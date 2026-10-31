@@ -159,7 +159,7 @@ describe('CanvasSpawnMenu mount lifecycle (issue #1536)', () => {
     // happens after the microtask. waitFor drains the queue so
     // React commits and the spy sees the call.
     await waitFor(() => {
-      expect(selectSpy).toHaveBeenCalledWith(7, 'Repo Seven', '/r7', 'claude', true, undefined, undefined);
+      expect(selectSpy).toHaveBeenCalledWith(7, 'Repo Seven', '/r7', 'claude', true, undefined, undefined, undefined);
     });
     expect(useUIStore.getState().canvasSpawnMenuMeshId).toBeNull();
   });
@@ -179,7 +179,7 @@ describe('CanvasSpawnMenu mount lifecycle (issue #1536)', () => {
     fireEvent.click(screen.getByTestId('fake-spawn-pick-alt'));
     // MESH.use_worktree = true; altKey = true → invert → false
     await waitFor(() => {
-      expect(selectSpy).toHaveBeenCalledWith(7, 'Repo Seven', '/r7', 'claude', false, undefined, undefined);
+      expect(selectSpy).toHaveBeenCalledWith(7, 'Repo Seven', '/r7', 'claude', false, undefined, undefined, undefined);
     });
   });
 });

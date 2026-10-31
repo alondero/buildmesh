@@ -194,6 +194,12 @@ pub struct ResolvedLaunchPlan {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub extra_args: Option<String>,
+    /// The Harness Login this launch uses; absent means the default login.
+    /// Frozen with the home path so a resume returns to the home that holds
+    /// the session even after the login is renamed or removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub harness_login: Option<super::harness_logins::HarnessLoginRef>,
 }
 
 pub fn resolve(
@@ -436,6 +442,9 @@ fn resolve_plan(
             .max_by_key(|v| matches!(v.status, super::PairingVerificationStatus::Verified))
             .cloned()
     });
+    let requested_login = configuration
+        .and_then(|c| super::harness_logins::normalize_login_id(c.login_id.as_deref()));
+    let harness_login = login_for_plan(prefs, &harness.harness, route.is_some(), requested_login)?;
     Ok(ResolvedLaunchPlan {
         configuration_id: configuration
             .map_or_else(|| format!("launch/{selection}"), |c| c.id.clone()),
@@ -447,6 +456,7 @@ fn resolve_plan(
         model: config.model,
         effort: config.effort,
         extra_args: config.extra_args,
+        harness_login,
     })
 }
 
@@ -557,7 +567,50 @@ pub fn resolve_snapshot(
         spawn_configurations: vec![snapshot(plan.clone())],
         ..Default::default()
     };
-    resolve(&prefs, &plan.configuration_id, overrides)
+    // The frozen login is part of the snapshot, not a live preference: a
+    // resume returns to the home that holds the session.
+    let mut resolved = resolve(&prefs, &plan.configuration_id, overrides)?;
+    resolved.harness_login = plan.harness_login.clone();
+    Ok(resolved)
+}
+
+/// Resolve the Harness Login a plan launches with. A Provider Route signs in
+/// with its own key, so a login on a routed plan is refused rather than
+/// silently ignored.
+fn login_for_plan(
+    prefs: &AppPreferences,
+    harness_adapter_id: &str,
+    routed: bool,
+    requested: Option<&str>,
+) -> Result<Option<super::harness_logins::HarnessLoginRef>, String> {
+    let requested = super::harness_logins::normalize_login_id(requested);
+    if requested.is_some() && routed {
+        return Err(
+            "A Provider Route signs in with its own key; choose a login only for native Codex"
+                .into(),
+        );
+    }
+    super::harness_logins::resolve_login(prefs, harness_adapter_id, requested)
+}
+
+/// Apply the login picked in the spawn menu to a freshly resolved plan. The
+/// pick wins over the configuration's pinned login; `None` keeps the plan's
+/// own login (the pin, else the default).
+pub fn apply_login_pick(
+    prefs: &AppPreferences,
+    plan: &mut ResolvedLaunchPlan,
+    picked: Option<&str>,
+) -> Result<(), String> {
+    let Some(picked) = picked.map(str::trim).filter(|id| !id.is_empty()) else {
+        return Ok(());
+    };
+    plan.harness_login = login_for_plan(
+        prefs,
+        &plan.harness.harness,
+        plan.route.is_some(),
+        Some(picked),
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

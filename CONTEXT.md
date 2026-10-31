@@ -55,6 +55,10 @@ _Avoid_: Provider row, launch option, harness profile (the existing `HarnessProf
 A named startup recipe selecting one **Agent Harness**, an optional **Provider Route**, and supported model, effort, and extra-argument choices. An **Agent Node** retains its resolved recipe independently of subsequent edits or deletion.
 _Avoid_: Harness profile (identifies the harness itself), Model Provider (identifies credentials and billing).
 
+**Harness Login**:
+One signed-in subscription account of a native **Agent Harness**, kept in its own harness home folder (for Codex, a `CODEX_HOME` holding `auth.json`, `config.toml` and sessions). The default login is the harness's ordinary home and is never stored; additional logins are named, live under `~/.codex-accounts/<id>/`, and apply to native Windows launches only. With more than one login the **Spawn Menu** asks which login to launch with, a **Launch Configuration** may pin one, and each login is its own **Usage Identity** with its own **Usage Meter**.
+_Avoid_: Account (reserved for **Provider Account**), profile (a Codex `config.toml` profile is a different thing).
+
 **Provider Route**:
 The technical connection between a **Provider Account** and an **Agent Harness**, owning the compatible API surface, endpoint, model translation, and verification. It references credentials without owning another copy.
 _Avoid_: Launch Configuration, provider credential.
@@ -249,6 +253,7 @@ _Avoid_: container (when meaning OS-level confinement), jail, restricted shell
 - The Providers page lists only configured providers: self-auth first-class rows are always present (enable + billing); keyed first-class rows appear after the user adds them from the catalog; generics after the user creates them. A **Usage Meter** still appears on the Usage tab when relevant (harness installed or key set)
 - Every spawn surface (sidebar, Issues/PRs probes, archived-resume, mobile) renders the one **Spawn Menu** as-is — none re-orders or re-derives it; harness order is user-set (Terminal pinned last) and **Proxied Provider** options nest under their **Agent Harness**
 - A **Proxied Provider**'s configuration splits by scope: the **credential (API key)** and (for first-class) **billing mode** are **global to the Model Provider**; the **Compatible API surface + endpoint URL + model-tier remap** are **per harness×provider pairing** and are edited only on the Harnesses page. Saving a key never auto-attaches a pairing — attach is explicit. A first-class provider's published surface→URL(+tiers) map prefills the attach form; the stored pairing is the source of truth at spawn
+- A native **Agent Harness** (today, Codex) can have several **Harness Logins**; an **Agent Node** freezes its login in its **Resolved Launch Plan**, so resume keeps the same account
 - A **Mesh** can have one or more **Agent Nodes**
 - A **Circuit Run History** preserves the sequence of **Circuit Step** attempts, evidence, and **Operator-recorded Outcomes** within one **Circuit Run**
 - An **Unverified Checkpoint** can be rechecked or given an **Operator-recorded Outcome**; that outcome stays distinct from verified evidence and approval

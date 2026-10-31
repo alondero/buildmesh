@@ -245,6 +245,115 @@ fn read_codex_credentials(
     ))
 }
 
+/// Usage for one additional Harness Login: that home's `auth.json` only, with
+/// no fallback to the default home or WSL — falling back would report the
+/// wrong account's allowance under this login's name.
+pub(crate) fn codex_usage_for_home(home: &Path) -> UsageOutcome {
+    codex_usage_with_paths(&[home.join("auth.json")], &usage_endpoint())
+}
+
+/// Who a Codex home is signed in as, read from its `auth.json` without any
+/// network call. Every field is display metadata; none of it is a secret.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct CodexLoginIdentity {
+    /// `auth.json` holds a usable access token.
+    pub signed_in: bool,
+    pub email: Option<String>,
+    /// ChatGPT plan label as the provider reports it (e.g. `pro`).
+    pub plan: Option<String>,
+    /// The person and the ChatGPT workspace they signed in to, used to spot
+    /// two logins on the same subscription. The same person in another
+    /// workspace (personal Pro and a Team seat) is a different subscription.
+    pub subscription: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct IdTokenAuthClaims {
+    #[serde(default)]
+    chatgpt_plan_type: Option<String>,
+    #[serde(default)]
+    chatgpt_user_id: Option<String>,
+    #[serde(default)]
+    chatgpt_account_id: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct IdTokenClaims {
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
+    sub: Option<String>,
+    #[serde(default, rename = "https://api.openai.com/auth")]
+    auth: Option<IdTokenAuthClaims>,
+}
+
+#[derive(Deserialize, Default)]
+struct IdTokenEnvelope {
+    #[serde(default)]
+    tokens: Option<IdTokenHolder>,
+}
+
+#[derive(Deserialize, Default)]
+struct IdTokenHolder {
+    #[serde(default)]
+    id_token: Option<String>,
+}
+
+/// Read the sign-in state of the Codex home at `home`.
+pub(crate) fn read_login_identity(home: &Path) -> CodexLoginIdentity {
+    let path = home.join("auth.json");
+    let Ok(content) = fs::read_to_string(&path) else {
+        return CodexLoginIdentity::default();
+    };
+    login_identity_from_auth(&content)
+}
+
+/// Pure half of [`read_login_identity`]. The id token's payload is decoded but
+/// not verified: it only labels the login on screen, it authorises nothing.
+pub(crate) fn login_identity_from_auth(content: &str) -> CodexLoginIdentity {
+    let signed_in = serde_json::from_str::<CodexAuthFile>(content)
+        .ok()
+        .and_then(|file| file.extract_credentials())
+        .is_some();
+    let claims = serde_json::from_str::<IdTokenEnvelope>(content)
+        .ok()
+        .and_then(|envelope| envelope.tokens)
+        .and_then(|tokens| tokens.id_token)
+        .and_then(|token| decode_jwt_claims(&token))
+        .unwrap_or_default();
+    let non_empty = |value: Option<String>| value.filter(|v| !v.trim().is_empty());
+    let auth = claims.auth.unwrap_or_default();
+    CodexLoginIdentity {
+        signed_in,
+        email: non_empty(claims.email),
+        plan: non_empty(auth.chatgpt_plan_type),
+        subscription: subscription_key(
+            non_empty(auth.chatgpt_user_id).or_else(|| non_empty(claims.sub)),
+            non_empty(auth.chatgpt_account_id),
+        ),
+    }
+}
+
+fn subscription_key(person: Option<String>, workspace: Option<String>) -> Option<String> {
+    match (person, workspace) {
+        (None, None) => None,
+        (person, workspace) => Some(format!(
+            "{}|{}",
+            person.unwrap_or_default(),
+            workspace.unwrap_or_default()
+        )),
+    }
+}
+
+fn decode_jwt_claims(token: &str) -> Option<IdTokenClaims> {
+    use base64::Engine;
+    let payload = token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload.trim_end_matches('='))
+        .ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
 /// JSON number that ChatGPT sometimes emits as a number and sometimes as a
 /// decimal string (`"25000"`, `"17000.50"`).
 #[derive(Deserialize, Debug, Clone)]

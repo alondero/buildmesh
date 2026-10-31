@@ -79,7 +79,7 @@ export function CanvasSpawnMenu({ meshId }: CanvasSpawnMenuProps) {
 
   if (targetMesh === null) return null;
 
-  const handleSelect = async (providerId: string, altKey: boolean, configurationId?: string) => {
+  const handleSelect = async (providerId: string, altKey: boolean, configurationId?: string, loginId?: string) => {
     close();
     // The `altKey` modifier on a spawn pick toggles the worktree
     // override — Alt+click inverts the mesh's configured default,
@@ -99,6 +99,7 @@ export function CanvasSpawnMenu({ meshId }: CanvasSpawnMenuProps) {
         useWorktree,
         undefined,
         configurationId,
+        loginId,
       );
     } catch (error) {
       // The agentNodeStore selector swallows errors and surfaces
@@ -151,6 +152,7 @@ export function CanvasSpawnMenu({ meshId }: CanvasSpawnMenuProps) {
       <GroupedProviderMenu
         providers={providerList}
         onSelect={handleSelect}
+        loginsEnabled
         // Don't pass `onClose` here. `GroupedProviderMenu`'s
         // `useAriaMenu` hook (issue #837) binds Escape AND Tab to
         // `onClose` — Tab-in-menu would UNMOUNT THE WHOLE modal

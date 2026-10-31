@@ -24,6 +24,7 @@ import { getOrderableHarnesses } from './harnessOrder';
 import { HarnessConfigList, type ProxyHarness } from './HarnessConfigList';
 import { HarnessDefaultsSection } from './HarnessDefaultsSection';
 import { LaunchConfigurations } from '../Providers/LaunchConfigurations';
+import { CodexLoginsSection } from './CodexLoginsSection';
 import { SettingsSection } from './SettingsRow';
 import { ResourceLoadStatus } from './ResourceLoadStatus';
 import { getHostPairingVerifications } from './settingsUtils';
@@ -391,6 +392,8 @@ export function HarnessesPane({
           />
         </SettingsSection>
       )}
+
+      {providers.some((provider) => provider.harness_id === 'codex' && !provider.is_proxied) && <CodexLoginsSection />}
 
       {/* The list stays MOUNTED while collapsed (`hidden`, not unmounted): an
           open editor holds a draft and reports a dirty site, and unmounting

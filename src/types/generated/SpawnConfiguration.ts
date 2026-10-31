@@ -5,4 +5,9 @@ import type { ResolvedLaunchPlan } from "./ResolvedLaunchPlan";
 /**
  * Named, sparse launch overrides belonging to one Spawn Option.
  */
-export type SpawnConfiguration = { id: string, name: string, spawn_option_id: string, harness_id?: string, provider_route_id?: string, model: string | null, effort: string | null, extra_args: string | null, generated?: GeneratedLaunch, resolved?: ResolvedLaunchPlan, };
+export type SpawnConfiguration = { id: string, name: string, spawn_option_id: string, harness_id?: string, provider_route_id?: string, model: string | null, effort: string | null, extra_args: string | null, generated?: GeneratedLaunch, resolved?: ResolvedLaunchPlan, 
+/**
+ * Harness Login this configuration always launches with (Codex only).
+ * Absent means the login picked in the spawn menu, else the default.
+ */
+login_id?: string, };

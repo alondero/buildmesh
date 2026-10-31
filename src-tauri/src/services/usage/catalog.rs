@@ -162,8 +162,39 @@ pub(crate) fn cached_outcome_and_usage(
     accounts: &[ProviderAccount],
 ) -> Option<(UsageOutcome, ProviderUsage)> {
     let adapter = dispatch(provider_id)?;
-    let provider_id_static = adapter.id();
     let identity = adapter.cache_identity(accounts);
+    Some(cached_with_identity(
+        adapter.id(),
+        identity,
+        force_refresh,
+        || adapter.fetch(accounts),
+    ))
+}
+
+/// Codex usage for one additional Harness Login. Cached and coalesced under
+/// the `codex` provider with an identity derived from the login's home, so
+/// each login keeps its own five-minute entry and single-flight slot.
+pub(crate) fn cached_codex_login_outcome_and_usage(
+    home: &std::path::Path,
+    force_refresh: bool,
+) -> (UsageOutcome, ProviderUsage) {
+    let identity = super::adapter::UsageIdentityFingerprint::new(
+        "codex_login",
+        home.to_string_lossy().as_bytes(),
+    );
+    let provider_id = CODEX_ADAPTER.id();
+    cached_with_identity(provider_id, identity, force_refresh, || {
+        super::adapters::codex::codex_usage_for_home(home)
+    })
+}
+
+/// The cache read, single-flight join and fetch shared by every reading.
+fn cached_with_identity(
+    provider_id_static: &'static str,
+    identity: super::adapter::UsageIdentityFingerprint,
+    force_refresh: bool,
+    fetch: impl FnOnce() -> UsageOutcome,
+) -> (UsageOutcome, ProviderUsage) {
     let cache = &super::cache::USAGE_CACHE;
     if !force_refresh {
         if let Some(cached) = cache.get(provider_id_static, &identity) {
@@ -174,7 +205,7 @@ pub(crate) fn cached_outcome_and_usage(
             // the cache to store the outcome directly, this path becomes
             // a simple `cache.get_outcome`.
             let outcome = outcome_from_cached(&cached);
-            return Some((outcome, cached));
+            return (outcome, cached);
         }
     }
     // Cache miss (or explicit force-refresh): coalesce per credential
@@ -186,15 +217,15 @@ pub(crate) fn cached_outcome_and_usage(
             // `NoCredential` / `Rejected` distinction that the lossy
             // `outcome_from_cached` round-trip cannot preserve. Meter
             // visibility therefore matches a non-coalesced read exactly.
-            Some(flight.wait())
+            flight.wait()
         }
         FlightTicket::Leader(flight) => {
             let guard = LeaderGuard::new(cache, provider_id_static, &identity, flight);
-            let outcome = adapter.fetch(accounts);
+            let outcome = fetch();
             let result = outcome.clone().into_usage(provider_id_static);
             cache.set(provider_id_static, identity.clone(), result.clone());
             guard.complete((outcome.clone(), result.clone()));
-            Some((outcome, result))
+            (outcome, result)
         }
     }
 }

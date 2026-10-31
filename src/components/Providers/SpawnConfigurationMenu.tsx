@@ -6,25 +6,38 @@ import { deleteSpawnConfiguration, getLaunchTargets, listProviders, listSpawnCon
 import { LaunchConfigurationEditor, cloneConfiguration } from './LaunchConfigurationEditor';
 import type { ProviderPairing } from '../../types/generated/ProviderPairing';
 import type { LaunchTarget } from '../../types/generated/LaunchTarget';
+import { placeFlyout } from './flyoutPlacement';
 
 function belongsToHarness(configuration: SpawnConfiguration, harnessId: string): boolean {
   return (configuration.harness_id ?? configuration.spawn_option_id.split(':')[0]) === harnessId;
 }
 
 /**
- * Room the submenu needs below its harness row before it opens above the row
- * instead. Below this the panel would be a sliver, so flipping up (with the
- * panel's bottom edge on the row) reads better than a scrollbar in a strip.
+ * Whether a configuration is offered under a login's submenu: unpinned
+ * configurations launch with whichever login was picked, a pinned one only
+ * appears under its own login. A Provider Route signs in with its own key, so
+ * it is offered only under the Default login, where the pick changes nothing.
  */
-const MIN_ROOM_BELOW = 120;
+export function offeredUnderLogin(configuration: SpawnConfiguration, loginId: string | undefined): boolean {
+  if (loginId === undefined) return true;
+  const routed = Boolean(configuration.provider_route_id) || configuration.spawn_option_id.includes(':');
+  if (routed) return loginId === DEFAULT_LOGIN_ID;
+  return !configuration.login_id || configuration.login_id === loginId;
+}
 
-export function SpawnConfigurationMenu({ option, anchor, keyboard, configurationRows, decorate, onSelect, onClose, onDismiss, onEditingChange }: {
+/** Id of the implicit login that uses Codex's ordinary home. */
+const DEFAULT_LOGIN_ID = 'default';
+
+export function SpawnConfigurationMenu({ option, anchor, keyboard, configurationRows, decorate, login, onSelect, onClose, onDismiss, onEditingChange }: {
   option: SpawnOption;
   anchor: HTMLElement;
   keyboard: boolean;
   configurationRows: SpawnOption[];
   decorate?: (option: SpawnOption) => SpawnOption;
-  onSelect: (providerId: string, altKey: boolean, configurationId?: string) => void;
+  /** The Harness Login this submenu launches with (opened from the login
+   *  submenu). Absent when the harness has a single login. */
+  login?: { id: string; label: string };
+  onSelect: (providerId: string, altKey: boolean, configurationId?: string, loginId?: string) => void;
   onClose: () => void;
   onDismiss: () => void;
   onEditingChange: (editing: boolean) => void;
@@ -61,11 +74,11 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
     let current = true;
     listSpawnConfigurations().then((values) => {
       if (!current) return;
-      setConfigurations(values.filter((value) => belongsToHarness(value, option.harness_id)));
+      setConfigurations(values.filter((value) => belongsToHarness(value, option.harness_id) && offeredUnderLogin(value, login?.id)));
       setLoaded(true);
     }).catch((e: unknown) => { if (current) setError(String(e)); });
     return () => { current = false; };
-  }, [option.id, option.harness_id, option.configuration]);
+  }, [option.id, option.harness_id, option.configuration, login?.id]);
 
   const editing = draft !== null;
   useEffect(() => {
@@ -87,38 +100,10 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
       // instead of measuring a zero rect, which used to snap the panel to the
       // top-left corner of the screen, far from the row it belongs to.
       if (rect.width === 0 && rect.height === 0) return;
-      const margin = 8;
-      const viewportWidth = window.innerWidth;
-      const viewportHeight = window.innerHeight;
-      const width = panel.current?.offsetWidth ?? 280;
       // `scrollHeight` is the panel's natural content height; `offsetHeight`
       // would report the height already capped by the previous placement.
-      const height = panel.current?.scrollHeight ?? 0;
-      // Horizontal: the panel is a side flyout of the harness row. Open it to
-      // the right of the row; flip to the left only when that side fits on
-      // screen, otherwise keep the row's left edge so the panel stays on the
-      // row it was opened from.
-      let left = rect.right;
-      if (left + width > viewportWidth - margin) {
-        const flipped = rect.left - width;
-        left = flipped >= margin ? flipped : rect.left;
-      }
-      left = Math.max(margin, Math.min(left, viewportWidth - width - margin));
-      // Vertical: hang from the row's top line and scroll inside the panel.
-      // Open above the row only when there is no usable room below it and
-      // more room above, so the panel keeps touching the row. The anchor edges
-      // are clipped to the viewport: a row that is only partly visible at a
-      // scroll boundary must not hand the panel room past the viewport edge.
-      const anchorTop = Math.min(Math.max(rect.top, margin), viewportHeight - margin);
-      const anchorBottom = Math.min(Math.max(rect.bottom, margin), viewportHeight - margin);
-      const roomBelow = viewportHeight - margin - anchorTop;
-      const roomAbove = anchorBottom - margin;
-      let top = anchorTop;
-      let maxHeight = roomBelow;
-      if (roomBelow < MIN_ROOM_BELOW && roomAbove > roomBelow) {
-        top = Math.max(margin, anchorBottom - Math.min(height, roomAbove));
-        maxHeight = roomAbove;
-      }
+      const { left, top, maxHeight } = placeFlyout(rect, panel.current?.offsetWidth ?? 280,
+        panel.current?.scrollHeight ?? 0, window.innerWidth, window.innerHeight);
       setPlacement((current) => current
         && current.left === left
         && current.top === top
@@ -177,7 +162,7 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
   const replaceConfiguration = (saved: SpawnConfiguration, harnessId?: string) => {
     setConfigurations((previous) => {
       const index = previous.findIndex((entry) => entry.id === saved.id);
-      if (harnessId !== option.harness_id) return previous.filter((entry) => entry.id !== saved.id);
+      if (harnessId !== option.harness_id || !offeredUnderLogin(saved, login?.id)) return previous.filter((entry) => entry.id !== saved.id);
       if (index < 0) return [...previous, saved];
       const next = [...previous];
       next[index] = saved;
@@ -218,6 +203,10 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
     console.info(`launch_config_timing: checkpoint=refresh elapsed=${Math.round(performance.now() - refreshStarted)}ms`);
     if (mounted.current && draftSession.current === session) setDraft(null);
   };
+  // Every launch from a login's submenu carries that login.
+  const select = login
+    ? (providerId: string, altKey: boolean, configurationId?: string) => onSelect(providerId, altKey, configurationId, login.id)
+    : onSelect;
   const menuClass = 'w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-selection focus:bg-bg-selection focus:outline-none';
   const mutedMenuClass = 'w-full px-3 py-1.5 text-left text-xs text-text-muted';
   const rowActionClass = 'px-2 text-xs text-text-secondary hover:bg-bg-selection focus:bg-bg-selection';
@@ -304,10 +293,10 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
           });
           if (draftSession.current === session) cancelDraft();
         } : undefined} /> : (
-        <div role="menu" aria-label={`${option.label} configurations`}>
+        <div role="menu" aria-label={login ? `${option.label} ${login.label} configurations` : `${option.label} configurations`}>
           <button type="button" role="menuitem" data-menu-index={menuIndex.get('defaults')} tabIndex={activeMenuIndex === menuIndex.get('defaults') ? 0 : -1} className={menuClass}
             aria-disabled={Boolean(defaultsUnavailable)} title={defaultsUnavailable}
-            onClick={(e) => { if (!defaultsUnavailable) onSelect(option.id, e.altKey); }}>Spawn with defaults</button>
+            onClick={(e) => { if (!defaultsUnavailable) select(option.id, e.altKey); }}>Spawn with defaults</button>
           {!loaded && !error && <p role="presentation" className="px-3 py-1.5 text-xs text-text-muted">Loading configurations…</p>}
           {loaded && configurations.length === 0 && <p role="presentation" className="px-3 py-1.5 text-xs text-text-muted">No saved configurations</p>}
           {configurations.map((value) => {
@@ -315,7 +304,7 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
             return <div key={value.id} role="presentation" className="flex">
               <button type="button" role="menuitem" data-menu-index={menuIndex.get(`configuration:${value.id}`)} tabIndex={activeMenuIndex === menuIndex.get(`configuration:${value.id}`) ? 0 : -1}
                 aria-disabled={Boolean(unavailable)} title={unavailable ?? undefined}
-                className={`${menuClass} min-w-0 flex-1 break-words ${unavailable ? 'cursor-default text-text-muted' : ''}`} onClick={(e) => { if (!unavailable) onSelect(value.spawn_option_id, e.altKey, value.id); }}>
+                className={`${menuClass} min-w-0 flex-1 break-words ${unavailable ? 'cursor-default text-text-muted' : ''}`} onClick={(e) => { if (!unavailable) select(value.spawn_option_id, e.altKey, value.id); }}>
                 {value.name}{unavailable && <span className="block text-text-muted">{unavailable}</span>}
               </button>
               <button type="button" role="menuitem" data-menu-index={menuIndex.get(`edit:${value.id}`)} tabIndex={activeMenuIndex === menuIndex.get(`edit:${value.id}`) ? 0 : -1} aria-label={`Edit ${value.name}`} className={rowActionClass} onClick={() => openDraft(value)}>Edit</button>

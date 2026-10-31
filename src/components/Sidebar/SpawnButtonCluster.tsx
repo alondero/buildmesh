@@ -104,7 +104,7 @@ interface SpawnButtonClusterProps {
   onSpawnDefault: (altKey: boolean) => void;
   /** Called when a provider row is picked from the open dropdown. `altKey`
    *  forwarded for the same reason as `onSpawnDefault`. */
-  onSelectProvider: (providerId: string, altKey: boolean, configurationId?: string) => void;
+  onSelectProvider: (providerId: string, altKey: boolean, configurationId?: string, loginId?: string) => void;
   /** Optional — returns the default provider id for the cluster's tooltip.
    *  If omitted, the tooltip falls back to the generic "Add agent node".
    *  Hover/focus triggers a fetch; a rejection is swallowed because the
@@ -119,6 +119,9 @@ interface SpawnButtonClusterProps {
    *  (the cluster does not auto-close). */
   isSpawning?: boolean;
   configurationsEnabled?: boolean;
+  /** Offer the Codex login submenu. Set only by surfaces whose
+   *  `onSelectProvider` passes the login on to node creation. */
+  loginsEnabled?: boolean;
   /** Optional footer rendered at the bottom of the open menu (e.g. the
    *  worktree-gated "Alt-click spawns in mesh root" hint the sidebar
    *  passes when `mesh.use_worktree` is true). Omitted everywhere else. */
@@ -139,6 +142,7 @@ export function SpawnButtonCluster({
   disabled,
   isSpawning,
   configurationsEnabled = true,
+  loginsEnabled = false,
   menuFooter,
 }: SpawnButtonClusterProps) {
   // Cache the default provider id for the tooltip + quick-spawn icon so
@@ -311,6 +315,7 @@ export function SpawnButtonCluster({
           dropdownKey={dropdownKey}
           providers={providers}
           configurationsEnabled={configurationsEnabled}
+          loginsEnabled={loginsEnabled}
           footer={menuFooter}
           onSelect={onSelectProvider}
           // Issue #814 — Escape closes the dropdown. The cluster re-uses

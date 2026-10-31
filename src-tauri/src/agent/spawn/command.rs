@@ -206,6 +206,12 @@ pub fn build_spawn_command_prepared(
             command_wsl_env.push("CODEX_HOME");
         }
     }
+    // A native launch with an additional Harness Login runs Codex against
+    // that login's home; without one the child inherits Buildmesh's own
+    // CODEX_HOME (or none), exactly as before.
+    if let Some(home) = native_login_home(resolved.env_type, provider_enum, routing) {
+        cmd.env("CODEX_HOME", home);
+    }
     command_wsl_env.extend(["TERM", "COLORTERM", "FORCE_COLOR"]);
     spawn_environment::apply_wsl_env(
         &mut cmd,
@@ -214,6 +220,25 @@ pub fn build_spawn_command_prepared(
         adapter.wsl_passthrough_env(),
     );
     Ok(cmd)
+}
+
+/// The `CODEX_HOME` a native (host) Codex launch must run with: the Harness
+/// Login home its frozen plan selected. `None` for every other harness,
+/// runtime or routing, which keep the inherited environment.
+pub(crate) fn native_login_home(
+    env_type: EnvType,
+    provider: Provider,
+    routing: &crate::agent::launch_routing::PreparedLaunchRouting,
+) -> Option<String> {
+    if env_type != EnvType::Windows || provider != Provider::Codex {
+        return None;
+    }
+    match routing {
+        crate::agent::launch_routing::PreparedLaunchRouting::Native { harness_home, .. } => {
+            harness_home.clone()
+        }
+        _ => None,
+    }
 }
 
 /// Apply the per-profile backend env (`PreparedLaunchRouting::Environment`)

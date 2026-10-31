@@ -1,5 +1,63 @@
-use super::command::{cascade_inputs_for, resolve_spawn_config};
+use super::command::{cascade_inputs_for, native_login_home, resolve_spawn_config};
 use super::{ExplicitSpawnOverrides, SpawnIntent, SpawnRequest, TerminalSize};
+
+/// A native Codex launch whose frozen plan selected an additional Harness
+/// Login runs with that login's home as `CODEX_HOME`.
+#[test]
+fn a_native_codex_launch_with_a_login_sets_codex_home() {
+    use super::command::{build_spawn_command_prepared, SpawnCommandInput};
+    use super::reader::SessionIdMode;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().to_string_lossy().into_owned();
+    let home = directory.path().join("login-home");
+    let home = home.to_string_lossy().into_owned();
+    let resolved = crate::env::ResolvedPath {
+        host_path: path.clone(),
+        spawn_path: path.clone(),
+        raw_path: path,
+        env_type: EnvType::Windows,
+    };
+    let routing = crate::agent::launch_routing::PreparedLaunchRouting::Native {
+        executable: None,
+        harness_home: Some(home.clone()),
+    };
+    let command = build_spawn_command_prepared(SpawnCommandInput {
+        resolved: &resolved,
+        provider: Provider::Codex,
+        routing: &routing,
+        session_id_mode: &SessionIdMode::None,
+        session_id: 7,
+        config: &ResolvedAgentConfig::default(),
+        prefill: None,
+        sandbox: false,
+        resume_cause: super::ResumeCause::Explicit,
+    })
+    .unwrap();
+    assert_eq!(
+        command
+            .get_env("CODEX_HOME")
+            .map(|value| value.to_string_lossy().into_owned()),
+        Some(home)
+    );
+}
+
+/// Only a native Codex launch takes a login home; other harnesses, WSL and
+/// Provider Routes keep the environment they inherit.
+#[test]
+fn only_native_codex_launches_take_a_login_home() {
+    let native = crate::agent::launch_routing::PreparedLaunchRouting::Native {
+        executable: None,
+        harness_home: Some("home".into()),
+    };
+    assert_eq!(
+        native_login_home(EnvType::Windows, Provider::Codex, &native).as_deref(),
+        Some("home")
+    );
+    assert!(native_login_home(EnvType::Wsl, Provider::Codex, &native).is_none());
+    assert!(native_login_home(EnvType::Windows, Provider::Anthropic, &native).is_none());
+    let environment = crate::agent::launch_routing::PreparedLaunchRouting::environment(&[]);
+    assert!(native_login_home(EnvType::Windows, Provider::Codex, &environment).is_none());
+}
 use crate::agent::capabilities::{
     resolve_agent_config, FieldInputs, HarnessCapabilities, ResolvedAgentConfig,
     PERMISSION_MODE_UNATTENDED,

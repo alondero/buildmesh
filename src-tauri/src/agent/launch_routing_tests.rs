@@ -105,3 +105,76 @@ fn a_failed_route_warns_without_asking_for_a_recheck() {
 fn a_verified_route_has_no_follow_up() {
     assert!(codex_proxy(None).verification_follow_up().is_none());
 }
+
+const WORK_HOME: &str = r"C:\Users\u\.codex-accounts\work";
+
+fn codex_plan_with_login(
+    login: Option<preferences::harness_logins::HarnessLoginRef>,
+) -> preferences::launch_configurations::ResolvedLaunchPlan {
+    let mut plan = preferences::launch_configurations::capture(
+        &preferences::AppPreferences::default(),
+        "codex",
+        &Default::default(),
+    )
+    .unwrap();
+    plan.harness_login = login;
+    plan
+}
+
+fn work_login() -> preferences::harness_logins::HarnessLoginRef {
+    preferences::harness_logins::HarnessLoginRef {
+        id: "work".into(),
+        label: "Work".into(),
+        home: WORK_HOME.into(),
+    }
+}
+
+fn resolved_for(env_type: crate::models::EnvType) -> ResolvedPath {
+    ResolvedPath {
+        host_path: "C:/work".into(),
+        spawn_path: "C:/work".into(),
+        raw_path: "C:/work".into(),
+        env_type,
+    }
+}
+
+/// A frozen plan with an additional login routes the native launch to that
+/// login's home, which is what trust provisioning and `CODEX_HOME` read.
+#[test]
+fn a_frozen_login_routes_a_native_codex_launch_to_its_home() {
+    let routing = prepare_snapshot(
+        &codex_plan_with_login(Some(work_login())),
+        &resolved_for(crate::models::EnvType::Windows),
+    )
+    .unwrap();
+    assert_eq!(
+        routing.launch_runtime().harness_home.as_deref(),
+        Some(WORK_HOME)
+    );
+}
+
+/// The default login leaves the runtime's own home in charge.
+#[test]
+fn the_default_login_keeps_the_inherited_codex_home() {
+    let routing = prepare_snapshot(
+        &codex_plan_with_login(None),
+        &resolved_for(crate::models::EnvType::Windows),
+    )
+    .unwrap();
+    assert_eq!(routing.launch_runtime().harness_home, None);
+}
+
+/// A WSL guest resolves its own home, so an additional login is refused
+/// there rather than silently running on the guest's default account.
+#[test]
+fn a_wsl_launch_with_an_additional_login_is_refused() {
+    let error = prepare_snapshot(
+        &codex_plan_with_login(Some(work_login())),
+        &resolved_for(crate::models::EnvType::Wsl),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("only available for native Windows"),
+        "{error}"
+    );
+}

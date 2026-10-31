@@ -477,6 +477,11 @@ pub struct AppPreferences {
     /// files load as empty via `#[serde(default)]`.
     #[serde(default)]
     pub detached_provider_routes: Vec<String>,
+    /// Additional harness-native logins, each with its own harness home
+    /// (`CODEX_HOME`). The default login is implicit and never stored. See
+    /// [`super::harness_logins`]. Additive on disk — older files load empty.
+    #[serde(default)]
+    pub harness_logins: Vec<super::harness_logins::HarnessLogin>,
     /// Buildmesh-wide default Worktree Node directory (issue #1519).
     /// Optional raw user input — relative values resolve from the Mesh root,
     /// absolute values must be in the same host environment (native/Windows

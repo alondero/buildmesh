@@ -334,6 +334,13 @@ pub fn run() {
             preferences::spawn_configurations::save_spawn_configuration,
             preferences::spawn_configurations::verify_launch_configuration,
             preferences::spawn_configurations::delete_spawn_configuration,
+            // Harness Logins: additional Codex sign-ins, each in its own home.
+            commands::harness_logins::list_harness_logins,
+            commands::harness_logins::add_harness_login,
+            commands::harness_logins::rename_harness_login,
+            commands::harness_logins::remove_harness_login,
+            commands::harness_logins::start_harness_login_sign_in,
+            commands::harness_logins::cancel_harness_login_sign_in,
             // Resolved harness view (issue #1656) — single IPC entry that
             // returns the full per-harness cascade (four-layer breakdown +
             // capability-masked resolved value) for the Settings modal and

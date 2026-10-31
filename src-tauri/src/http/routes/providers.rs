@@ -27,10 +27,13 @@ fn usage_rows(
             let account = accounts
                 .iter()
                 .find(|a| a.id == meter.provider && a.enabled)?;
-            Some(MobileProviderUsage {
-                name: account.name.clone(),
-                meter,
-            })
+            // A provider with several Harness Logins has a row per login;
+            // the login names each row.
+            let name = match &meter.login {
+                Some(login) => format!("{} · {}", account.name, login.label),
+                None => account.name.clone(),
+            };
+            Some(MobileProviderUsage { name, meter })
         })
         .collect()
 }
