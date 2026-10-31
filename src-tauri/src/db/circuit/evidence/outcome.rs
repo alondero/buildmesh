@@ -233,20 +233,11 @@ pub(in crate::db::circuit) fn record_outcome_locked(
         );
         context.set(&format!("node.{}.recheck_only", step.node_id), "1");
         // The recheck clears the step's error. Keep the checkpoint it is
-        // rechecking, so a recheck that finds nothing new can restore it.
+        // rechecking, so a recheck the step's evidence cannot resolve can
+        // restore it.
         context.set(
             &format!("node.{}.recheck_checkpoint", step.node_id),
             step.error_message.clone().unwrap_or_default(),
-        );
-        // And what could resolve it (the turn's report and lifecycle): if
-        // that is unchanged later, the recheck found nothing new. Projections
-        // and repeated hooks do not count as new.
-        let fingerprint = crate::circuit::observation::stored_recheck_fingerprint(
-            context.get(&format!("node.{}.evidence.{}", step.node_id, step.attempt)),
-        );
-        context.set(
-            &format!("node.{}.recheck_fingerprint", step.node_id),
-            fingerprint,
         );
         let op = crate::db::circuit::CircuitStepOp {
             node_id: step.node_id,

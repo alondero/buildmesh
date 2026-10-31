@@ -346,15 +346,6 @@ pub struct WorkEvidence {
     pub source_watermarks: std::collections::BTreeMap<String, i64>,
 }
 
-/// [`WorkEvidence::recheck_fingerprint`] of a step's stored evidence; a step
-/// with none (or unreadable evidence) has the fingerprint of empty evidence.
-pub(crate) fn stored_recheck_fingerprint(evidence: Option<&str>) -> String {
-    evidence
-        .and_then(|json| serde_json::from_str::<WorkEvidence>(json).ok())
-        .unwrap_or_default()
-        .recheck_fingerprint()
-}
-
 impl WorkEvidence {
     /// Older conflicts lack provenance. Only the exact append-only history
     /// observation that produced their digest can establish it retrospectively.
@@ -431,27 +422,6 @@ impl WorkEvidence {
             });
         }
         self.conflicted = true;
-    }
-
-    /// What could answer an operator recheck: the turn's report, its lifecycle
-    /// and ownership state, its owned work and any open human request. Which
-    /// sources were seen and when is left out: a status projection or a
-    /// repeated hook records that something was observed, not that the turn
-    /// moved, so it cannot resolve the checkpoint being rechecked.
-    pub(crate) fn recheck_fingerprint(&self) -> String {
-        serde_json::to_string(&(
-            self.report
-                .as_ref()
-                .map(|report| (&report.text, &report.revision)),
-            self.foreground_terminated,
-            self.assignment_completed,
-            self.ownership_covered,
-            self.lifecycle_invalidated,
-            self.conflicted,
-            &self.children,
-            self.has_human_wait(),
-        ))
-        .expect("plain values serialize")
     }
 
     pub fn has_human_wait(&self) -> bool {

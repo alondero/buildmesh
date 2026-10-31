@@ -156,24 +156,28 @@ so lifecycle completion is never claimed. A process still launching
 Older releases parked the step on the gap with the gap text as its error. Such
 a persisted step returns to Running when its error matches the gap exactly; any
 other checkpoint stays. An operator Recheck saves the checkpoint it clears
-(`node.<id>.recheck_checkpoint`) and a fingerprint of what could resolve it
-(`node.<id>.recheck_fingerprint`, from `WorkEvidence::recheck_fingerprint`):
-the turn's report, lifecycle and ownership state, owned work and open human
-requests. Source ids, watermarks and the latest observation are left out, so a
-status projection or a repeated hook does not count as new. If the recheck
-then finds only the same gap with that fingerprint unchanged, it cannot resolve
-the checkpoint, so the step returns to Unverified with the saved checkpoint. A
-recheck saved before this change has no checkpoint text, so the restored
-checkpoint says the earlier checkpoint still applies and quotes the gap. Either
-answer stays put on later identical polls, so the checkpoint is not hidden
-behind a Running step. When the checkpoint being rechecked was the gap itself,
-the answer is that the step carries on Running.
+(`node.<id>.recheck_checkpoint`). A checkpoint is resolved only by the step
+being routed or by a person; readiness judges an Unverified step's report just
+as it does a Running one's. The gap says only that owned work cannot be
+verified, so it resolves no checkpoint but itself, whatever else the evidence
+records (a status projection, owned work starting or ending, a repeated hook).
+While the gap holds, a pending recheck of any other checkpoint therefore
+returns the step to Unverified with that checkpoint at once (`gap_settlement`).
+The recheck still re-examines the report and routes the step if it can, and
+nothing is hidden behind a Running step meanwhile. A recheck saved before this
+change has no checkpoint text, so the restored checkpoint says the earlier
+checkpoint still applies and quotes the gap. Either answer stays put on later
+polls. When the checkpoint being rechecked was the gap itself, the answer is
+that the step carries on Running.
 
 Every settlement answers a pending recheck, so it ends recheck mode
 (`recheck_only` back to `0`). Recheck mode stops the stepper sending
 continuations; left set after the step carried on Running, it would hold back
 an eligible continuation indefinitely. Ending it changes no delivery state, so a
-claimed (uncertain) continuation is still never replayed.
+claimed (uncertain) continuation is still never replayed. A never-sent
+(pending) continuation can only be sent from a Running step, so the gate pass
+schedules its retry, and skips the turn for it, only while the step is Running.
+An Unverified step with one still has its turn examined.
 
 Both settlements need the gap to be seen again, and the two harnesses see it
 differently:

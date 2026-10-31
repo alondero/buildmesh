@@ -713,3 +713,98 @@ fn the_gate_pass_settles_a_stored_hook_ownership_gap_and_nothing_else() {
         "an unrelated checkpoint is not settled by the gap"
     );
 }
+
+/// A recheck the stored gap cannot resolve restores its checkpoint, leaving
+/// the step Unverified with a continuation that was decided but never sent.
+/// Only a Running step can send it, so the gate pass must not schedule the
+/// retry (the stepper would refuse it) and must not skip the turn for it:
+/// later evidence is still examined.
+#[test]
+fn a_restored_checkpoint_with_a_pending_continuation_is_still_examined() {
+    use crate::circuit::observation::{
+        CircuitObservation, ObservationIdentity, ObservedWorkFact, WorkEvidence,
+    };
+    let gap = crate::circuit::strategy::for_stored("agy")
+        .hooks()
+        .and_then(|hooks| hooks.ownership_gap)
+        .expect("Antigravity declares an ownership gap");
+    let identity = ObservationIdentity {
+        run_id: 1876,
+        step_id: "step".into(),
+        attempt: 1,
+        agent_node_id: 42,
+        session_incarnation: Some("7".into()),
+        session_id: Some("session".into()),
+        turn_id: None,
+        report_revision: None,
+    };
+    let mut evidence = WorkEvidence::default();
+    evidence.observe(
+        &identity,
+        &CircuitObservation {
+            identity: identity.clone(),
+            source: "agy_native_hook".into(),
+            source_id: Some("agy-stop".into()),
+            observed_at_ms: 10,
+            authoritative: false,
+            fact: ObservedWorkFact::OwnershipUnavailable { reason: gap.into() },
+        },
+    );
+    let delivery = "Prompt delivery is unverified: no echo";
+    // As the operator Recheck leaves it.
+    let mut run = view(spawn(), RunState::Running, StepStatus::Running, Some(42));
+    run.context.set(
+        "node.step.evidence.1",
+        serde_json::to_string(&evidence).unwrap(),
+    );
+    run.context.set("node.step.recheck_only", "1");
+    run.context.set("node.step.recheck_checkpoint", delivery);
+    run.context.set("node.step.continuation.attempt", "1");
+    run.context
+        .set("node.step.continuation.delivery", "pending");
+
+    let mut events = Vec::new();
+    super::turn_classify::observe_gates_with(&run, &mut events, &mut Script::default());
+    for event in &events {
+        advance(&mut run, event);
+    }
+    assert_eq!(run.steps[0].status, StepStatus::Unverified);
+    assert!(run.steps[0].error.as_deref().unwrap().contains(delivery));
+    assert_eq!(run.context.get("node.step.recheck_only"), Some("0"));
+    assert_eq!(
+        run.context.get("node.step.continuation.delivery"),
+        Some("pending")
+    );
+
+    // A later poll brings a new report verdict.
+    let mut script = Script {
+        turn: Some(turn(Some(Classification::Completed), false)),
+        ..Default::default()
+    };
+    let mut events = Vec::new();
+    super::turn_classify::observe_gates_with(&run, &mut events, &mut script);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, CircuitEvent::ContinuationRetry { .. })),
+        "an Unverified step cannot send the continuation: {events:?}"
+    );
+    assert!(script.calls.contains(&"classify"), "the turn is examined");
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, CircuitEvent::TurnClassified { node_id, .. } if node_id == "step")),
+        "the new verdict reaches the stepper: {events:?}"
+    );
+
+    // Once the step is Running again, the never-sent continuation is retried.
+    run.steps[0].status = StepStatus::Running;
+    run.steps[0].error = None;
+    let mut script = Script::default();
+    let mut events = Vec::new();
+    super::turn_classify::observe_gates_with(&run, &mut events, &mut script);
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, CircuitEvent::ContinuationRetry { .. })));
+    assert!(!script.calls.contains(&"classify"));
+}

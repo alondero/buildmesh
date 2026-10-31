@@ -1290,7 +1290,12 @@ pub(super) fn observe_gates_with(
                     });
                     continue;
                 }
-                if continuation_delivery == Some("pending")
+                // Only a Running step can send it (`ContinuationRetry` accepts
+                // nothing else). An Unverified step with a never-sent
+                // continuation has nothing in flight, so its turn is still
+                // examined below rather than skipped on every poll.
+                if step.status == StepStatus::Running
+                    && continuation_delivery == Some("pending")
                     && continuation_attempt == Some(step.attempt)
                     && view
                         .context
@@ -1305,8 +1310,8 @@ pub(super) fn observe_gates_with(
                 }
                 // A hook reports an ownership gap once and its receipt is not
                 // read again, so the stored evidence settles the step: a
-                // recheck that found nothing new, or a step a previous release
-                // parked on the gap. Readiness below still judges the turn.
+                // pending recheck, or a step a previous release parked on the
+                // gap. Readiness below still judges the turn.
                 if view.ownership_gap_settlement_due(&step.node_id) {
                     events.push(CircuitEvent::OwnershipGapHeld {
                         node_id: step.node_id.clone(),

@@ -1636,9 +1636,11 @@ fn a_consumed_antigravity_gap_receipt_still_settles_the_step_from_stored_evidenc
         view
     };
 
-    // A person rechecks an unrelated checkpoint. The only thing that arrives
-    // is a status projection, which the worker applies before the gate pass:
-    // it changes the stored evidence but cannot resolve the checkpoint.
+    // A person rechecks an unrelated checkpoint. Before the gate pass (the
+    // worker applies observations first), a status projection arrives and an
+    // owned child starts and finishes. Those change the stored evidence,
+    // including its work state, but none of them says whether the prompt was
+    // delivered, so none resolves the checkpoint.
     let mut db = settled();
     let delivery = "Prompt delivery is unverified: The harness did not confirm the pasted prompt";
     let mut view = recheck(&mut db, delivery);
@@ -1647,47 +1649,75 @@ fn a_consumed_antigravity_gap_receipt_still_settles_the_step_from_stored_evidenc
         .get("node.spawn.evidence.1")
         .unwrap()
         .to_owned();
-    let projected = advance(
-        &mut view,
-        &CircuitEvent::Observed {
-            expected: crate::circuit::observation::ObservationIdentity {
-                run_id: 1,
-                step_id: "spawn".into(),
-                attempt: 1,
-                agent_node_id: 9,
-                session_incarnation: Some("7".into()),
-                session_id: Some("550e8400-e29b-41d4-a716-446655440000".into()),
-                turn_id: None,
-                report_revision: None,
+    let identity = crate::circuit::observation::ObservationIdentity {
+        run_id: 1,
+        step_id: "spawn".into(),
+        attempt: 1,
+        agent_node_id: 9,
+        session_incarnation: Some("7".into()),
+        session_id: Some("550e8400-e29b-41d4-a716-446655440000".into()),
+        turn_id: None,
+        report_revision: None,
+    };
+    use crate::circuit::observation::ObservedWorkFact as Fact;
+    for (at, source, source_id, fact) in [
+        (
+            20,
+            "agent_status_projection",
+            "status-after-recheck",
+            Fact::Yielded,
+        ),
+        (
+            21,
+            "agy_native_hook",
+            "child-started",
+            Fact::OwnedStarted {
+                work_id: "child-1".into(),
             },
-            observation: Box::new(crate::circuit::observation::CircuitObservation {
-                identity: crate::circuit::observation::ObservationIdentity {
-                    run_id: 1,
-                    step_id: "spawn".into(),
-                    attempt: 1,
-                    agent_node_id: 9,
-                    session_incarnation: Some("7".into()),
-                    session_id: Some("550e8400-e29b-41d4-a716-446655440000".into()),
-                    turn_id: None,
-                    report_revision: None,
-                },
-                source: "agent_status_projection".into(),
-                source_id: Some("status-after-recheck".into()),
-                observed_at_ms: 20,
-                authoritative: false,
-                fact: crate::circuit::observation::ObservedWorkFact::Yielded,
-            }),
-        },
+        ),
+        (
+            22,
+            "agy_native_hook",
+            "child-ended",
+            Fact::OwnedTerminated {
+                work_id: "child-1".into(),
+            },
+        ),
+    ] {
+        // Child work is reported as authoritative fact fenced to its turn, so
+        // it changes the stored work state; the projection is neither.
+        let projection = source == "agent_status_projection";
+        let mut observed_identity = identity.clone();
+        if !projection {
+            observed_identity.turn_id = Some("turn-1".into());
+        }
+        let observed = advance(
+            &mut view,
+            &CircuitEvent::Observed {
+                expected: identity.clone(),
+                observation: Box::new(crate::circuit::observation::CircuitObservation {
+                    identity: observed_identity,
+                    source: source.into(),
+                    source_id: Some(source_id.into()),
+                    observed_at_ms: at,
+                    authoritative: !projection,
+                    fact,
+                }),
+            },
+        );
+        assert_eq!(observed.observations.len(), 1, "{source_id} is recorded");
+    }
+    let after: crate::circuit::observation::WorkEvidence =
+        serde_json::from_str(view.context.get("node.spawn.evidence.1").unwrap()).unwrap();
+    assert_ne!(
+        serde_json::to_string(&after).unwrap(),
+        before,
+        "the stored evidence changed"
     );
     assert_eq!(
-        projected.observations.len(),
-        1,
-        "the projection is recorded"
-    );
-    assert_ne!(
-        view.context.get("node.spawn.evidence.1"),
-        Some(before.as_str()),
-        "the stored evidence changed"
+        after.children.get("child-1"),
+        Some(&true),
+        "the work state changed too"
     );
     let (due, transition) = poll(&mut view);
     assert!(due, "the stored gap answers the recheck");

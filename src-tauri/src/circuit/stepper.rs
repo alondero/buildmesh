@@ -505,32 +505,12 @@ impl RunView {
             .find_map(|source| super::strategy::hook_ownership_gap_for_source(source))
     }
 
-    /// Whether a pending operator recheck has found nothing that could
-    /// resolve its checkpoint: the turn's report and lifecycle are as the
-    /// recheck saved them (`WorkEvidence::recheck_fingerprint`). A recheck
-    /// recorded before fingerprints were saved has only the stored evidence
-    /// to go on.
-    fn recheck_evidence_unchanged(&self, node_id: &str) -> bool {
-        let Some(step) = self.step(node_id) else {
-            return false;
-        };
-        self.context
-            .get(&format!("node.{node_id}.recheck_fingerprint"))
-            .is_none_or(|saved| {
-                super::observation::stored_recheck_fingerprint(
-                    self.context
-                        .get(&format!("node.{node_id}.evidence.{}", step.attempt)),
-                ) == saved
-            })
-    }
-
     /// Whether the stored ownership gap would settle this step now. The worker
     /// asks on every poll, so a gap reported once by a hook still releases a
     /// step parked on it, and still answers a recheck, after a restart.
     pub(crate) fn ownership_gap_settlement_due(&self, node_id: &str) -> bool {
-        self.held_ownership_gap(node_id).is_some_and(|gap| {
-            gap_settlement(self, node_id, gap, self.recheck_evidence_unchanged(node_id)).is_some()
-        })
+        self.held_ownership_gap(node_id)
+            .is_some_and(|gap| gap_settlement(self, node_id, gap).is_some())
     }
 
     pub fn evidence_deadline_ms(&self, node_id: &str) -> Option<i64> {
@@ -1704,7 +1684,7 @@ fn apply_observation(
     // write is the step row, not another observation.
     if disposition == D::Duplicate {
         if let Some(gap) = ownership_gap.filter(|_| !evidence.has_human_wait()) {
-            reconcile_ownership_gap(run, t, &expected.step_id, gap, true);
+            reconcile_ownership_gap(run, t, &expected.step_id, gap);
         }
         return false;
     }
@@ -1747,7 +1727,7 @@ fn apply_observation(
     let declared_ownership_gap = disposition == D::Unavailable && ownership_gap.is_some();
     if let Some(gap) = ownership_gap.filter(|_| declared_ownership_gap) {
         if !evidence.has_human_wait() {
-            reconcile_ownership_gap(run, t, &expected.step_id, gap, false);
+            reconcile_ownership_gap(run, t, &expected.step_id, gap);
         }
     }
     if matches!(disposition, D::Unavailable | D::Conflicting)
@@ -1899,8 +1879,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                     .is_some_and(|step| step.attempt == *attempt)
             {
                 if let Some(gap) = run.held_ownership_gap(node_id) {
-                    let answered = run.recheck_evidence_unchanged(node_id);
-                    reconcile_ownership_gap(run, &mut t, node_id, gap, answered);
+                    reconcile_ownership_gap(run, &mut t, node_id, gap);
                 }
             }
         }
@@ -3383,8 +3362,8 @@ fn resume_observed_step(run: &mut RunView, t: &mut Transition, node_id: &str) {
     t.step_writes.push(write);
 }
 
-/// Prefix of a checkpoint restored by a recheck that found nothing new.
-const RECHECK_UNCHANGED: &str = "Evidence recheck found no new evidence";
+/// Prefix of a checkpoint restored by a recheck that the gap could not settle.
+const RECHECK_UNRESOLVED: &str = "Evidence recheck could not resolve this checkpoint";
 
 /// What a declared ownership gap does to a step. The gap is not a checkpoint.
 #[derive(Debug, PartialEq)]
@@ -3392,24 +3371,23 @@ enum GapSettlement {
     /// The step is still parked on this very gap (the previous release parked
     /// it there, and persisted runs keep that state): return it to Running.
     Resume,
-    /// A pending operator recheck found only the gap: restore the checkpoint
-    /// it was rechecking. Leaving the step Running would hide that checkpoint
-    /// without resolving it.
+    /// A pending operator recheck of another checkpoint: restore it.
     Restore(String),
-    /// A pending operator recheck of the gap itself found only the gap. The
-    /// gap needs no person, so the answer is that the step carries on
-    /// Running, out of recheck mode.
+    /// A pending operator recheck of the gap itself. The gap needs no person,
+    /// so the answer is that the step carries on Running, out of recheck mode.
     EndRecheck,
 }
 
 /// Decide [`GapSettlement`] for a step whose evidence holds `gap`.
-/// `recheck_answered` says the gap is all a pending recheck has found.
-fn gap_settlement(
-    run: &RunView,
-    node_id: &str,
-    gap: &str,
-    recheck_answered: bool,
-) -> Option<GapSettlement> {
+///
+/// A checkpoint is resolved only by the step being routed (readiness judges an
+/// Unverified step's report just as it does a Running one's) or by a person.
+/// The gap says only that owned work cannot be verified, so it resolves no
+/// checkpoint but itself, whatever else the evidence records. A pending
+/// recheck of any other checkpoint therefore gets it back at once: the
+/// recheck's re-examination of the report still routes the step if it can,
+/// and nothing is hidden behind a Running step while it does.
+fn gap_settlement(run: &RunView, node_id: &str, gap: &str) -> Option<GapSettlement> {
     let step = run.step(node_id)?;
     if step.outcome.is_some() {
         return None;
@@ -3417,8 +3395,7 @@ fn gap_settlement(
     match step.status {
         StepStatus::Unverified if step.error.as_deref() == Some(gap) => Some(GapSettlement::Resume),
         StepStatus::Running
-            if recheck_answered
-                && run.context.get(&format!("node.{node_id}.recheck_only")) == Some("1") =>
+            if run.context.get(&format!("node.{node_id}.recheck_only")) == Some("1") =>
         {
             let checkpoint = run
                 .context
@@ -3426,17 +3403,17 @@ fn gap_settlement(
                 .filter(|checkpoint| !checkpoint.is_empty());
             let reason = match checkpoint {
                 Some(checkpoint) if checkpoint == gap => return Some(GapSettlement::EndRecheck),
-                Some(checkpoint) if checkpoint.starts_with(RECHECK_UNCHANGED) => {
+                Some(checkpoint) if checkpoint.starts_with(RECHECK_UNRESOLVED) => {
                     checkpoint.to_owned()
                 }
                 Some(checkpoint) => format!(
-                    "{RECHECK_UNCHANGED}; the checkpoint still applies. Previous checkpoint: {checkpoint}"
+                    "{RECHECK_UNRESOLVED}; it still applies. Previous checkpoint: {checkpoint}"
                 ),
                 // A recheck recorded before checkpoints were kept: the
                 // checkpoint is unknown, so say so. This answer must not equal
                 // the bare gap, which would release it again on the next poll.
                 None => format!(
-                    "{RECHECK_UNCHANGED}; the earlier checkpoint still applies. The harness reported: {gap}"
+                    "{RECHECK_UNRESOLVED}; the earlier checkpoint still applies. The harness reported: {gap}"
                 ),
             };
             Some(GapSettlement::Restore(reason))
@@ -3451,14 +3428,8 @@ fn gap_settlement(
 /// later gap could restore a checkpoint the step has moved past. Ending it
 /// changes no delivery state, so a claimed (uncertain) continuation is still
 /// never replayed.
-fn reconcile_ownership_gap(
-    run: &mut RunView,
-    t: &mut Transition,
-    node_id: &str,
-    gap: &str,
-    recheck_answered: bool,
-) {
-    let Some(settlement) = gap_settlement(run, node_id, gap, recheck_answered) else {
+fn reconcile_ownership_gap(run: &mut RunView, t: &mut Transition, node_id: &str, gap: &str) {
+    let Some(settlement) = gap_settlement(run, node_id, gap) else {
         return;
     };
     match settlement {
