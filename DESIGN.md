@@ -61,6 +61,20 @@ the same change.
    the same facts, drifts from them, and costs space twice. New status for a
    Circuit Run, for example, belongs on the card's Overview tab.
 
+### Affordances and progressive disclosure
+
+Use familiar application conventions to make actions and state recognisable:
+standard icons, clear hierarchy, selected states and direct manipulation.
+Give icon controls accessible names and tooltips. Keep visible copy to the
+identity, scope and information needed for the current decision; place
+supporting explanation in contextual help, menus or expandable details.
+Keep errors and recovery actions visible where the user needs to act.
+
+Probe headers have two lines: the destination name, then its current scope.
+Show Host-wide once for Host probes; show the selected Mesh or Agent identity
+and relevant working-tree detail for selection-scoped probes. Disclose
+selection-following behavior in the scope tooltip.
+
 Compact desktop controls still provide a **24 by 24 CSS pixel minimum hit
 area**. A small colour swatch or glyph may sit inside that area; the surrounding
 button owns pointer and keyboard input. Recovery actions remain visible in

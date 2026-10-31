@@ -33,8 +33,8 @@
  * resolutions.
  *
  * The header shows the active destination's icon in a tinted chip next to its
- * label, with the explicit lens/subject and the fixed-or-following mode
- * visible so each destination body stays free of redundant context chrome.
+ * label on the first line and its scope on the second. Selection-following
+ * behavior is disclosed in the scope tooltip.
  * Issue #2075 promoted that lens/subject line to a legible weight: since
  * #2073 removed Probe Context Pins, disclosure is the only thing making a
  * selection-following destination's subject drift visible, so the subject is
@@ -140,11 +140,9 @@ function ProbePanelContent() {
   // title-bar Usage action, and contextual entries own reopening.
   const activeDef = PROBE_TABS.find((t) => t.tab === probeTab) ?? PROBE_TABS[0];
   const ActiveIcon = activeDef.icon;
-  // Issue #2073 — the mode vocabulary is exactly two values: a Host-owned
-  // destination is fixed, every Mesh/Agent destination follows the selection.
-  const contextModeLabel = context.mode === 'fixed'
-    ? 'Host-wide'
-    : 'Following selection';
+  const scopeLabel = context.mode === 'fixed' ? 'Host-wide' : context.subjectLabel;
+  const scopeTitle = [scopeLabel, context.detailLabel, context.mode === 'following' ? 'Following selection' : null]
+    .filter(Boolean).join(' · ');
 
   return (
     // Outer wrapper is `relative` but does NOT carry `overflow-hidden` —
@@ -214,15 +212,7 @@ function ProbePanelContent() {
         aria-label="Probe panel"
         className="flex flex-col h-full w-full overflow-hidden border-l border-border-subtle"
       >
-        {/* Header — active destination icon chip + label (title) + explicit
-            lens/subject + fixed-or-following mode + close button. The subject
-            line replaces the directory-path strip the Issues / PRs tabs
-            used to render individually, so every destination makes its
-            ownership visible in the same place — and since #2075 that
-            disclosure renders at a weight that is actually readable at a
-            glance (see the comment on the subject row below). Only live-scope
-            information is here: #2073 removed the pin, so the header carries
-            no captured subject to disagree with the selection. */}
+        {/* Two lines: destination, then current scope. */}
         <div
           className="flex items-center justify-between gap-2 pl-3 pr-2 py-2 border-b border-border-subtle min-h-[56px]"
         >
@@ -241,6 +231,7 @@ function ProbePanelContent() {
                   header would stop saying which is the destination. */}
               <span
                 data-testid="probe-context-title"
+                title={activeDef.label}
                 className="text-sm text-text-primary font-semibold truncate"
               >
                 {activeDef.label}
@@ -260,15 +251,13 @@ function ProbePanelContent() {
               <div
                 data-testid="probe-context-subject"
                 className="flex items-center gap-1 min-w-0"
-                title={context.detailLabel
-                  ? `${context.subjectLabel} · ${context.detailLabel}`
-                  : context.subjectLabel}
+                title={scopeTitle}
               >
                 <span
                   data-testid="probe-context-subject-name"
                   className="truncate min-w-0 text-sm font-medium text-text-primary"
                 >
-                  {context.subjectLabel}
+                  {scopeLabel}
                 </span>
                 {/* Mixed-ownership qualifier: Project Files' working tree vs the
                     repository root, an Agent lens' parent Mesh. One step below
@@ -284,12 +273,6 @@ function ProbePanelContent() {
                   </span>
                 )}
               </div>
-              <span
-                data-testid="probe-context-mode"
-                className="text-2xs text-text-secondary truncate"
-              >
-                {contextModeLabel}
-              </span>
             </div>
           </div>
           <button
