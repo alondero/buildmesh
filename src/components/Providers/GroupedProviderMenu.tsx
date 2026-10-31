@@ -139,11 +139,11 @@ export function GroupedProviderMenu({ providers, onSelect, filter, decorate, cla
               <button type="button" role="menuitem"
                 tabIndex={flatIndexById.get(option.id) === activeIndex ? 0 : -1}
                 data-spawn-id={option.id} data-spawn-harness={option.harness_id}
-                aria-label={option.label}
+                aria-label={option.unavailable_reason ? option.label : [option.label, option.verification_warning].filter(Boolean).join(' — ')}
                 aria-haspopup={configurable(option) ? 'menu' : undefined}
                 aria-expanded={configurable(option) ? submenu?.option.id === option.id : undefined}
                 aria-disabled={Boolean(option.unavailable_reason)}
-                title={option.verification_warning ?? option.unavailable_reason ?? undefined}
+                title={option.unavailable_reason ?? option.verification_warning ?? undefined}
                 onClick={(e) => { e.stopPropagation(); if (!option.unavailable_reason) onSelect(option.id, e.altKey); }}
                 onMouseEnter={(e) => { if (!editing.current) e.currentTarget.focus({ preventScroll: true }); }}
                 onFocus={() => syncCaretToFocus(option.id)}

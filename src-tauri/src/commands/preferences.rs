@@ -469,9 +469,45 @@ pub fn verify_provider_pairing(
         &provider_id,
         env_type,
     )?;
-    let _ = app.emit("pairing-verification-changed", &record);
-    let _ = app.emit("provider-list-changed", ());
+    publish_verification_result(&app, &record);
     Ok(record)
+}
+
+/// The events a completed pairing verification must publish.
+///
+/// A seam, not a style choice: the provider list is cached per surface and
+/// invalidated by `provider-list-changed`, so a check that saved a fresh
+/// record but forgot to raise it would leave the stale caveat on screen
+/// without a gate to fail.
+trait PairingVerificationEvents {
+    /// The verification record changed — the Settings pane re-reads it.
+    fn verification_changed(&self, record: &PairingVerification);
+    /// The provider list changed — the spawn surfaces drop their cached list.
+    fn provider_list_changed(&self);
+}
+
+impl PairingVerificationEvents for AppHandle {
+    fn verification_changed(&self, record: &PairingVerification) {
+        let _ = self.emit("pairing-verification-changed", record);
+    }
+
+    fn provider_list_changed(&self) {
+        let _ = self.emit("provider-list-changed", ());
+    }
+}
+
+/// Publish the result of a completed pairing verification.
+///
+/// Both events: the record event updates the Settings pane, and the
+/// provider-list event is what makes the Spawn Menu drop a warning the fresh
+/// record has just cleared. The manual command and the scheduled probe both
+/// call this, so the two paths stay in step.
+fn publish_verification_result<E: PairingVerificationEvents + ?Sized>(
+    events: &E,
+    record: &PairingVerification,
+) {
+    events.verification_changed(record);
+    events.provider_list_changed();
 }
 
 /// Schedule a pairing-verification probe (network call) for one
@@ -528,8 +564,7 @@ pub(crate) fn schedule_pairing_verification_for_runtime(
         })
         .await;
         if let Ok(record) = result {
-            let _ = app.emit("pairing-verification-changed", record);
-            let _ = app.emit("provider-list-changed", ());
+            publish_verification_result(&app, &record);
         }
     });
 }
