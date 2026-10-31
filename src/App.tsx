@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import type { ProviderErrorPayload } from './types/generated/ProviderErrorPayload';
+import type { ProviderWarningPayload } from './types/generated/ProviderWarningPayload';
 import type { ResumeFailedPayload } from './types/generated/ResumeFailedPayload';
 import type { WorktreeCleanupFailedPayload } from './types/generated/WorktreeCleanupFailedPayload';
 import type { CircuitAgentBlockedPayload } from './types/generated/CircuitAgentBlockedPayload';
@@ -162,6 +163,16 @@ function App() {
     // `addToast` is a module-level function that delegates to
     // `useToastStore.getState().addToast` — stable across renders,
     // so it doesn't belong in the dep array.
+  }, []);
+
+  // A pairing verification is advisory: the session runs either way, so an
+  // unverified, stale or previously failed pairing is a warning rather than
+  // an error. The backend re-checks the pairing in the background.
+  useEffect(() => {
+    const unlisten = listen<ProviderWarningPayload>('provider-warning', (event) => {
+      addToast(event.payload.provider, event.payload.message, 'warning');
+    });
+    return () => { unlisten.then((fn) => fn()); };
   }, []);
 
   useEffect(() => {

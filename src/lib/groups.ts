@@ -37,6 +37,10 @@ export type SpawnOption = Pick<
   capabilities?: ProviderInfo['capabilities'];
   configuration?: ProviderInfo['configuration'];
   unavailable_reason?: ProviderInfo['unavailable_reason'];
+  /** Why this row's pairing is not covered by a current successful check.
+   *  A caveat, not a block: the row stays selectable and the session starts
+   *  either way. */
+  verification_warning?: ProviderInfo['verification_warning'];
 };
 
 /**
@@ -57,6 +61,7 @@ export function mapBackendProviders(backend: ProviderInfo[]): SpawnOption[] {
     capabilities: p.capabilities,
     configuration: p.configuration,
     unavailable_reason: p.unavailable_reason,
+    verification_warning: p.verification_warning,
     label: p.label,
     icon: p.icon,
     harness_id: p.harness_id,

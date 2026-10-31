@@ -6,7 +6,7 @@
 //! stays in `process`.
 
 use super::reader::SpawnTimer;
-use super::wire::emit_provider_error;
+use super::wire::{emit_provider_error, emit_provider_warning};
 use super::{MeshSyncOutcome, MeshSyncWarningPayload};
 use crate::agent::session_lifecycle::SessionLifecycleSink as _;
 use crate::env;
@@ -592,6 +592,51 @@ pub(super) async fn provision_workspace(
         }
     };
     timer.checkpoint("after_provider_preflight");
+
+    // A Codex route whose pairing check is not current still launches. The
+    // pairing verification is advisory — it proves a combination worked once,
+    // but a routine `codex-cli` npm auto-update invalidates that proof every
+    // few days, and refusing to start on an unproven route means the user
+    // cannot even try. Warn them about what is uncertain, and re-check the
+    // pairing in the background so the next launch finds a current record
+    // instead of asking them to re-verify by hand.
+    if let Some(follow_up) = routing.verification_follow_up() {
+        use crate::agent::launch_routing::VerificationFollowUp;
+        match follow_up {
+            VerificationFollowUp::WarnAndRecheck {
+                provider_id,
+                message,
+            } => {
+                tracing::warn!(
+                    session_id,
+                    provider = %provider,
+                    provider_id,
+                    "pairing is not verified for the current inputs; launching anyway and re-checking in the background"
+                );
+                emit_provider_warning(app, session_id, provider, &provider_id, &message);
+                if let Some(identity) = routing.codex_route_identity() {
+                    crate::commands::preferences::schedule_pairing_verification_for_runtime(
+                        app.clone(),
+                        identity.harness_id.to_string(),
+                        identity.provider_id.to_string(),
+                        identity.runtime,
+                    );
+                }
+            }
+            VerificationFollowUp::WarnOnly {
+                provider_id,
+                message,
+            } => {
+                tracing::warn!(
+                    session_id,
+                    provider = %provider,
+                    provider_id,
+                    "the pairing check failed; launching anyway"
+                );
+                emit_provider_warning(app, session_id, provider, &provider_id, &message);
+            }
+        }
+    }
 
     let emit_signal_unavailable = |message: &str| {
         if let Some(app) = crate::http::app_handle() {

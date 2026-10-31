@@ -168,23 +168,27 @@ uses the dark theme regardless of the phone's system appearance.
 `MainActivity` owns the transparent system bars and their dark appearance through
 its edge-to-edge setup; the resource theme supplies the initial window background.
 
-Compose owns Overview/Work, mesh selection and search, node details and replies,
+Compose owns Overview/Work, mesh selection, node details and replies,
 task capture, issue spawning, archive import/resume, changed files, selectable
 diffs, mesh-branch PR creation and connection settings. Connection settings also
 owns the background notifications switch, which is off until the user turns it
 on; the watch it starts is described under
 [Background agent notices](#background-agent-notices). Launch selections come
 from the backend menu, including saved configurations and capability filtering.
-Tapping an Overview mesh name selects its ID and switches to Work, clearing the
-search and attention filter. Mesh headers summarize open (non-archived) nodes
-with wrapping status dots and a count, independent of dashboard filters. Empty
-mesh names use the muted text token; their actions remain available. Overview
-cards omit filesystem paths and put the compact Spawn split button beside the
-name. Like the desktop sidebar, meshes with non-archived nodes come first;
-both groups preserve saved mesh order, regardless of search or attention filters.
-The home screen's first surface is whoever is waiting on a person: every
-`awaiting_input` node is pinned above the mesh list with what it asked, its mesh
-and branch, and the one action its request supports. That action is read from
+Tapping an Overview mesh name selects its ID and opens Work for that mesh.
+Overview lists meshes only: it does not list agents, and Work does not offer a
+mesh selector, a search box, or an attention filter. A window at least 600dp
+wide, which covers a tablet and an unfolded fold, keeps that mesh list beside
+the selected mesh's agents instead of replacing one with the other. Mesh
+headers summarize open (non-archived) nodes with wrapping status dots and a
+count. Empty mesh names use the muted text token; their actions remain
+available. Overview cards omit filesystem paths and put the compact Spawn
+split button beside the name. Like the desktop sidebar, meshes with
+non-archived nodes come first; both groups preserve saved mesh order.
+The selected mesh's Work screen pins agents waiting on a person. An
+`awaiting_input` node that carries a request is pinned above that mesh's other
+agents, with what it asked, its mesh and branch, and the one action its request
+supports. That action is read from
 the observation, never from the bare status (issue #1966): a
 `permission_requested` request is answered with the desktop semantic-turn
 banner's own `Allow (Y)` / `Deny (N)` pair — `Approve (Y)` / `Deny (N)` when
@@ -196,12 +200,10 @@ disable while a reply is in flight and retire only once the desktop accepted
 it; a send that fails signals the card, which clears the in-flight marker and
 hands the controls back instead of showing "Sending…" until the desktop
 replaces the request. State is keyed by the request rather than the node, so a
-node that asks again arrives with live controls. The deck keeps the screen's
-mesh scope but ignores the search query and the attention filter: who is
-blocked on you is not something a search box should hide. It belongs to the
-Overview tab, whose node cards exclude these same agents — the rule the phone
-web list applies — so a waiting agent renders exactly once; the Work tab has
-no deck and keeps these nodes as rows under their mesh. The dashboard refreshes by pull-to-refresh as well as through the app-bar
+node that asks again arrives with live controls. The deck is that mesh's Work
+list. A waiting agent who is on their own is left out of the rows under it. A paired group stays together in the rows. On a phone, Overview
+shows meshes only; a wide window keeps the deck in the agents pane beside the
+mesh list. The dashboard refreshes by pull-to-refresh as well as through the app-bar
 action, and the app-bar progress bar belongs to the first load and to a read the
 user asked for — the five-second poll never pulses the chrome. Node details put
 the reply composer directly under the request it answers, above the
@@ -216,17 +218,16 @@ does not depend on scrolling. One indicator belongs to one gesture — the pull
 owns the indicator it shows, and the app-bar action keeps the thin progress
 bar — so a single gesture does not drive two spinners at once.
 
-Pull requests, Issues and Archive live under each mesh header in Your work,
-including meshes without open agents or matches for the current filters.
-Work uses compact rows under mesh headers, with the desktop status-circle shapes
+Pull requests, Issues and Archive live on the selected mesh's Work screen,
+including when that mesh has no open agents.
+Work uses compact rows for the selected mesh, with the desktop status-circle shapes
 and Circuit orbit glyphs. Circuit-linked agents share one bracket, ordered with
 the representative first; each row opens that agent. Within a mesh group the
 activities that need a person come first — a failed or lost agent, then a
 Circuit run waiting on you, then an agent blocked on its own input — and
 everything else keeps the desktop's saved order. A bracket moves as a unit: its
 representative stays first, its members keep their order, and no activity
-leaves its mesh group. Search and Needs attention match individual agents and
-retain the matching activity's other members for context. Missing or archived
+leaves its mesh group. Missing or archived
 parents, cross-mesh links and cycles leave agents accessible. Desktop manual
 groups remain local desktop view state.
 Swipe a Work row toward the start edge to reveal **Close**, then tap it and

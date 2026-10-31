@@ -204,9 +204,10 @@ fn a_pinned_runtime_is_honoured_over_the_mesh_runtime() {
     let routing = PreparedLaunchRouting::CodexProxy {
         harness_id: "codex".into(),
         provider_id: "minimax".into(),
+        account_name: "MiniMax".into(),
         profile_name: "Codex".into(),
         descriptor: codex_verification_descriptor(),
-        verification: crate::preferences::PairingVerification {
+        verification: Some(crate::preferences::PairingVerification {
             harness_id: "codex".into(),
             provider_id: "minimax".into(),
             pairing_signature: "sig".into(),
@@ -220,7 +221,8 @@ fn a_pinned_runtime_is_honoured_over_the_mesh_runtime() {
             status: crate::preferences::PairingVerificationStatus::Verified,
             verified_at: None,
             reason: None,
-        },
+        }),
+        advisory: None,
         runtime: EnvType::Wsl,
         install: crate::agent::provider::adapters::codex::CodexInstall {
             executable: "/home/dev/.npm-global/bin/codex".into(),

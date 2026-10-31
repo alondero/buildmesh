@@ -184,6 +184,7 @@ fn provider_row(row: MenuRow) -> crate::agent::provider::ProviderInfo {
         configurations: Vec::new(),
         configuration: row.configuration,
         unavailable_reason: row.unavailable_reason.map(str::to_string),
+        verification_warning: None,
         effective_permission: None,
     }
 }

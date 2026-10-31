@@ -160,6 +160,9 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/services/usage/adapters/minimax_tests.rs': 'services::usage::adapters::minimax::tests',
   'src-tauri/src/services/usage/adapters/opencode_tests.rs': 'services::usage::adapters::opencode::tests',
   'src-tauri/src/services/usage/adapters/perch_tests.rs': 'services::usage::adapters::perch::tests',
+  'src-tauri/src/services/provider_verification_tests.rs': 'services::provider_verification::tests',
+  'src-tauri/src/agent/launch_routing_tests.rs': 'agent::launch_routing::launch_routing_tests',
+  'src-tauri/src/commands/preferences_tests.rs': 'commands::preferences::preferences_tests',
 };
 
 // A Rust production file whose tests live in a sibling `<stem>_tests` module

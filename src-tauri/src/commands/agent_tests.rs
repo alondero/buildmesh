@@ -49,8 +49,9 @@ mod tests {
         PreparedLaunchRouting::CodexProxy {
             harness_id: "codex".into(),
             provider_id: "minimax".into(),
+            account_name: "MiniMax".into(),
             profile_name: profile_name.into(),
-            verification: PairingVerification {
+            verification: Some(PairingVerification {
                 harness_id: "codex".into(),
                 provider_id: "minimax".into(),
                 pairing_signature: "test-signature".into(),
@@ -67,7 +68,8 @@ mod tests {
                 status: PairingVerificationStatus::Verified,
                 verified_at: Some(chrono::Utc::now()),
                 reason: None,
-            },
+            }),
+            advisory: None,
             descriptor,
             runtime: EnvType::Wsl,
             install: crate::agent::provider::adapters::codex::CodexInstall {
@@ -125,6 +127,9 @@ mod tests {
             unreachable!()
         };
         let executable = executable.to_string_lossy().into_owned();
+        let verification = verification
+            .as_mut()
+            .expect("a Codex proxy carries its check");
         verification.runtime = "native-test".into();
         verification.executable = executable.clone();
         *runtime = EnvType::Windows;

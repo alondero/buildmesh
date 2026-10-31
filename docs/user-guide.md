@@ -1223,26 +1223,26 @@ agent to open a worktree PR from its terminal. **Connection → Forget this
 desktop** removes this phone's saved session. Revoke the device on the desktop
 to remove its authorization. Certificate resets require fresh pairing.
 
-In Android **Overview**, tap a mesh name to open **Work** for that mesh. This
-clears the search and attention filter so you see all its open agents. Each
-mesh header shows a status dot per open agent and their count. Meshes without
-open agents have muted names, with **No agents yet**; they remain tappable.
-Meshes with open agents appear first, preserving your desktop mesh order within
-each group. The **+** beside the mesh name starts a task with its default agent;
-the adjacent arrow offers other launch configurations. In **Your work**, each
-mesh has **Pull requests**, **Issues**, and **Archive** links, even when it has
-no open agents. Choose **All meshes** in Work's Mesh selector to widen the view.
+In Android **Overview**, the screen is the list of meshes. Tap a mesh name to
+open **Work** for that mesh. Each mesh shows a status dot per open agent and
+their count. Meshes without open agents have muted names and say **No agents
+yet**; they remain tappable. Meshes with open agents appear first, preserving
+your desktop mesh order within each group. The **+** beside the mesh name
+starts a task with its default agent; the adjacent arrow offers other launch
+configurations.
 
-The phone opens on **Overview**, with counts for agents needing attention,
-running agents, and all active agents. Errors and degraded status reporting
-appear first, followed by agents waiting for input. Each agent card shows its
-mesh name. Status reporting warnings mean the agent's activity may be out of
-date; inspect its terminal to check.
+**Work** lists that mesh's open agents. An agent waiting on you is pinned at
+the top, once, with the reply the desktop would offer. A paired group stays
+together in that list. **Pull requests**,
+**Issues**, and **Archive** stay on that mesh, including when it has no open
+agents. Work has no mesh switcher and no status filter: choose another mesh
+from **Overview**. On a tablet, or a fold opened flat, the mesh list stays on
+the side and the agents stay beside it, so choosing a mesh does not leave the
+list.
 
-Use the bottom navigation to switch between **Overview**, **Work**, and
-**Capture**. Work searches agent names, meshes, providers, and branches, with
-filters for attention, running, and idle agents. Each mesh has direct links
-to GitHub Issues and its Archive, plus a button to start an empty agent.
+The phone opens on **Overview**. Use the bottom navigation to switch between
+**Overview**, **Work**, and **Capture**. Status reporting warnings mean the
+agent's activity may be out of date; inspect its terminal to check.
 
 **Capture** saves an idea draft on this phone as you type. Choose a mesh and
 an available agent (your choices are remembered on this phone), then select **Start working on this**. The idea becomes
