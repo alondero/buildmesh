@@ -16,10 +16,10 @@ fun waitingForInput(nodes: List<JsonObject>): List<JsonObject> =
     nodes.filter { nodeInputRequest(it) != null }.sortedBy { it.number("id") }
 
 /**
- * The agents that are waiting on you, pinned above everything else.
+ * The agents that are waiting on you, pinned above that mesh's other agents.
  *
- * This is the phone's most-used surface, so it is the first thing on the home
- * screen: what the agent asked, which mesh and branch it is, and the one action
+ * The deck sits on the selected mesh's Work list: what the agent asked, which
+ * mesh and branch it is, and the one action
  * the harness actually offers. The reply controls are chosen from the observed
  * request, never from the bare `awaiting_input` status (issue #1966) — an
  * approval the harness asked for gets the desktop semantic-turn banner's own

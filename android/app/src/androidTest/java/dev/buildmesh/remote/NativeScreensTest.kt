@@ -74,14 +74,16 @@ class NativeScreensTest {
         compose.onNodeWithText("Title").assertExists()
     }
 
-    @Test fun dashboardOpensNodesAndFiltersAttention() {
+    @Test fun dashboardOpensTheSelectedMeshAgents() {
         val mesh = Json.parseToJsonElement("{\"id\":2,\"name\":\"Test mesh\",\"path\":\"/repo\"}").obj()
         val ready = Json.parseToJsonElement("{\"id\":3,\"mesh_id\":2,\"name\":\"Ready agent\",\"branch\":\"main\",\"status\":\"ready\"}").obj()
         val waiting = Json.parseToJsonElement("{\"id\":4,\"mesh_id\":2,\"name\":\"Waiting agent\",\"branch\":\"task\",\"status\":\"awaiting_input\"}").obj()
+        val other = Json.parseToJsonElement("{\"id\":5,\"mesh_id\":9,\"name\":\"Other mesh agent\",\"branch\":\"main\",\"status\":\"ready\"}").obj()
         var opened = 0L
-        compose.setContent { BuildmeshTheme { Dashboard(RemoteState(nodes = listOf(ready, waiting), meshes = listOf(mesh)), "Work", 0, {}, { opened = it }, { _, _ -> }, { _, _ -> }) } }
-        compose.onAllNodesWithText("Needs attention", substring = false).onFirst().performClick()
-        compose.onNodeWithText("Ready agent").assertDoesNotExist()
+        compose.setContent { BuildmeshTheme { Dashboard(RemoteState(nodes = listOf(ready, waiting, other), meshes = listOf(mesh)), "Work", 2, {}, { opened = it }, { _, _ -> }, { _, _ -> }) } }
+        compose.onNodeWithText("Ready agent").assertIsDisplayed()
+        compose.onNodeWithText("Other mesh agent").assertDoesNotExist()
+        compose.onNodeWithText("Search agents or branches").assertDoesNotExist()
         compose.onNodeWithText("Waiting agent").performScrollTo().performClick()
         compose.runOnIdle { assertEquals(4L, opened) }
     }
