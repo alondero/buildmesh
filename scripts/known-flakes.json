@@ -2,5 +2,6 @@
   "agent::managed_config::tests::concurrent_writes_do_not_share_a_temp_name": 2626,
   "db::tests::reader_pool_wait_ends_at_one_deadline_however_often_it_is_woken": 2552,
   "commands::prune::prune_tests::blocked_removal_names_the_stage_that_failed": 2220,
-  "commands::prune::prune_tests::remove_worktree_fails_while_process_pins_it": 2220
+  "commands::prune::prune_tests::remove_worktree_fails_while_process_pins_it": 2220,
+  "services::circuit_worker::dispatch::tests::inject_pty_asks_a_file_only_harness_for_a_result_file": 2663
 }
