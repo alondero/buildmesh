@@ -290,14 +290,15 @@ pub fn regenerate_apply_blocking(
     )
     .is_some();
     // A resumed session lives in the home of the Harness Login that started
-    // it, so a native resume keeps that login rather than the new plan's.
+    // it, so a native resume keeps that login rather than the new plan's:
+    // an additional login, or `None` for the Default login. A node with no
+    // frozen plan has no recorded login, so the new plan's stands.
     if resume && plan.route.is_none() {
-        let previous = db::node_spawn_configuration(node_id, old_provider)
+        if let Some(previous) = db::node_spawn_configuration(node_id, old_provider)
             .map_err(|error| AgentNodeError::Backend(error.to_string()))?
             .and_then(|value| value.resolved)
-            .and_then(|plan| plan.harness_login);
-        if previous.is_some() {
-            plan.harness_login = previous;
+        {
+            plan.harness_login = previous.harness_login;
         }
     }
     let runtime = plan.harness.runtime.unwrap_or_else(|| {

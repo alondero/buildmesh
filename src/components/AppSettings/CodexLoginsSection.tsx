@@ -197,7 +197,13 @@ export function CodexLoginsSection({ api = defaultApi }: { api?: CodexLoginsApi 
                   </div>
                 )}
                 {signIn && !signIn.running && signIn.error && (
-                  <p role="alert" className="mt-2 text-sm text-status-error">{signIn.error}</p>
+                  // The backend keeps a finished sign-in until it is dismissed
+                  // or another sign-in starts, so the error stays until then.
+                  <div role="alert" className="mt-2 flex items-start gap-2 text-sm text-status-error">
+                    <p className="min-w-0 flex-1">{signIn.error}</p>
+                    <button type="button" className={secondaryButton} disabled={busy}
+                      onClick={() => void run(() => api.cancelSignIn(login.id))}>Dismiss</button>
+                  </div>
                 )}
                 {confirmRemove === login.id && (
                   <div className="mt-2 rounded-md border border-border-subtle px-2.5 py-2 text-sm text-text-secondary" role="group" aria-label={`Remove ${login.label}`}>

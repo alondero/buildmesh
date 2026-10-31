@@ -153,3 +153,90 @@ fn the_same_person_in_another_workspace_is_a_different_subscription() {
     assert_eq!(personal.subscription, again.subscription);
     assert!(personal.subscription.is_some());
 }
+
+/// `codex login` writes `auth.json` and then exits. The list polls the process
+/// before it reads any `auth.json`, so a sign-in that finishes during the call
+/// is reported finished *and* signed in rather than finished and signed out
+/// (which would stop the Settings poll on a stale "Not signed in"). This test
+/// pins the order; the write-before-exit order is Codex's.
+#[test]
+fn the_list_polls_the_sign_in_before_reading_auth_json() {
+    let prefs = crate::preferences::AppPreferences {
+        harness_logins: vec![HarnessLogin {
+            id: "work".into(),
+            harness_id: "codex".into(),
+            label: "Work".into(),
+            home: "C:/u/.codex-accounts/work".into(),
+        }],
+        ..Default::default()
+    };
+    let polled = std::cell::Cell::new(false);
+    let reads_before_poll = std::cell::Cell::new(0);
+    let list = list_with(
+        &prefs,
+        std::path::Path::new("C:/u/.codex"),
+        || {
+            polled.set(true);
+            Some((
+                "work".to_string(),
+                SignInState {
+                    running: false,
+                    url: None,
+                    error: None,
+                },
+            ))
+        },
+        |_home| {
+            if !polled.get() {
+                reads_before_poll.set(reads_before_poll.get() + 1);
+            }
+            login_identity_from_auth(&auth_json("w@example.com", "user-w"))
+        },
+    );
+    assert_eq!(reads_before_poll.get(), 0, "auth.json read before the poll");
+    let work = list.iter().find(|login| login.id == "work").unwrap();
+    assert!(work.signed_in);
+    assert_eq!(
+        work.sign_in.as_ref().map(|state| state.running),
+        Some(false)
+    );
+}
+
+/// A failed sign-in keeps reporting its error (Settings may be closed when it
+/// fails) until the user dismisses it; dismissing clears it for good.
+#[test]
+fn a_finished_sign_in_error_is_reported_until_dismissed() {
+    let mut command = if cfg!(windows) {
+        let mut command = std::process::Command::new("cmd");
+        command.args(["/C", "exit 1"]);
+        command
+    } else {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "exit 1"]);
+        command
+    };
+    let mut child = command.spawn().expect("spawn a failing process");
+    child.wait().expect("the process exits");
+    let id = "dismiss-test";
+    *lock() = Some(SignInSession {
+        login_id: id.into(),
+        child,
+        #[cfg(target_os = "windows")]
+        job: None,
+        output: Arc::new(Mutex::new(SignInOutput {
+            url: None,
+            last_line: Some("Login failed".into()),
+        })),
+        started: Instant::now(),
+        finished: None,
+    });
+
+    for _ in 0..2 {
+        let (login, state) = poll_sign_in().expect("the failure is reported");
+        assert_eq!(login, id);
+        assert!(!state.running);
+        assert_eq!(state.error.as_deref(), Some("Login failed"));
+    }
+    cancel_sign_in_blocking(id).unwrap();
+    assert!(poll_sign_in().is_none(), "a dismissed sign-in is gone");
+}

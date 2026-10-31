@@ -2581,3 +2581,77 @@ fn regenerate_apply_blocking_keeps_the_login_of_a_resumed_session() {
         .map(|login| login.id);
     assert_eq!(login.as_deref(), Some("work"));
 }
+
+/// The other direction: a session started on the Default login lives in the
+/// default home, so regenerating it to a configuration pinned to another
+/// login still resumes on the Default login.
+#[test]
+fn regenerate_apply_blocking_keeps_the_default_login_of_a_resumed_session() {
+    let prefs_dir = tempfile::tempdir().unwrap();
+    crate::preferences::init_for_tests(prefs_dir.path().into());
+    crate::preferences::storage::try_update(|prefs| {
+        prefs
+            .harness_logins
+            .push(crate::preferences::harness_logins::HarnessLogin {
+                id: "work".into(),
+                harness_id: "codex".into(),
+                label: "Work".into(),
+                home: "C:/Users/u/.codex-accounts/work".into(),
+            });
+        prefs.spawn_configurations.push(
+            crate::preferences::spawn_configurations::SpawnConfiguration {
+                id: "launch/codex-work".into(),
+                name: "Work".into(),
+                spawn_option_id: "codex".into(),
+                login_id: Some("work".into()),
+                ..Default::default()
+            },
+        );
+        Ok(())
+    })
+    .unwrap();
+    let _db = crate::db::test_support::isolated();
+    let mesh_id = fresh_mesh();
+    let node = crate::services::agent_node::create_blocking_configured(
+        NodeCreateParams {
+            mesh_id,
+            path: "/tmp/buildmesh_regen_default_login",
+            branch: "main",
+            provider: Some("codex"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: Some(false),
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: None,
+            operation: None,
+        },
+        false,
+    )
+    .expect("seed node")
+    .node;
+    let frozen_login = |node_id: i64| {
+        db::node_spawn_configuration(node_id, "codex")
+            .unwrap()
+            .and_then(|value| value.resolved)
+            .map(|plan| plan.harness_login.map(|login| login.id))
+    };
+    assert_eq!(
+        frozen_login(node.id),
+        Some(None),
+        "seeded on the Default login"
+    );
+    db::update_cli_session_id(node.id, "019a0000-0000-7000-8000-000000000002")
+        .expect("set cli_session_id");
+
+    let resume = regenerate_apply_blocking(node.id, "codex", "launch/codex-work").expect("apply");
+    assert!(resume, "same-harness regenerate resumes the session");
+    assert_eq!(
+        frozen_login(node.id),
+        Some(None),
+        "the resumed session stays on the Default login that holds it"
+    );
+}

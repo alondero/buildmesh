@@ -109,6 +109,17 @@ describe('Settings › Launch Configurations › Codex logins', () => {
     expect((await screen.findByRole('note')).textContent).toContain('same ChatGPT account as Default');
   });
 
+  it('dismisses a finished sign-in error so it does not stay on the login', async () => {
+    const failed = { ...WORK, signed_in: false, sign_in: { running: false, url: null, error: 'codex login exited without signing in' } };
+    const api = fakeApi([[DEFAULT, failed], [DEFAULT, { ...failed, sign_in: null }]]);
+    render(<CodexLoginsSection api={api} />);
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('exited without signing in');
+    await userEvent.click(within(alert).getByRole('button', { name: 'Dismiss' }));
+    expect(api.cancelSignIn).toHaveBeenCalledWith('work');
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+  });
+
   it('reports a failed sign-in start', async () => {
     const api = fakeApi([[DEFAULT, WORK]]);
     api.startSignIn.mockRejectedValueOnce('Codex is not installed or not on PATH');

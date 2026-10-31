@@ -994,7 +994,9 @@ one and choose which to launch with.
    already signed in to, so switch accounts there first, or open the link shown
    under the login in a private window. The login shows its email and plan once
    the sign-in finishes. If two logins turn out to be the same ChatGPT account,
-   Buildmesh says so; sign one of them in again with the other account.
+   Buildmesh says so; sign one of them in again with the other account. If a
+   sign-in fails or times out, its error stays under the login until you
+   choose **Dismiss** or start another sign-in.
 
 With more than one login, hovering **Codex** in a sidebar or canvas spawn menu
 shows a login submenu. Click a login to spawn Codex with it, or open the login's

@@ -827,7 +827,10 @@ the authorisation URL parsed from its output, the process tree held in a
 Windows job, and one sign-in at a time because `codex login` listens on a fixed
 local port. A sign-in older than 10 minutes is stopped the next time the login
 list is read; closing Settings mid-sign-in leaves `codex login` waiting until
-then, a new sign-in starts, or Buildmesh exits.
+then, a new sign-in starts, or Buildmesh exits. The list polls the sign-in
+before it reads any `auth.json`, because `codex login` writes `auth.json`
+before it exits. A finished sign-in (and its error) is kept until
+`cancel_harness_login_sign_in` dismisses it or another sign-in starts.
 
 The login is chosen in one of two places. With more than one login the desktop
 Spawn Menu shows a login submenu between the native Codex row and its

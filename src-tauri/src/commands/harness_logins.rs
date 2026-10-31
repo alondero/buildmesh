@@ -80,7 +80,7 @@ pub async fn start_harness_login_sign_in(id: String) -> Result<SignInState, Stri
     .await
 }
 
-/// Stop a running sign-in.
+/// Stop a running sign-in, or dismiss a finished one (and its error).
 #[command]
 pub async fn cancel_harness_login_sign_in(id: String) -> Result<(), String> {
     let id = required(&id, "Login id")?;
@@ -89,3 +89,7 @@ pub async fn cancel_harness_login_sign_in(id: String) -> Result<(), String> {
     })
     .await
 }
+
+#[cfg(test)]
+#[path = "harness_logins_tests.rs"]
+mod tests;

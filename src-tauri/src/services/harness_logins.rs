@@ -82,32 +82,48 @@ static SIGN_IN: Mutex<Option<SignInSession>> = Mutex::new(None);
 /// The default login plus every stored Codex login, with sign-in state.
 pub fn list_blocking() -> Result<Vec<HarnessLoginStatus>, String> {
     let prefs = crate::preferences::load()?;
-    let default_home = crate::env::codex_dir();
+    Ok(list_with(
+        &prefs,
+        &crate::env::codex_dir(),
+        poll_sign_in,
+        read_login_identity,
+    ))
+}
+
+/// [`list_blocking`] with the sign-in poll and the `auth.json` reader passed
+/// in. The poll runs first: `codex login` writes `auth.json` before it exits,
+/// so a sign-in reported finished has already left its `auth.json` for the
+/// reads that follow.
+fn list_with(
+    prefs: &crate::preferences::AppPreferences,
+    default_home: &Path,
+    poll: impl FnOnce() -> Option<(String, SignInState)>,
+    read: impl Fn(&Path) -> CodexLoginIdentity,
+) -> Vec<HarnessLoginStatus> {
+    let session = poll();
     let mut entries: Vec<(HarnessLoginStatus, Option<String>)> = Vec::new();
-    let default_identity = read_login_identity(&default_home);
     entries.push(status_entry(
         DEFAULT_LOGIN_ID,
         "Default",
-        &default_home,
+        default_home,
         true,
-        default_identity,
+        read(default_home),
     ));
-    for login in model::logins_for(&prefs, HARNESS) {
-        let identity = read_login_identity(Path::new(&login.home));
+    for login in model::logins_for(prefs, HARNESS) {
+        let home = Path::new(&login.home);
         entries.push(status_entry(
             &login.id,
             &login.label,
-            Path::new(&login.home),
+            home,
             false,
-            identity,
+            read(home),
         ));
     }
     let labels: Vec<(Option<String>, String)> = entries
         .iter()
         .map(|(status, user)| (user.clone(), status.label.clone()))
         .collect();
-    let session = poll_sign_in();
-    Ok(entries
+    entries
         .into_iter()
         .enumerate()
         .map(|(index, (mut status, user))| {
@@ -119,7 +135,7 @@ pub fn list_blocking() -> Result<Vec<HarnessLoginStatus>, String> {
             }
             status
         })
-        .collect())
+        .collect()
 }
 
 fn status_entry(
