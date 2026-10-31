@@ -153,6 +153,17 @@ the normal route to a report-based handoff. The evidence still records the gap,
 so lifecycle completion is never claimed. A process still launching
 (`Pending`/`Spawning`) is not reported as missing.
 
+Older releases parked the step on the gap with the gap text as its error. The
+gap, whether new or a repeat, returns such a persisted step to Running when the
+error matches the gap exactly; any other checkpoint stays. An operator Recheck
+saves the checkpoint it clears (`node.<id>.recheck_checkpoint`). If the recheck
+then sees only the same, already-recorded gap, it cannot resolve that
+checkpoint, so the step returns to Unverified with the saved checkpoint. A
+recheck saved before this change has no checkpoint text, so the restored
+checkpoint says the earlier checkpoint still applies and quotes the gap. Either
+answer stays put on later identical polls. The checkpoint is not hidden behind
+a Running step.
+
 The waits that used to park stay bounded (known background work keeps its
 behaviour above). Readiness re-examines a Running step that holds a
 recorded blocker or a settled turn exactly as it re-examined the same step while

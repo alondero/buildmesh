@@ -1632,9 +1632,20 @@ fn apply_observation(
     } else {
         D::Rejected
     };
+    let ownership_gap = match &observation.fact {
+        super::observation::ObservedWorkFact::OwnershipUnavailable { reason } => {
+            Some(reason.as_str())
+        }
+        _ => None,
+    };
     // A repeated fact is not new evidence. Recording it advanced the run
     // revision on every poll and made every operator action lose the race.
+    // A repeated ownership gap can still settle the step's state (below); that
+    // write is the step row, not another observation.
     if disposition == D::Duplicate {
+        if let Some(gap) = ownership_gap.filter(|_| !evidence.has_human_wait()) {
+            reconcile_ownership_gap(run, t, &expected.step_id, gap, true);
+        }
         return false;
     }
     t.observations.push(RecordedObservation {
@@ -1673,11 +1684,12 @@ fn apply_observation(
     // The evidence keeps it, so completion is never claimed as verified, but it
     // is the normal route to a report-based handoff rather than something a
     // person must act on: the handoff or the evidence window decides.
-    let declared_ownership_gap = disposition == D::Unavailable
-        && matches!(
-            observation.fact,
-            super::observation::ObservedWorkFact::OwnershipUnavailable { .. }
-        );
+    let declared_ownership_gap = disposition == D::Unavailable && ownership_gap.is_some();
+    if let Some(gap) = ownership_gap.filter(|_| declared_ownership_gap) {
+        if !evidence.has_human_wait() {
+            reconcile_ownership_gap(run, t, &expected.step_id, gap, false);
+        }
+    }
     if matches!(disposition, D::Unavailable | D::Conflicting)
         && !declared_ownership_gap
         && !evidence.has_human_wait()
@@ -3297,6 +3309,62 @@ fn resume_observed_step(run: &mut RunView, t: &mut Transition, node_id: &str) {
     write.outcome = Some(None);
     write.error = Some(None);
     t.step_writes.push(write);
+}
+
+/// Prefix of a checkpoint restored by a recheck that found nothing new.
+const RECHECK_UNCHANGED: &str = "Evidence recheck found no new evidence";
+
+/// Settle a step after a declared ownership gap, which is not a checkpoint.
+///
+/// - A step still parked on this very gap (the previous release parked it
+///   there, and persisted runs keep that state) returns to Running.
+/// - A pending operator recheck that saw only the gap it had already recorded
+///   gets a definite answer: the checkpoint it was rechecking comes back,
+///   unless that checkpoint was this gap. Leaving the step Running would hide
+///   the checkpoint without resolving it.
+fn reconcile_ownership_gap(
+    run: &mut RunView,
+    t: &mut Transition,
+    node_id: &str,
+    gap: &str,
+    repeated: bool,
+) {
+    let Some(step) = run.step(node_id) else {
+        return;
+    };
+    if step.outcome.is_some() {
+        return;
+    }
+    match step.status {
+        StepStatus::Unverified if step.error.as_deref() == Some(gap) => {
+            resume_observed_step(run, t, node_id);
+        }
+        StepStatus::Running
+            if repeated
+                && run.context.get(&format!("node.{node_id}.recheck_only")) == Some("1") =>
+        {
+            let checkpoint = run
+                .context
+                .get(&format!("node.{node_id}.recheck_checkpoint"))
+                .filter(|checkpoint| !checkpoint.is_empty())
+                .map(str::to_owned);
+            let reason = match checkpoint {
+                Some(checkpoint) if checkpoint == gap => return,
+                Some(checkpoint) if checkpoint.starts_with(RECHECK_UNCHANGED) => checkpoint,
+                Some(checkpoint) => format!(
+                    "{RECHECK_UNCHANGED}; the checkpoint still applies. Previous checkpoint: {checkpoint}"
+                ),
+                // A recheck recorded before checkpoints were kept: the
+                // checkpoint is unknown, so say so. This answer must not equal
+                // the bare gap, which would release it again on the next poll.
+                None => format!(
+                    "{RECHECK_UNCHANGED}; the earlier checkpoint still applies. The harness reported: {gap}"
+                ),
+            };
+            unverify_step(run, t, node_id, reason);
+        }
+        _ => {}
+    }
 }
 
 fn set_step(run: &mut RunView, t: &mut Transition, node_id: &str, status: StepStatus) {

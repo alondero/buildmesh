@@ -232,6 +232,12 @@ pub(in crate::db::circuit) fn record_outcome_locked(
             "0",
         );
         context.set(&format!("node.{}.recheck_only", step.node_id), "1");
+        // The recheck clears the step's error. Keep the checkpoint it is
+        // rechecking, so a recheck that finds nothing new can restore it.
+        context.set(
+            &format!("node.{}.recheck_checkpoint", step.node_id),
+            step.error_message.clone().unwrap_or_default(),
+        );
         let op = crate::db::circuit::CircuitStepOp {
             node_id: step.node_id,
             status: if open_pr {

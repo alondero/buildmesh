@@ -1298,6 +1298,140 @@ fn a_wake_up_is_recorded_as_a_prompt_submission_for_its_owning_step() {
     assert_eq!(submission.submission_seq, 1);
 }
 
+/// A person rechecks a checkpoint; the Codex pull returns only the completion
+/// it had already recorded. That repeated ownership gap cannot resolve the
+/// checkpoint, so the recheck must end with the original checkpoint back in
+/// place rather than leaving the step Running with its reason cleared. When
+/// the checkpoint being rechecked was the ownership gap itself, which no longer
+/// needs a person, the step stays Running.
+#[test]
+fn a_recheck_that_finds_only_repeated_ownership_evidence_restores_the_checkpoint() {
+    use crate::circuit::{
+        context::CircuitContext,
+        model::{CircuitGraph, CircuitNodeKind},
+        observation::{CircuitObservation, ObservationIdentity, ObservedWorkFact, WorkEvidence},
+        stepper::{advance, CircuitEvent, RunState, RunView, StepStatus, StepView},
+    };
+    let gap = "Codex recorded a completed foreground turn, but its rollout cannot verify all owned child and background work.";
+    let identity = ObservationIdentity {
+        run_id: 1,
+        step_id: "spawn".into(),
+        attempt: 1,
+        agent_node_id: 9,
+        session_incarnation: Some("1000".into()),
+        session_id: Some("session".into()),
+        turn_id: Some("turn-1".into()),
+        report_revision: None,
+    };
+    let completion = CircuitObservation {
+        identity: identity.clone(),
+        source: "codex_rollout".into(),
+        source_id: Some("turn-1:2000:1".into()),
+        observed_at_ms: 2000,
+        authoritative: true,
+        fact: ObservedWorkFact::OwnershipUnavailable { reason: gap.into() },
+    };
+    let rechecked_view = |checkpoint: &str| {
+        let mut db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(9,1,'agent','/repo');
+            INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state,source_agent_node_id) VALUES(1,1,1,'running',9);
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,agent_node_id) VALUES(1,'spawn',1,'unverified',9);").unwrap();
+        db.execute(
+            "UPDATE autopilot_circuit_run_steps SET error_message=?1",
+            [checkpoint],
+        )
+        .unwrap();
+        let mut graph = CircuitGraph::walking_skeleton("");
+        graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "spawn")
+            .unwrap()
+            .kind = CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: Some("$source".into()),
+        };
+        db.execute(
+            "UPDATE autopilot_circuits SET graph_json=?1",
+            [graph.to_json().unwrap()],
+        )
+        .unwrap();
+        let mut evidence = WorkEvidence::default();
+        evidence.observe(&identity, &completion);
+        let mut context = CircuitContext::default();
+        context.set("source.agent_id", "9");
+        context.set(
+            "node.spawn.evidence.1",
+            serde_json::to_string(&evidence).unwrap(),
+        );
+        db.execute(
+            "UPDATE autopilot_circuit_runs SET context_json=?1",
+            [context.to_json().unwrap()],
+        )
+        .unwrap();
+        record_outcome_locked(
+            &mut db,
+            &CheckpointRequest {
+                run_id: 1,
+                node_id: "spawn".into(),
+                attempt: 1,
+                expected_revision: 0,
+                action: CheckpointAction::Recheck,
+                reason: String::new(),
+            },
+        )
+        .unwrap();
+        let stored = super::super::ledger::get_circuit_run_inner(&db, 1)
+            .unwrap()
+            .unwrap();
+        let step = super::super::ledger::list_circuit_run_steps_inner(&db, 1)
+            .unwrap()
+            .remove(0);
+        assert_eq!(step.status, "running", "the recheck reopens the step");
+        assert_eq!(step.error_message, None);
+        RunView {
+            run_id: 1,
+            state: RunState::Running,
+            graph,
+            context: CircuitContext::from_json(&stored.context_json).unwrap(),
+            steps: vec![StepView {
+                node_id: "spawn".into(),
+                attempt: 1,
+                status: StepStatus::Running,
+                agent_node_id: Some(9),
+                outcome: None,
+                error: None,
+            }],
+        }
+    };
+    let repeat = CircuitEvent::Observed {
+        expected: identity.clone(),
+        observation: Box::new(completion.clone()),
+    };
+
+    let delivery = "Prompt delivery is unverified: The harness did not confirm the pasted prompt";
+    let mut view = rechecked_view(delivery);
+    let transition = advance(&mut view, &repeat);
+    assert_eq!(view.steps[0].status, StepStatus::Unverified);
+    let error = view.steps[0].error.clone().unwrap();
+    assert!(error.contains(delivery), "{error}");
+    assert!(error.contains("recheck"), "{error}");
+    assert_eq!(transition.step_writes.len(), 1);
+    assert!(
+        transition.observations.is_empty(),
+        "the repeat is still not recorded as a new observation"
+    );
+    // A second unchanged pass writes nothing more.
+    assert!(advance(&mut view, &repeat).step_writes.is_empty());
+
+    let mut view = rechecked_view(gap);
+    advance(&mut view, &repeat);
+    assert_eq!(view.steps[0].status, StepStatus::Running);
+    assert_eq!(view.steps[0].error, None);
+}
+
 #[test]
 fn recheck_retains_ownership_uncertainty_and_cannot_authorize_classifier_completion() {
     use crate::circuit::{

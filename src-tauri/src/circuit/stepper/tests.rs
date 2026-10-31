@@ -631,6 +631,81 @@ fn a_repeated_observation_records_nothing() {
     );
 }
 
+/// A step persisted by the previous release as Unverified with an ownership
+/// gap as its reason (and no `observation_blocker` key) observes a gap that is
+/// no longer a checkpoint. Its gap's repeat and its next turn's gap both
+/// release it; a checkpoint with any other reason is left alone.
+#[test]
+fn a_persisted_ownership_gap_checkpoint_is_released_by_its_gap() {
+    use super::super::observation::*;
+    let gap = "Codex recorded a completed foreground turn, but its rollout cannot verify all owned child and background work.";
+    let identity = ObservationIdentity {
+        run_id: 0,
+        step_id: "spawn".into(),
+        attempt: 1,
+        agent_node_id: 900,
+        session_incarnation: Some("generation-1".into()),
+        session_id: Some("session-1".into()),
+        turn_id: Some("turn-1".into()),
+        report_revision: None,
+    };
+    let observation = |source_id: &str, observed_at_ms| CircuitObservation {
+        identity: identity.clone(),
+        source: "codex_rollout".into(),
+        source_id: Some(source_id.into()),
+        observed_at_ms,
+        authoritative: true,
+        fact: ObservedWorkFact::OwnershipUnavailable { reason: gap.into() },
+    };
+    // The previous release recorded the gap and parked the step on it.
+    let persisted = |error: &str| {
+        let mut run = linear_run();
+        advance(&mut run, &CircuitEvent::Triggered);
+        advance(&mut run, &tick(1));
+        run.attach_agent_node("spawn", 900);
+        let mut evidence = WorkEvidence::default();
+        let mut expected = identity.clone();
+        expected.run_id = run.run_id;
+        let mut first = observation("turn-1-gap", 10);
+        first.identity.run_id = run.run_id;
+        evidence.observe(&expected, &first);
+        run.context.set(
+            "node.spawn.evidence.1",
+            serde_json::to_string(&evidence).unwrap(),
+        );
+        let step = run.step_mut("spawn").unwrap();
+        step.status = StepStatus::Unverified;
+        step.error = Some(error.into());
+        (run, expected, first)
+    };
+    let observed =
+        |expected: &ObservationIdentity, observation: CircuitObservation| CircuitEvent::Observed {
+            expected: expected.clone(),
+            observation: Box::new(observation),
+        };
+
+    let (mut run, expected, first) = persisted(gap);
+    assert!(run.context.get("node.spawn.observation_blocker").is_none());
+    let released = advance(&mut run, &observed(&expected, first.clone()));
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Running, "repeat");
+    assert_eq!(run.step("spawn").unwrap().error, None);
+    assert_eq!(released.step_writes.len(), 1);
+    assert_eq!(released.step_writes[0].attempt, 1);
+
+    let (mut run, expected, _) = persisted(gap);
+    let mut next_turn = observation("turn-2-gap", 20);
+    next_turn.identity.run_id = expected.run_id;
+    advance(&mut run, &observed(&expected, next_turn));
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Running, "next turn");
+
+    let unrelated = "Prompt delivery is unverified: The harness did not confirm the pasted prompt";
+    let (mut run, expected, first) = persisted(unrelated);
+    let kept = advance(&mut run, &observed(&expected, first));
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Unverified);
+    assert_eq!(run.step("spawn").unwrap().error.as_deref(), Some(unrelated));
+    assert!(kept.step_writes.is_empty());
+}
+
 /// Issue #2138: `unverify_step` guards roughly thirteen call sites, and every
 /// emitted `StepWrite` becomes a `step_transition` row — plus a
 /// `checkpoint_reason` when the status is `unverified`. Re-parking a step that is

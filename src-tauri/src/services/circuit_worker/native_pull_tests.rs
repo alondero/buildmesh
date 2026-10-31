@@ -157,15 +157,48 @@ fn codex_foreground_completion_waits_for_handoff_without_claiming_owned_work_end
         "a repeated report must not record duplicate observations"
     );
     assert!(!duplicate.context_changed);
-    // A recheck keeps this attempt and retains observation deduplication: the
-    // same completion again changes nothing, so it commits nothing (and needs
-    // no input guard). It used to re-park the step on every repeat.
-    run.context.set("node.spawn.recheck_only", "1");
-    let rechecked = advance(&mut run, &event);
-    assert!(rechecked.effects.is_empty());
-    assert_eq!(run.steps[0].status, StepStatus::Running);
-    assert!(rechecked.observations.is_empty());
-    assert!(rechecked.step_writes.is_empty());
+    // A recheck keeps this attempt and retains observation deduplication, but
+    // the same completion again cannot resolve the checkpoint being rechecked,
+    // so the recheck gets a definite answer instead of leaving the step
+    // Running with its checkpoint hidden.
+    let delivery = "Prompt delivery is unverified: the terminal did not echo the prompt";
+    for (stored, expected) in [
+        (None, codex_pull().ownership_limit.to_owned()),
+        (Some(delivery), delivery.to_owned()),
+    ] {
+        let mut rechecked_run = run.clone();
+        rechecked_run.context.set("node.spawn.recheck_only", "1");
+        if let Some(stored) = stored {
+            rechecked_run
+                .context
+                .set("node.spawn.recheck_checkpoint", stored);
+        }
+        let rechecked = advance(&mut rechecked_run, &event);
+        assert!(rechecked.effects.is_empty());
+        assert!(rechecked.observations.is_empty());
+        assert_eq!(rechecked.step_writes.len(), 1, "{stored:?}");
+        let step = &rechecked_run.steps[0];
+        assert_eq!(step.status, StepStatus::Unverified, "{stored:?}");
+        assert_eq!(step.attempt, 1);
+        assert!(
+            step.error
+                .as_deref()
+                .is_some_and(|error| error.contains(&expected)),
+            "{stored:?}: {:?}",
+            step.error
+        );
+        // The answer is stable: the pull keeps returning the same completion,
+        // and must not flip the step back to Running on the next poll.
+        for poll in 0..2 {
+            let repeat = advance(&mut rechecked_run, &event);
+            assert!(repeat.step_writes.is_empty(), "{stored:?} poll {poll}");
+            assert_eq!(
+                rechecked_run.steps[0].status,
+                StepStatus::Unverified,
+                "{stored:?} poll {poll}"
+            );
+        }
+    }
     // A decision that cannot bind a current report is still a checkpoint.
     let classified = advance(
         &mut run,
