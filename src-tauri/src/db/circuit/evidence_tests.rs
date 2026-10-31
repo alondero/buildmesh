@@ -1298,6 +1298,520 @@ fn a_wake_up_is_recorded_as_a_prompt_submission_for_its_owning_step() {
     assert_eq!(submission.submission_seq, 1);
 }
 
+/// A person rechecks a checkpoint; the Codex pull returns only the completion
+/// it had already recorded. That repeated ownership gap cannot resolve the
+/// checkpoint, so the recheck must end with the original checkpoint back in
+/// place rather than leaving the step Running with its reason cleared. When
+/// the checkpoint being rechecked was the ownership gap itself, which no longer
+/// needs a person, the step stays Running.
+#[test]
+fn a_recheck_that_finds_only_repeated_ownership_evidence_restores_the_checkpoint() {
+    use crate::circuit::{
+        context::CircuitContext,
+        model::{CircuitGraph, CircuitNodeKind},
+        observation::{CircuitObservation, ObservationIdentity, ObservedWorkFact, WorkEvidence},
+        stepper::{advance, CircuitEvent, RunState, RunView, StepStatus, StepView},
+    };
+    let gap = "Codex recorded a completed foreground turn, but its rollout cannot verify all owned child and background work.";
+    let identity = ObservationIdentity {
+        run_id: 1,
+        step_id: "spawn".into(),
+        attempt: 1,
+        agent_node_id: 9,
+        session_incarnation: Some("1000".into()),
+        session_id: Some("session".into()),
+        turn_id: Some("turn-1".into()),
+        report_revision: None,
+    };
+    let completion = CircuitObservation {
+        identity: identity.clone(),
+        source: "codex_rollout".into(),
+        source_id: Some("turn-1:2000:1".into()),
+        observed_at_ms: 2000,
+        authoritative: true,
+        fact: ObservedWorkFact::OwnershipUnavailable { reason: gap.into() },
+    };
+    let rechecked_view = |checkpoint: &str| {
+        let mut db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(9,1,'agent','/repo');
+            INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state,source_agent_node_id) VALUES(1,1,1,'running',9);
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,agent_node_id) VALUES(1,'spawn',1,'unverified',9);").unwrap();
+        db.execute(
+            "UPDATE autopilot_circuit_run_steps SET error_message=?1",
+            [checkpoint],
+        )
+        .unwrap();
+        let mut graph = CircuitGraph::walking_skeleton("");
+        graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "spawn")
+            .unwrap()
+            .kind = CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: Some("$source".into()),
+        };
+        db.execute(
+            "UPDATE autopilot_circuits SET graph_json=?1",
+            [graph.to_json().unwrap()],
+        )
+        .unwrap();
+        let mut evidence = WorkEvidence::default();
+        evidence.observe(&identity, &completion);
+        let mut context = CircuitContext::default();
+        context.set("source.agent_id", "9");
+        context.set(
+            "node.spawn.evidence.1",
+            serde_json::to_string(&evidence).unwrap(),
+        );
+        db.execute(
+            "UPDATE autopilot_circuit_runs SET context_json=?1",
+            [context.to_json().unwrap()],
+        )
+        .unwrap();
+        record_outcome_locked(
+            &mut db,
+            &CheckpointRequest {
+                run_id: 1,
+                node_id: "spawn".into(),
+                attempt: 1,
+                expected_revision: 0,
+                action: CheckpointAction::Recheck,
+                reason: String::new(),
+            },
+        )
+        .unwrap();
+        let stored = super::super::ledger::get_circuit_run_inner(&db, 1)
+            .unwrap()
+            .unwrap();
+        let step = super::super::ledger::list_circuit_run_steps_inner(&db, 1)
+            .unwrap()
+            .remove(0);
+        assert_eq!(step.status, "running", "the recheck reopens the step");
+        assert_eq!(step.error_message, None);
+        RunView {
+            run_id: 1,
+            state: RunState::Running,
+            graph,
+            context: CircuitContext::from_json(&stored.context_json).unwrap(),
+            steps: vec![StepView {
+                node_id: "spawn".into(),
+                attempt: 1,
+                status: StepStatus::Running,
+                agent_node_id: Some(9),
+                outcome: None,
+                error: None,
+            }],
+        }
+    };
+    let repeat = CircuitEvent::Observed {
+        expected: identity.clone(),
+        observation: Box::new(completion.clone()),
+    };
+
+    let delivery = "Prompt delivery is unverified: The harness did not confirm the pasted prompt";
+    let mut view = rechecked_view(delivery);
+    let transition = advance(&mut view, &repeat);
+    assert_eq!(view.steps[0].status, StepStatus::Unverified);
+    let error = view.steps[0].error.clone().unwrap();
+    assert!(error.contains(delivery), "{error}");
+    assert!(error.contains("recheck"), "{error}");
+    assert_eq!(transition.step_writes.len(), 1);
+    assert!(
+        transition.observations.is_empty(),
+        "the repeat is still not recorded as a new observation"
+    );
+    // A second unchanged pass writes nothing more.
+    assert!(advance(&mut view, &repeat).step_writes.is_empty());
+
+    let mut view = rechecked_view(gap);
+    let transition = advance(&mut view, &repeat);
+    assert_eq!(view.steps[0].status, StepStatus::Running);
+    assert_eq!(view.steps[0].error, None);
+    assert!(transition.step_writes.is_empty());
+    assert_eq!(
+        view.context.get("node.spawn.recheck_only"),
+        Some("0"),
+        "the gap answered its own recheck, so recheck mode is over"
+    );
+}
+
+/// Antigravity reports its ownership gap once, in a Stop hook receipt that the
+/// observer reads past its cursor and never replays. The stored evidence still
+/// settles the step with no further hook: a recheck of an unrelated checkpoint
+/// gets that checkpoint back, and a step a previous release parked on the gap
+/// returns to Running after a restart.
+#[test]
+fn a_consumed_antigravity_gap_receipt_still_settles_the_step_from_stored_evidence() {
+    use crate::circuit::{
+        context::CircuitContext,
+        model::{CircuitGraph, CircuitNodeKind, StepOutcome},
+        stepper::{advance, CircuitEvent, RunState, RunView, StepStatus, StepView},
+    };
+    use crate::services::circuit_worker::native_hooks::{
+        resolve_receipt, NativeHook, NativeReceipt,
+    };
+    let gap = crate::circuit::strategy::for_stored("agy")
+        .hooks()
+        .and_then(|hooks| hooks.ownership_gap)
+        .expect("Antigravity declares an ownership gap");
+    let load = |db: &Connection| {
+        let run = super::super::ledger::get_circuit_run_inner(db, 1)
+            .unwrap()
+            .unwrap();
+        let graph: String = db
+            .query_row(
+                "SELECT graph_json FROM autopilot_circuits WHERE id=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        RunView {
+            run_id: 1,
+            state: RunState::from_db_str(&run.state),
+            graph: CircuitGraph::from_json(&graph).unwrap(),
+            context: super::super::artifacts::load_context(db, 1).unwrap(),
+            steps: super::super::ledger::list_circuit_run_steps_inner(db, 1)
+                .unwrap()
+                .into_iter()
+                .map(|s| StepView {
+                    node_id: s.node_id,
+                    attempt: s.attempt,
+                    status: StepStatus::from_db_str(&s.status),
+                    outcome: s.outcome.as_deref().and_then(StepOutcome::from_db_str),
+                    error: s.error_message,
+                    agent_node_id: s.agent_node_id,
+                })
+                .collect(),
+        }
+    };
+    // The worker's commit of a transition: context (with its side table) and
+    // the step row.
+    let persist = |db: &Connection, view: &RunView| {
+        let step = &view.steps[0];
+        let commit = super::super::ledger::commit_circuit_advance_inner(
+            db,
+            1,
+            None,
+            Some(&view.context.to_json().unwrap()),
+            &[crate::db::circuit::CircuitStepOp {
+                node_id: step.node_id.clone(),
+                status: step.status.as_db_str().into(),
+                attempt: step.attempt,
+                outcome: None,
+                error: Some(step.error.clone()),
+                agent_node_id: None,
+                fresh_attempt: false,
+            }],
+        )
+        .unwrap();
+        assert!(commit.applied);
+    };
+    let cursor = |view: &RunView| -> i64 {
+        view.context
+            .get("observer.receipt_cursor")
+            .and_then(|cursor| cursor.parse().ok())
+            .unwrap_or(0)
+    };
+    // A run whose Antigravity agent settled one turn: its Stop receipt was
+    // stored, read past the cursor and applied, so it is consumed.
+    let settled = || {
+        let mut db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(9,1,'agent','/repo');
+            INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state,source_agent_node_id) VALUES(1,1,1,'running',9);
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,agent_node_id) VALUES(1,'spawn',1,'running',9);").unwrap();
+        let mut graph = CircuitGraph::walking_skeleton("");
+        graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "spawn")
+            .unwrap()
+            .kind = CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: Some("$source".into()),
+        };
+        db.execute(
+            "UPDATE autopilot_circuits SET graph_json=?1",
+            [graph.to_json().unwrap()],
+        )
+        .unwrap();
+        let mut context = CircuitContext::default();
+        context.set("source.agent_id", "9");
+        db.execute(
+            "UPDATE autopilot_circuit_runs SET context_json=?1",
+            [context.to_json().unwrap()],
+        )
+        .unwrap();
+        let hook = NativeHook::parse(
+            "agy",
+            br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","executionNum":3,"fullyIdle":true,"terminationReason":"model_stop"}"#,
+        )
+        .unwrap();
+        crate::db::circuit::evidence::receive_native_hook_locked(
+            &mut db,
+            &NativeReceipt {
+                agent_node_id: 9,
+                input_stamp: None,
+                session_incarnation: Some("7".into()),
+                source_id: "agy-stop".into(),
+                received_at_ms: 10,
+                turn_fenced: false,
+                explicit_turn_mismatch: false,
+                submission_correlated: false,
+                submission_seq: None,
+                hook,
+            },
+        )
+        .unwrap();
+        let mut view = load(&db);
+        let receipts =
+            crate::db::circuit::evidence::native_hook_receipts_in(&db, 1, cursor(&view)).unwrap();
+        assert_eq!(receipts.len(), 1);
+        for entry in receipts {
+            let event = resolve_receipt(1, entry, |_| {
+                Ok((
+                    Some("550e8400-e29b-41d4-a716-446655440000".into()),
+                    Some("7".into()),
+                    None,
+                ))
+            })
+            .unwrap();
+            advance(&mut view, &event);
+        }
+        assert_eq!(
+            view.steps[0].status,
+            StepStatus::Running,
+            "the gap is not a checkpoint"
+        );
+        persist(&db, &view);
+        assert!(
+            crate::db::circuit::evidence::native_hook_receipts_in(&db, 1, cursor(&view))
+                .unwrap()
+                .is_empty(),
+            "the receipt is consumed and will not be replayed"
+        );
+        db
+    };
+    let poll = |view: &mut RunView| {
+        let due = view.ownership_gap_settlement_due("spawn");
+        let transition = advance(
+            view,
+            &CircuitEvent::OwnershipGapHeld {
+                node_id: "spawn".into(),
+                attempt: 1,
+            },
+        );
+        (due, transition)
+    };
+
+    // The step is parked on `checkpoint` and a person rechecks it, acting on
+    // the revision they see (which the receipt advanced).
+    let recheck = |db: &mut Connection, checkpoint: &str| {
+        db.execute(
+            "UPDATE autopilot_circuit_run_steps SET status='unverified', error_message=?1",
+            [checkpoint],
+        )
+        .unwrap();
+        let expected_revision = super::revision_inner(db, 1).unwrap();
+        record_outcome_locked(
+            db,
+            &CheckpointRequest {
+                run_id: 1,
+                node_id: "spawn".into(),
+                attempt: 1,
+                expected_revision,
+                action: CheckpointAction::Recheck,
+                reason: String::new(),
+            },
+        )
+        .unwrap();
+        let view = load(db);
+        assert_eq!(view.steps[0].status, StepStatus::Running);
+        assert_eq!(view.steps[0].error, None);
+        assert_eq!(view.context.get("node.spawn.recheck_only"), Some("1"));
+        view
+    };
+
+    // A person rechecks an unrelated checkpoint. Before the gate pass (the
+    // worker applies observations first), a status projection arrives and an
+    // owned child starts and finishes. Those change the stored evidence,
+    // including its work state, but none of them says whether the prompt was
+    // delivered, so none resolves the checkpoint.
+    let mut db = settled();
+    let delivery = "Prompt delivery is unverified: The harness did not confirm the pasted prompt";
+    let mut view = recheck(&mut db, delivery);
+    let before = view
+        .context
+        .get("node.spawn.evidence.1")
+        .unwrap()
+        .to_owned();
+    let identity = crate::circuit::observation::ObservationIdentity {
+        run_id: 1,
+        step_id: "spawn".into(),
+        attempt: 1,
+        agent_node_id: 9,
+        session_incarnation: Some("7".into()),
+        session_id: Some("550e8400-e29b-41d4-a716-446655440000".into()),
+        turn_id: None,
+        report_revision: None,
+    };
+    use crate::circuit::observation::ObservedWorkFact as Fact;
+    for (at, source, source_id, fact) in [
+        (
+            20,
+            "agent_status_projection",
+            "status-after-recheck",
+            Fact::Yielded,
+        ),
+        (
+            21,
+            "agy_native_hook",
+            "child-started",
+            Fact::OwnedStarted {
+                work_id: "child-1".into(),
+            },
+        ),
+        (
+            22,
+            "agy_native_hook",
+            "child-ended",
+            Fact::OwnedTerminated {
+                work_id: "child-1".into(),
+            },
+        ),
+    ] {
+        // Child work is reported as authoritative fact fenced to its turn, so
+        // it changes the stored work state; the projection is neither.
+        let projection = source == "agent_status_projection";
+        let mut observed_identity = identity.clone();
+        if !projection {
+            observed_identity.turn_id = Some("turn-1".into());
+        }
+        let observed = advance(
+            &mut view,
+            &CircuitEvent::Observed {
+                expected: identity.clone(),
+                observation: Box::new(crate::circuit::observation::CircuitObservation {
+                    identity: observed_identity,
+                    source: source.into(),
+                    source_id: Some(source_id.into()),
+                    observed_at_ms: at,
+                    authoritative: !projection,
+                    fact,
+                }),
+            },
+        );
+        assert_eq!(observed.observations.len(), 1, "{source_id} is recorded");
+    }
+    let after: crate::circuit::observation::WorkEvidence =
+        serde_json::from_str(view.context.get("node.spawn.evidence.1").unwrap()).unwrap();
+    assert_ne!(
+        serde_json::to_string(&after).unwrap(),
+        before,
+        "the stored evidence changed"
+    );
+    assert_eq!(
+        after.children.get("child-1"),
+        Some(&true),
+        "the work state changed too"
+    );
+    let (due, transition) = poll(&mut view);
+    assert!(due, "the stored gap answers the recheck");
+    assert_eq!(transition.step_writes.len(), 1);
+    assert_eq!(view.steps[0].status, StepStatus::Unverified);
+    let error = view.steps[0].error.clone().unwrap();
+    assert!(error.contains(delivery), "{error}");
+    assert!(error.contains("recheck"), "{error}");
+    assert_eq!(
+        view.context.get("node.spawn.recheck_only"),
+        Some("0"),
+        "the answered recheck is over"
+    );
+    persist(&db, &view);
+    let mut view = load(&db);
+    let (due, transition) = poll(&mut view);
+    assert!(!due, "the answer stays put after a restart");
+    assert!(transition.step_writes.is_empty());
+
+    // A previous release parked the step on the gap itself, and the app
+    // restarted. The step returns to Running; nothing else is released.
+    let db = settled();
+    db.execute(
+        "UPDATE autopilot_circuit_run_steps SET status='unverified', error_message=?1",
+        [gap],
+    )
+    .unwrap();
+    let mut view = load(&db);
+    let (due, transition) = poll(&mut view);
+    assert!(due);
+    assert_eq!(transition.step_writes.len(), 1);
+    assert_eq!(view.steps[0].status, StepStatus::Running);
+    assert_eq!(view.steps[0].error, None);
+    persist(&db, &view);
+    let mut view = load(&db);
+    assert!(!poll(&mut view).0, "the release is settled");
+    db.execute(
+        "UPDATE autopilot_circuit_run_steps SET status='unverified', error_message=?1",
+        [delivery],
+    )
+    .unwrap();
+    let mut view = load(&db);
+    let (due, transition) = poll(&mut view);
+    assert!(!due, "an unrelated checkpoint is not released");
+    assert!(transition.step_writes.is_empty());
+    assert_eq!(view.steps[0].status, StepStatus::Unverified);
+
+    // A person rechecks the gap itself while a continuation was decided but
+    // never sent. The gap needs no person, so the recheck ends with the step
+    // Running and out of recheck mode, and that continuation becomes eligible
+    // again. Recheck mode is what held it back.
+    let mut db = settled();
+    let mut view = load(&db);
+    view.context.set("node.spawn.continuation.attempt", "1");
+    view.context
+        .set("node.spawn.continuation.delivery", "pending");
+    persist(&db, &view);
+    let mut view = recheck(&mut db, gap);
+    let retry = CircuitEvent::ContinuationRetry {
+        node_id: "spawn".into(),
+        attempt: 1,
+    };
+    let mut held = view.clone();
+    assert!(
+        advance(&mut held, &retry).effects.is_empty(),
+        "a pending recheck sends no input"
+    );
+    let (due, transition) = poll(&mut view);
+    assert!(due, "the gap answers its own recheck");
+    assert!(transition.step_writes.is_empty(), "the step stays as it is");
+    assert!(transition.context_changed);
+    assert_eq!(view.steps[0].status, StepStatus::Running);
+    assert_eq!(view.context.get("node.spawn.recheck_only"), Some("0"));
+    persist(&db, &view);
+    let mut view = load(&db);
+    assert!(!poll(&mut view).0, "the recheck is over after a restart");
+    let resumed = advance(&mut view, &retry);
+    assert!(
+        resumed.effects.iter().any(|effect| matches!(
+            effect,
+            crate::circuit::stepper::Effect::ContinueAgentTurn { .. }
+        )),
+        "the eligible continuation is sent: {:?}",
+        resumed.effects
+    );
+    assert_eq!(
+        view.context.get("node.spawn.continuation.delivery"),
+        Some("claimed")
+    );
+    // Ending recheck mode changed no delivery state: a claimed delivery is
+    // still never replayed.
+    assert!(advance(&mut view, &retry).effects.is_empty());
+}
+
 #[test]
 fn recheck_retains_ownership_uncertainty_and_cannot_authorize_classifier_completion() {
     use crate::circuit::{

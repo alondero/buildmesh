@@ -373,6 +373,12 @@ An **Unverified Checkpoint** means Buildmesh cannot currently establish the
 evidence needed for the next circuit step. It does not mean the agent failed,
 and a Done label on the agent does not by itself prove the circuit can advance.
 
+A checkpoint is only raised for something you can act on. While an agent is
+still starting, still working, or has not yet written this turn's report, the
+step simply shows as running. If that wait stops making progress, the step
+becomes a checkpoint when its evidence window ends, and the message names what
+it was waiting for.
+
 A run that needs you says so on its card: a **What to do next** box explains
 what happened in plain words (the raw error is under *Technical detail*) and offers
 the actions that apply. When the implementation has finished and another review

@@ -87,9 +87,11 @@ pub struct HookPush {
     /// Observation source recorded for question/permission facts.
     pub request_source: &'static str,
     /// `Some(reason)`: the harness has no child/background registry, so a
-    /// settled turn that reports none is an explicit ownership gap surfaced to
-    /// the operator. `None`: the harness may report a registry, and a turn
-    /// without one leaves ownership merely unknown.
+    /// settled turn that reports none is an explicit ownership gap. The step's
+    /// evidence records it (completion is never verified) and its diagnostics
+    /// name it; it is not itself a checkpoint, because report-based handoff is
+    /// the normal route for such a harness. `None`: the harness may report a
+    /// registry, and a turn without one leaves ownership merely unknown.
     pub ownership_gap: Option<&'static str>,
     /// Whether the parser reports the foreground turn (`Stop`,
     /// `UserPromptSubmit`). `false`: it reports child or background work only
@@ -429,6 +431,20 @@ pub fn native_pull_for_source(source: &str) -> Option<NativePull> {
             .native_pull()
             .filter(|pull| pull.source == source)
             .copied()
+    })
+}
+
+/// The ownership gap a hook harness declares (`HookPush::ownership_gap`) for
+/// the lifecycle source its hooks record. `None` for any other source,
+/// including native pulls, which re-read their completion on every poll.
+pub fn hook_ownership_gap_for_source(source: &str) -> Option<&'static str> {
+    crate::models::Provider::all().iter().find_map(|provider| {
+        provider
+            .adapter()
+            .circuit_observation()
+            .hooks()
+            .filter(|hooks| hooks.source == source)
+            .and_then(|hooks| hooks.ownership_gap)
     })
 }
 

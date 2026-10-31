@@ -59,6 +59,14 @@ pub(crate) fn prepare_with_lifecycle_veto(
     // Discovery cannot recover a suspended process. Name the actionable wait
     // instead of promising automatic session discovery forever.
     if matches!(input, Err(InputUnavailable::MissingProcess)) {
+        // A launch still in progress has not registered its terminal yet.
+        // That is not a lost process: wait without raising a checkpoint.
+        if matches!(
+            agent.status,
+            SessionStatus::Pending | SessionStatus::Spawning
+        ) {
+            return Ok(None);
+        }
         return Err(Blocker::ProcessUnavailable);
     }
     let evidence = view.classifier_evidence(node_id).filter(|evidence| {
@@ -103,7 +111,7 @@ pub(crate) fn prepare_with_lifecycle_veto(
         agent.status,
         SessionStatus::Ready | SessionStatus::Completed | SessionStatus::AwaitingInput
     );
-    if !finished && !declared && !yielded && step.status != StepStatus::Unverified {
+    if !finished && !declared && !yielded && !view.observation_pending(node_id) {
         return Ok(None);
     }
     let (session_id, incarnation, incarnation_ms, input) = bound_identity(agent, stamp, input)?;

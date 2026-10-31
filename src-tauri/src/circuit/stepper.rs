@@ -455,6 +455,64 @@ impl RunView {
             && !self.report_has_known_blockers(node_id)
     }
 
+    /// Whether readiness must keep re-examining this step even though its
+    /// agent shows no finished turn. True for an Unverified step, and for a
+    /// Running step that an observation is holding: a recorded blocker that
+    /// clears on its own, or a settled foreground turn whose owned work the
+    /// harness cannot report. Those used to park the step Unverified; keeping
+    /// them Running must not change when Buildmesh re-examines them.
+    pub(crate) fn observation_pending(&self, node_id: &str) -> bool {
+        let Some(step) = self.step(node_id) else {
+            return false;
+        };
+        step.status == StepStatus::Unverified
+            || self
+                .context
+                .get(&format!("node.{node_id}.observation_blocker"))
+                .is_some_and(|json| !json.is_empty())
+            || self
+                .context
+                .get(&format!("node.{node_id}.evidence.{}", step.attempt))
+                .and_then(|json| {
+                    serde_json::from_str::<super::observation::WorkEvidence>(json).ok()
+                })
+                .is_some_and(|evidence| {
+                    evidence.foreground_terminated && !evidence.ownership_covered
+                })
+    }
+
+    /// The ownership gap held by the stored evidence of the step's current
+    /// attempt, from a hook harness that declares one. Its gap marks the
+    /// lifecycle invalidated with ownership uncovered, and that holds until
+    /// ownership is covered; a conflict or open human request rules it out. A
+    /// hook receipt is read once, so this evidence is the lasting record.
+    fn held_ownership_gap(&self, node_id: &str) -> Option<&'static str> {
+        let step = self.step(node_id)?;
+        let evidence = self
+            .context
+            .get(&format!("node.{node_id}.evidence.{}", step.attempt))
+            .and_then(|json| serde_json::from_str::<super::observation::WorkEvidence>(json).ok())?;
+        if !evidence.lifecycle_invalidated
+            || evidence.ownership_covered
+            || evidence.conflicted
+            || evidence.has_human_wait()
+        {
+            return None;
+        }
+        evidence
+            .source_watermarks
+            .keys()
+            .find_map(|source| super::strategy::hook_ownership_gap_for_source(source))
+    }
+
+    /// Whether the stored ownership gap would settle this step now. The worker
+    /// asks on every poll, so a gap reported once by a hook still releases a
+    /// step parked on it, and still answers a recheck, after a restart.
+    pub(crate) fn ownership_gap_settlement_due(&self, node_id: &str) -> bool {
+        self.held_ownership_gap(node_id)
+            .is_some_and(|gap| gap_settlement(self, node_id, gap).is_some())
+    }
+
     pub fn evidence_deadline_ms(&self, node_id: &str) -> Option<i64> {
         let step = self.step(node_id)?;
         if self.state != RunState::Running
@@ -996,6 +1054,14 @@ pub enum CircuitEvent {
         node_id: String,
         attempt: i32,
         reason: String,
+    },
+    /// The worker found the step's stored evidence holding a declared
+    /// ownership gap that settles the step (`RunView::ownership_gap_settlement_due`).
+    /// A hook reports the gap once, so this, not a replayed receipt, is what
+    /// settles a recheck or a step a previous release parked on the gap.
+    OwnershipGapHeld {
+        node_id: String,
+        attempt: i32,
     },
     ObservationDeferred {
         node_id: String,
@@ -1606,22 +1672,19 @@ fn apply_observation(
     } else {
         D::Rejected
     };
+    let ownership_gap = match &observation.fact {
+        super::observation::ObservedWorkFact::OwnershipUnavailable { reason } => {
+            Some(reason.as_str())
+        }
+        _ => None,
+    };
     // A repeated fact is not new evidence. Recording it advanced the run
     // revision on every poll and made every operator action lose the race.
-    // Missing ownership can still park a running step; that write is the
-    // step row, not another observation.
+    // A repeated ownership gap can still settle the step's state (below); that
+    // write is the step row, not another observation.
     if disposition == D::Duplicate {
-        if !evidence.lifecycle_verified() && !evidence.has_human_wait() {
-            if let super::observation::ObservedWorkFact::OwnershipUnavailable { reason } =
-                &observation.fact
-            {
-                if run
-                    .step(&expected.step_id)
-                    .is_some_and(|step| step.status == StepStatus::Running)
-                {
-                    unverify_step(run, t, &expected.step_id, reason.clone());
-                }
-            }
+        if let Some(gap) = ownership_gap.filter(|_| !evidence.has_human_wait()) {
+            reconcile_ownership_gap(run, t, &expected.step_id, gap);
         }
         return false;
     }
@@ -1656,7 +1719,21 @@ fn apply_observation(
                 .set(&format!("node.{}.output", expected.step_id), text.clone());
         }
     }
-    if matches!(disposition, D::Unavailable | D::Conflicting) && !evidence.has_human_wait() {
+    // A harness that declares it has no child/background registry (Codex
+    // native pull, Antigravity hooks) reports that gap on every settled turn.
+    // The evidence keeps it, so completion is never claimed as verified, but it
+    // is the normal route to a report-based handoff rather than something a
+    // person must act on: the handoff or the evidence window decides.
+    let declared_ownership_gap = disposition == D::Unavailable && ownership_gap.is_some();
+    if let Some(gap) = ownership_gap.filter(|_| declared_ownership_gap) {
+        if !evidence.has_human_wait() {
+            reconcile_ownership_gap(run, t, &expected.step_id, gap);
+        }
+    }
+    if matches!(disposition, D::Unavailable | D::Conflicting)
+        && !declared_ownership_gap
+        && !evidence.has_human_wait()
+    {
         let reason = match &observation.fact {
             super::observation::ObservedWorkFact::OwnershipUnavailable { reason } => reason.clone(),
             _ => "Lifecycle or owned-work evidence is unavailable or conflicting. Inspect the agent and Recheck evidence.".into(),
@@ -1795,6 +1872,17 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 finish_observed_step(run, &mut t, expected);
             }
         }
+        CircuitEvent::OwnershipGapHeld { node_id, attempt } => {
+            if run.state == RunState::Running
+                && run
+                    .step(node_id)
+                    .is_some_and(|step| step.attempt == *attempt)
+            {
+                if let Some(gap) = run.held_ownership_gap(node_id) {
+                    reconcile_ownership_gap(run, &mut t, node_id, gap);
+                }
+            }
+        }
         CircuitEvent::ObservationDeferred {
             node_id,
             attempt,
@@ -1815,6 +1903,13 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
             }
             let key = format!("node.{node_id}.observation_blocker");
             let encoded = serde_json::to_string(blocker).expect("observation blocker");
+            let previous = run
+                .context
+                .get(&key)
+                .filter(|json| !json.is_empty())
+                .and_then(|json| {
+                    serde_json::from_str::<super::observation::CircuitObservationBlocker>(json).ok()
+                });
             let mut reason = blocker.message();
             if matches!(
                 blocker,
@@ -1842,16 +1937,30 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 run.context.set(&key, encoded);
                 t.context_changed = true;
             }
-            let waiting_for_background = matches!(
-                blocker,
-                super::observation::CircuitObservationBlocker::KnownWorkOutstanding
-            );
-            if !waiting_for_background
-                && run.step(node_id).is_some_and(|step| {
-                    step.status != StepStatus::Unverified
-                        || step.error.as_deref() != Some(reason.as_str())
-                })
-            {
+            if blocker.clears_without_a_person() {
+                // An ordinary wait (still starting, still working, report not
+                // yet published) is not a checkpoint: the step stays Running and
+                // the evidence window bounds it. It does release a checkpoint the
+                // previous observation blocker raised, such as a draft the person
+                // has since submitted; any other checkpoint is not the observer's
+                // to release.
+                let parked_by_observer = previous.is_some_and(|previous| {
+                    run.step(node_id).is_some_and(|step| {
+                        step.status == StepStatus::Unverified
+                            && step.outcome.is_none()
+                            && step
+                                .error
+                                .as_deref()
+                                .is_some_and(|error| error.starts_with(&previous.message()))
+                    })
+                });
+                if parked_by_observer {
+                    resume_observed_step(run, &mut t, node_id);
+                }
+            } else if run.step(node_id).is_some_and(|step| {
+                step.status != StepStatus::Unverified
+                    || step.error.as_deref() != Some(reason.as_str())
+            }) {
                 unverify_step(run, &mut t, node_id, reason);
             }
         }
@@ -2281,10 +2390,21 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 return t;
             }
             if expired {
-                let detail = if reason.is_empty() {
-                    "Agent produced no new report"
-                } else {
-                    reason
+                // The step stays Running through a self-clearing observation
+                // wait, so its checkpoint names what that wait was for.
+                let held = run
+                    .context
+                    .get(&format!("node.{node_id}.observation_blocker"))
+                    .filter(|json| !json.is_empty())
+                    .and_then(|json| {
+                        serde_json::from_str::<super::observation::CircuitObservationBlocker>(json)
+                            .ok()
+                    })
+                    .map(|blocker| blocker.expired_wait_detail());
+                let detail = match held {
+                    Some(held) => held,
+                    None if reason.is_empty() => "Agent produced no new report".to_owned(),
+                    None => reason.trim_end_matches('.').to_owned(),
                 };
                 unverify_step(run, &mut t, node_id, format!("Evidence window ended after {}: {detail}. Recheck evidence after inspecting the agent.", describe_window(*timeout_ms)));
                 return t;
@@ -3221,6 +3341,109 @@ fn unverify_step(run: &mut RunView, t: &mut Transition, node_id: &str, reason: S
     write.error = Some(Some(reason));
     t.step_writes.push(write);
     true
+}
+
+/// Return an Unverified step to Running on the same attempt once the
+/// observation blocker that parked it has given way to an ordinary wait.
+/// Unlike `set_step`, this never starts a new attempt.
+fn resume_observed_step(run: &mut RunView, t: &mut Transition, node_id: &str) {
+    let Some(step) = run.step_mut(node_id) else {
+        return;
+    };
+    if step.status != StepStatus::Unverified {
+        return;
+    }
+    step.status = StepStatus::Running;
+    step.outcome = None;
+    step.error = None;
+    let mut write = StepWrite::for_existing(node_id, StepStatus::Running, step.attempt);
+    write.outcome = Some(None);
+    write.error = Some(None);
+    t.step_writes.push(write);
+}
+
+/// Prefix of a checkpoint restored by a recheck that the gap could not settle.
+const RECHECK_UNRESOLVED: &str = "Evidence recheck could not resolve this checkpoint";
+
+/// What a declared ownership gap does to a step. The gap is not a checkpoint.
+#[derive(Debug, PartialEq)]
+enum GapSettlement {
+    /// The step is still parked on this very gap (the previous release parked
+    /// it there, and persisted runs keep that state): return it to Running.
+    Resume,
+    /// A pending operator recheck of another checkpoint: restore it.
+    Restore(String),
+    /// A pending operator recheck of the gap itself. The gap needs no person,
+    /// so the answer is that the step carries on Running, out of recheck mode.
+    EndRecheck,
+}
+
+/// Decide [`GapSettlement`] for a step whose evidence holds `gap`.
+///
+/// A checkpoint is resolved only by the step being routed (readiness judges an
+/// Unverified step's report just as it does a Running one's) or by a person.
+/// The gap says only that owned work cannot be verified, so it resolves no
+/// checkpoint but itself, whatever else the evidence records. A pending
+/// recheck of any other checkpoint therefore gets it back at once: the
+/// recheck's re-examination of the report still routes the step if it can,
+/// and nothing is hidden behind a Running step while it does.
+fn gap_settlement(run: &RunView, node_id: &str, gap: &str) -> Option<GapSettlement> {
+    let step = run.step(node_id)?;
+    if step.outcome.is_some() {
+        return None;
+    }
+    match step.status {
+        StepStatus::Unverified if step.error.as_deref() == Some(gap) => Some(GapSettlement::Resume),
+        StepStatus::Running
+            if run.context.get(&format!("node.{node_id}.recheck_only")) == Some("1") =>
+        {
+            let checkpoint = run
+                .context
+                .get(&format!("node.{node_id}.recheck_checkpoint"))
+                .filter(|checkpoint| !checkpoint.is_empty());
+            let reason = match checkpoint {
+                Some(checkpoint) if checkpoint == gap => return Some(GapSettlement::EndRecheck),
+                Some(checkpoint) if checkpoint.starts_with(RECHECK_UNRESOLVED) => {
+                    checkpoint.to_owned()
+                }
+                Some(checkpoint) => format!(
+                    "{RECHECK_UNRESOLVED}; it still applies. Previous checkpoint: {checkpoint}"
+                ),
+                // A recheck recorded before checkpoints were kept: the
+                // checkpoint is unknown, so say so. This answer must not equal
+                // the bare gap, which would release it again on the next poll.
+                None => format!(
+                    "{RECHECK_UNRESOLVED}; the earlier checkpoint still applies. The harness reported: {gap}"
+                ),
+            };
+            Some(GapSettlement::Restore(reason))
+        }
+        _ => None,
+    }
+}
+
+/// Apply [`gap_settlement`]. Each settlement answers a pending recheck, so it
+/// ends recheck mode (`recheck_only`): left set, recheck mode would keep
+/// suppressing the step's continuations after it carried on Running, and a
+/// later gap could restore a checkpoint the step has moved past. Ending it
+/// changes no delivery state, so a claimed (uncertain) continuation is still
+/// never replayed.
+fn reconcile_ownership_gap(run: &mut RunView, t: &mut Transition, node_id: &str, gap: &str) {
+    let Some(settlement) = gap_settlement(run, node_id, gap) else {
+        return;
+    };
+    match settlement {
+        GapSettlement::Resume => resume_observed_step(run, t, node_id),
+        GapSettlement::Restore(reason) => {
+            unverify_step(run, t, node_id, reason);
+        }
+        GapSettlement::EndRecheck => {}
+    }
+    let key = format!("node.{node_id}.recheck_only");
+    if run.context.get(&key) == Some("1") {
+        run.context.set(&key, "0");
+        t.context_changed = true;
+    }
 }
 
 fn set_step(run: &mut RunView, t: &mut Transition, node_id: &str, status: StepStatus) {

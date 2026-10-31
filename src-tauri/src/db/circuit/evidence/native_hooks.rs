@@ -408,6 +408,15 @@ pub(crate) fn receive_native_hook_locked(
 
 pub(crate) fn native_hook_receipts(run_id: i64, after: i64) -> SqlResult<Vec<CircuitHistoryEntry>> {
     let db = crate::db::read_conn()?;
+    native_hook_receipts_in(&db, run_id, after)
+}
+
+/// Receipts after the observer's cursor, on a given connection.
+pub(crate) fn native_hook_receipts_in(
+    db: &Connection,
+    run_id: i64,
+    after: i64,
+) -> SqlResult<Vec<CircuitHistoryEntry>> {
     let mut stmt = db.prepare("SELECT id,node_id,attempt,kind,detail,source,disposition,observed_at FROM circuit_run_history WHERE run_id=?1 AND id>?2 AND kind='native_hook_received' ORDER BY id LIMIT 512")?;
     let rows = stmt.query_map(params![run_id, after], |r| {
         Ok(CircuitHistoryEntry {

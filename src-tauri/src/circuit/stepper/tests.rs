@@ -583,8 +583,10 @@ fn a_repeated_observation_records_nothing() {
         "a repeated fact must not record a duplicate or rewrite context: {repeated:?}"
     );
 
-    // The same missing-ownership fact, seen again while the step is running,
-    // still parks the step. It does not also record the duplicate.
+    // A harness that declares it has no child/background registry (Codex,
+    // Antigravity) reports that gap on every settled turn. It is the normal
+    // route to a report-based handoff, not a problem for a person: the step
+    // stays Running, the evidence keeps the gap, and a repeat records nothing.
     let missing = CircuitObservation {
         identity: identity.clone(),
         source: "codex_rollout".into(),
@@ -602,12 +604,19 @@ fn a_repeated_observation_records_nothing() {
             observation: Box::new(missing.clone()),
         },
     );
-    assert_eq!(status_of(&run, "spawn"), StepStatus::Unverified);
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Running);
+    assert!(parked.step_writes.is_empty());
     assert_eq!(
         parked.observations[0].disposition,
         ObservationDisposition::Unavailable
     );
-    run.step_mut("spawn").unwrap().status = StepStatus::Running;
+    let evidence: WorkEvidence =
+        serde_json::from_str(run.context.get("node.spawn.evidence.1").unwrap()).unwrap();
+    assert!(!evidence.ownership_covered);
+    assert!(
+        !evidence.lifecycle_verified(),
+        "the gap is never verified completion"
+    );
     let parked_again = advance(
         &mut run,
         &CircuitEvent::Observed {
@@ -615,12 +624,86 @@ fn a_repeated_observation_records_nothing() {
             observation: Box::new(missing),
         },
     );
-    assert_eq!(status_of(&run, "spawn"), StepStatus::Unverified);
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Running);
     assert!(
-        parked_again.observations.is_empty(),
-        "re-parking must not append a duplicate observation"
+        parked_again.is_empty(),
+        "a repeated ownership gap records nothing: {parked_again:?}"
     );
-    assert_eq!(parked_again.step_writes.len(), 1);
+}
+
+/// A step persisted by the previous release as Unverified with an ownership
+/// gap as its reason (and no `observation_blocker` key) observes a gap that is
+/// no longer a checkpoint. Its gap's repeat and its next turn's gap both
+/// release it; a checkpoint with any other reason is left alone.
+#[test]
+fn a_persisted_ownership_gap_checkpoint_is_released_by_its_gap() {
+    use super::super::observation::*;
+    let gap = "Codex recorded a completed foreground turn, but its rollout cannot verify all owned child and background work.";
+    let identity = ObservationIdentity {
+        run_id: 0,
+        step_id: "spawn".into(),
+        attempt: 1,
+        agent_node_id: 900,
+        session_incarnation: Some("generation-1".into()),
+        session_id: Some("session-1".into()),
+        turn_id: Some("turn-1".into()),
+        report_revision: None,
+    };
+    let observation = |source_id: &str, observed_at_ms| CircuitObservation {
+        identity: identity.clone(),
+        source: "codex_rollout".into(),
+        source_id: Some(source_id.into()),
+        observed_at_ms,
+        authoritative: true,
+        fact: ObservedWorkFact::OwnershipUnavailable { reason: gap.into() },
+    };
+    // The previous release recorded the gap and parked the step on it.
+    let persisted = |error: &str| {
+        let mut run = linear_run();
+        advance(&mut run, &CircuitEvent::Triggered);
+        advance(&mut run, &tick(1));
+        run.attach_agent_node("spawn", 900);
+        let mut evidence = WorkEvidence::default();
+        let mut expected = identity.clone();
+        expected.run_id = run.run_id;
+        let mut first = observation("turn-1-gap", 10);
+        first.identity.run_id = run.run_id;
+        evidence.observe(&expected, &first);
+        run.context.set(
+            "node.spawn.evidence.1",
+            serde_json::to_string(&evidence).unwrap(),
+        );
+        let step = run.step_mut("spawn").unwrap();
+        step.status = StepStatus::Unverified;
+        step.error = Some(error.into());
+        (run, expected, first)
+    };
+    let observed =
+        |expected: &ObservationIdentity, observation: CircuitObservation| CircuitEvent::Observed {
+            expected: expected.clone(),
+            observation: Box::new(observation),
+        };
+
+    let (mut run, expected, first) = persisted(gap);
+    assert!(run.context.get("node.spawn.observation_blocker").is_none());
+    let released = advance(&mut run, &observed(&expected, first.clone()));
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Running, "repeat");
+    assert_eq!(run.step("spawn").unwrap().error, None);
+    assert_eq!(released.step_writes.len(), 1);
+    assert_eq!(released.step_writes[0].attempt, 1);
+
+    let (mut run, expected, _) = persisted(gap);
+    let mut next_turn = observation("turn-2-gap", 20);
+    next_turn.identity.run_id = expected.run_id;
+    advance(&mut run, &observed(&expected, next_turn));
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Running, "next turn");
+
+    let unrelated = "Prompt delivery is unverified: The harness did not confirm the pasted prompt";
+    let (mut run, expected, first) = persisted(unrelated);
+    let kept = advance(&mut run, &observed(&expected, first));
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Unverified);
+    assert_eq!(run.step("spawn").unwrap().error.as_deref(), Some(unrelated));
+    assert!(kept.step_writes.is_empty());
 }
 
 /// Issue #2138: `unverify_step` guards roughly thirteen call sites, and every
@@ -699,6 +782,197 @@ fn known_background_work_keeps_the_step_running_with_an_explicit_blocker() {
     );
     assert!(transition.classifications.is_empty());
     assert!(transition.effects.is_empty());
+}
+
+/// Over a month of the live ledger, 68% of the time steps spent Unverified was
+/// an agent working normally: no session id yet, a turn still running tools, a
+/// report from before the prompt. Each of those clears on its own, so it must
+/// not raise a checkpoint that asks a person to act. The evidence window still
+/// bounds the wait: a step that stops making progress becomes Unverified there.
+#[test]
+fn self_clearing_observation_blockers_keep_the_step_running() {
+    use super::super::observation::CircuitObservationBlocker as B;
+    for blocker in [
+        B::SessionIdentityUnavailable,
+        B::ReportUnavailable {
+            reason: "newer input or tool activity follows the assistant report".into(),
+        },
+        B::ReportSuperseded,
+        B::KnownWorkOutstanding,
+    ] {
+        assert!(blocker.clears_without_a_person(), "{blocker:?}");
+        let mut run = linear_run();
+        advance(&mut run, &CircuitEvent::Triggered);
+        advance(&mut run, &tick(1));
+        run.attach_agent_node("spawn", 900);
+
+        let transition = advance(
+            &mut run,
+            &CircuitEvent::ObservationDeferred {
+                node_id: "spawn".into(),
+                attempt: 1,
+                agent_node_id: 900,
+                blocker: blocker.clone(),
+            },
+        );
+
+        let step = run.step("spawn").unwrap();
+        assert_eq!(step.status, StepStatus::Running, "{blocker:?}");
+        assert_eq!(step.error, None, "{blocker:?}");
+        assert!(
+            transition.step_writes.is_empty(),
+            "{blocker:?} must not write a checkpoint transition"
+        );
+        assert_eq!(
+            run.context.get("node.spawn.observation_blocker"),
+            Some(serde_json::to_string(&blocker).unwrap().as_str()),
+            "the reason is still recorded for diagnostics"
+        );
+    }
+}
+
+/// A blocker only a person can clear still parks the step.
+#[test]
+fn observation_blockers_that_need_a_person_still_park_the_step() {
+    use super::super::observation::CircuitObservationBlocker as B;
+    for blocker in [
+        B::ProcessUnavailable,
+        B::InputDraft,
+        B::InputUncertain,
+        B::InputPaste,
+        B::HumanResponseRequired,
+        B::ResultFileUnavailable {
+            path: "result.md".into(),
+            reason: "access denied".into(),
+        },
+        B::LifecycleEvidenceUnavailable,
+        B::EvidenceConflict,
+        B::TurnCompletionUnobservable,
+    ] {
+        assert!(!blocker.clears_without_a_person(), "{blocker:?}");
+        let mut run = linear_run();
+        advance(&mut run, &CircuitEvent::Triggered);
+        advance(&mut run, &tick(1));
+        run.attach_agent_node("spawn", 900);
+        advance(
+            &mut run,
+            &CircuitEvent::ObservationDeferred {
+                node_id: "spawn".into(),
+                attempt: 1,
+                agent_node_id: 900,
+                blocker: blocker.clone(),
+            },
+        );
+        assert_eq!(
+            status_of(&run, "spawn"),
+            StepStatus::Unverified,
+            "{blocker:?}"
+        );
+    }
+}
+
+/// Once the condition a person had to clear is gone and only a self-clearing
+/// wait remains (the draft was submitted and the agent is working), the step
+/// returns to Running instead of keeping the old checkpoint.
+#[test]
+fn a_self_clearing_blocker_returns_an_observation_checkpoint_to_running() {
+    use super::super::observation::CircuitObservationBlocker as B;
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(1));
+    run.attach_agent_node("spawn", 900);
+    let deferred = |blocker| CircuitEvent::ObservationDeferred {
+        node_id: "spawn".into(),
+        attempt: 1,
+        agent_node_id: 900,
+        blocker,
+    };
+    advance(&mut run, &deferred(B::InputDraft));
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Unverified);
+
+    let resumed = advance(
+        &mut run,
+        &deferred(B::ReportUnavailable {
+            reason: "the harness has not recorded a current finished turn".into(),
+        }),
+    );
+
+    let step = run.step("spawn").unwrap();
+    assert_eq!(step.status, StepStatus::Running);
+    assert_eq!(step.error, None);
+    assert_eq!(resumed.step_writes.len(), 1);
+    assert_eq!(resumed.step_writes[0].status, StepStatus::Running);
+    assert_eq!(resumed.step_writes[0].error, Some(None));
+    assert_eq!(
+        resumed.step_writes[0].attempt, 1,
+        "resuming keeps the attempt"
+    );
+}
+
+/// Steps parked by the earlier code for a self-clearing reason (already in the
+/// ledger at upgrade) are released by the next observation of the same wait.
+#[test]
+fn a_step_parked_for_a_self_clearing_reason_returns_to_running() {
+    use super::super::observation::CircuitObservationBlocker as B;
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(1));
+    run.attach_agent_node("spawn", 900);
+    let blocker = B::SessionIdentityUnavailable;
+    run.context.set(
+        "node.spawn.observation_blocker",
+        serde_json::to_string(&blocker).unwrap(),
+    );
+    let step = run.step_mut("spawn").unwrap();
+    step.status = StepStatus::Unverified;
+    step.error = Some(blocker.message());
+
+    advance(
+        &mut run,
+        &CircuitEvent::ObservationDeferred {
+            node_id: "spawn".into(),
+            attempt: 1,
+            agent_node_id: 900,
+            blocker,
+        },
+    );
+
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Running);
+    assert_eq!(run.step("spawn").unwrap().error, None);
+}
+
+/// A checkpoint raised for some other reason (an expired evidence window, an
+/// uncertain prompt delivery) is not the observer's to release.
+#[test]
+fn a_self_clearing_blocker_leaves_an_unrelated_checkpoint_in_place() {
+    use super::super::observation::CircuitObservationBlocker as B;
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(1));
+    run.attach_agent_node("spawn", 900);
+    run.context.set(
+        "node.spawn.observation_blocker",
+        serde_json::to_string(&B::SessionIdentityUnavailable).unwrap(),
+    );
+    let reason = "Evidence window ended after 2 hours: Agent produced no new report. Recheck evidence after inspecting the agent.";
+    let mut transition = Transition::default();
+    super::unverify_step(&mut run, &mut transition, "spawn", reason.into());
+
+    let later = advance(
+        &mut run,
+        &CircuitEvent::ObservationDeferred {
+            node_id: "spawn".into(),
+            attempt: 1,
+            agent_node_id: 900,
+            blocker: B::ReportUnavailable {
+                reason: "newer input or tool activity follows the assistant report".into(),
+            },
+        },
+    );
+
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Unverified);
+    assert_eq!(run.step("spawn").unwrap().error.as_deref(), Some(reason));
+    assert!(later.step_writes.is_empty());
 }
 
 #[test]
@@ -2603,6 +2877,49 @@ fn circuit_sub_minute_evidence_window_is_reported_in_seconds() {
         "{error}"
     );
     assert!(!error.contains("0 minutes"), "{error}");
+}
+
+/// A self-clearing wait no longer parks the step, so when it fails to clear
+/// the checkpoint raised by the evidence window must still say what it was
+/// waiting for. "Agent produced no new report" alone would hide that the
+/// transcript, for example, contains a record the reader cannot parse.
+#[test]
+fn an_expired_evidence_window_names_the_observation_blocker_it_waited_on() {
+    use super::super::observation::CircuitObservationBlocker as B;
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    let blocker = B::ReportUnavailable {
+        reason: "the transcript contains an unrecognised or malformed record".into(),
+    };
+    run.context.set(
+        "node.classify.observation_blocker",
+        serde_json::to_string(&blocker).unwrap(),
+    );
+    advance(&mut run, &wait_observed_with(0, Some("rev-1"), 30_000));
+    assert_eq!(status_of(&run, "classify"), StepStatus::Running);
+    advance(&mut run, &wait_observed_with(30_000, Some("rev-1"), 30_000));
+
+    assert_eq!(status_of(&run, "classify"), StepStatus::Unverified);
+    let error = run.step("classify").unwrap().error.clone().unwrap();
+    assert!(
+        error.contains("Evidence window ended after 30 seconds:"),
+        "{error}"
+    );
+    assert!(
+        error.contains("unrecognised or malformed record"),
+        "{error}"
+    );
+    assert!(
+        !error.contains("will recheck automatically"),
+        "an expired wait must not promise an automatic recheck: {error}"
+    );
+    assert!(!error.contains(".."), "{error}");
 }
 
 #[test]

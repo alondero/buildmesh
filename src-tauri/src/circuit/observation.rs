@@ -32,6 +32,50 @@ pub enum CircuitObservationBlocker {
 }
 
 impl CircuitObservationBlocker {
+    /// Whether this is an ordinary wait that ends without anyone acting: the
+    /// agent is still starting, still working, or has not published this
+    /// turn's report yet. Such a wait keeps the step Running (its reason stays
+    /// in the run history); the evidence window bounds it, and a wait that
+    /// stops making progress becomes an Unverified Checkpoint there. The
+    /// remaining blockers name something a person must inspect or do.
+    ///
+    /// Deliberately exhaustive: a new blocker must decide which it is.
+    pub fn clears_without_a_person(&self) -> bool {
+        match self {
+            Self::SessionIdentityUnavailable
+            | Self::ReportUnavailable { .. }
+            | Self::ReportSuperseded
+            | Self::KnownWorkOutstanding => true,
+            Self::ProcessUnavailable
+            | Self::InputDraft
+            | Self::InputUncertain
+            | Self::InputPaste
+            | Self::ResultFileUnavailable { .. }
+            | Self::HumanResponseRequired
+            | Self::LifecycleEvidenceUnavailable
+            | Self::EvidenceConflict
+            | Self::TurnCompletionUnobservable => false,
+        }
+    }
+
+    /// What an expired evidence window was still waiting for, without the
+    /// "will recheck automatically" promise the live message makes.
+    pub fn expired_wait_detail(&self) -> String {
+        match self {
+            Self::SessionIdentityUnavailable => {
+                "the harness session identity was never discovered".into()
+            }
+            Self::ReportUnavailable { reason } => format!("no usable harness report ({reason})"),
+            Self::ReportSuperseded => {
+                "the only report predates the current session or assigned prompt".into()
+            }
+            Self::KnownWorkOutstanding => {
+                "the harness still reports unfinished child or background work".into()
+            }
+            other => other.message().trim_end_matches('.').to_owned(),
+        }
+    }
+
     pub fn message(&self) -> String {
         match self {
             Self::SessionIdentityUnavailable => "Waiting for the harness session identity. Buildmesh will retry discovery automatically.".into(),

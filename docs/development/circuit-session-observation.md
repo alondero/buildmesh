@@ -125,6 +125,88 @@ Codex, Muse and Command Code report snapshots can carry that native completion
 fact; other adapters retain their supported observation paths. No generic
 terminal silence rule invents completion or background ownership.
 
+### Only a blocker a person must clear raises a checkpoint
+
+An Unverified Checkpoint raises the run's "needs you" badge, so it is reserved
+for a condition a person must act on. `CircuitObservationBlocker::clears_without_a_person`
+splits the typed blockers (exhaustively, so a new one must choose):
+
+- **Clears on its own:** session identity not yet discovered, report not yet
+  usable (newer tool activity, no finished turn, no published report, transcript
+  changing), report superseded by the current prompt, known background work.
+  The step stays Running; the blocker is still stored in
+  `node.<id>.observation_blocker` and recorded as an `observation_readiness`
+  history row.
+- **Needs a person:** a missing process after launch, terminal input draft,
+  paste or uncertainty, a human question, an unreadable result file, unavailable
+  lifecycle evidence, an evidence conflict, an unobservable turn end. These park
+  the step Unverified as before.
+
+A self-clearing blocker also releases a step that an earlier observation blocker
+had parked (its error starts with that blocker's message), for example a draft
+the person has since submitted. It never releases a checkpoint raised for
+another reason, such as an expired evidence window or an uncertain delivery.
+
+A harness-declared ownership gap (`OwnershipUnavailable`, used by Codex native
+pull and Antigravity hooks) on a settled turn is likewise not a checkpoint: it is
+the normal route to a report-based handoff. The evidence still records the gap,
+so lifecycle completion is never claimed. A process still launching
+(`Pending`/`Spawning`) is not reported as missing.
+
+Older releases parked the step on the gap with the gap text as its error. Such
+a persisted step returns to Running when its error matches the gap exactly; any
+other checkpoint stays. An operator Recheck saves the checkpoint it clears
+(`node.<id>.recheck_checkpoint`). A checkpoint is resolved only by the step
+being routed or by a person; readiness judges an Unverified step's report just
+as it does a Running one's. The gap says only that owned work cannot be
+verified, so it resolves no checkpoint but itself, whatever else the evidence
+records (a status projection, owned work starting or ending, a repeated hook).
+While the gap holds, a pending recheck of any other checkpoint therefore
+returns the step to Unverified with that checkpoint at once (`gap_settlement`).
+The recheck still re-examines the report and routes the step if it can, and
+nothing is hidden behind a Running step meanwhile. A recheck saved before this
+change has no checkpoint text, so the restored checkpoint says the earlier
+checkpoint still applies and quotes the gap. Either answer stays put on later
+polls. When the checkpoint being rechecked was the gap itself, the answer is
+that the step carries on Running.
+
+Every settlement answers a pending recheck, so it ends recheck mode
+(`recheck_only` back to `0`). Recheck mode stops the stepper sending
+continuations; left set after the step carried on Running, it would hold back
+an eligible continuation indefinitely. Ending it changes no delivery state, so a
+claimed (uncertain) continuation is still never replayed. A never-sent
+(pending) continuation can only be sent from a Running step, so the gate pass
+schedules its retry, and skips the turn for it, only while the step is Running.
+An Unverified step with one still has its turn examined.
+
+Both settlements need the gap to be seen again, and the two harnesses see it
+differently:
+
+- Codex's native pull re-reads its completion on every poll, so the repeated
+  gap arrives as a duplicate observation.
+- An Antigravity hook receipt is read once, past `observer.receipt_cursor`, and
+  never replayed. For hook harnesses the gate pass therefore asks
+  `RunView::ownership_gap_settlement_due` on every poll, which reads the
+  step's stored evidence (`lifecycle_invalidated` with ownership uncovered,
+  from a source whose harness declares the gap). When a settlement is due, the
+  pass emits `CircuitEvent::OwnershipGapHeld`, so a restart or a consumed
+  receipt does not strand the step.
+
+The waits that used to park stay bounded (known background work keeps its
+behaviour above). Readiness re-examines a Running step that holds a
+recorded blocker or a settled turn exactly as it re-examined the same step while
+Unverified, so handoff decisions are unchanged. Because the step is Running, the
+evidence window (`WaitObserved`) keeps timing it: a step that stops making
+progress becomes an Unverified Checkpoint when the window ends, and a step that
+never becomes observable still fails fast after the first-observation window.
+That checkpoint names the recorded blocker it was waiting on
+(`CircuitObservationBlocker::expired_wait_detail`), so the reason is not lost.
+
+A month of the stable ledger (30 September to 31 October 2026) motivated this:
+389 of 483 runs showed an Unverified step for 30 seconds or longer, 68% of the
+782 Unverified hours were self-clearing waits, and fewer than 5% of episodes
+involved any operator action.
+
 ### Parked gates are re-judged on new evidence, not on every tick
 
 A classification that cannot be bound — a known blocker, a report that fails the
