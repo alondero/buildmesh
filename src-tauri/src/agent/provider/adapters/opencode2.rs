@@ -301,6 +301,39 @@ fn model_ref(model: &str) -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({"providerID": provider, "id": id}))
 }
 
+/// Windows PowerShell's legacy native-argument marshaller consumes JSON quotes.
+/// Protect them (including preceding backslashes) for the native argv parser.
+/// Encode cmd metacharacters as JSON Unicode escapes so an npm .cmd shim cannot
+/// expand environment references or interpret data as command syntax.
+fn api_body_argument(body: serde_json::Value) -> String {
+    let json = body.to_string();
+    if !cfg!(windows) {
+        return json;
+    }
+    let mut escaped = String::with_capacity(json.len());
+    let mut backslashes = 0;
+    for ch in json.chars() {
+        if ch == '\\' {
+            backslashes += 1;
+            continue;
+        }
+        let count = if ch == '"' {
+            backslashes * 2 + 1
+        } else {
+            backslashes
+        };
+        escaped.extend(std::iter::repeat_n('\\', count));
+        backslashes = 0;
+        if "&|<>^!%()".contains(ch) {
+            escaped.push_str(&format!("\\u{:04x}", ch as u32));
+        } else {
+            escaped.push(ch);
+        }
+    }
+    escaped.extend(std::iter::repeat_n('\\', backslashes));
+    escaped
+}
+
 fn api(
     executable: &Path,
     directory: &Path,
@@ -321,7 +354,9 @@ fn api(
         windows_shell: crate::agent::provider::WindowsShell::PowerShell,
     };
     if method == "POST" {
-        recipe.base_args.extend(["--data".into(), body.to_string()]);
+        recipe
+            .base_args
+            .extend(["--data".into(), api_body_argument(body)]);
     }
     let mut command =
         crate::agent::spawn_environment::background_command(&recipe, Some(executable))

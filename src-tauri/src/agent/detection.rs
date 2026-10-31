@@ -113,7 +113,9 @@ const DETECTABLE: &[Detectable] = &[
         id: "opencode2",
         name: "OpenCode 2",
         harness: "opencode2",
-        binaries: &["opencode"],
+        // The npm V2 CLI ships this alias alongside the shared command. Prefer
+        // it so an earlier V1 installation does not hide V2 during discovery.
+        binaries: &["opencode2", "opencode"],
         major_version: Some(2),
         config_dirs: &[],
     },
@@ -789,6 +791,21 @@ fn filter_installed_profiles(profiles: Vec<HarnessProfile>, ids: &[String]) -> V
 
 pub(crate) fn currently_installed_profiles(profiles: Vec<HarnessProfile>) -> Vec<HarnessProfile> {
     installed_profiles(profiles, &detection_snapshot())
+}
+
+/// Actual frozen launches can verify their saved executable while deferred
+/// discovery is still pending. Menu derivation keeps using the published set.
+pub(crate) fn validate_saved_native_profile(profile: &HarnessProfile) -> Result<bool, String> {
+    let native = profile.runtime.is_none()
+        || (cfg!(windows) && profile.runtime == Some(crate::models::EnvType::Windows));
+    let Some(expected) = version_requirement(&profile.harness).filter(|_| native) else {
+        return Ok(false);
+    };
+    let Some(executable) = profile.executable.as_deref().filter(|path| path.is_file()) else {
+        return Ok(false);
+    };
+    crate::agent::provider::adapters::opencode_version::require_major(executable, expected)?;
+    Ok(true)
 }
 
 pub(crate) fn canonical_harness(id: &str) -> Option<&'static str> {

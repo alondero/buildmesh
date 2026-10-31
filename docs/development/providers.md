@@ -651,11 +651,22 @@ seam runs before command construction and uses a private session API to apply
 the model or fork a regenerate. A returned fork id is persisted before argv is
 built. `model_override_via_session_api` keeps `--model` out of the full TUI;
 `background_model_args` retains the separate `run` CLI contract. Both launch
-paths call adapter-owned executable validation. V2 refuses an effective Mesh
+paths call adapter-owned executable validation. The API adapter escapes JSON
+for Windows PowerShell's native argument marshaller and encodes cmd
+metacharacters as JSON Unicode escapes before crossing an npm shim.
+V2 refuses an effective Mesh
 sandbox request before API preparation, respecting the developer feature gate.
 Version results are cached by executable path, modification time and size.
 Discovery and launch share one compatibility rule: V2 requires a known major;
 V1 rejects only a known mismatch, remaining discoverable on unknown results.
+V2 discovery prefers the npm CLI's `opencode2` alias before the shared
+`opencode` stem. The alias still passes the deferred major-version gate;
+installations exposing only `opencode` keep the shared-stem fallback.
+Frozen launches can validate their saved native OpenCode executable through
+the same cached major gate before deferred detection publishes it. This probe
+runs in the spawn pipeline's blocking snapshot-resolution step; menu and edit
+resolution do not start a CLI. Missing binaries,
+unsupported runtimes and known major mismatches still fail.
 Ordinary V2 resume looks up its saved identity and creates it only on
 `SessionNotFoundError`, so a failed first create does not strand that node.
 See [ADR-0050](../adr/0050-opencode-major-version-isolation.md).

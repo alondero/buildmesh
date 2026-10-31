@@ -653,8 +653,10 @@ OpenCode and OpenCode 2 share the `opencode` command. Detection checks its
 major version after the initial startup scan, so the matching menu entry may
 appear a few seconds later. An unknown result is still offered through the V1
 harness for compatibility; OpenCode 2 is withheld until a 2.x version is read.
-To keep both installed, pin each Harness Profile's executable to the
-corresponding major. Existing V1 nodes stay V1; Buildmesh refuses a known
+V2 discovery prefers the `opencode2` alias shipped by the npm CLI, then falls
+back to `opencode`, so a V1 executable earlier on PATH does not hide that alias.
+For installations without the alias, pin each Harness Profile's executable to
+the corresponding major. Existing V1 nodes stay V1; Buildmesh refuses a known
 mismatched native executable instead of silently upgrading a node.
 OpenCode 2 currently requires a native runtime, with no WSL/Windows Interop
 launch preparation. Extra arguments are disabled to preserve its private server
@@ -1167,7 +1169,7 @@ auto mode because there is nobody to answer a prompt.
 | Codex | `--ask-for-approval never` | CLI default (asks); sandbox and hook trust unchanged |
 | Cursor | `--force` | Asks |
 | OpenCode | `--auto` | Asks (V1) |
-| OpenCode 2 | `--auto` | Asks; an external-directory deny is configured, with enforcement still unverified in either mode |
+| OpenCode 2 | `--auto` | Asks; an external-directory deny is configured; see the [runtime caveats](troubleshooting.md#opencode-2-does-not-start-or-report-attention) |
 | Command Code | `--yolo` | Asks |
 | Meta Muse | `--disable-approval --disable-sandbox` | Asks (its own OS sandbox stays on) |
 | Perch | `--permission take_the_wheel` | Asks |

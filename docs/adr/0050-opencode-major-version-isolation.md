@@ -52,9 +52,10 @@ JSON/JSONC and plugin arrays remain under OpenCode's own merge rules.
 Configure an explicit `external_directory` deny in the V2 managed override. V2's allow
 default otherwise widens filesystem access on upgrade. Background inference
 also configures tool denies through project permissions and a `tool.use` policy.
-Actual out-of-project reads or writes have not been tested against these rules
-with the production interactive or background argv, including interactive
-`--auto`. That enforcement remains an acceptance gate. These are CLI rules;
+The Windows 2.2.3 follow-up denied an out-of-worktree read through the full TUI
+with `--auto`; external writes and other platforms remain unverified. See the
+[runtime evidence](../research/opencode-v2-readiness.md#windows-native-follow-up-2026-10-31).
+These are CLI rules;
 they do not replace the Mesh OS sandbox.
 
 ## Alternatives

@@ -5,6 +5,68 @@
 use super::*;
 
 #[test]
+fn saved_opencode_binaries_are_validated_before_deferred_discovery_publishes() {
+    use crate::agent::detection;
+    struct Restore(detection::DetectionSnapshot);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            detection::restore_detection_state(&self.0);
+        }
+    }
+    let _restore = Restore(detection::detection_snapshot());
+    detection::observe_installations(Default::default());
+    for (harness, expected) in [("opencode", 1), ("opencode2", 2)] {
+        for actual in [1, 2] {
+            let dir = tempfile::tempdir().unwrap();
+            let executable = dir.path().join(if cfg!(windows) {
+                "opencode.cmd"
+            } else {
+                "opencode"
+            });
+            let script = if cfg!(windows) {
+                format!("@echo off\r\necho opencode v{actual}.2.3\r\n")
+            } else {
+                format!("#!/bin/sh\nprintf 'opencode v{actual}.2.3\\n'\n")
+            };
+            std::fs::write(&executable, script).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+            }
+            let prefs: AppPreferences = serde_json::from_value(serde_json::json!({
+                "harness_profiles":[{"id":harness,"name":harness,"harness":harness,"executable":executable}]
+            })).unwrap();
+            let plan = capture(&prefs, harness, &Default::default()).unwrap();
+            assert!(
+                resolve(&prefs, harness, &Default::default()).is_err(),
+                "menu availability still waits for detection"
+            );
+            assert_eq!(
+                resolve_snapshot(&plan, &Default::default()).is_ok(),
+                actual == expected,
+                "harness={harness}, actual={actual}"
+            );
+            assert!(
+                detection::currently_installed_profiles(vec![plan.harness.clone()]).is_empty(),
+                "launch validation does not publish menu discovery"
+            );
+            let mut missing = plan.clone();
+            missing.harness.executable = Some(dir.path().join("missing"));
+            assert!(resolve_snapshot(&missing, &Default::default()).is_err());
+            let mut foreign = plan;
+            foreign.harness.runtime = Some(if cfg!(windows) {
+                crate::models::EnvType::WindowsInterop
+            } else {
+                crate::models::EnvType::Wsl
+            });
+            assert!(resolve_snapshot(&foreign, &Default::default()).is_err());
+        }
+    }
+}
+
+#[test]
 fn mcode_configuration_round_trips_and_resolves_model_before_defaults() {
     use crate::preferences::{
         launch_catalog, launch_configurations, spawn_configurations, AppPreferences,
@@ -183,7 +245,7 @@ fn proxy_defaults_do_not_inherit_native_harness_models() {
     prefs
         .spawn_configurations
         .push(serde_json::from_value(user_minimax_configuration()).unwrap());
-    let plan = resolve_plan(&prefs, "launch/my-minimax", &Default::default(), false).unwrap();
+    let plan = capture(&prefs, "launch/my-minimax", &Default::default()).unwrap();
     assert_eq!(plan.model.as_deref(), Some("MiniMax-M3.1-Flash[1m]"));
     assert_eq!(plan.effort, None);
 }
@@ -203,7 +265,7 @@ fn minimax_codex_m3_1_flash_accepts_real_efforts_and_rejects_none() {
     });
     reconcile(&mut prefs);
     let resolve = |effort: &str| {
-        resolve_plan(
+        capture(
             &prefs,
             "codex:minimax",
             &LaunchOverrides {
@@ -211,7 +273,6 @@ fn minimax_codex_m3_1_flash_accepts_real_efforts_and_rejects_none() {
                 effort: Some(effort.into()),
                 extra_args: None,
             },
-            false,
         )
     };
     for effort in ["low", "medium", "high", "xhigh"] {
@@ -233,7 +294,7 @@ fn minimax_codex_configuration_accepts_documented_thinking_choices() {
     });
     reconcile(&mut prefs);
     for effort in ["none", "high"] {
-        let plan = resolve_plan(
+        let plan = capture(
             &prefs,
             "codex:minimax",
             &LaunchOverrides {
@@ -241,12 +302,11 @@ fn minimax_codex_configuration_accepts_documented_thinking_choices() {
                 effort: Some(effort.into()),
                 extra_args: None,
             },
-            false,
         )
         .unwrap();
         assert_eq!(plan.effort.as_deref(), Some(effort));
     }
-    assert!(resolve_plan(
+    assert!(capture(
         &prefs,
         "codex:minimax",
         &LaunchOverrides {
@@ -254,7 +314,6 @@ fn minimax_codex_configuration_accepts_documented_thinking_choices() {
             effort: Some("xhigh".into()),
             extra_args: None,
         },
-        false
     )
     .unwrap_err()
     .contains("Effort"));

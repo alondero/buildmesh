@@ -99,7 +99,7 @@ pub(crate) fn read_rows(
         .ok()?;
     // One statement observes messages and parts from the same SQLite snapshot.
     let order = if oldest { "ASC" } else { "DESC" };
-    let sql = format!("WITH recent AS (SELECT id, session_id, type, seq, data FROM session_message WHERE session_id=?1 ORDER BY seq {order} LIMIT ?2) SELECT m.id,m.type,m.data,p.type,p.call_id,p.data FROM recent m LEFT JOIN session_part p ON p.message_id=m.id AND p.session_id=m.session_id ORDER BY m.seq {order},p.ordinal ASC");
+    let sql = format!("WITH recent AS (SELECT id, session_id, type, seq, data FROM session_message WHERE session_id=?1 AND type IN ('user','assistant','idle') ORDER BY seq {order} LIMIT ?2) SELECT m.id,m.type,m.data,p.type,p.call_id,p.data FROM recent m LEFT JOIN session_part p ON p.message_id=m.id AND p.session_id=m.session_id ORDER BY m.seq {order},p.ordinal ASC");
     let mut stmt = conn.prepare(&sql).ok()?;
     let mut rows = stmt
         .query(rusqlite::params![
