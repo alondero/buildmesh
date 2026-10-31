@@ -238,13 +238,16 @@ pub(in crate::db::circuit) fn record_outcome_locked(
             &format!("node.{}.recheck_checkpoint", step.node_id),
             step.error_message.clone().unwrap_or_default(),
         );
-        // And the evidence it is rechecking: evidence that is still the same
-        // later means the recheck found nothing new.
-        let evidence = context
-            .get(&format!("node.{}.evidence.{}", step.node_id, step.attempt))
-            .unwrap_or_default()
-            .to_owned();
-        context.set(&format!("node.{}.recheck_evidence", step.node_id), evidence);
+        // And what could resolve it (the turn's report and lifecycle): if
+        // that is unchanged later, the recheck found nothing new. Projections
+        // and repeated hooks do not count as new.
+        let fingerprint = crate::circuit::observation::stored_recheck_fingerprint(
+            context.get(&format!("node.{}.evidence.{}", step.node_id, step.attempt)),
+        );
+        context.set(
+            &format!("node.{}.recheck_fingerprint", step.node_id),
+            fingerprint,
+        );
         let op = crate::db::circuit::CircuitStepOp {
             node_id: step.node_id,
             status: if open_pr {

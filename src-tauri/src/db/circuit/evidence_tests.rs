@@ -1427,9 +1427,15 @@ fn a_recheck_that_finds_only_repeated_ownership_evidence_restores_the_checkpoint
     assert!(advance(&mut view, &repeat).step_writes.is_empty());
 
     let mut view = rechecked_view(gap);
-    advance(&mut view, &repeat);
+    let transition = advance(&mut view, &repeat);
     assert_eq!(view.steps[0].status, StepStatus::Running);
     assert_eq!(view.steps[0].error, None);
+    assert!(transition.step_writes.is_empty());
+    assert_eq!(
+        view.context.get("node.spawn.recheck_only"),
+        Some("0"),
+        "the gap answered its own recheck, so recheck mode is over"
+    );
 }
 
 /// Antigravity reports its ownership gap once, in a Stop hook receipt that the
@@ -1602,31 +1608,87 @@ fn a_consumed_antigravity_gap_receipt_still_settles_the_step_from_stored_evidenc
         (due, transition)
     };
 
-    // A person rechecks an unrelated checkpoint. Nothing new arrives.
+    // The step is parked on `checkpoint` and a person rechecks it, acting on
+    // the revision they see (which the receipt advanced).
+    let recheck = |db: &mut Connection, checkpoint: &str| {
+        db.execute(
+            "UPDATE autopilot_circuit_run_steps SET status='unverified', error_message=?1",
+            [checkpoint],
+        )
+        .unwrap();
+        let expected_revision = super::revision_inner(db, 1).unwrap();
+        record_outcome_locked(
+            db,
+            &CheckpointRequest {
+                run_id: 1,
+                node_id: "spawn".into(),
+                attempt: 1,
+                expected_revision,
+                action: CheckpointAction::Recheck,
+                reason: String::new(),
+            },
+        )
+        .unwrap();
+        let view = load(db);
+        assert_eq!(view.steps[0].status, StepStatus::Running);
+        assert_eq!(view.steps[0].error, None);
+        assert_eq!(view.context.get("node.spawn.recheck_only"), Some("1"));
+        view
+    };
+
+    // A person rechecks an unrelated checkpoint. The only thing that arrives
+    // is a status projection, which the worker applies before the gate pass:
+    // it changes the stored evidence but cannot resolve the checkpoint.
     let mut db = settled();
     let delivery = "Prompt delivery is unverified: The harness did not confirm the pasted prompt";
-    db.execute(
-        "UPDATE autopilot_circuit_run_steps SET status='unverified', error_message=?1",
-        [delivery],
-    )
-    .unwrap();
-    // The person acts on the revision they see, which the receipt advanced.
-    let expected_revision = super::revision_inner(&db, 1).unwrap();
-    record_outcome_locked(
-        &mut db,
-        &CheckpointRequest {
-            run_id: 1,
-            node_id: "spawn".into(),
-            attempt: 1,
-            expected_revision,
-            action: CheckpointAction::Recheck,
-            reason: String::new(),
+    let mut view = recheck(&mut db, delivery);
+    let before = view
+        .context
+        .get("node.spawn.evidence.1")
+        .unwrap()
+        .to_owned();
+    let projected = advance(
+        &mut view,
+        &CircuitEvent::Observed {
+            expected: crate::circuit::observation::ObservationIdentity {
+                run_id: 1,
+                step_id: "spawn".into(),
+                attempt: 1,
+                agent_node_id: 9,
+                session_incarnation: Some("7".into()),
+                session_id: Some("550e8400-e29b-41d4-a716-446655440000".into()),
+                turn_id: None,
+                report_revision: None,
+            },
+            observation: Box::new(crate::circuit::observation::CircuitObservation {
+                identity: crate::circuit::observation::ObservationIdentity {
+                    run_id: 1,
+                    step_id: "spawn".into(),
+                    attempt: 1,
+                    agent_node_id: 9,
+                    session_incarnation: Some("7".into()),
+                    session_id: Some("550e8400-e29b-41d4-a716-446655440000".into()),
+                    turn_id: None,
+                    report_revision: None,
+                },
+                source: "agent_status_projection".into(),
+                source_id: Some("status-after-recheck".into()),
+                observed_at_ms: 20,
+                authoritative: false,
+                fact: crate::circuit::observation::ObservedWorkFact::Yielded,
+            }),
         },
-    )
-    .unwrap();
-    let mut view = load(&db);
-    assert_eq!(view.steps[0].status, StepStatus::Running);
-    assert_eq!(view.steps[0].error, None);
+    );
+    assert_eq!(
+        projected.observations.len(),
+        1,
+        "the projection is recorded"
+    );
+    assert_ne!(
+        view.context.get("node.spawn.evidence.1"),
+        Some(before.as_str()),
+        "the stored evidence changed"
+    );
     let (due, transition) = poll(&mut view);
     assert!(due, "the stored gap answers the recheck");
     assert_eq!(transition.step_writes.len(), 1);
@@ -1634,6 +1696,11 @@ fn a_consumed_antigravity_gap_receipt_still_settles_the_step_from_stored_evidenc
     let error = view.steps[0].error.clone().unwrap();
     assert!(error.contains(delivery), "{error}");
     assert!(error.contains("recheck"), "{error}");
+    assert_eq!(
+        view.context.get("node.spawn.recheck_only"),
+        Some("0"),
+        "the answered recheck is over"
+    );
     persist(&db, &view);
     let mut view = load(&db);
     let (due, transition) = poll(&mut view);
@@ -1667,6 +1734,52 @@ fn a_consumed_antigravity_gap_receipt_still_settles_the_step_from_stored_evidenc
     assert!(!due, "an unrelated checkpoint is not released");
     assert!(transition.step_writes.is_empty());
     assert_eq!(view.steps[0].status, StepStatus::Unverified);
+
+    // A person rechecks the gap itself while a continuation was decided but
+    // never sent. The gap needs no person, so the recheck ends with the step
+    // Running and out of recheck mode, and that continuation becomes eligible
+    // again. Recheck mode is what held it back.
+    let mut db = settled();
+    let mut view = load(&db);
+    view.context.set("node.spawn.continuation.attempt", "1");
+    view.context
+        .set("node.spawn.continuation.delivery", "pending");
+    persist(&db, &view);
+    let mut view = recheck(&mut db, gap);
+    let retry = CircuitEvent::ContinuationRetry {
+        node_id: "spawn".into(),
+        attempt: 1,
+    };
+    let mut held = view.clone();
+    assert!(
+        advance(&mut held, &retry).effects.is_empty(),
+        "a pending recheck sends no input"
+    );
+    let (due, transition) = poll(&mut view);
+    assert!(due, "the gap answers its own recheck");
+    assert!(transition.step_writes.is_empty(), "the step stays as it is");
+    assert!(transition.context_changed);
+    assert_eq!(view.steps[0].status, StepStatus::Running);
+    assert_eq!(view.context.get("node.spawn.recheck_only"), Some("0"));
+    persist(&db, &view);
+    let mut view = load(&db);
+    assert!(!poll(&mut view).0, "the recheck is over after a restart");
+    let resumed = advance(&mut view, &retry);
+    assert!(
+        resumed.effects.iter().any(|effect| matches!(
+            effect,
+            crate::circuit::stepper::Effect::ContinueAgentTurn { .. }
+        )),
+        "the eligible continuation is sent: {:?}",
+        resumed.effects
+    );
+    assert_eq!(
+        view.context.get("node.spawn.continuation.delivery"),
+        Some("claimed")
+    );
+    // Ending recheck mode changed no delivery state: a claimed delivery is
+    // still never replayed.
+    assert!(advance(&mut view, &retry).effects.is_empty());
 }
 
 #[test]

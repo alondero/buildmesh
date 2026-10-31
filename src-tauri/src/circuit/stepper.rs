@@ -505,25 +505,23 @@ impl RunView {
             .find_map(|source| super::strategy::hook_ownership_gap_for_source(source))
     }
 
-    /// Whether a pending operator recheck has seen no new evidence: the
-    /// step's evidence is what the recheck saved. A recheck recorded before
-    /// evidence was saved has only the stored evidence to go on.
+    /// Whether a pending operator recheck has found nothing that could
+    /// resolve its checkpoint: the turn's report and lifecycle are as the
+    /// recheck saved them (`WorkEvidence::recheck_fingerprint`). A recheck
+    /// recorded before fingerprints were saved has only the stored evidence
+    /// to go on.
     fn recheck_evidence_unchanged(&self, node_id: &str) -> bool {
         let Some(step) = self.step(node_id) else {
             return false;
         };
-        match self
-            .context
-            .get(&format!("node.{node_id}.recheck_evidence"))
-        {
-            None => true,
-            Some(saved) => {
-                self.context
-                    .get(&format!("node.{node_id}.evidence.{}", step.attempt))
-                    .unwrap_or_default()
-                    == saved
-            }
-        }
+        self.context
+            .get(&format!("node.{node_id}.recheck_fingerprint"))
+            .is_none_or(|saved| {
+                super::observation::stored_recheck_fingerprint(
+                    self.context
+                        .get(&format!("node.{node_id}.evidence.{}", step.attempt)),
+                ) == saved
+            })
     }
 
     /// Whether the stored ownership gap would settle this step now. The worker
@@ -3398,6 +3396,10 @@ enum GapSettlement {
     /// it was rechecking. Leaving the step Running would hide that checkpoint
     /// without resolving it.
     Restore(String),
+    /// A pending operator recheck of the gap itself found only the gap. The
+    /// gap needs no person, so the answer is that the step carries on
+    /// Running, out of recheck mode.
+    EndRecheck,
 }
 
 /// Decide [`GapSettlement`] for a step whose evidence holds `gap`.
@@ -3423,7 +3425,7 @@ fn gap_settlement(
                 .get(&format!("node.{node_id}.recheck_checkpoint"))
                 .filter(|checkpoint| !checkpoint.is_empty());
             let reason = match checkpoint {
-                Some(checkpoint) if checkpoint == gap => return None,
+                Some(checkpoint) if checkpoint == gap => return Some(GapSettlement::EndRecheck),
                 Some(checkpoint) if checkpoint.starts_with(RECHECK_UNCHANGED) => {
                     checkpoint.to_owned()
                 }
@@ -3443,9 +3445,12 @@ fn gap_settlement(
     }
 }
 
-/// Apply [`gap_settlement`]. A resumed step's recheck, if one was pending, has
-/// had its answer (the gap it parked on), so it is no longer pending; a later
-/// gap must not restore a checkpoint the step has moved past.
+/// Apply [`gap_settlement`]. Each settlement answers a pending recheck, so it
+/// ends recheck mode (`recheck_only`): left set, recheck mode would keep
+/// suppressing the step's continuations after it carried on Running, and a
+/// later gap could restore a checkpoint the step has moved past. Ending it
+/// changes no delivery state, so a claimed (uncertain) continuation is still
+/// never replayed.
 fn reconcile_ownership_gap(
     run: &mut RunView,
     t: &mut Transition,
@@ -3453,19 +3458,20 @@ fn reconcile_ownership_gap(
     gap: &str,
     recheck_answered: bool,
 ) {
-    match gap_settlement(run, node_id, gap, recheck_answered) {
-        Some(GapSettlement::Resume) => {
-            resume_observed_step(run, t, node_id);
-            let key = format!("node.{node_id}.recheck_only");
-            if run.context.get(&key) == Some("1") {
-                run.context.set(&key, "0");
-                t.context_changed = true;
-            }
-        }
-        Some(GapSettlement::Restore(reason)) => {
+    let Some(settlement) = gap_settlement(run, node_id, gap, recheck_answered) else {
+        return;
+    };
+    match settlement {
+        GapSettlement::Resume => resume_observed_step(run, t, node_id),
+        GapSettlement::Restore(reason) => {
             unverify_step(run, t, node_id, reason);
         }
-        None => {}
+        GapSettlement::EndRecheck => {}
+    }
+    let key = format!("node.{node_id}.recheck_only");
+    if run.context.get(&key) == Some("1") {
+        run.context.set(&key, "0");
+        t.context_changed = true;
     }
 }
 
