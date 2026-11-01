@@ -90,13 +90,35 @@ it('lets a missing-agent request be dismissed in-session without treating store 
     const attention = await screen.findByRole('region', { name: 'Needs attention' });
     fireEvent.click(within(attention).getByRole('button', { name: /Open agent/ }));
     expect(within(attention).getByRole('alert').textContent).toContain('no longer available');
-    fireEvent.click(within(attention).getByRole('button', { name: 'Dismiss notification' }));
+    fireEvent.click(within(attention).getByRole('button', { name: 'Dismiss notification from Circuit agent' }));
     expect(useToastStore.getState().notifications.filter(needsAttention)).toEqual([]);
     expect(useToastStore.getState().toasts).toEqual([]);
     expect(bell.title).toContain('0 need attention');
     expect(bell.title).toContain('0 unread');
     expect(within(screen.getByRole('region', { name: 'Recent activity' })).getByText('Notification dismissed.')).toBeTruthy();
   } finally { stop(); }
+});
+
+it('names each dismiss control with its agent and Mesh and clears only the selected request', async () => {
+  vi.mocked(invoke).mockResolvedValue([]);
+  addToast('Needs input', 'reviewer in buildmesh needs your input.', 'warning', {
+    kind: 'agent-input', nodeId: 10, agentName: 'reviewer', meshName: 'buildmesh',
+  });
+  addToast('Needs input', 'reviewer in playground needs your input.', 'warning', {
+    kind: 'agent-input', nodeId: 20, agentName: 'reviewer', meshName: 'playground',
+  });
+  render(<><NotificationButton /><ProbePanel /></>);
+  const bell = screen.getByRole('button', { name: 'Open Notifications' });
+  fireEvent.click(bell);
+  const attention = await screen.findByRole('region', { name: 'Needs attention' });
+  const dismissBuildmesh = within(attention).getByRole('button', { name: 'Dismiss notification from reviewer in buildmesh' });
+  expect(within(attention).getByRole('button', { name: 'Dismiss notification from reviewer in playground' })).toBeTruthy();
+  fireEvent.click(dismissBuildmesh);
+  expect(within(attention).queryByRole('button', { name: 'Dismiss notification from reviewer in buildmesh' })).toBeNull();
+  expect(within(attention).getByRole('button', { name: 'Dismiss notification from reviewer in playground' })).toBeTruthy();
+  expect(useToastStore.getState().notifications.filter(needsAttention).map(n => n.action?.kind === 'agent-input' && n.action.nodeId)).toEqual([20]);
+  expect(bell.title).toContain('1 need attention');
+  expect(bell.title).toContain('1 unread');
 });
 
 // A mesh that never reached upstream and a worktree that cannot be removed are

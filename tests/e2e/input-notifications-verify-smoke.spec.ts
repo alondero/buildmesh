@@ -64,7 +64,7 @@ test('a missing agent reports an inline error without navigating elsewhere', asy
   const bell = page.getByRole('button', { name: 'Open Notifications' });
   await bell.click();
   const tab = page.getByTestId('notifications-tab');
-  const dismiss = tab.getByRole('region', { name: 'Needs attention' }).getByRole('button', { name: 'Dismiss notification' });
+  const dismiss = tab.getByRole('region', { name: 'Needs attention' }).getByRole('button', { name: 'Dismiss notification from Circuit agent' });
   const bounds = await dismiss.boundingBox();
   const tabBounds = await tab.boundingBox();
   expect(bounds!.width).toBeGreaterThanOrEqual(24);

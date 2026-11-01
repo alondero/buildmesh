@@ -3,7 +3,7 @@ import { useProbeResource } from '../../lib/probeResource';
 import { lazy, Suspense, useEffect, useState, type ReactNode } from 'react';
 import { useToastStore } from '../../stores/toastStore';
 import { openBlockedCleanups, useBlockedCleanupStore } from '../../stores/blockedCleanupStore';
-import { isAgentInput, isMeshSyncFailure, isWorktreeCleanup, needsAttention,
+import { agentInputSubject, isAgentInput, isMeshSyncFailure, isWorktreeCleanup, needsAttention,
   type AgentInputNotificationAction, type MeshSyncNotificationAction, type Notification, type SyncEvidence, type WorktreeNotificationAction } from '../../lib/notifications';
 import { runMeshSync } from '../../lib/meshSyncFeedback';
 import { refreshWorktreeNotifications } from '../../lib/worktreeNotifications';
@@ -173,7 +173,8 @@ export function NotificationsTab() {
                 <span className="block mt-2 text-accent-cyan">Open agent →</span>
               </AgentInputLink>
               <div className="notification-card-actions">
-                <button type="button" className="notification-link" onClick={() => {
+                <button type="button" className="notification-link"
+                  aria-label={`Dismiss notification from ${agentInputSubject(notice.action)}`} onClick={() => {
                   const store = useToastStore.getState();
                   store.markNotificationRead(notice.id);
                   store.resolveAgentInputNotification(notice.action.nodeId, 'Notification dismissed.');
