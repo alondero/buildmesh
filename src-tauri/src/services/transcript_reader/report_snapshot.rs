@@ -351,7 +351,9 @@ fn read_opencode_store(
 }
 
 #[cfg(test)]
-fn from_file(path: &Path, format: TranscriptFormat) -> Option<ReportSnapshot> {
+// allow-test-in-production: a file-backed ReportSnapshot needs the private
+// reader; circuit_worker tests share it to drive readiness end to end.
+pub(crate) fn from_file(path: &Path, format: TranscriptFormat) -> Option<ReportSnapshot> {
     read_file(path, format).ok()
 }
 
