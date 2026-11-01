@@ -2097,6 +2097,11 @@ pub(crate) fn commit_circuit_advance_inner(
                 })
                 .unwrap_or(false);
         if cleanup_requested {
+            let retained = if state == "failed" {
+                super::recovery::retained_reviewers_inner(tx, run_id)?
+            } else {
+                Vec::new()
+            };
             tx.execute(
                 &format!(
                     "INSERT INTO agent_node_lifecycle_leases (node_id, cleanup_requested)
@@ -2107,11 +2112,17 @@ pub(crate) fn commit_circuit_advance_inner(
                  WHERE s.run_id = ?1 AND s.agent_node_id IS NOT NULL
                    AND {}
                    AND s.agent_node_id IS NOT r.source_agent_node_id
+                   AND s.agent_node_id NOT IN (SELECT value FROM json_each(?2))
                  ON CONFLICT(node_id) DO UPDATE SET
                    cleanup_requested = 1, retired = 0, updated_at = unixepoch()",
                     super::leases::RETIRABLE_STEP_AGENT
                 ),
-                params![run_id],
+                params![
+                    run_id,
+                    serde_json::to_string(&retained).map_err(|error| {
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                    })?
+                ],
             )?;
         }
         tx.execute(

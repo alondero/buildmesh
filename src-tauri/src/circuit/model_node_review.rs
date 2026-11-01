@@ -22,6 +22,13 @@ impl CircuitGraph {
         if self.has_review_topology_of(&expected) {
             return true;
         }
+        // Extensions with a retained reviewer deliver the next prompt before
+        // joining its report; the spawn row only retains the agent identity.
+        let mut retained = expected.clone();
+        retained.retarget_edge("reviewer", "review_round", "re_review");
+        if self.has_review_topology_of(&retained) {
+            return true;
+        }
         let mut upgraded = self.clone();
         // Pinned stock graphs retain the old inconclusive-review branch.
         // ReviewVerdict now parks that outcome as Unverified. Normalize only

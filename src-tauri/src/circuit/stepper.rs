@@ -4912,7 +4912,8 @@ fn finish_run_if_done(run: &mut RunView, t: &mut Transition) {
                     _ => false,
                 },
             );
-        // A failed run retires its owned agents through the terminal commit.
+        // A failed run retains its reviewer for inspection and continuation;
+        // other helpers are retired through the terminal commit.
         // A completed run hands back every agent its graph did not close: an
         // approved review leaves the implementation agent open to merge.
         run.state = if unresolved {

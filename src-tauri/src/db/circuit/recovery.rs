@@ -1,6 +1,7 @@
 //! Review extensions borrow the retained implementation agent and reuse its
 //! Circuit Run. Earlier findings and replaced graph snapshots remain archived.
 
+use crate::circuit::stepper::{resolve_target_agent, StepStatus, StepView};
 use crate::circuit::{
     context::CircuitContext,
     model::{CircuitGraph, CircuitNodeKind},
@@ -20,6 +21,80 @@ pub(crate) struct ReviewRecovery {
 pub(crate) enum ContinuationTarget {
     Existing(i64),
     Failed(i64),
+}
+
+/// Review findings and the conversation remain available until approval or
+/// explicit disposal. Other helpers still follow the ordinary failure cleanup.
+pub(crate) fn retained_reviewers_inner(
+    db: &Connection,
+    run_id: i64,
+) -> crate::db::SqlResult<Vec<i64>> {
+    let json = super::evidence::run_graph_json(db, run_id)?;
+    let Ok(graph) = CircuitGraph::from_json(&json) else {
+        return Ok(Vec::new());
+    };
+    let steps: Vec<StepView> = super::ledger::list_circuit_run_steps_inner(db, run_id)?
+        .into_iter()
+        .map(|step| StepView {
+            node_id: step.node_id,
+            agent_node_id: step.agent_node_id,
+            status: StepStatus::from_db_str(&step.status),
+            outcome: step
+                .outcome
+                .as_deref()
+                .and_then(crate::circuit::model::StepOutcome::from_db_str),
+            error: step.error_message,
+            attempt: step.attempt,
+        })
+        .collect();
+    Ok(graph
+        .nodes
+        .iter()
+        .filter(|node| matches!(node.kind, CircuitNodeKind::ReviewVerdict { .. }))
+        .filter_map(|node| resolve_target_agent(&graph, &steps, &node.id))
+        .collect())
+}
+
+/// Resolve the retained reviewer before resuming a stopped process. The
+/// extension transaction checks its lifecycle lease again before attaching it.
+pub fn review_recovery_reviewer(run_id: i64) -> Result<Option<i64>, DbError> {
+    let db = crate::db::read_conn()?;
+    let target = match continuation_target_inner(&db, run_id)? {
+        ContinuationTarget::Existing(_) => return Ok(None),
+        ContinuationTarget::Failed(id) => id,
+    };
+    retained_reviewer_inner(&db, target)
+}
+
+fn retained_reviewer_inner(db: &Connection, run_id: i64) -> Result<Option<i64>, DbError> {
+    let reviewer: Option<(i64, bool)> = db
+        .query_row(
+            "SELECT a.id, COALESCE(l.cleanup_requested,0) = 1 OR l.cleanup_generation IS NOT NULL
+         FROM autopilot_circuit_run_steps s JOIN agent_nodes a ON a.id=s.agent_node_id
+         LEFT JOIN agent_node_lifecycle_leases l ON l.node_id=a.id
+         WHERE s.run_id=?1 AND s.node_id='reviewer' AND a.status != 'archived'",
+            [run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    match reviewer {
+        Some((_, true)) => Err(DbError::conflict(
+            "The previous reviewer is still being cleaned up. Try Review again in a moment.",
+        )),
+        Some((id, false)) => {
+            let piloted_elsewhere: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM autopilot_circuit_runs r
+                 WHERE r.id != ?1 AND r.state IN ('pending','running','paused')
+                   AND (r.source_agent_node_id=?2 OR EXISTS(SELECT 1 FROM autopilot_circuit_run_steps s
+                       WHERE s.run_id=r.id AND s.agent_node_id=?2)))",
+                params![run_id, id], |row| row.get(0))?;
+            if piloted_elsewhere {
+                return Err(DbError::conflict("The reviewer is controlled by another active Circuit Run. Finish or cancel that run before continuing this review."));
+            }
+            Ok(Some(id))
+        }
+        None => Ok(None),
+    }
 }
 
 fn is_review_extension(state: &str, context_json: &str) -> bool {
@@ -361,7 +436,7 @@ pub(crate) fn extend_failed_review_locked(
         .filter(|step| {
             matches!(
                 step.node_id.as_str(),
-                "reviewer" | "verdict" | "review_classifier"
+                "reviewer" | "verdict" | "review_classifier" | "re_review"
             )
         })
         .map(|step| step.attempt)
@@ -381,7 +456,7 @@ pub(crate) fn extend_failed_review_locked(
         .checked_add(additional_rounds)
         .filter(|limit| *limit <= 10000)
         .ok_or_else(|| DbError::conflict("Review round limit reached."))?;
-    let recovery = review_recovery_inner(&tx, target, next_limit)?;
+    let mut recovery = review_recovery_inner(&tx, target, next_limit)?;
     let other_live = super::ledger::find_live_run_for_source_inner(&tx, recovery.source_id)?;
     if let Some(id) = other_live {
         return Ok(id);
@@ -394,14 +469,14 @@ pub(crate) fn extend_failed_review_locked(
             "The implementation agent is still being stopped. Try Review again in a moment.",
         ));
     }
-    let owned_reviewer_live: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM autopilot_circuit_run_steps s JOIN agent_nodes a ON a.id=s.agent_node_id
-         WHERE s.run_id=?1 AND s.agent_node_id IS NOT NULL AND s.agent_node_id != ?2 AND a.status != 'archived')",
-        params![target, recovery.source_id], |row| row.get(0))?;
-    if owned_reviewer_live {
-        return Err(DbError::conflict(
-            "The previous reviewer is still being cleaned up. Try Review again in a moment.",
-        ));
+    let retained_reviewer = retained_reviewer_inner(&tx, target)?;
+    if retained_reviewer.is_some() {
+        // The completed spawn supplies identity, not a fresh report. Route
+        // through delivery before the join can schedule a verdict.
+        recovery
+            .graph
+            .retarget_edge("reviewer", "review_round", "re_review");
+        recovery.graph.validate()?;
     }
 
     // Old continuation runs are moved back under their original Circuit.
@@ -436,7 +511,7 @@ pub(crate) fn extend_failed_review_locked(
     });
     context.insert("retry.attempt".into(), next_attempt.to_string());
     context.insert("retry.max_retries".into(), next_limit.to_string());
-    context.remove("review.round_limit");
+    context.insert("review.round_limit".into(), next_limit.to_string());
     context.insert("review.extended".into(), "1".into());
     if run.source_agent_node_id.is_none() {
         context.insert("review.source_was_circuit_owned".into(), "1".into());
@@ -476,8 +551,22 @@ pub(crate) fn extend_failed_review_locked(
             VALUES (?1,?2,'completed',?3,'completed',datetime('now'),datetime('now'))",
             params![target, node, next_attempt])?;
     }
-    tx.execute("INSERT INTO autopilot_circuit_run_steps (run_id,node_id,status,attempt) VALUES (?1,'reviewer','pending_slot',?2)",
-        params![target, next_attempt])?;
+    if let Some(reviewer_id) = retained_reviewer {
+        tx.execute("INSERT INTO autopilot_circuit_run_steps
+            (run_id,node_id,status,attempt,outcome,agent_node_id,parent_agent_node_id,started_at,completed_at)
+            VALUES (?1,'reviewer','completed',?2,'completed',?3,?4,datetime('now'),datetime('now'))",
+            params![target, next_attempt, reviewer_id, recovery.source_id])?;
+        tx.execute(
+            "INSERT INTO autopilot_circuit_run_steps (run_id,node_id,status,attempt)
+            VALUES (?1,'re_review','pending_slot',?2)",
+            params![target, next_attempt],
+        )?;
+    } else {
+        // Older builds already retired the reviewer. Those runs can still
+        // continue, but necessarily start a new conversation.
+        tx.execute("INSERT INTO autopilot_circuit_run_steps (run_id,node_id,status,attempt) VALUES (?1,'reviewer','pending_slot',?2)",
+            params![target, next_attempt])?;
+    }
     // The extension keeps the run's trigger context but starts the reviewer's
     // working state afresh, so the node-scoped bulky values go with it
     // (issue #2601). The values the extension does keep — the source's report,
@@ -524,3 +613,7 @@ pub(crate) fn recovery_circuit_inner(
         params![mesh_id, recovery.name, "Continue a failed review on its retained worktree", graph])?;
     Ok((db.last_insert_rowid(), recovery.name.clone()))
 }
+
+#[cfg(test)]
+#[path = "recovery_tests.rs"]
+mod tests;

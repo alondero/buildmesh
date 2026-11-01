@@ -2417,7 +2417,9 @@ test('a Rust file attached with #[path] selects the module that owns it', () => 
   // is declared by an ancestor, so a path walk maps them to a module that
   // holds no tests of its own.
   assert.equal(rustModule('src-tauri/src/db/circuit/queue.rs'), 'db::circuit_tests');
-  assert.equal(rustModule('src-tauri/src/db/circuit/recovery.rs'), 'db::circuit_tests');
+  // Recovery owns new tests and keeps its historical sibling corpus.
+  assert.equal(rustModule('src-tauri/src/db/circuit/recovery.rs'), 'db');
+  assert.equal(rustModule('src-tauri/src/services/circuit_worker/admission.rs'), 'services::circuit_worker::tests');
   assert.equal(rustModule('src-tauri/src/services/circuit_worker/restart.rs'), 'services::circuit_worker::tests');
   assert.equal(rustModule('src-tauri/src/db/create_operation.rs'), 'db::create_operation_tests');
   assert.equal(rustModule('src-tauri/src/db/mesh.rs'), 'db::mesh_tests');

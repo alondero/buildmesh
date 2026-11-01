@@ -156,3 +156,84 @@ pub(super) fn observe_capacity_with(counts: CapacityCounts) -> CircuitEvent {
         counts.global_free_slots,
     ))
 }
+
+/// Transfer retained pending agents into a durable run reservation before
+/// admission. The caller's totals include earlier admissions in this pass.
+pub(super) fn reserve_pending_agents(
+    active: &db::ActiveCircuitRun,
+    reserved_circuit_slots: &mut i64,
+    unleased_slots: &mut i64,
+    global_pool: Option<u32>,
+) -> bool {
+    let required = required_agent_slots(active);
+    if required > 0 {
+        let retained_by_run = match db::count_unleased_pending_circuit_agent_nodes(active.run.id) {
+            Ok(count) => count,
+            Err(error) => {
+                tracing::warn!(
+                    "circuits: retained agent count failed for run {}: {}",
+                    active.run.id,
+                    error
+                );
+                return false;
+            }
+        };
+        let other_unleased = unleased_slots.saturating_sub(retained_by_run);
+        // A failed reservation read is *unknown*, not zero (issue
+        // #1533): `existing = 0` would reserve `required` slots a
+        // second time. Skip the reservation for this run; the next
+        // pass re-reads the count.
+        let existing = match db::circuit_agent_slots_reserved(active.run.id) {
+            Ok(existing) => existing,
+            Err(e) => {
+                tracing::warn!(
+                    "circuits: reservation read failed for run {}, skipping the reservation: {}",
+                    active.run.id,
+                    e
+                );
+                return false;
+            }
+        };
+        let additional = required.saturating_sub(existing);
+        if !global_agent_reservation_fits(
+            additional,
+            *reserved_circuit_slots,
+            other_unleased,
+            global_pool,
+        ) {
+            super::record_queue_wait(
+                active.run.id,
+                db::circuit::evidence::QueueWaitReason::AgentCapacity {
+                    required: additional,
+                    available: global_pool.map(|limit| {
+                        i64::from(limit)
+                            .saturating_sub(*reserved_circuit_slots)
+                            .saturating_sub(other_unleased)
+                            .max(0)
+                    }),
+                },
+            );
+            tracing::info!(
+                "circuits: global Circuit agent pool held — run {} needs {} reserved agent slot(s)",
+                active.run.id,
+                required
+            );
+            return false;
+        }
+        if additional > 0 {
+            match db::reserve_circuit_agent_slots(active.run.id, required) {
+                Ok(true) => {}
+                Ok(false) | Err(_) => {
+                    super::record_queue_wait(
+                        active.run.id,
+                        db::circuit::evidence::QueueWaitReason::ReservationUnavailable,
+                    );
+                    return false;
+                }
+            }
+        }
+        *reserved_circuit_slots = reserved_circuit_slots.saturating_add(additional);
+        *unleased_slots = other_unleased;
+    }
+    true
+}

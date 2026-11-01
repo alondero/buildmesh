@@ -1,4 +1,99 @@
 // Circuit worker capacity tests. Included in the existing tests scope.
+#[test]
+fn pending_retained_reviewer_transfers_into_its_lease_without_overadmitting_a_sibling() {
+    for existing_pending_lease in [false, true] {
+        let _db = install_temp_db();
+        {
+            let conn = db::write_conn();
+            conn.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'retained','/repo');
+                INSERT INTO agent_nodes(id,mesh_id,name,path,status) VALUES(9,1,'source','/repo','ready'),(10,1,'reviewer','/review','ready');
+                INSERT INTO autopilot_circuits(id,mesh_id,name,graph_json) VALUES(1,1,'review','{}');
+                INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state,source_agent_node_id,trigger_identity) VALUES(1,1,1,'pending',9,'manual:extension'),(2,1,1,'pending',NULL,'manual:sibling');
+                INSERT INTO autopilot_circuit_run_steps(run_id,node_id,status,agent_node_id,parent_agent_node_id) VALUES(1,'reviewer','completed',10,9);").unwrap();
+            conn.execute(
+                "UPDATE autopilot_circuits SET graph_json=?1",
+                [CircuitGraph::agent_review(None, None, 6).to_json().unwrap()],
+            )
+            .unwrap();
+        }
+        if existing_pending_lease {
+            assert!(db::reserve_circuit_agent_slots(1, 1).unwrap());
+        }
+        let runs = db::list_active_circuit_runs().unwrap();
+        let mut reserved = db::count_reserved_circuit_agent_slots_total().unwrap();
+        assert_eq!(db::count_retained_circuit_agent_nodes_total().unwrap(), 1);
+        let mut unleased = db::count_unleased_circuit_agent_nodes_total().unwrap();
+        assert_eq!(
+            (reserved, unleased),
+            if existing_pending_lease {
+                (1, 0)
+            } else {
+                (0, 1)
+            }
+        );
+        assert!(reserve_pending_agents(
+            runs.iter().find(|run| run.run.id == 1).unwrap(),
+            &mut reserved,
+            &mut unleased,
+            Some(1)
+        ));
+        assert_eq!((reserved, unleased), (1, 0));
+        assert_eq!(db::circuit_agent_slots_reserved(1).unwrap(), 1);
+        db::set_circuit_run_state(1, "running").unwrap();
+        assert_eq!(db::count_reserved_circuit_agent_slots_total().unwrap(), 1);
+        assert_eq!(db::count_retained_circuit_agent_nodes_total().unwrap(), 0);
+        assert!(!reserve_pending_agents(
+            runs.iter().find(|run| run.run.id == 2).unwrap(),
+            &mut reserved,
+            &mut unleased,
+            Some(1)
+        ));
+        assert_eq!(db::circuit_agent_slots_reserved(2).unwrap(), 0);
+        assert_eq!(db::get_circuit_run(2).unwrap().unwrap().state, "pending");
+    }
+}
+
+#[test]
+fn a_pool_reduction_still_counts_a_leased_pending_reviewer_at_tick() {
+    use crate::circuit::stepper::Capacity;
+    let _db = install_temp_db();
+    {
+        let conn = db::write_conn();
+        conn.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'pool-reduction','/repo');
+            INSERT INTO agent_nodes(id,mesh_id,name,path,status) VALUES(10,1,'pending-reviewer','/review','ready'),(11,1,'active','/active','ready');
+            INSERT INTO autopilot_circuits(id,mesh_id,name,graph_json) VALUES(1,1,'review','{}');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state,trigger_identity) VALUES(1,1,1,'pending','manual:pending'),(2,1,1,'running','manual:active');
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,status,agent_node_id) VALUES(1,'reviewer','completed',10),(2,'reviewer','running',11);").unwrap();
+        conn.execute(
+            "UPDATE autopilot_circuits SET graph_json=?1",
+            [CircuitGraph::agent_review(None, None, 6).to_json().unwrap()],
+        )
+        .unwrap();
+    }
+    assert!(db::reserve_circuit_agent_slots(1, 1).unwrap());
+    assert!(db::reserve_circuit_agent_slots(2, 2).unwrap());
+    let active = db::list_active_circuit_runs()
+        .unwrap()
+        .into_iter()
+        .find(|run| run.run.id == 2)
+        .unwrap();
+    assert_eq!(db::count_active_circuit_agent_nodes_total().unwrap(), 1);
+    assert_eq!(db::count_retained_circuit_agent_nodes_total().unwrap(), 1);
+    assert_eq!(db::count_unleased_circuit_agent_nodes_total().unwrap(), 0);
+    assert!(matches!(
+        observe_capacity(&active, Some(3)),
+        CircuitEvent::Tick(Capacity {
+            agent_free_slots: 1
+        })
+    ));
+    assert!(matches!(
+        observe_capacity(&active, Some(2)),
+        CircuitEvent::Tick(Capacity {
+            agent_free_slots: 0
+        })
+    ));
+}
+
 /// The structural pin: `may_admit_run` short-circuits for `running`
 /// and `paused` without touching the DB, so a no-DB-init unit test
 /// can still verify the helper's contract for those branches.

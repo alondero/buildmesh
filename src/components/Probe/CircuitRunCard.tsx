@@ -163,7 +163,7 @@ interface CircuitRunCardProps {
   busy: boolean;
   onPause: () => void;
   onResume: () => void;
-  onContinueReview?: () => void;
+  onContinueReview?: (additionalRounds: number) => void;
   onReviewRoundLimitChange?: (limit: number) => void;
   onCancel: () => void;
   onApprove: (nodeId: string) => void;
@@ -208,6 +208,7 @@ export function CircuitRunCard({
   openingAgentId,
   focused = false,
 }: CircuitRunCardProps) {
+  const [additionalRounds, setAdditionalRounds] = useState(1);
   const { run, steps } = detail;
   const roundLimit = detail.review_round_limit ?? null;
   const review = reviewResult(detail, reviewCircuit, context);
@@ -342,12 +343,20 @@ export function CircuitRunCard({
       {expanded && review && <p className="px-2 pb-1.5 text-2xs text-text-secondary break-words">{review.detail}</p>}
       {canContinueReview(detail, reviewCircuit, context) && onContinueReview && (
         <div className="px-2 pb-2">
-          <button type="button" disabled={busy} onClick={onContinueReview}
+          <label className="mb-1 flex flex-wrap items-center gap-1 text-2xs text-text-secondary">
+            Additional review rounds
+            <select aria-label="Additional review rounds" value={additionalRounds} disabled={busy}
+              onChange={(event) => setAdditionalRounds(Number(event.target.value))}
+              className="min-h-[24px] rounded-md border border-border-subtle bg-bg-input px-1.5 text-text-primary disabled:opacity-40">
+              {Array.from({ length: 10 }, (_, index) => index + 1).map((rounds) => <option key={rounds} value={rounds}>{rounds}</option>)}
+            </select>
+          </label>
+          <button type="button" disabled={busy} onClick={() => onContinueReview(additionalRounds)}
             data-testid={`run-continue-review-${run.id}`}
-            className="px-1.5 py-1 text-2xs rounded-md bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25 disabled:opacity-40">
-            Review again · +1 round
+            className="min-h-[24px] px-1.5 py-1 text-2xs rounded-md bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25 disabled:opacity-40">
+            Review again · +{additionalRounds} {additionalRounds === 1 ? 'round' : 'rounds'}
           </button>
-          <p hidden={!expanded} className="mt-1 text-2xs text-text-muted break-words">Adds one round to this run and resumes the saved implementation agent if needed. Earlier findings remain in Run History.</p>
+          <p hidden={!expanded} className="mt-1 text-2xs text-text-muted break-words">Adds the selected rounds to this run and continues with the retained reviewer. Earlier findings remain in Run History. Change Review rounds on the active run to adjust its remaining allowance.</p>
         </div>
       )}
       {expanded && context['recovery.from_run_id'] && <p className="px-2 pb-1.5 text-2xs text-text-secondary">Continues run #{context['recovery.from_run_id']} on the same worktree.</p>}
