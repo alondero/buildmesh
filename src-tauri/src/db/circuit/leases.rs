@@ -183,6 +183,25 @@ pub fn count_retained_circuit_agent_nodes_total() -> SqlResult<i64> {
     count_retained_circuit_agent_nodes_total_inner(&db)
 }
 
+/// Admission counts reservations plus agents outside those reservations.
+/// Tick instead uses the physical retained-process count above, including
+/// reviewers in queued runs that already hold a reservation.
+pub fn count_unleased_circuit_agent_nodes_total() -> SqlResult<i64> {
+    let db = crate::db::read_conn()?;
+    db.query_row(
+        &format!(
+            "SELECT ({RETAINED_CIRCUIT_AGENT_NODES_SQL}) - (
+        SELECT COUNT(DISTINCT s.agent_node_id) FROM autopilot_circuit_run_steps s
+        JOIN autopilot_circuit_runs r ON r.id=s.run_id
+        JOIN agent_nodes a ON a.id=s.agent_node_id
+        JOIN autopilot_circuit_run_agent_leases l ON l.run_id=r.id
+        WHERE r.state='pending' AND a.status != 'archived' AND l.slots>0)"
+        ),
+        [],
+        |row| row.get(0),
+    )
+}
+
 /// The SQL [`count_retained_circuit_agent_nodes_total`] runs, kept as a
 /// constant so the plan test pins the statement production executes.
 ///
@@ -196,7 +215,7 @@ pub(crate) const RETAINED_CIRCUIT_AGENT_NODES_SQL: &str = "SELECT COUNT(DISTINCT
        SELECT s.agent_node_id AS agent_id FROM autopilot_circuit_run_steps s \
        JOIN autopilot_circuit_runs r ON r.id = s.run_id \
        JOIN agent_nodes a ON a.id = s.agent_node_id \
-       WHERE r.state IN ('completed', 'failed', 'cancelled') \
+       WHERE r.state IN ('pending', 'completed', 'failed', 'cancelled') \
          AND s.agent_node_id IS NOT NULL AND a.status != 'archived' \
        UNION \
        SELECT r.source_agent_node_id AS agent_id FROM agent_nodes a \
@@ -211,12 +230,35 @@ pub(crate) fn count_retained_circuit_agent_nodes_total_inner(db: &Connection) ->
     db.query_row(RETAINED_CIRCUIT_AGENT_NODES_SQL, [], |row| row.get(0))
 }
 
+/// Pending extensions already own a retained reviewer. Admission transfers
+/// that process from the unleased baseline into the run's reservation.
+pub fn count_unleased_pending_circuit_agent_nodes(run_id: i64) -> SqlResult<i64> {
+    let db = crate::db::read_conn()?;
+    count_unleased_pending_circuit_agent_nodes_inner(&db, run_id)
+}
+
+pub(crate) fn count_unleased_pending_circuit_agent_nodes_inner(
+    db: &Connection,
+    run_id: i64,
+) -> SqlResult<i64> {
+    db.query_row(
+        "SELECT COUNT(DISTINCT s.agent_node_id) FROM autopilot_circuit_run_steps s
+        JOIN autopilot_circuit_runs r ON r.id=s.run_id
+        JOIN agent_nodes a ON a.id=s.agent_node_id
+        WHERE r.id=?1 AND r.state='pending' AND a.status != 'archived'
+          AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_run_agent_leases l WHERE l.run_id=r.id AND l.slots>0)",
+        [run_id],
+        |row| row.get(0),
+    )
+}
+
 const NODE_LEASE_TTL_SECS: i64 = 300;
 
 /// Which circuit agents Autopilot may retire when a run ends badly.
 ///
 /// A step's agent with a parent was launched to review or assist another agent
-/// (the reviewer); Autopilot owns it and cleans it up. An agent with no parent
+/// (a helper); Autopilot owns its cleanup. Failure retains reviewers for
+/// continuation, while cancellation retires all helpers. An agent with no parent
 /// is the run's implementation agent: the user's work. It stays open whatever
 /// happens to the run, and is closed only by an explicit `CloseAgentNode` once
 /// a squash-merge has been verified. Alias the step table as `s`.
@@ -707,6 +749,10 @@ fn sweepable_runs_sql() -> String {
     SELECT id FROM autopilot_circuit_runs r \
       WHERE r.state IN ({}) \
         AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_run_steps s \
+                        JOIN agent_nodes a ON a.id = s.agent_node_id \
+                        WHERE s.run_id = r.id AND r.state = 'failed' \
+                          AND s.parent_agent_node_id IS NOT NULL AND a.status != 'archived') \
+        AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_run_steps s \
                         JOIN agent_node_lifecycle_leases l ON l.node_id = s.agent_node_id \
                         WHERE s.run_id = r.id AND l.cleanup_requested = 1) \
         AND r.updated_at < ?1 \
@@ -732,6 +778,10 @@ fn sweepable_runs_sql() -> String {
 fn compactable_runs_sql() -> String {
     format!(
         "state IN ({}) \
+    AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_run_steps s \
+                    JOIN agent_nodes a ON a.id = s.agent_node_id \
+                    WHERE s.run_id = autopilot_circuit_runs.id AND autopilot_circuit_runs.state = 'failed' \
+                      AND s.parent_agent_node_id IS NOT NULL AND a.status != 'archived') \
     AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_run_steps s \
                     JOIN agent_node_lifecycle_leases l ON l.node_id = s.agent_node_id \
                     WHERE s.run_id = autopilot_circuit_runs.id AND l.cleanup_requested = 1) \
@@ -796,13 +846,7 @@ pub(crate) fn prune_terminal_circuit_runs_before_inner(
         conn.execute(
             &format!(
                 "DELETE FROM {table} WHERE run_id IN (
-            SELECT id FROM autopilot_circuit_runs r WHERE r.state IN ({})
-            AND r.updated_at < ?1
-            AND r.trigger_identity NOT LIKE 'interval:%' AND r.trigger_identity NOT LIKE 'manual:%'
-            AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_run_steps s
-                JOIN agent_node_lifecycle_leases l ON l.node_id=s.agent_node_id
-                WHERE s.run_id=r.id AND l.cleanup_requested=1))",
-                RunState::SQL_IN_SWEEPABLE
+            SELECT id FROM autopilot_circuit_runs WHERE {compactable})"
             ),
             params![cutoff],
         )?;
