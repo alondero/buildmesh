@@ -90,7 +90,7 @@ it('lets a missing-agent request be dismissed in-session without treating store 
     const attention = await screen.findByRole('region', { name: 'Needs attention' });
     fireEvent.click(within(attention).getByRole('button', { name: /Open agent/ }));
     expect(within(attention).getByRole('alert').textContent).toContain('no longer available');
-    fireEvent.click(within(attention).getByRole('button', { name: 'Dismiss notification from Circuit agent' }));
+    fireEvent.click(within(attention).getByRole('button', { name: /^Dismiss notification from Circuit agent:/ }));
     expect(useToastStore.getState().notifications.filter(needsAttention)).toEqual([]);
     expect(useToastStore.getState().toasts).toEqual([]);
     expect(bell.title).toContain('0 need attention');
@@ -111,14 +111,45 @@ it('names each dismiss control with its agent and Mesh and clears only the selec
   const bell = screen.getByRole('button', { name: 'Open Notifications' });
   fireEvent.click(bell);
   const attention = await screen.findByRole('region', { name: 'Needs attention' });
-  const dismissBuildmesh = within(attention).getByRole('button', { name: 'Dismiss notification from reviewer in buildmesh' });
-  expect(within(attention).getByRole('button', { name: 'Dismiss notification from reviewer in playground' })).toBeTruthy();
+  const dismissBuildmesh = within(attention).getByRole('button', { name: /^Dismiss notification from reviewer in buildmesh:/ });
+  expect(within(attention).getByRole('button', { name: /^Dismiss notification from reviewer in playground:/ })).toBeTruthy();
   fireEvent.click(dismissBuildmesh);
-  expect(within(attention).queryByRole('button', { name: 'Dismiss notification from reviewer in buildmesh' })).toBeNull();
-  expect(within(attention).getByRole('button', { name: 'Dismiss notification from reviewer in playground' })).toBeTruthy();
+  expect(within(attention).queryByRole('button', { name: /^Dismiss notification from reviewer in buildmesh:/ })).toBeNull();
+  expect(within(attention).getByRole('button', { name: /^Dismiss notification from reviewer in playground:/ })).toBeTruthy();
   expect(useToastStore.getState().notifications.filter(needsAttention).map(n => n.action?.kind === 'agent-input' && n.action.nodeId)).toEqual([20]);
   expect(bell.title).toContain('1 need attention');
   expect(bell.title).toContain('1 unread');
+});
+
+it.each([
+  { scenario: 'different questions', messages: ['Use main or develop?', 'May I run the checks?'] },
+  { scenario: 'identical questions and arrival times', messages: ['May I run the checks?', 'May I run the checks?'] },
+])('distinguishes same-named agents in one Mesh with $scenario', async ({ messages }) => {
+  vi.mocked(invoke).mockResolvedValue([]);
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(1793523600000);
+  try {
+    for (const [index, message] of messages.entries()) {
+      addToast('Needs input', message, 'warning', {
+        kind: 'agent-input', nodeId: index === 0 ? 10 : 20, agentName: 'reviewer', meshName: 'buildmesh',
+      });
+    }
+  } finally { clock.mockRestore(); }
+  expect(new Set(useToastStore.getState().notifications.map(n => n.createdAt)).size).toBe(1);
+  render(<><NotificationButton /><ProbePanel /></>);
+  fireEvent.click(screen.getByRole('button', { name: 'Open Notifications' }));
+  const attention = await screen.findByRole('region', { name: 'Needs attention' });
+  const controls = within(attention).getAllByRole('button', { name: /^Dismiss notification from reviewer in buildmesh/ });
+  const labels = controls.map(button => button.getAttribute('aria-label'));
+  expect(new Set(labels).size).toBe(2);
+  expect(labels[0]).toContain(messages[1]);
+  expect(labels[1]).toContain(messages[0]);
+  expect(labels[0]).toContain('(request 1 of 2)');
+  expect(labels[1]).toContain('(request 2 of 2)');
+  fireEvent.click(controls[1]);
+  expect(useToastStore.getState().notifications.filter(needsAttention).map(n => n.action?.kind === 'agent-input' && n.action.nodeId)).toEqual([20]);
+  const remaining = within(attention).getByRole('button', { name: /^Dismiss notification from reviewer in buildmesh/ });
+  expect(remaining.getAttribute('aria-label')).toContain(messages[1]);
+  expect(remaining.getAttribute('aria-label')).toContain('(request 1 of 1)');
 });
 
 // A mesh that never reached upstream and a worktree that cannot be removed are

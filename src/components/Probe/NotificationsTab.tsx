@@ -165,7 +165,7 @@ export function NotificationsTab() {
           {attention.length === 0 ? <p className="notification-caught-up">
             {error ? 'Worktree status is unavailable.' : loading ? 'Checking worktree problems…' : 'You’re all caught up.'}
           </p> : <>
-            {inputAttention.map(notice => <article key={notice.id} className="notification-attention-card">
+            {inputAttention.map((notice, index) => <article key={notice.id} className="notification-attention-card">
               <div className="notification-heading"><h4>Needs input</h4><NoticeTime notice={notice} /></div>
               <AgentInputLink action={notice.action} className="notification-input-link">
                 <span className="block notification-node">{notice.action.agentName}</span>
@@ -174,7 +174,7 @@ export function NotificationsTab() {
               </AgentInputLink>
               <div className="notification-card-actions">
                 <button type="button" className="notification-link"
-                  aria-label={`Dismiss notification from ${agentInputSubject(notice.action)}`} onClick={() => {
+                  aria-label={`Dismiss notification from ${agentInputSubject(notice.action)}: ${notice.message} (request ${index + 1} of ${inputAttention.length})`} onClick={() => {
                   const store = useToastStore.getState();
                   store.markNotificationRead(notice.id);
                   store.resolveAgentInputNotification(notice.action.nodeId, 'Notification dismissed.');
