@@ -48,3 +48,5 @@ Use the next numeric filename and include:
 - [0050: OpenCode major-version and node configuration isolation](0050-opencode-major-version-isolation.md)
 
 - [0051: The pairing verification warns; it does not gate the launch](0051-pairing-verification-warns-not-gates.md)
+
+- [0052: Probe scope uses progressive disclosure](0052-probe-scope-progressive-disclosure.md) (proposed)

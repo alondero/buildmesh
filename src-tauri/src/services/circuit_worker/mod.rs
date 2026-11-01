@@ -72,7 +72,7 @@ mod result_handoff;
 mod spawn;
 mod turn_classify;
 mod zombie_sweep;
-use admission::{global_agent_reservation_fits, may_admit_run, required_agent_slots};
+use admission::{may_admit_run, required_agent_slots};
 use dispatch::execute_effects;
 use observation::{agent_lookup_for_observation, observe};
 pub use restart::startup_reconcile_pass;
@@ -526,8 +526,8 @@ fn run_pass(app: &AppHandle) {
     // not hold a lease, but retained implementation PTYs still consume host
     // optional app-wide pool until their agent rows are archived/deleted;
     // include those non-leased agents in the global baseline.
-    let retained_total = db::count_retained_circuit_agent_nodes_total().unwrap_or(i64::MAX);
-    let unleased_slots = retained_total;
+    let retained_total = db::count_unleased_circuit_agent_nodes_total().unwrap_or(i64::MAX);
+    let mut unleased_slots = retained_total;
     let mut reserved_circuit_slots =
         db::count_reserved_circuit_agent_slots_total().unwrap_or(i64::MAX);
     for active in runs {
@@ -619,65 +619,13 @@ fn run_pass(app: &AppHandle) {
                 }
                 Ok(_) => {} // admitted by may_admit_run — reserve its lease below
             }
-            let required = required_agent_slots(&active);
-            if required > 0 {
-                // A failed reservation read is *unknown*, not zero (issue
-                // #1533): `existing = 0` would reserve `required` slots a
-                // second time. Skip the reservation for this run; the next
-                // pass re-reads the count.
-                let existing = match db::circuit_agent_slots_reserved(active.run.id) {
-                    Ok(existing) => existing,
-                    Err(e) => {
-                        tracing::warn!(
-                            "circuits: reservation read failed for run {}, skipping the reservation: {}",
-                            active.run.id,
-                            e
-                        );
-                        continue;
-                    }
-                };
-                let additional = required.saturating_sub(existing);
-                if additional > 0
-                    && !global_agent_reservation_fits(
-                        additional,
-                        reserved_circuit_slots,
-                        unleased_slots,
-                        global_pool,
-                    )
-                {
-                    record_queue_wait(
-                        active.run.id,
-                        db::circuit::evidence::QueueWaitReason::AgentCapacity {
-                            required: additional,
-                            available: global_pool.map(|limit| {
-                                i64::from(limit)
-                                    .saturating_sub(reserved_circuit_slots)
-                                    .saturating_sub(unleased_slots)
-                                    .max(0)
-                            }),
-                        },
-                    );
-                    tracing::info!(
-                        "circuits: global Circuit agent pool held — run {} needs {} reserved agent slot(s)",
-                        active.run.id, required
-                    );
-                    continue;
-                }
-                if additional > 0 {
-                    match db::reserve_circuit_agent_slots(active.run.id, required) {
-                        Ok(true) => {
-                            reserved_circuit_slots =
-                                reserved_circuit_slots.saturating_add(additional);
-                        }
-                        Ok(false) | Err(_) => {
-                            record_queue_wait(
-                                active.run.id,
-                                db::circuit::evidence::QueueWaitReason::ReservationUnavailable,
-                            );
-                            continue;
-                        }
-                    }
-                }
+            if !admission::reserve_pending_agents(
+                &active,
+                &mut reserved_circuit_slots,
+                &mut unleased_slots,
+                global_pool,
+            ) {
+                continue;
             }
         }
         if let Err(e) = drive_run(app, &active) {
@@ -991,9 +939,8 @@ fn drive_run(app: &AppHandle, active: &db::ActiveCircuitRun) -> Result<(), Strin
             );
         }
 
-        // Failed and cancelled runs retire their owned processes while
-        // retaining recovery checkpoints; every terminal run stops piloting
-        // the agents it hands back.
+        // Terminal runs stop piloting their agents. Failure retains reviewers
+        // for inspection and continuation; cancellation retires all helpers.
         if view.state.is_terminal() {
             close_run_agents(&view);
             // The one terminal emit, after `close_run_agents` has archived the

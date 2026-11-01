@@ -1204,9 +1204,9 @@ export function CircuitsProbeTab() {
                           onPause={() => runAction(() => pauseCircuitRun(detail.run.id))}
                           onResume={() => runAction(() => resumeCircuitRun(detail.run.id))}
                           onReviewRoundLimitChange={(limit) => runAction(() => setCircuitReviewRoundLimit(detail.run.id, limit))}
-                          onContinueReview={() => runAction(async () => {
+                          onContinueReview={(additionalRounds) => runAction(async () => {
                             const meshId = activeMeshIdRef.current;
-                            const nextRunId = await continueCircuitReview(detail.run.id);
+                            const nextRunId = await continueCircuitReview(detail.run.id, additionalRounds);
                             if (mountedRef.current && activeMeshIdRef.current === meshId) {
                               resource.invalidate();
                               useUIStore.getState().focusCircuitRun(nextRunId);

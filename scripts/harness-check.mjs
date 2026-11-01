@@ -76,6 +76,8 @@ export function frontendInScope(paths) {
 // `pathIncludeDrift` below, so a new `#[path]` fails the gate that runs on the
 // Rust diff itself, not only the one CI happens to run (review of PR #2232).
 export const RUST_PATH_INCLUDES = {
+  'src-tauri/src/db/circuit/recovery_tests.rs': 'db::circuit::recovery::tests',
+  'src-tauri/src/db/circuit/review_rounds_tests.rs': 'db::circuit::review_rounds::tests',
   'src-tauri/src/agent/opencode_detection_tests.rs': 'agent::detection::opencode_detection_tests',
   'src-tauri/src/agent/provider/adapters/opencode2_tests.rs': 'agent::provider::adapters::opencode2::tests',
   'src-tauri/src/agent/provider/adapters/opencode_version_tests.rs': 'agent::provider::adapters::opencode_version::tests',
@@ -209,13 +211,14 @@ export const RUST_SIBLING_TESTS = {
   // The queue and the recovery path carry no tests of their own: the circuit
   // suite the crate root declares covers them.
   'src-tauri/src/db/circuit/queue.rs': 'db::circuit_tests',
-  'src-tauri/src/db/circuit/recovery.rs': 'db::circuit_tests',
+  'src-tauri/src/db/circuit/recovery.rs': 'db',
   'src-tauri/src/db/create_operation.rs': 'db::create_operation_tests',
   'src-tauri/src/db/mesh.rs': 'db::mesh_tests',
   'src-tauri/src/db/warm_pool.rs': 'db::warm_pool_tests',
   // The startup reconcile pass is covered by the worker test suite the parent
   // declares (`tests/lineage_recovery.rs`).
   'src-tauri/src/services/circuit_worker/restart.rs': 'services::circuit_worker::tests',
+  'src-tauri/src/services/circuit_worker/admission.rs': 'services::circuit_worker::tests',
   // Report admission is covered by the worker suite (`tests/review_reports.rs`,
   // `tests/result_handoff.rs`) the parent declares.
   'src-tauri/src/services/circuit_worker/readiness.rs': 'services::circuit_worker::tests',

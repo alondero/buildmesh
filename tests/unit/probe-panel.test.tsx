@@ -165,14 +165,14 @@ describe('ProbePanel', () => {
   });
 
   it('shows the active lens and Mesh subject in the header', () => {
-    // The shared dock header names the explicit ownership lens and subject,
-    // then makes live selection visible as a separate mode line.
+    // Scope stays visible; the disclosure provides selection behavior on demand.
     useUIStore.setState({ probeOpen: true, probeTab: 'files' });
     render(<ProbePanel />);
 
     const header = screen.getByRole('region', { name: 'Probe panel' });
     expect(screen.getByTestId('probe-context-subject').textContent).toContain('Mesh: demo');
-    expect(screen.getByTestId('probe-context-mode').textContent).toBe('Following selection');
+    expect(screen.queryByTestId('probe-context-mode')).toBeNull();
+    expect(screen.getByTestId('probe-context-subject').title).toContain('Following selection');
     expect(header.textContent).toContain('demo');
   });
 
@@ -180,16 +180,15 @@ describe('ProbePanel', () => {
     useUIStore.setState({ probeOpen: true, probeTab: 'usage' });
     render(<ProbePanel />);
 
-    expect(screen.getByTestId('probe-context-subject').textContent).toBe('Host');
-    expect(screen.getByTestId('probe-context-mode').textContent).toBe('Host-wide');
+    expect(screen.getByTestId('probe-context-subject').textContent).toBe('Host-wide');
+    expect(screen.queryByTestId('probe-context-mode')).toBeNull();
     expect(screen.getByRole('region', { name: 'Probe panel' }).textContent).not.toContain('demo');
   });
 
   it('offers no pin control — the header subject always follows selection (issue #2073)', () => {
     // Probe Context Pins are removed: a destination can no longer be pinned to
     // a subject that disagrees with the sidebar selection, so the header has no
-    // pin/unpin affordance at all. The mode line is therefore always one of the
-    // two fixed-vs-following labels.
+    // pin/unpin affordance at all.
     for (const tab of ['properties', 'files', 'review'] as const) {
       useUIStore.setState({ probeOpen: true, probeTab: tab });
       const { unmount } = render(<ProbePanel />);
@@ -197,7 +196,7 @@ describe('ProbePanel', () => {
       expect(screen.queryByTestId('probe-context-pin')).toBeNull();
       expect(screen.queryByRole('button', { name: 'Pin context' })).toBeNull();
       expect(screen.queryByRole('button', { name: 'Unpin context' })).toBeNull();
-      expect(screen.getByTestId('probe-context-mode').textContent).toBe('Following selection');
+      expect(screen.getByTestId('probe-context-subject').title).toContain('Following selection');
       unmount();
     }
   });
@@ -382,7 +381,7 @@ describe('ProbePanel', () => {
     expect(screen.getByTestId('probe-context-subject-detail').textContent).toBe('· Repository root');
   });
 
-  it('names the lens, the subject and the mode for every destination kind (issue #2075)', () => {
+  it('shows only destination and scope lines for every destination kind', () => {
     const cases = [
       // Mesh lens: names the Mesh, and only Project Files carries a detail.
       { tab: 'files', subject: 'Mesh: demo', detail: '· Working tree: agent-1', mode: 'Following selection' },
@@ -390,7 +389,7 @@ describe('ProbePanel', () => {
       // Agent lens: names the focused node, with its parent Mesh as detail.
       { tab: 'review', subject: 'Agent: agent-1', detail: '· Mesh: demo', mode: 'Following selection' },
       // Host lens: no selection, no Mesh name leaking in.
-      { tab: 'usage', subject: 'Host', detail: null, mode: 'Host-wide' },
+      { tab: 'usage', subject: 'Host-wide', detail: null, mode: 'Host-wide' },
     ] as const;
 
     for (const { tab, subject, detail, mode } of cases) {
@@ -398,7 +397,12 @@ describe('ProbePanel', () => {
       const { unmount } = render(<ProbePanel />);
 
       expect(screen.getByTestId('probe-context-subject-name').textContent).toBe(subject);
-      expect(screen.getByTestId('probe-context-mode').textContent).toBe(mode);
+      const scope = screen.getByTestId('probe-context-subject');
+      expect(scope.title).toContain(mode);
+      expect(screen.queryByTestId('probe-context-mode')).toBeNull();
+      const header = screen.getByTestId('probe-context-title').parentElement;
+      expect(header?.children.length).toBe(2);
+      expect(header?.lastElementChild?.contains(scope)).toBe(true);
       const detailEl = screen.queryByTestId('probe-context-subject-detail');
       if (detail === null) {
         expect(detailEl).toBeNull();
@@ -417,12 +421,78 @@ describe('ProbePanel', () => {
     useUIStore.setState({ probeOpen: true, probeTab: 'files' });
     const { unmount } = render(<ProbePanel />);
     expect(screen.getByTestId('probe-context-subject').getAttribute('title'))
-      .toBe('Mesh: demo · Working tree: agent-1');
+      .toBe('Mesh: demo · Working tree: agent-1 · Following selection');
     unmount();
 
     useUIStore.setState({ probeOpen: true, probeTab: 'usage' });
     render(<ProbePanel />);
-    expect(screen.getByTestId('probe-context-subject').getAttribute('title')).toBe('Host');
+    expect(screen.getByTestId('probe-context-subject').getAttribute('title')).toBe('Host-wide');
+  });
+
+  it('exposes complete scope and mode through a keyboard-focusable native disclosure', () => {
+    useUIStore.setState({ probeOpen: true, probeTab: 'files' });
+    render(<ProbePanel />);
+
+    const summary = screen.getByTestId('probe-context-subject');
+    expect(summary.tagName).toBe('SUMMARY');
+    expect(summary.getAttribute('aria-label')).toBe('Mesh: demo · Working tree: agent-1 · Following selection');
+    fireEvent.click(summary);
+    expect(summary.parentElement?.hasAttribute('open')).toBe(true);
+    expect(screen.getByTestId('probe-context-details').textContent).toBe(summary.getAttribute('aria-label'));
+
+    fireEvent.keyDown(summary, { key: 'Escape' });
+    expect(summary.parentElement?.hasAttribute('open')).toBe(false);
+    expect(document.activeElement).toBe(summary);
+    expect(useUIStore.getState().probeOpen).toBe(true);
+  });
+
+  it.each(['mouse', 'touch'])('dismisses scope details on an outside %s pointer-down', async (pointerType) => {
+    useUIStore.setState({ probeOpen: true, probeTab: 'files' });
+    render(<ProbePanel />);
+    await screen.findByText('File Tree');
+    const summary = screen.getByTestId('probe-context-subject');
+    fireEvent.click(summary);
+    fireEvent.pointerDown(screen.getByTestId('probe-context-details'), { pointerType });
+    expect(summary.parentElement?.hasAttribute('open')).toBe(true);
+
+    fireEvent.pointerDown(screen.getByTestId('probe-context-title'), { pointerType });
+    expect(summary.parentElement?.hasAttribute('open')).toBe(false);
+    expect(useUIStore.getState().probeOpen).toBe(true);
+  });
+
+  it.each(['outside control', 'page body'])('dismisses scope details when focus moves to %s without stealing focus back', async (target) => {
+    useUIStore.setState({ probeOpen: true, probeTab: 'files' });
+    render(<ProbePanel />);
+    await screen.findByText('File Tree');
+    const summary = screen.getByTestId('probe-context-subject');
+    summary.focus();
+    fireEvent.click(summary);
+    const closeButton = screen.getByRole('button', { name: 'Close panel' });
+
+    act(() => target === 'outside control' ? closeButton.focus() : summary.blur());
+
+    expect(summary.parentElement?.hasAttribute('open')).toBe(false);
+    expect(document.activeElement).toBe(target === 'outside control' ? closeButton : document.body);
+    expect(useUIStore.getState().probeOpen).toBe(true);
+  });
+
+  it('closes stale scope details and preserves summary focus when the working tree changes', async () => {
+    useUIStore.setState({ probeOpen: true, probeTab: 'files' });
+    render(<ProbePanel />);
+    await screen.findByText('File Tree');
+    const originalSummary = screen.getByTestId('probe-context-subject');
+    originalSummary.focus();
+    fireEvent.click(originalSummary);
+    expect(originalSummary.parentElement?.hasAttribute('open')).toBe(true);
+
+    act(() => seedAgentNodes([{ ...NODE, id: 8, name: 'agent-2' }], 8));
+
+    const summary = screen.getByTestId('probe-context-subject');
+    expect(summary).toBe(originalSummary);
+    expect(document.activeElement).toBe(summary);
+    expect(summary.parentElement?.hasAttribute('open')).toBe(false);
+    expect(summary.getAttribute('aria-label')).toBe('Mesh: demo · Working tree: agent-2 · Following selection');
+    expect(screen.getByTestId('probe-context-subject-detail').textContent).toContain('agent-2');
   });
 
   it('reaches the unavailable-subject empty state through ordinary selection loss (issue #2075)', () => {

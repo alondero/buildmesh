@@ -127,6 +127,23 @@ async function serveHtml(html) {
 const throwingSteps = resolve(repoRoot, 'tests', 'integration', 'ui-shot-throwing.steps.mjs');
 
 describe('ui-shot mock mode', () => {
+  it('keeps Probe headers compact and dismisses scope details across pointer, touch and focus changes', async () => {
+    const folder = await mkdtemp(join(tmpdir(), 'buildmesh-ui-shot-probe-'));
+    try {
+      const port = await freePort();
+      const result = await runUiShot([
+        '--out', join(folder, 'probe.png'), '--mock', '--serve',
+        '--mock-url', `http://127.0.0.1:${port}`,
+        '--fixtures', resolve(repoRoot, 'tests/integration/ui-shot-probe-header.fixtures.mjs'),
+        '--steps', resolve(repoRoot, 'tests/integration/ui-shot-probe-header.steps.mjs'),
+      ]);
+      expect(result.code, result.stderr).toBe(0);
+      expect(result.stdout).toContain('11 two-row Probe headers at 240px');
+    } finally {
+      await rm(folder, { recursive: true, force: true });
+    }
+  }, TEST_DEADLINE_MS);
+
   it('groups, reloads, swaps and ungroups nodes through pointer and keyboard interactions', async () => {
     const folder = await mkdtemp(join(tmpdir(), 'buildmesh-ui-shot-groups-'));
     try {
