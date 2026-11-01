@@ -297,7 +297,7 @@ describe('CircuitsProbeTab', () => {
     expect(screen.queryByLabelText(`Enable ${CIRCUIT.name}`)).toBeNull();
   });
 
-  it('adds one round to a failed review and focuses the same run', async () => {
+  it.each([1, 3, 10])('adds %i rounds to a failed review and focuses the same run', async (additionalRounds) => {
     const graph = { version: 3, nodes: [{ id: 'verdict', type: { type: 'review_verdict', target_node_id: 'reviewer' } }], edges: [] };
     const failed = { run: { ...RUN_DONE.run, state: 'failed', source_agent_node_id: 42, context_json: '{"source.review_preset":"1"}' },
       steps: [{ ...RUN_DONE.steps[0], node_id: 'verdict', status: 'completed', outcome: 'working' }] };
@@ -312,9 +312,11 @@ describe('CircuitsProbeTab', () => {
     openProbeDestination('circuits');
     await screen.findByTestId('circuits-view-history');
     fireEvent.click(screen.getByTestId('circuits-view-history'));
-    fireEvent.click(await screen.findByRole('button', { name: 'Review again · +1 round' }));
-    expect(invoke).toHaveBeenCalledWith('continue_circuit_review', { runId: 11, additionalRounds: 1 });
+    fireEvent.change(await screen.findByLabelText('Additional review rounds'), { target: { value: String(additionalRounds) } });
+    fireEvent.click(screen.getByRole('button', { name: `Review again · +${additionalRounds} ${additionalRounds === 1 ? 'round' : 'rounds'}` }));
+    expect(invoke).toHaveBeenCalledWith('continue_circuit_review', { runId: 11, additionalRounds });
     expect(screen.getByTestId('run-continue-review-11').hasAttribute('disabled')).toBe(true);
+    expect(screen.getByLabelText('Additional review rounds').hasAttribute('disabled')).toBe(true);
     mockBackend({ circuits, runs: [{ run: { ...failed.run, state: 'running', context_json: '{"source.review_preset":"1","review.extended":"1","retry.attempt":"4","retry.max_retries":"4"}' }, steps: [] }] });
     await act(async () => { finish(11); });
     await waitFor(() => expect(screen.getByTestId('circuits-view-activity').getAttribute('aria-selected')).toBe('true'));

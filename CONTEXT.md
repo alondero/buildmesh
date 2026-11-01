@@ -184,7 +184,7 @@ The built-in local workflow for reviewing an Agent Node's work. It asks the Agen
 _Avoid_: Automated review loop, issue-driven PR review blueprint
 
 **Hand-back**:
-The end of a completed Circuit Run's control over the agents it did not close: the circuit stops observing and prompting them, and they stay open for the user. An approved review hands the implementation agent back after asking it to merge. A failed or cancelled run retires only its helper agents (such as the reviewer); the implementation agent stays open in every case, and is closed only by a squash-merge that GitHub confirmed.
+The end of a Circuit Run's control over the agents it did not close: the circuit stops observing and prompting them, and they stay open for the user. An approved review hands the implementation agent back after asking it to merge. A failed review keeps its reviewer open for inspection, conversation and continuation until approval or explicit disposal. Other helpers are retired on failure; cancellation retires helpers including the reviewer. The implementation agent stays open in every case, and is closed only by a squash-merge that GitHub confirmed.
 _Avoid_: Release, detach
 
 **Review-derived Circuit**:
@@ -196,7 +196,7 @@ The graph and effective reviewer configuration a run used, shown as read-only hi
 _Avoid_: Current blueprint, live configuration
 
 **Review Extension**:
-An operator request that increases a failed Review Circuit Run's round allowance and queues the next reviewer attempt on that same run. Earlier findings remain in its history. A repeated request while that attempt is active returns the same run; cancellation requires a fresh review.
+An operator request that increases a failed Review Circuit Run's round allowance by a chosen number of rounds and queues the next attempt with its retained reviewer on that same run. Earlier findings remain in its history, and the reviewer retains its conversation. Older runs whose reviewer was already retired start a new reviewer. A repeated request while that attempt is active returns the same run; cancellation requires a fresh review.
 _Avoid_: Review Successor, Continued Review Circuit
 
 **Review Behavior Revision**:

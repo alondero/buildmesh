@@ -185,7 +185,7 @@ function HistoryDetail({ entry }: { entry: CircuitHistoryEntry }) {
       case 'review_continuation': return <p className="text-text-secondary break-words">{reviewContinuationText(entry.detail)}</p>;
       case 'review_extension': {
         const extension = parseDetail<{ additional_rounds?: number; round_limit?: number; attempt?: number }>(entry.detail);
-        return <p className="text-text-secondary break-words">Added {extension?.additional_rounds ?? 1} review round; queued attempt {extension?.attempt ?? 'unknown'} of {extension?.round_limit ?? 'unknown'} on this run. Earlier findings remain in Run History.</p>;
+        return <p className="text-text-secondary break-words">Added {extension?.additional_rounds ?? 1} review {(extension?.additional_rounds ?? 1) === 1 ? 'round' : 'rounds'}; queued attempt {extension?.attempt ?? 'unknown'} of {extension?.round_limit ?? 'unknown'} on this run. Earlier findings remain in Run History.</p>;
       }
       case 'review_round_limit': {
         const change = parseDetail<{ max_rounds: number }>(entry.detail);

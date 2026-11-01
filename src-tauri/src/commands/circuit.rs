@@ -978,6 +978,26 @@ pub async fn continue_circuit_review(
         crate::db::circuit::recovery::review_recovery_source(run_id).map_err(String::from)
     })
     .await?;
+    let reviewer_id = crate::commands::run_blocking("review_recovery_reviewer", move || {
+        crate::db::circuit::recovery::review_recovery_reviewer(run_id).map_err(String::from)
+    })
+    .await?;
+    if let Some(reviewer_id) = reviewer_id {
+        if !crate::agent::process::PROCESS_REGISTRY.is_alive(&reviewer_id) {
+            use crate::agent::spawn::{ResumeCause, SpawnIntent, SpawnRequest};
+            crate::agent::spawn::spawn_with_intent(
+                &app,
+                SpawnRequest::new(reviewer_id, SpawnIntent::Resume { cause: ResumeCause::Explicit }, Default::default())
+                    .with_lifecycle_lease(),
+            ).await.map_err(|error| format!("Could not resume the reviewer: {error}. Open the reviewer to resolve this before continuing."))?;
+            if !crate::agent::process::PROCESS_REGISTRY.is_alive(&reviewer_id) {
+                return Err(
+                    "The reviewer is still being stopped or resumed. Try Review again in a moment."
+                        .into(),
+                );
+            }
+        }
+    }
     if !crate::agent::process::PROCESS_REGISTRY.is_alive(&source_id) {
         use crate::agent::spawn::{ResumeCause, SpawnIntent, SpawnRequest};
         crate::agent::spawn::spawn_with_intent(&app,
@@ -999,6 +1019,9 @@ pub async fn continue_circuit_review(
     })
     .await?;
     crate::circuit::evaluator::register_circuit(source_id);
+    if let Some(reviewer_id) = reviewer_id {
+        crate::circuit::evaluator::register_circuit(reviewer_id);
+    }
     crate::services::circuit_worker::wake_circuit_worker();
     let _ = app.emit(
         "circuit-run-updated",
