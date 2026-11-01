@@ -100,6 +100,7 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/agent/spawn/startup_prompt_tests.rs': 'agent::spawn::startup_prompt::tests',
   'src-tauri/src/circuit/compatibility_tests.rs': 'circuit::compatibility::tests',
   'src-tauri/src/circuit/delivery_tests.rs': 'circuit::delivery::tests',
+  'src-tauri/src/circuit/observation_tests.rs': 'circuit::observation::owned_work_tests',
   'src-tauri/src/circuit/vocabulary_tests.rs': 'circuit::vocabulary::tests',
   'src-tauri/src/commands/git_status_bench.rs': 'commands::git_tests',
   'src-tauri/src/commands/git_status_counts_tests.rs': 'commands::git_tests::status_counts',

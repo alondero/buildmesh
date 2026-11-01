@@ -337,6 +337,14 @@ pub struct WorkEvidence {
     pub assignment_completed: bool,
     pub ownership_covered: bool,
     pub children: std::collections::BTreeMap<String, bool>,
+    /// Children first reported by the harness's own registry (an
+    /// `OwnershipSnapshot`, such as Claude Code's Stop hook `background_tasks`).
+    /// A later snapshot that no longer lists one is the harness saying it has
+    /// ended. A child known only from `OwnedStarted` still needs its own
+    /// `OwnedTerminated`. Evidence written before this field existed records no
+    /// registry children, so its snapshots retire nothing.
+    #[serde(default)]
+    pub registry_children: std::collections::BTreeSet<String>,
     pub conflicted: bool,
     #[serde(default)]
     pub conflicts: Vec<EvidenceConflict>,
@@ -422,6 +430,19 @@ impl WorkEvidence {
             });
         }
         self.conflicted = true;
+    }
+
+    /// A registry snapshot is the harness's whole list of live background work
+    /// (the hook parser drops a registry with any malformed item rather than
+    /// report part of it), so registry work it no longer lists has ended.
+    fn retire_unlisted_registry_children(&mut self, active_work: &[String]) {
+        for id in &self.registry_children {
+            if !active_work.contains(id) {
+                if let Some(terminal) = self.children.get_mut(id) {
+                    *terminal = true;
+                }
+            }
+        }
     }
 
     pub fn has_human_wait(&self) -> bool {
@@ -684,6 +705,18 @@ impl WorkEvidence {
                 });
             }
         }
+        // A registry snapshot describes the session's background work, not the
+        // foreground turn that carried it. Claude Code opens a turn of its own
+        // (`<task-notification>`) when background work finishes; Buildmesh sent
+        // no prompt for it, so the turn's evidence is reduced-confidence. Its
+        // registry still proves which work has ended. Identity was checked
+        // above, so only retire work, and only from a named session; adding
+        // work still needs authoritative evidence.
+        if let ObservedWorkFact::OwnershipSnapshot { active_work } = &event.fact {
+            if observed.session_incarnation.is_some() && observed.session_id.is_some() {
+                self.retire_unlisted_registry_children(active_work);
+            }
+        }
         if !event.authoritative
             || observed.session_incarnation.is_none()
             || observed.session_id.is_none()
@@ -773,6 +806,7 @@ impl WorkEvidence {
                 }
                 for id in active_work {
                     self.children.insert(id.clone(), false);
+                    self.registry_children.insert(id.clone());
                 }
                 self.ownership_covered = true;
             }
@@ -809,6 +843,10 @@ impl WorkEvidence {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "observation_tests.rs"]
+mod owned_work_tests;
 
 #[cfg(test)]
 mod tests {

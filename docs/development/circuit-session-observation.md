@@ -48,6 +48,19 @@ claiming complete native ownership coverage. Known unfinished work, evidence
 conflicts and actual requests remain blockers. Review approval and external
 merge requirements remain separate.
 
+A harness registry snapshot (`OwnershipSnapshot`, from Claude Code's Stop hook
+`background_tasks` and `session_crons`) lists all of the session's live
+background work; the hook parser drops a registry with any malformed item
+rather than report part of it. Work a snapshot reported and a later snapshot no longer lists
+has ended (`WorkEvidence::registry_children`). That holds for a
+reduced-confidence snapshot too: Claude Code opens a turn of its own
+(`<task-notification>`) when backgrounded work finishes, Buildmesh sent no prompt
+for it, and that turn's registry is the only completion evidence a backgrounded
+Bash command produces. Without it a step waited on finished work until its
+evidence window expired (runs 774, 775, 781 and 782). A reduced-confidence
+snapshot only retires work; it never adds a child. A child known only from
+`OwnedStarted` still ends only with its own `OwnedTerminated`.
+
 The shared `circuit::report_admission` policy reads the last persisted harness
 lifecycle report as negative evidence: explicit questions and permissions block
 report handoff, and BackgroundRunning blocks it as known outstanding work.

@@ -4072,6 +4072,113 @@ fn native_owned_work_snapshot_is_atomic_and_only_hands_off_to_task_interpretatio
     assert_eq!(run.context.get("observer.receipt_cursor"), Some("3"));
 }
 
+/// Runs 774, 775, 781 and 782: the agent backgrounded `npm run verify` and
+/// ended its prompted turn, so the Stop hook listed that task. Claude Code then
+/// opened a turn of its own (`<task-notification>`) when the task finished.
+/// Buildmesh sent no prompt for that turn, so its hooks are reduced-confidence,
+/// and the registry that no longer lists the task was ignored: the step waited
+/// on finished work until its evidence window expired.
+#[test]
+fn a_harness_started_turn_registry_retires_background_work_that_finished() {
+    use super::super::observation::{
+        CircuitObservation, CircuitObservationBlocker as B, ObservationIdentity,
+        ObservedWorkFact as Fact,
+    };
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(2));
+    run.attach_agent_node("work", 900);
+    let prompted = ObservationIdentity {
+        run_id: 42,
+        step_id: "work".into(),
+        attempt: 1,
+        agent_node_id: 900,
+        session_incarnation: Some("generation".into()),
+        session_id: Some("session".into()),
+        turn_id: Some("prompt".into()),
+        report_revision: None,
+    };
+    let mut notification = prompted.clone();
+    notification.turn_id = Some("task-notification".into());
+    let batch = |receipt_id: i64,
+                 identity: &ObservationIdentity,
+                 authoritative: bool,
+                 facts: Vec<Fact>| CircuitEvent::ObservationBatch {
+        receipt_id,
+        // As `native_hooks::normalize` builds it: the hook's own turn.
+        expected: identity.clone(),
+        stale: false,
+        input_guard: None,
+        observations: facts
+            .into_iter()
+            .enumerate()
+            .map(|(index, fact)| CircuitObservation {
+                identity: identity.clone(),
+                source: "claude_native_hook".into(),
+                source_id: Some(format!("{receipt_id}:{index}")),
+                observed_at_ms: receipt_id,
+                authoritative,
+                fact,
+            })
+            .collect(),
+    };
+    advance(
+        &mut run,
+        &batch(
+            1,
+            &prompted,
+            true,
+            vec![
+                Fact::AssistantReport {
+                    text: "Waiting for the background verify run".into(),
+                    revision: "report-1".into(),
+                },
+                Fact::ForegroundTerminated,
+                Fact::OwnershipSnapshot {
+                    active_work: vec!["task:verify".into()],
+                },
+            ],
+        ),
+    );
+    assert_eq!(run.report_blocker("work"), Some(B::KnownWorkOutstanding));
+    run.context = CircuitContext::from_json(&run.context.to_json().unwrap()).unwrap();
+
+    advance(
+        &mut run,
+        &batch(2, &notification, false, vec![Fact::Working]),
+    );
+    advance(
+        &mut run,
+        &batch(
+            3,
+            &notification,
+            false,
+            vec![
+                Fact::AssistantReport {
+                    text: "Verify passed; round complete".into(),
+                    revision: "report-3".into(),
+                },
+                Fact::ForegroundTerminated,
+                Fact::OwnershipSnapshot {
+                    active_work: vec![],
+                },
+            ],
+        ),
+    );
+    run.context = CircuitContext::from_json(&run.context.to_json().unwrap()).unwrap();
+    assert_eq!(
+        run.report_blocker("work"),
+        None,
+        "the harness registry no longer lists the task, so it is not outstanding"
+    );
+}
+
 #[test]
 fn circuit_classifier_outage_has_a_durable_retry_budget() {
     let mut run = gate_run(
