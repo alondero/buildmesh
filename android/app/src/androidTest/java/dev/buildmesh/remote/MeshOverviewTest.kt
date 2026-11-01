@@ -8,9 +8,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
-import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.Density
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.platform.app.InstrumentationRegistry
@@ -51,7 +48,7 @@ class MeshOverviewTest {
     @Test fun overviewScreenshot() {
         compose.setContent { BuildmeshTheme {
             Surface(color = MeshColors.background) {
-                Dashboard(RemoteState(meshes = meshes, nodes = nodes), "Overview", 0, {}, {}, { _, _ -> }, { _, _ -> })
+                Dashboard(RemoteState(meshes = meshes, nodes = nodes), HomePane.Meshes, 0, {}, {}, { _, _ -> }, { _, _ -> })
             }
         } }
         compose.onNodeWithText("Empty mesh").performScrollTo().assertIsDisplayed()
@@ -77,7 +74,7 @@ class MeshOverviewTest {
         val opened = mutableListOf<Pair<Long, String>>()
         compose.setContent { BuildmeshTheme {
             Surface(color = MeshColors.background) {
-                Dashboard(state.value, "Work", selected.value, { selected.value = it }, {},
+                Dashboard(state.value, HomePane.Work, selected.value, { selected.value = it }, {},
                     { id, target -> opened += id to target }, { _, _ -> })
             }
         } }
@@ -103,7 +100,7 @@ class MeshOverviewTest {
         val state = mutableStateOf(RemoteState(meshes = savedOrder, nodes = nodes + archived))
         compose.setContent { BuildmeshTheme {
             Surface(color = MeshColors.background) {
-                Dashboard(state.value, "Overview", 3, {}, {}, { _, _ -> }, { _, _ -> })
+                Dashboard(state.value, HomePane.Meshes, 3, {}, {}, { _, _ -> }, { _, _ -> })
             }
         } }
         fun assertOrder(names: List<String>) {
@@ -156,8 +153,11 @@ class MeshOverviewTest {
 
                 compose.onNodeWithText("Buildmesh agent").performClick()
                 compose.onNodeWithText("Open terminal").assertIsDisplayed()
+                // Back from an agent lands on the mesh it belongs to, and Back
+                // from the mesh page returns to the mesh list.
                 compose.onNodeWithContentDescription("Back").performClick()
-                compose.onNodeWithText("Overview", substring = false).performClick()
+                compose.onNodeWithText("Buildmesh agent").assertIsDisplayed()
+                compose.onNodeWithContentDescription("Back").performClick()
                 compose.onNodeWithText("Buildmesh agent").assertDoesNotExist()
                 compose.onNode(hasScrollToIndexAction()).performScrollToNode(hasText("Empty mesh"))
                 compose.onNodeWithText("Empty mesh").performClick()
@@ -184,7 +184,7 @@ class MeshOverviewTest {
         val opened = mutableListOf<Pair<Long, String>>()
         compose.setContent { BuildmeshTheme {
             Surface(color = MeshColors.background) {
-                Dashboard(RemoteState(meshes = listOf(meshes[0], pinned), nodes = nodes, providers = providers), "Overview", 0, {}, {}, { _, _ -> },
+                Dashboard(RemoteState(meshes = listOf(meshes[0], pinned), nodes = nodes, providers = providers), HomePane.Meshes, 0, {}, {}, { _, _ -> },
                     { id, option -> opened += id to option })
             }
         } }
@@ -243,7 +243,7 @@ class MeshOverviewTest {
         var target = ""
         compose.setContent { BuildmeshTheme {
             Surface(color = MeshColors.background) {
-                Dashboard(state.value, "Overview", 0, {}, {}, { id, screen -> opened = id; target = screen }, { _, _ -> })
+                Dashboard(state.value, HomePane.Meshes, 0, {}, {}, { id, screen -> opened = id; target = screen }, { _, _ -> })
             }
         } }
         compose.onNodeWithContentDescription("2 agents: Running, Needs attention", useUnmergedTree = true).assertExists()
@@ -287,7 +287,7 @@ class MeshOverviewTest {
         var opened = 0L
         compose.setContent { BuildmeshTheme {
             Surface(color = MeshColors.background) {
-                Dashboard(RemoteState(meshes = listOf(meshes[1]), nodes = listOf(waitingPermission)), "Work", 2, {}, { opened = it }, { _, _ -> }, { _, _ -> })
+                Dashboard(RemoteState(meshes = listOf(meshes[1]), nodes = listOf(waitingPermission)), HomePane.Work, 2, {}, { opened = it }, { _, _ -> }, { _, _ -> })
                 { id, sequence, onDone -> answered = id to sequence; onDone(true); true }
             }
         } }
@@ -310,7 +310,7 @@ class MeshOverviewTest {
         var answered: Pair<Long, String>? = null
         compose.setContent { BuildmeshTheme {
             Surface(color = MeshColors.background) {
-                Dashboard(RemoteState(meshes = listOf(meshes[1]), nodes = listOf(waitingPermission)), "Work", 2, {}, {}, { _, _ -> }, { _, _ -> })
+                Dashboard(RemoteState(meshes = listOf(meshes[1]), nodes = listOf(waitingPermission)), HomePane.Work, 2, {}, {}, { _, _ -> }, { _, _ -> })
                 { id, sequence, onDone -> answered = id to sequence; onDone(false); true }
             }
         } }
@@ -329,7 +329,7 @@ class MeshOverviewTest {
         var terminal = 0L
         compose.setContent { BuildmeshTheme {
             Surface(color = MeshColors.background) {
-                Dashboard(RemoteState(meshes = listOf(meshes[1]), nodes = listOf(waitingQuestion)), "Work", 2, {}, { opened = it }, { _, _ -> }, { _, _ -> },
+                Dashboard(RemoteState(meshes = listOf(meshes[1]), nodes = listOf(waitingQuestion)), HomePane.Work, 2, {}, { opened = it }, { _, _ -> }, { _, _ -> },
                     openTerminal = { terminal = it }) { _, _, _ -> true }
             }
         } }
@@ -345,27 +345,21 @@ class MeshOverviewTest {
     @Test fun theDeckDoesNotDuplicateTheWorkTabRows() {
         compose.setContent { BuildmeshTheme {
             Surface(color = MeshColors.background) {
-                Dashboard(RemoteState(meshes = listOf(meshes[1]), nodes = listOf(waitingPermission)), "Work", 2, {}, {}, { _, _ -> }, { _, _ -> }) { _, _, _ -> true }
+                Dashboard(RemoteState(meshes = listOf(meshes[1]), nodes = listOf(waitingPermission)), HomePane.Work, 2, {}, {}, { _, _ -> }, { _, _ -> }) { _, _, _ -> true }
             }
         } }
         compose.onNodeWithText("Waiting for input").assertIsDisplayed()
         compose.onAllNodesWithText("Waiting agent").assertCountEquals(1)
     }
 
-    @Test fun wideWindowShowsTheMeshListBesideTheSelectedMesh() {
+    @Test fun splitDashboardShowsTheMeshListBesideTheSelectedMesh() {
         val selected = mutableStateOf(0L)
-        // The phone window is about 411dp. Lower the density so those same pixels
-        // measure at least 720dp and the 600dp split lays out inside the real window.
-        val density = compose.activity.resources.displayMetrics.widthPixels / 720f
         compose.setContent { BuildmeshTheme {
-            val fontScale = LocalDensity.current.fontScale
-            CompositionLocalProvider(LocalDensity provides Density(density, fontScale)) {
-                Surface(color = MeshColors.background) {
-                    Dashboard(RemoteState(meshes = meshes, nodes = nodes), "Overview", selected.value,
-                        { selected.value = it }, {},
-                        { id, target -> if (target == "work") selected.value = id },
-                        { _, _ -> })
-                }
+            Surface(color = MeshColors.background) {
+                Dashboard(RemoteState(meshes = meshes, nodes = nodes), HomePane.Meshes, selected.value,
+                    { selected.value = it }, {},
+                    { id, target -> if (target == "work") selected.value = id },
+                    { _, _ -> }, split = true)
             }
         } }
         compose.onNodeWithText("Empty mesh").assertIsDisplayed()
@@ -383,7 +377,7 @@ class MeshOverviewTest {
         }
         compose.setContent { BuildmeshTheme {
             Surface(color = MeshColors.background) {
-                Dashboard(RemoteState(meshes = listOf(meshes[1]), nodes = manyNodes), "Overview", 0, {}, {}, { _, _ -> }, { _, _ -> })
+                Dashboard(RemoteState(meshes = listOf(meshes[1]), nodes = manyNodes), HomePane.Meshes, 0, {}, {}, { _, _ -> }, { _, _ -> })
             }
         } }
         val title = compose.onNodeWithText("Website with a long mesh name").performScrollTo().assertHasClickAction()

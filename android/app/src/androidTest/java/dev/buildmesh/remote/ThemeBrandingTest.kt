@@ -14,6 +14,9 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -101,8 +104,9 @@ class ThemeBrandingTest {
                 compose.onNodeWithContentDescription("Buildmesh").assertIsDisplayed()
                 compose.onNodeWithText("buildmesh").assertIsDisplayed()
                 saveScreenshot("branding-home")
-                compose.onNodeWithContentDescription("Connection settings").performClick()
-                compose.onNodeWithText("Connection").assertIsDisplayed()
+                // Settings is a destination in the navigation bar, not an app-bar icon.
+                compose.onNode(hasText("Settings") and hasAnyAncestor(hasTestTag("bottom-navigation"))).performClick()
+                compose.onNodeWithText("Paired desktop").assertIsDisplayed()
             } finally {
                 compose.runOnUiThread { vm.forget() }
                 store.clear()

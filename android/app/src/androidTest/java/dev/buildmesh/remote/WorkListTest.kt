@@ -48,7 +48,7 @@ class WorkListTest {
         compose.setContent { BuildmeshTheme {
             Surface(color = MeshColors.background) {
                 Box(Modifier.width(320.dp).fillMaxHeight()) {
-                    Dashboard(state, "Work", 1, {}, { opened += it }, { _, _ -> }, { _, _ -> }, { closed += it })
+                    Dashboard(state, HomePane.Work, 1, {}, { opened += it }, { _, _ -> }, { _, _ -> }, { closed += it })
                 }
             }
         } }
@@ -71,7 +71,7 @@ class WorkListTest {
         val closed = mutableListOf<Long>()
         compose.setContent { BuildmeshTheme {
             Surface(color = MeshColors.background) {
-                Dashboard(state, "Work", 1, {}, {}, { _, _ -> }, { _, _ -> }, { closed += it })
+                Dashboard(state, HomePane.Work, 1, {}, {}, { _, _ -> }, { _, _ -> }, { closed += it })
             }
         } }
         compose.onNodeWithText("Reviewer").performScrollTo().performTouchInput { swipeLeft() }
@@ -92,7 +92,7 @@ class WorkListTest {
                 LocalDensity provides Density(density, 1.4f)) {
                 Surface(color = MeshColors.background) {
                     Box(Modifier.width(320.dp).fillMaxHeight()) {
-                        Dashboard(state, "Work", 1, {}, {}, { _, _ -> }, { _, _ -> }, {})
+                        Dashboard(state, HomePane.Work, 1, {}, {}, { _, _ -> }, { _, _ -> }, {})
                     }
                 }
             }
@@ -109,7 +109,7 @@ class WorkListTest {
         var busy by mutableStateOf(false)
         compose.setContent { BuildmeshTheme {
             Surface(color = MeshColors.background) {
-                Dashboard(state.copy(busy = busy), "Work", 1, {}, {}, { _, _ -> }, { _, _ -> }, { closed += it })
+                Dashboard(state.copy(busy = busy), HomePane.Work, 1, {}, {}, { _, _ -> }, { _, _ -> }, { closed += it })
             }
         } }
         val closeAction = compose.onNodeWithText("Reviewer").performScrollTo().fetchSemanticsNode()
@@ -127,7 +127,7 @@ class WorkListTest {
         compose.setContent { BuildmeshTheme {
             Surface(color = MeshColors.background) {
                 Box(Modifier.width(320.dp).fillMaxHeight().testTag("work")) {
-                    Dashboard(state, "Work", 1, {}, { opened += it }, { _, _ -> }, { _, _ -> })
+                    Dashboard(state, HomePane.Work, 1, {}, { opened += it }, { _, _ -> }, { _, _ -> })
                 }
             }
         } }
@@ -163,7 +163,7 @@ class WorkListTest {
             CompositionLocalProvider(LocalDensity provides Density(density, 1.4f)) {
                 Surface(color = MeshColors.background) {
                     Box(Modifier.width(320.dp).fillMaxHeight()) {
-                        Dashboard(state, "Work", 1, {}, {}, { _, _ -> }, { _, _ -> })
+                        Dashboard(state, HomePane.Work, 1, {}, {}, { _, _ -> }, { _, _ -> })
                     }
                 }
             }

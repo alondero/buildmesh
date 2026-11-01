@@ -1275,7 +1275,7 @@ input to keep the draft as it was. Availability and offline support depend on
 your phone's speech provider, which may use an online service. If speech input
 is unavailable, type your task or use your keyboard's microphone.
 
-Android provides native Overview/Work, agent replies, task capture, issues,
+Android provides native meshes and agents, agent replies, task capture, issues,
 archive resume, changes and diffs. Pull an Android list down to refresh it:
 Issues, Archive, Changes, Pull requests and Usage re-read on the gesture, and
 the refresh button in the app bar reloads the screen you are on. The mesh
@@ -1286,29 +1286,35 @@ keys, and reconnects when the app returns to the foreground. In either phone
 client, tap a terminal URL or hyperlink to open it in your phone's browser;
 drag to scroll without opening links.
 **Create PR** on a mesh uses that mesh's current branch; ask an
-agent to open a worktree PR from its terminal. **Connection → Forget this
+agent to open a worktree PR from its terminal. **Settings → Forget this
 desktop** removes this phone's saved session. Revoke the device on the desktop
 to remove its authorization. Certificate resets require fresh pairing.
 
-In Android **Overview**, the screen is the list of meshes. Tap a mesh name to
-open **Work** for that mesh. Each mesh shows a status dot per open agent and
+Android has three places you can move between from the bottom bar:
+**Meshes**, **Usage** and **Settings**. On a tablet, or a fold opened flat,
+the bar becomes a rail down the side. Everything else is a step inside one of
+them, and Back takes you up one step. Starting a task is a button, not a place:
+**New task** floats over Meshes (at the top of the rail on a tablet) and opens
+**Capture** for the mesh you have selected.
+
+In Android **Meshes**, the screen is the list of meshes. Tap a mesh name to
+open that mesh's agents. Each mesh shows a status dot per open agent and
 their count. Meshes without open agents have muted names and say **No agents
 yet**; they remain tappable. Meshes with open agents appear first, preserving
 your desktop mesh order within each group. The **+** beside the mesh name
 starts a task with its default agent; the adjacent arrow offers other launch
 configurations.
 
-**Work** lists that mesh's open agents. An agent waiting on you is pinned at
+A mesh's page lists its open agents. An agent waiting on you is pinned at
 the top, once, with the reply the desktop would offer. A paired group stays
 together in that list. **Pull requests**,
 **Issues**, and **Archive** stay on that mesh, including when it has no open
-agents. Work has no mesh switcher and no status filter: choose another mesh
-from **Overview**. On a tablet, or a fold opened flat, the mesh list stays on
+agents. A mesh page has no mesh switcher and no status filter: press Back and
+choose another mesh. On a tablet, or a fold opened flat, the mesh list stays on
 the side and the agents stay beside it, so choosing a mesh does not leave the
 list.
 
-The phone opens on **Overview**. Use the bottom navigation to switch between
-**Overview**, **Work**, and **Capture**. Status reporting warnings mean the
+The phone opens on **Meshes**. Status reporting warnings mean the
 agent's activity may be out of date; inspect its terminal to check.
 
 **Capture** saves an idea draft on this phone as you type. Choose a mesh and
@@ -1316,7 +1322,7 @@ an available agent (your choices are remembered on this phone), then select **St
 the new agent's initial prompt. Saved launch configurations are available;
 only agents supporting initial prompts are offered. Desktop uses the same rule
 for a prompted new node, a handover, and an issue or pull-request spawn. A failed launch retains
-the draft. If the connection drops during launch, check Work before retrying:
+the draft. If the connection drops during launch, check the mesh's agents before retrying:
 the desktop may have accepted the request. Drafts are local to the browser,
 are not a desktop backlog, and disappear when site data is cleared.
 
@@ -1329,7 +1335,7 @@ terminal. Changes still supports file diffs and pull request creation. The
 request and unsent reply remain available while you inspect changes or the
 terminal. Back returns through the screen you came from.
 
-**Connection → Background notifications** makes the phone tell you when an
+**Settings → Background notifications** makes the phone tell you when an
 agent needs you while the app is closed. Turn it on once; the phone then keeps
 a connection to the desktop and posts one notification per agent that asks a
 question or requests permission. Tapping the notification opens that agent,

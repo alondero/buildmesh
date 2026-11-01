@@ -25,6 +25,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -33,18 +35,71 @@ import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.serialization.json.*
 
-@OptIn(ExperimentalMaterial3Api::class)
+/**
+ * The app's top-level destinations: peers a person moves between at will, so
+ * they are what the bottom bar (or, on a wide window, the rail) offers. A
+ * mesh's agents, an agent, Capture and the resource lists are not peers: they
+ * are steps inside Meshes, entered by tapping and left with Back.
+ */
+private enum class Destination(val label: String, val icon: ImageVector, val screen: String) {
+    Meshes("Meshes", Icons.Default.Hub, "home"),
+    Usage("Usage", Icons.Default.BarChart, "usage"),
+    Settings("Settings", Icons.Default.Settings, "connection"),
+}
+
+// "mesh" is the second step of Meshes on a phone: one mesh's agents, pushed
+// over the mesh list. A wide window has no such screen; it shows both at once.
+private fun destinationOf(screen: String) = when (screen) {
+    "home", "mesh" -> Destination.Meshes
+    "usage" -> Destination.Usage
+    "connection" -> Destination.Settings
+    else -> null
+}
+
 @Composable
 fun BuildmeshApp(vm: BuildmeshViewModel, invitation: String = "", requestedNodeId: Long = 0L, onNodeRequestConsumed: () -> Unit = {}) {
+    // The window is measured once, here. That one answer chooses the navigation
+    // component and whether the mesh list shares the screen with the selected
+    // mesh's agents, so the two can never disagree about what "wide" means.
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        BuildmeshShell(vm, invitation, requestedNodeId, onNodeRequestConsumed, wide = maxWidth >= MeshSplitMinWidth)
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun BuildmeshShell(vm: BuildmeshViewModel, invitation: String, requestedNodeId: Long, onNodeRequestConsumed: () -> Unit, wide: Boolean) {
     val state by vm.state.collectAsStateWithLifecycle()
     var screen by rememberSaveable { mutableStateOf("home") }
-    var tab by rememberSaveable { mutableStateOf("Overview") }
     var meshId by rememberSaveable { mutableLongStateOf(0) }
     var nodeId by rememberSaveable { mutableLongStateOf(0) }
     var launch by rememberSaveable { mutableStateOf("") }
     var file by rememberSaveable { mutableStateOf("") }
     var pendingNodeId by rememberSaveable { mutableLongStateOf(0L) }
+    // Where Capture was opened from, so Back returns there.
+    var captureOrigin by rememberSaveable { mutableStateOf("home") }
+    // The screen that shows the selected mesh's agents: its own page on a phone,
+    // the right-hand pane of the list on a wide window.
+    fun meshScreen() = if (wide || meshId <= 0L) "home" else "mesh"
+    // An agent lives in a mesh, so opening one also selects that mesh. Back then
+    // lands on the mesh the agent belongs to, however the agent was reached
+    // (a notification, the waiting deck, an issue, a new task).
+    fun openNode(id: Long, next: String = "node") {
+        nodeId = id
+        state.nodes.firstOrNull { it.number("id") == id }?.number("mesh_id")?.takeIf { it > 0L }?.let { meshId = it }
+        screen = next
+    }
+    fun openCapture(id: Long, option: String) {
+        meshId = id
+        launch = option
+        captureOrigin = if (screen == "mesh") "mesh" else "home"
+        screen = "capture"
+    }
     LaunchedEffect(state.paired) { if (!state.paired) screen = "home" }
+    // Unfolding or rotating into a wide window turns the phone's mesh page into
+    // the list-and-agents layout. Without this a Back press would "leave" a
+    // screen that looks identical to the one it lands on.
+    LaunchedEffect(wide, screen) { if (wide && screen == "mesh") screen = "home" }
     // A notification names the node it is about, so opening it lands on that
     // node. The request waits for the inventory before it navigates: an empty
     // node list before the first read means "not loaded yet", not "that node
@@ -58,13 +113,26 @@ fun BuildmeshApp(vm: BuildmeshViewModel, invitation: String = "", requestedNodeI
         if (pendingNodeId <= 0L) return@LaunchedEffect
         val present = state.nodes.any { it.number("id") == pendingNodeId }
         if (present || (state.loaded && !state.refreshing)) {
-            nodeId = pendingNodeId
-            screen = "node"
+            openNode(pendingNodeId)
             pendingNodeId = 0L
         }
     }
-    fun back() { screen = when (screen) { "terminal", "changes", "pr" -> "node"; "diff" -> "changes"; else -> "home" } }
+    // Back climbs one step: detail screens return to the screen that opened
+    // them, and an agent, a resource list or the mesh page return to the mesh.
+    // Everything else is a destination, whose Back is the start destination.
+    fun back() {
+        screen = when (screen) {
+            "terminal", "changes", "pr" -> "node"
+            "diff" -> "changes"
+            "node", "issues", "pulls", "archive" -> meshScreen()
+            "capture" -> if (captureOrigin == "mesh") meshScreen() else "home"
+            else -> "home"
+        }
+    }
     BackHandler(state.paired && screen != "home") { back() }
+    val destination = destinationOf(screen)
+    val showNavigation = state.paired && destination != null
+    val selectedMesh = state.meshes.firstOrNull { it.number("id") == meshId }
     val selected = state.nodes.firstOrNull { it.number("id") == nodeId }
     val snackbar = remember { SnackbarHostState() }
     LaunchedEffect(state.notice) {
@@ -76,92 +144,123 @@ fun BuildmeshApp(vm: BuildmeshViewModel, invitation: String = "", requestedNodeI
     val showProgress = state.busy || state.manualRefresh || (state.refreshing && !state.loaded)
     var pulling by remember { mutableStateOf(false) }
     LaunchedEffect(state.refreshing) { if (pulling && !state.refreshing) pulling = false }
+    val startTask = { openCapture(meshId, "") }
     Scaffold(
         topBar = {
             if (state.paired) TopAppBar(title = {
                 if (screen == "home") BuildmeshWordmark() else {
                     val title = when (screen) {
+                        "mesh" -> selectedMesh?.text("name") ?: "Mesh"
                         "node", "terminal", "changes", "diff", "pr" -> selected?.text("name") ?: "Agent Node"
                         "issues" -> "Issues"; "pulls" -> "Pull requests"; "archive" -> "Archive"; "capture" -> "New task"
-                        "connection" -> "Connection"; "usage" -> "Usage"; else -> "Buildmesh"
+                        "connection" -> "Settings"; "usage" -> "Usage"; else -> "Buildmesh"
                     }
-                    Text(title, maxLines = 1)
+                    Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }, colors = TopAppBarDefaults.topAppBarColors(
                 containerColor = MeshColors.surface, scrolledContainerColor = MeshColors.surface,
                 navigationIconContentColor = MeshColors.secondary, actionIconContentColor = MeshColors.secondary,
             ),
                 navigationIcon = {
-                    if (screen != "home") IconButton(onClick = ::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
+                    // A destination reached from the bar has no Back arrow: its
+                    // Back is the system gesture, which returns to Meshes.
+                    if (screen !in setOf("home", "usage", "connection")) IconButton(onClick = ::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
                 }, actions = {
-                    if (screen == "home") IconButton(onClick = { screen = "usage" }) { Icon(Icons.Default.BarChart, "Usage") }
                     // The shared recovery affordance every screen offers: it
                     // re-reads the screen's own route and keeps the thin
                     // progress bar, so a pull never needs a second control.
                     IconButton(onClick = vm::retry) { Icon(Icons.Default.Refresh, "Refresh") }
-                    IconButton(onClick = { screen = "connection" }) { Icon(Icons.Default.Settings, "Connection settings") }
                 })
         },
         bottomBar = {
-            if (state.paired && screen == "home") NavigationBar(containerColor = MeshColors.surface, tonalElevation = 0.dp) {
-                listOf("Overview" to Icons.Default.Dashboard, "Work" to Icons.Default.Work, "Capture" to Icons.Default.Add).forEach { (label, icon) ->
-                    NavigationBarItem(selected = tab == label, colors = NavigationBarItemDefaults.colors(
+            if (showNavigation && !wide) NavigationBar(Modifier.testTag("bottom-navigation"), containerColor = MeshColors.surface, tonalElevation = 0.dp) {
+                Destination.entries.forEach { target ->
+                    NavigationBarItem(selected = target == destination, colors = NavigationBarItemDefaults.colors(
                         selectedIconColor = MeshColors.accent, selectedTextColor = MeshColors.accent,
                         indicatorColor = MeshColors.selection,
                         unselectedIconColor = MeshColors.secondary, unselectedTextColor = MeshColors.secondary,
-                    ), onClick = {
-                        if (label == "Capture") screen = "capture" else tab = label
-                    }, icon = { Icon(icon, label) }, label = { Text(label) })
+                    ), onClick = { screen = target.screen }, icon = { Icon(target.icon, null) }, label = { Text(target.label) })
                 }
             }
+        },
+        // Starting a task is the app's one primary action, not a place to be:
+        // it floats over Meshes instead of taking a tab. A wide window keeps it
+        // at the head of the rail on every destination.
+        floatingActionButton = {
+            // The extended button clears its label's semantics, which would leave
+            // a screen reader announcing a button with no name.
+            if (showNavigation && !wide && destination == Destination.Meshes) ExtendedFloatingActionButton(
+                onClick = startTask,
+                modifier = Modifier.semantics { contentDescription = "New task" },
+                containerColor = MaterialTheme.colorScheme.primary, contentColor = MaterialTheme.colorScheme.onPrimary,
+                icon = { Icon(Icons.Default.Add, null) }, text = { Text("New task") },
+            )
         }, snackbarHost = { SnackbarHost(snackbar) },
     ) { padding ->
-        Column(Modifier.fillMaxSize().padding(padding)) {
-            if (state.error.isNotEmpty()) ErrorBanner(state.error, vm::dismissError)
-            if (showProgress) LinearProgressIndicator(Modifier.fillMaxWidth())
-            if (state.restoring) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
-            else if (!state.paired) PairScreen(invitation, state.busy, vm::pair)
-            else DesktopStateBoundary(state.draftNamespace) {
-                when (screen) {
-                    // Pull-to-refresh is the phone's own gesture for a list the
-                    // user is staring at; the app-bar action stays as the
-                    // recovery affordance the error notice points at.
-                    "home" -> PullToRefreshBox(
-                        isRefreshing = pulling,
-                        // The gesture owns its own indicator, so this read is not
-                        // marked manual: only a started read spins, and only
-                        // until it lands.
-                        onRefresh = { if (vm.refresh()) pulling = true },
-                        modifier = Modifier.fillMaxSize(),
-                    ) {
-                        Dashboard(state, tab, meshId, { meshId = it }, { nodeId = it; screen = "node" },
-                            { id, target ->
-                                meshId = id
-                                if (target == "work") tab = "Work" else screen = target
-                            }, { id, option -> meshId = id; launch = option; screen = "capture" },
-                            closeNode = vm::closeNode,
-                            openTerminal = { id -> nodeId = id; screen = "terminal" },
-                            // `onDone(true)` is the desktop accepting the keys;
-                            // `onDone(false)` is the send failing, which releases
-                            // the chip's in-flight marker.
-                            answer = { id, sequence, onDone ->
-                                vm.action(onFailed = { onDone(false) }) { api -> api.sendKeys(id, sequence); onDone(true) }
-                            })
+        Row(Modifier.fillMaxSize().padding(padding)) {
+            if (showNavigation && wide) NavigationRail(Modifier.testTag("navigation-rail"), containerColor = MeshColors.surface,
+                windowInsets = WindowInsets(0),
+                header = {
+                    FloatingActionButton(onClick = startTask, containerColor = MaterialTheme.colorScheme.primary, contentColor = MaterialTheme.colorScheme.onPrimary) {
+                        Icon(Icons.Default.Add, "New task")
                     }
-                    "node" -> if (selected != null) NodeScreen(selected, vm, { screen = "terminal" }, { screen = "changes" }, { screen = "pr" }, { id -> nodeId = id; screen = "terminal" })
-                        else EmptyMessage("This node is no longer available.")
-                    "terminal" -> vm.api?.let { TerminalPane(it, nodeId, vm) }
-                    "changes" -> vm.api?.let { ChangesScreen(it, nodeId, vm, { file = it; screen = "diff" }) }
-                    "diff" -> vm.api?.let { DiffScreen(it, nodeId, file, vm) }
-                    "capture" -> TaskScreen(state, vm, meshId, { meshId = it }, launch, { launch = it }, { id -> nodeId = id; screen = "node" })
-                    "issues", "archive" -> vm.api?.let { ResourceScreen(it, meshId, screen, state, vm, { id -> nodeId = id; screen = "node" }) }
-                    "pulls" -> vm.api?.let { PullRequestsScreen(it, meshId, vm, { id -> nodeId = id; screen = "node" }) }
-                    "usage" -> vm.api?.let { UsageScreen(it, vm) }
-                    "pr" -> if (selected != null) vm.api?.let { CreatePrScreen(it, selected.number("mesh_id"), nodeId, vm) }
-                        else EmptyMessage("This node is no longer available.")
-                    "connection" -> ConnectionScreen(state.origin, vm, {
-                        meshId = 0; nodeId = 0; screen = "home"
-                    })
+                }) {
+                Destination.entries.forEach { target ->
+                    NavigationRailItem(selected = target == destination, colors = NavigationRailItemDefaults.colors(
+                        selectedIconColor = MeshColors.accent, selectedTextColor = MeshColors.accent,
+                        indicatorColor = MeshColors.selection,
+                        unselectedIconColor = MeshColors.secondary, unselectedTextColor = MeshColors.secondary,
+                    ), onClick = { screen = target.screen }, icon = { Icon(target.icon, null) }, label = { Text(target.label) })
+                }
+            }
+            Column(Modifier.weight(1f).fillMaxHeight()) {
+                if (state.error.isNotEmpty()) ErrorBanner(state.error, vm::dismissError)
+                if (showProgress) LinearProgressIndicator(Modifier.fillMaxWidth())
+                if (state.restoring) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+                else if (!state.paired) PairScreen(invitation, state.busy, vm::pair)
+                else DesktopStateBoundary(state.draftNamespace) {
+                    when (screen) {
+                        // Pull-to-refresh is the phone's own gesture for a list the
+                        // user is staring at; the app-bar action stays as the
+                        // recovery affordance the error notice points at.
+                        "home", "mesh" -> PullToRefreshBox(
+                            isRefreshing = pulling,
+                            // The gesture owns its own indicator, so this read is not
+                            // marked manual: only a started read spins, and only
+                            // until it lands.
+                            onRefresh = { if (vm.refresh()) pulling = true },
+                            modifier = Modifier.fillMaxSize(),
+                        ) {
+                            Dashboard(state, if (screen == "mesh") HomePane.Work else HomePane.Meshes, meshId, { meshId = it }, { openNode(it) },
+                                { id, target ->
+                                    meshId = id
+                                    screen = if (target == "work") meshScreen() else target
+                                }, { id, option -> openCapture(id, option) },
+                                closeNode = vm::closeNode,
+                                openTerminal = { id -> openNode(id, "terminal") },
+                                split = wide,
+                                // `onDone(true)` is the desktop accepting the keys;
+                                // `onDone(false)` is the send failing, which releases
+                                // the chip's in-flight marker.
+                                answer = { id, sequence, onDone ->
+                                    vm.action(onFailed = { onDone(false) }) { api -> api.sendKeys(id, sequence); onDone(true) }
+                                })
+                        }
+                        "node" -> if (selected != null) NodeScreen(selected, vm, { screen = "terminal" }, { screen = "changes" }, { screen = "pr" }, { id -> nodeId = id; screen = "terminal" })
+                            else EmptyMessage("This node is no longer available.")
+                        "terminal" -> vm.api?.let { TerminalPane(it, nodeId, vm) }
+                        "changes" -> vm.api?.let { ChangesScreen(it, nodeId, vm, { file = it; screen = "diff" }) }
+                        "diff" -> vm.api?.let { DiffScreen(it, nodeId, file, vm) }
+                        "capture" -> TaskScreen(state, vm, meshId, { meshId = it }, launch, { launch = it }, { id -> openNode(id) })
+                        "issues", "archive" -> vm.api?.let { ResourceScreen(it, meshId, screen, state, vm, { id -> openNode(id) }) }
+                        "pulls" -> vm.api?.let { PullRequestsScreen(it, meshId, vm, { id -> openNode(id) }) }
+                        "usage" -> vm.api?.let { UsageScreen(it, vm) }
+                        "pr" -> if (selected != null) vm.api?.let { CreatePrScreen(it, selected.number("mesh_id"), nodeId, vm) }
+                            else EmptyMessage("This node is no longer available.")
+                        "connection" -> ConnectionScreen(state.origin, vm, {
+                            meshId = 0; nodeId = 0; screen = "home"
+                        })
+                    }
                 }
             }
         }
@@ -207,13 +306,24 @@ fun PairScreen(invitation: String, busy: Boolean, pair: (String, String) -> Unit
     }
 }
 
+// A tablet, an unfolded fold, or any window at least this wide keeps the mesh
+// list beside the agents. The shell measures the window, because the rail takes
+// width the content area no longer has.
 private val MeshSplitMinWidth = 600.dp
 
+// The two steps of Meshes: the list of meshes, then one mesh's agents. A phone
+// shows one at a time; a split window shows both and ignores this.
+enum class HomePane { Meshes, Work }
+
+// The bottom of a list clears the floating New task button.
+private val FabClearance = 88.dp
+
 @Composable
-fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) -> Unit, openNode: (Long) -> Unit, openMesh: (Long, String) -> Unit,
+fun Dashboard(state: RemoteState, pane: HomePane, meshId: Long, selectMesh: (Long) -> Unit, openNode: (Long) -> Unit, openMesh: (Long, String) -> Unit,
     openCapture: (Long, String) -> Unit,
     closeNode: ((Long) -> Unit)? = null,
     openTerminal: (Long) -> Unit = {},
+    split: Boolean = false,
     // `answer` returns false when the reply never reached the transport, and
     // completes with `true` only once the desktop accepted it — or `false`
     // when the send failed, so a tapped chip retires only on an acceptance
@@ -236,23 +346,19 @@ fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) 
     // Match Sidebar.tsx: open nodes determine the band; both bands keep saved mesh order.
     val (activeMeshes, inactiveMeshes) = state.meshes.partition { nodesByMesh.containsKey(it.number("id")) }
     val meshes = activeMeshes + inactiveMeshes
-    BoxWithConstraints(Modifier.fillMaxSize()) {
-        // A phone keeps the two steps apart. A tablet, an unfolded fold, or any
-        // window at least 600dp wide keeps the mesh list beside the agents.
-        val wide = maxWidth >= MeshSplitMinWidth
-        if (wide) {
-            Row(Modifier.fillMaxSize()) {
-                MeshDirectory(meshes, nodesByMesh, state, meshId, selectMesh, openMesh, openCapture, "Meshes",
-                    Modifier.width(280.dp).fillMaxHeight())
-                Box(Modifier.width(1.dp).fillMaxHeight().background(MeshColors.borderStrong))
-                MeshWork(state, meshId, openNode, openMesh, openTerminal, answer, closeNode, { closingId = it },
-                    Modifier.weight(1f).fillMaxHeight())
-            }
-        } else if (tab == "Overview") {
-            MeshDirectory(meshes, nodesByMesh, state, meshId, selectMesh, openMesh, openCapture, "Overview", Modifier.fillMaxSize())
-        } else {
-            MeshWork(state, meshId, openNode, openMesh, openTerminal, answer, closeNode, { closingId = it }, Modifier.fillMaxSize())
+    // A phone keeps the two steps apart; the mesh page carries the mesh's name
+    // in the app bar, so only the split layout repeats it as a heading.
+    if (split) {
+        Row(Modifier.fillMaxSize()) {
+            MeshDirectory(meshes, nodesByMesh, state, meshId, selectMesh, openMesh, openCapture, Modifier.width(280.dp).fillMaxHeight())
+            Box(Modifier.width(1.dp).fillMaxHeight().background(MeshColors.borderStrong))
+            MeshWork(state, meshId, openNode, openMesh, openTerminal, answer, closeNode, { closingId = it },
+                Modifier.weight(1f).fillMaxHeight(), showName = true)
         }
+    } else if (pane == HomePane.Meshes) {
+        MeshDirectory(meshes, nodesByMesh, state, meshId, selectMesh, openMesh, openCapture, Modifier.fillMaxSize())
+    } else {
+        MeshWork(state, meshId, openNode, openMesh, openTerminal, answer, closeNode, { closingId = it }, Modifier.fillMaxSize(), showName = false)
     }
 }
 
@@ -265,12 +371,12 @@ private fun MeshDirectory(
     selectMesh: (Long) -> Unit,
     openMesh: (Long, String) -> Unit,
     openCapture: (Long, String) -> Unit,
-    heading: String,
     modifier: Modifier = Modifier,
 ) {
-    LazyColumn(modifier, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    LazyColumn(modifier, contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = FabClearance),
+        verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item {
-            Text(heading, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text("Meshes", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         }
         items(meshes, key = { "mesh-${it.number("id")}" }) { mesh ->
             val members = nodesByMesh[mesh.number("id")].orEmpty()
@@ -312,6 +418,7 @@ private fun MeshWork(
     closeNode: ((Long) -> Unit)?,
     onRequestClose: (Long) -> Unit,
     modifier: Modifier = Modifier,
+    showName: Boolean,
 ) {
     val mesh = state.meshes.firstOrNull { it.number("id") == meshId }
     val scope = if (mesh == null) emptyList() else state.nodes.filter {
@@ -329,11 +436,12 @@ private fun MeshWork(
         else activity
     }
     val glyphMotion = rememberWorkGlyphMotion()
-    LazyColumn(modifier, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    LazyColumn(modifier, contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = FabClearance),
+        verticalArrangement = Arrangement.spacedBy(12.dp)) {
         if (mesh == null) {
             item { EmptyMessage("Select a mesh to see its agents.") }
         } else {
-            item {
+            if (showName) item {
                 Text(mesh.text("name"), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
