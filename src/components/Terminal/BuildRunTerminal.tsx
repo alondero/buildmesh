@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import '@xterm/xterm/css/xterm.css';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { buildRunTerminalManager } from './BuildRunTerminalRegistry';
+import { rememberTerminalFocusRequest, shouldAdoptTerminalFocus, type DeferredTerminalFocus } from './terminalFocus';
 
 interface BuildRunTerminalProps {
   sessionId: number;
@@ -33,18 +34,32 @@ export function BuildRunTerminal({ sessionId, mode = 'build', useWorktree = true
   const focusOnAttachRef = useRef(focusOnAttach);
   focusOnAttachRef.current = focusOnAttach;
 
-  // The wrapper owns focus for an already-mounted xterm. Attach-time focus is
-  // still handled by the promise below, which covers a cold lazy mount.
+  const deferredFocus = useRef<DeferredTerminalFocus | null>(null);
+
+  // The wrapper owns focus for an already-mounted xterm. A terminal that is
+  // still loading remembers the focused element and applies the request when
+  // attach resolves, unless the user has moved to another control.
   useEffect(() => {
     if (focusRequest === 0 || !focusOnAttachRef.current) return;
-    buildRunTerminalManager.getInstance(sessionId, mode, useWorktree)?.term.focus();
+    const inst = buildRunTerminalManager.getInstance(sessionId, mode, useWorktree);
+    if (inst) {
+      deferredFocus.current = null;
+      inst.term.focus();
+    } else {
+      deferredFocus.current = rememberTerminalFocusRequest();
+    }
   }, [focusRequest, sessionId, mode, useWorktree]);
 
   useAsyncEffect((signal) => {
     if (!containerRef.current) return;
     const container = containerRef.current;
     buildRunTerminalManager.attach(sessionId, mode, useWorktree, container, signal).then(instance => {
-      if (!signal.aborted && focusOnAttachRef.current) instance?.term.focus();
+      if (signal.aborted || !instance) return;
+      const deferred = deferredFocus.current;
+      deferredFocus.current = null;
+      if (focusOnAttachRef.current && shouldAdoptTerminalFocus(container, deferred)) {
+        instance.term.focus();
+      }
     });
     return () => {
       // DOM-only teardown — the registry preserves the xterm + PTY. The

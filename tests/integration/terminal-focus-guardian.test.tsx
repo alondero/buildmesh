@@ -414,6 +414,97 @@ describe('AgentTerminal focus guardian', () => {
   // even when the parent GridSplitter or grid row has a containing
   // block. Pins the portal target at the DOM level — visual drift is
   // covered by the render e2e.
+  // The Probe scope disclosure closes itself when focus leaves it. xterm's
+  // chunk load is slower than a click, so `attach().then(term.focus)` can
+  // land after the user has already moved to that disclosure (or any other
+  // control) and blur it shut. `ui-shot-probe-header.steps.mjs` catches this
+  // as a click on `probe-context-details` that stays "not visible". Hold
+  // attach so the test owns the ordering instead of waiting on the machine.
+  function holdAttach() {
+    let releaseGate: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+    const attach = terminalManager.attach.bind(terminalManager);
+    let settled = false;
+    vi.spyOn(terminalManager, 'attach').mockImplementation(async (nodeId: number, container: HTMLElement) => {
+      await gate;
+      return attach(nodeId, container);
+    });
+    return {
+      async release() {
+        if (settled) return;
+        settled = true;
+        releaseGate();
+        await act(async () => {
+          await vi.waitFor(() => {
+            expect(terminalManager.getInstance(RUNNING_NODE.id)).toBeDefined();
+          });
+          // The component focuses in a microtask chained after attach resolves.
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+      },
+    };
+  }
+
+  function outsideButton(label: string) {
+    const button = document.createElement('button');
+    button.textContent = label;
+    document.body.appendChild(button);
+    return button;
+  }
+
+  it('does not steal focus when the terminal attaches after the user moved to another control', async () => {
+    const probe = outsideButton('Probe scope');
+    const pending = holdAttach();
+    try {
+      render(<AgentTerminal nodeId={RUNNING_NODE.id} />);
+      probe.focus();
+      await pending.release();
+      expect(document.activeElement).toBe(probe);
+    } finally {
+      await pending.release();
+      probe.remove();
+    }
+  });
+
+  it('does not apply a deferred node-click focus after the user has moved to another control', async () => {
+    const previous = outsideButton('Previous');
+    const probe = outsideButton('Probe scope');
+    const pending = holdAttach();
+    try {
+      const view = render(<AgentTerminal nodeId={RUNNING_NODE.id} focusRequest={0} />);
+      previous.focus();
+      await act(async () => {
+        view.rerender(<AgentTerminal nodeId={RUNNING_NODE.id} focusRequest={1} />);
+      });
+      probe.focus();
+      await pending.release();
+      expect(document.activeElement).toBe(probe);
+    } finally {
+      await pending.release();
+      previous.remove();
+      probe.remove();
+    }
+  });
+
+  it('still focuses the terminal for a node click when the user has not moved', async () => {
+    const previous = outsideButton('Previous');
+    const pending = holdAttach();
+    try {
+      const view = render(<AgentTerminal nodeId={RUNNING_NODE.id} focusRequest={0} />);
+      previous.focus();
+      await act(async () => {
+        view.rerender(<AgentTerminal nodeId={RUNNING_NODE.id} focusRequest={1} />);
+      });
+      await pending.release();
+      const inst = terminalManager.getInstance(RUNNING_NODE.id);
+      expect(inst?.term.focus).toHaveBeenCalled();
+      expect(document.activeElement).toBe(inst?.term.helperTextarea);
+    } finally {
+      await pending.release();
+      previous.remove();
+    }
+  });
+
   it('renders the right-click context menu on document.body, not inside the terminal host (#1291)', async () => {
     const { host } = await mountAndSettle();
     // fireEvent.contextMenu fires a real React MouseEvent so the
