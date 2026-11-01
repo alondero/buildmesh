@@ -595,6 +595,11 @@ need help after an agent finishes its turn; restarting preserves that alert.
 If the agent has been removed, the notification explains that it is no longer
 available.
 
+Use **Dismiss notification** on a request card to remove it from Needs attention
+and the bell count, including when the agent is no longer available. This only
+dismisses the notification; it does not answer the agent. If the request arrived
+before startup loaded the agent, its name and Mesh update when that data arrives.
+
 ## Hand work over to another node
 
 Select text in an agent's terminal and right-click it to hand that selection on

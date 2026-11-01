@@ -39,8 +39,8 @@ export function createToastKey(toast: Pick<Toast, 'provider' | 'message' | 'acti
 // Replaces an existing toast with the same key when it's still on
 // screen (within `dedupTtlMs`); otherwise appends. The replace keeps
 // the id so the React list stays stable and preserves visual
-// position; only `createdAt` is bumped, which refreshes the auto-
-// dismiss timer.
+// position. The incoming message, time, severity and action replace the
+// payload, refreshing both the auto-dismiss timer and displayed details.
 export function dedupToasts(
   existing: Toast[],
   incoming: Toast,
@@ -54,10 +54,8 @@ export function dedupToasts(
   if (idx === -1) {
     return [...existing, incoming];
   }
-  // Replace keeps the id/createdAt-but-bumped so the React list stays
-  // stable and the auto-dismiss timer refreshes, but copies the incoming
-  // severity — a follow-up error shouldn't get downgraded to whatever
-  // level the toast originally arrived with.
+  // Retain list identity while refreshing the complete payload, including
+  // messages whose tails differ beyond the bounded key and updated actions.
   const next = existing.slice();
   next[idx] = { ...incoming, id: existing[idx].id };
   return next;

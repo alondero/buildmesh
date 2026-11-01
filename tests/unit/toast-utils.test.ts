@@ -92,7 +92,21 @@ describe('dedupToasts', () => {
     const result = dedupToasts([a, b, c], dupOfB, t(300), TOAST_DEDUP_TTL_MS);
 
     expect(result.map((toast) => toast.id)).toEqual([1, 2, 3]);
-    expect(result[1].createdAt).toBe(t(300)); // bumped, not replaced wholesale
+    expect(result[1].createdAt).toBe(t(300)); // refreshed payload retains the original id and position
+  });
+
+  it('refreshes the complete payload, including message tails and action data, while preserving identity', () => {
+    const prefix = 'x'.repeat(200);
+    const existing = make({ id: 1, message: `${prefix} old detail`, severity: 'warning',
+      action: { kind: 'worktree-cleanup', path: '/repo', nodeName: 'agent', detail: 'old action' } });
+    const incoming = make({ id: 99, createdAt: t(300), message: `${prefix} new detail`, severity: 'error',
+      action: { kind: 'worktree-cleanup', path: '/repo', nodeName: 'agent', detail: 'new action' } });
+    const [result] = dedupToasts([existing], incoming, t(300), TOAST_DEDUP_TTL_MS);
+    expect(result.id).toBe(existing.id);
+    expect(result.createdAt).toBe(t(300));
+    expect(result.message).toBe(`${prefix} new detail`);
+    expect(result.severity).toBe('error');
+    expect(result.action).toMatchObject({ kind: 'worktree-cleanup', detail: 'new action' });
   });
 
   it('returns a new array — never mutates the input', () => {

@@ -2,14 +2,14 @@ import type { CircuitAgentBlockedPayload } from '../types/generated/CircuitAgent
 import { useAgentNodeStore } from '../stores/agentNodeStore';
 import { useMeshStore } from '../stores/meshStore';
 import { addToast, useToastStore } from '../stores/toastStore';
-import { isAgentInput, needsAttention } from './notifications';
+import { agentInputSubject, isAgentInput, needsAttention } from './notifications';
 import { nodeInputRequest } from './status';
 
 export function reportCircuitInput({ node_id: nodeId, issue }: CircuitAgentBlockedPayload): void {
   const node = useAgentNodeStore.getState().nodesById[nodeId];
   const agentName = node?.name?.trim() || 'Circuit agent';
   const meshName = node ? useMeshStore.getState().meshesById.get(node.mesh_id)?.name ?? '' : '';
-  const subject = meshName ? `${agentName} in ${meshName}` : agentName;
+  const subject = agentInputSubject({ agentName, meshName });
   const issueLabel = issue > 0 ? ` (issue #${issue})` : '';
   const request = node && nodeInputRequest(node);
   addToast('Needs input', `${subject} needs your input${issueLabel}. ${request?.message || 'Open the agent to see the request and respond.'}`,
@@ -20,7 +20,23 @@ export function reportCircuitInput({ node_id: nodeId, issue }: CircuitAgentBlock
  * Ready agent (for example, a missing result file). Retain it across restart;
  * later status transitions can establish renewed work or an ended input wait. */
 export function watchAgentInputNotifications(): () => void {
+  const refreshIdentities = () => {
+    const { nodesById } = useAgentNodeStore.getState();
+    const { meshesById } = useMeshStore.getState();
+    for (const notice of useToastStore.getState().notifications) {
+      const action = notice.action;
+      if (!isAgentInput(action) || !needsAttention(notice)) continue;
+      const node = nodesById[action.nodeId];
+      if (!node) continue;
+      const agentName = node.name.trim() || action.agentName;
+      const meshName = meshesById.get(node.mesh_id)?.name ?? action.meshName;
+      if (agentName !== action.agentName || meshName !== action.meshName) {
+        useToastStore.getState().refreshAgentInputIdentity(action.nodeId, agentName, meshName);
+      }
+    }
+  };
   const reconcile = (initial: boolean, previous = useAgentNodeStore.getState()) => {
+    refreshIdentities();
     const { nodesById } = useAgentNodeStore.getState();
     for (const notice of useToastStore.getState().notifications) {
       const action = notice.action;
@@ -41,5 +57,9 @@ export function watchAgentInputNotifications(): () => void {
     }
   };
   reconcile(true);
-  return useAgentNodeStore.subscribe((_state, previous) => reconcile(false, previous));
+  const stopNodes = useAgentNodeStore.subscribe((_state, previous) => reconcile(false, previous));
+  const stopMeshes = useMeshStore.subscribe((state, previous) => {
+    if (state.meshesById !== previous.meshesById) refreshIdentities();
+  });
+  return () => { stopNodes(); stopMeshes(); };
 }

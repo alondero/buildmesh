@@ -56,6 +56,10 @@ export interface AgentInputNotificationAction {
   resolution?: string;
 }
 
+export function agentInputSubject({ agentName, meshName }: Pick<AgentInputNotificationAction, 'agentName' | 'meshName'>): string {
+  return meshName ? `${agentName} in ${meshName}` : agentName;
+}
+
 export type NotificationAction = WorktreeNotificationAction | MeshSyncNotificationAction | AgentInputNotificationAction;
 
 /** The worktree cleanup queue is the only thing that can resolve a cleanup

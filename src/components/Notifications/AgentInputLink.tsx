@@ -13,7 +13,7 @@ export function AgentInputLink({ action, children, className, onOpen }: {
   const [unavailable, setUnavailable] = useState(false);
   return <>
     <button type="button" className={className}
-      aria-label={`Open agent ${action.agentName}${action.meshName ? ` in ${action.meshName}` : ''}`}
+      aria-label={children === undefined ? `Open agent ${action.agentName}${action.meshName ? ` in ${action.meshName}` : ''}` : undefined}
       onClick={() => {
         if (!focusAgentNode(action.nodeId)) {
           setUnavailable(true);

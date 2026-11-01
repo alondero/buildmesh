@@ -5,7 +5,7 @@ import {
   type Toast, type ToastSeverity,
 } from '../lib/toastUtils';
 import {
-  isAgentInput, isMeshSyncFailure, isWorktreeCleanup, limitNotifications, needsAttention, restoreNotifications,
+  agentInputSubject, isAgentInput, isMeshSyncFailure, isWorktreeCleanup, limitNotifications, needsAttention, restoreNotifications,
   type Notification, type NotificationAction, type WorktreeNotice,
 } from '../lib/notifications';
 
@@ -29,6 +29,7 @@ interface ToastState {
   resolveWorktreeNotification: (path: string, resolution: string) => void;
   resolveMeshSyncNotification: (path: string, resolution: string) => void;
   resolveAgentInputNotification: (nodeId: number, resolution: string) => void;
+  refreshAgentInputIdentity: (nodeId: number, agentName: string, meshName: string) => void;
   reconcileWorktrees: (entries: WorktreeNotice[], expectedRevision: number) => void;
 }
 
@@ -126,6 +127,25 @@ export const useToastStore = create<ToastState>()(persist((set) => ({
     notifications: limitNotifications(state.notifications.map(n => isAgentInput(n.action) && needsAttention(n)
       && n.action.nodeId === nodeId ? { ...n, action: { ...n.action, resolution } } : n)),
   })),
+  refreshAgentInputIdentity: (nodeId, agentName, meshName) => set(state => {
+    let changed = false;
+    const refresh = <T extends Toast>(notice: T): T => {
+      const action = notice.action;
+      if (!isAgentInput(action) || action.nodeId !== nodeId || action.resolution
+        || (action.agentName === agentName && action.meshName === meshName)) return notice;
+      const previousSubject = agentInputSubject(action);
+      const updated = { ...action, agentName, meshName };
+      changed = true;
+      return { ...notice, action: updated,
+        // Replace only our known identity prefix, retaining the issue and
+        // request verbatim. Other callers' message formats stay intact.
+        message: notice.message.startsWith(`${previousSubject} needs your input`)
+          ? agentInputSubject(updated) + notice.message.slice(previousSubject.length) : notice.message };
+    };
+    const toasts = state.toasts.map(refresh);
+    const notifications = state.notifications.map(refresh);
+    return changed ? { toasts, notifications } : state;
+  }),
   reconcileWorktrees: (entries, expectedRevision) => set(state => {
     // A failure event or manual recovery after this read began owns the newer state.
     if (state.worktreeRevision !== expectedRevision) return state;

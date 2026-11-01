@@ -52,6 +52,10 @@ change.
 `AgentInputLink` uses the canonical `focusAgentNode` transition to select the
 Mesh, solo the agent and select its activity tab. Opening marks the notice
 read without answering or resolving the request.
+The card also offers explicit notification dismissal without inferring that an
+agent absent from the client store is gone. Pending identities refresh from both
+the agent and Mesh stores, retaining the request text and notification identity.
+Buttons containing the request use their visible contents as the accessible name.
 
 ### False-Yield Suppression (issue #878)
 

@@ -172,6 +172,13 @@ export function NotificationsTab() {
                 <span className="block mt-1 text-text-secondary">{notice.message}</span>
                 <span className="block mt-2 text-accent-cyan">Open agent →</span>
               </AgentInputLink>
+              <div className="notification-card-actions">
+                <button type="button" className="notification-link" onClick={() => {
+                  const store = useToastStore.getState();
+                  store.markNotificationRead(notice.id);
+                  store.resolveAgentInputNotification(notice.action.nodeId, 'Notification dismissed.');
+                }}>Dismiss notification</button>
+              </div>
             </article>)}
             {syncAttention.map(notice => <SyncAttentionCard key={notice.id} notice={notice} />)}
             {cleanupAttention.map(notice => <WorktreeAttentionCard key={notice.id} notice={notice} onResolve={resolve} />)}

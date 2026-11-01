@@ -84,6 +84,45 @@ describe('Circuit input notifications', () => {
     expect(useMeshStore.getState().selectedMeshId).toBe(2);
   });
 
+  it('includes the visible request in the action accessible name', () => {
+    render(<AgentInputLink action={action}>
+      <span>{node.name} needs your input. Which branch should I target?</span>
+      <span>Open agent</span>
+    </AgentInputLink>);
+    expect(screen.getByRole('button', { name: /needs your input.*Which branch should I target\?.*Open agent/ })).toBeTruthy();
+  });
+
+  it('refreshes the pending toast and saved identity when node and Mesh data arrive separately', () => {
+    seedAgentNodes([]);
+    useMeshStore.setState({ meshes: [], meshesById: new Map() });
+    stop = watchAgentInputNotifications();
+    reportCircuitInput({ node_id: node.id, issue: 42 });
+    const originalToast = useToastStore.getState().toasts[0];
+    const originalNotice = useToastStore.getState().notifications[0];
+    expect(originalToast.message).toContain('Circuit agent needs your input');
+    seedAgentNodes([node]);
+    expect(useToastStore.getState().notifications[0].action).toMatchObject({ agentName: node.name });
+    useMeshStore.setState({ meshes: fixtures.list_meshes, meshesById: new Map(fixtures.list_meshes.map(m => [m.id, m])) });
+    const { toasts, notifications } = useToastStore.getState();
+    expect(toasts[0].message).toContain(`${node.name} in buildmesh needs your input (issue #42)`);
+    expect(toasts[0].action).toEqual(action);
+    expect(toasts[0].id).toBe(originalToast.id);
+    expect(toasts[0].createdAt).toBe(originalToast.createdAt);
+    expect(notifications[0]).toMatchObject({ id: originalNotice.id, read: false, action });
+    expect(notifications[0].message).toBe(toasts[0].message);
+    expect(restoreNotifications(JSON.parse(JSON.stringify(notifications)))[0].action).toEqual(action);
+    expect(needsAttention(notifications[0])).toBe(true);
+  });
+
+  it('refreshes a boot-time fallback from the already loaded startup snapshot', () => {
+    seedAgentNodes([]);
+    reportCircuitInput({ node_id: node.id, issue: 0 });
+    seedAgentNodes([node]);
+    stop = watchAgentInputNotifications();
+    expect(useToastStore.getState().notifications[0].action).toEqual(action);
+    expect(useToastStore.getState().notifications[0].message).toContain(`${node.name} in buildmesh`);
+  });
+
   it('resolves history and withdraws the toast when input ends, but retains the destination', () => {
     reportCircuitInput({ node_id: node.id, issue: 0 });
     stop = watchAgentInputNotifications();

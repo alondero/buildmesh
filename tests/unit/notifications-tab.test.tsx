@@ -5,6 +5,10 @@ import { preloadProbeTabs } from './helpers/preloadProbeTabs';
 import { ProbePanel } from '../../src/components/Probe/ProbePanel';
 import { NotificationButton } from '../../src/components/TitleBar/NotificationButton';
 import { reportBlockedWorktreeCleanup } from '../../src/lib/worktreeCleanupAlerts';
+import { reportCircuitInput, watchAgentInputNotifications } from '../../src/lib/agentInputNotifications';
+import { needsAttention } from '../../src/lib/notifications';
+import { seedAgentNodes } from './helpers/seedAgentNodes';
+import { makeAgentNode } from './helpers/makeAgentNode';
 import { addToast, useToastStore } from '../../src/stores/toastStore';
 import { useBlockedCleanupStore } from '../../src/stores/blockedCleanupStore';
 import { useUIStore } from '../../src/stores/uiStore';
@@ -70,6 +74,29 @@ it('keeps read history after toast dismissal, clears it explicitly, and swaps wi
   expect(await screen.findByTestId('notifications-tab')).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: 'Open Notifications' }));
   expect(screen.queryByTestId('notifications-tab')).toBeNull();
+});
+
+it('lets a missing-agent request be dismissed in-session without treating store absence as resolution', async () => {
+  vi.mocked(invoke).mockResolvedValue([]);
+  seedAgentNodes([]);
+  const stop = watchAgentInputNotifications();
+  try {
+    reportCircuitInput({ node_id: 6377, issue: 0 });
+    seedAgentNodes([makeAgentNode({ id: 1, mesh_id: 1, position: 0 })]);
+    expect(useToastStore.getState().notifications.filter(needsAttention)).toHaveLength(1);
+    render(<><NotificationButton /><ProbePanel /></>);
+    const bell = screen.getByRole('button', { name: 'Open Notifications' });
+    fireEvent.click(bell);
+    const attention = await screen.findByRole('region', { name: 'Needs attention' });
+    fireEvent.click(within(attention).getByRole('button', { name: /Open agent/ }));
+    expect(within(attention).getByRole('alert').textContent).toContain('no longer available');
+    fireEvent.click(within(attention).getByRole('button', { name: 'Dismiss notification' }));
+    expect(useToastStore.getState().notifications.filter(needsAttention)).toEqual([]);
+    expect(useToastStore.getState().toasts).toEqual([]);
+    expect(bell.title).toContain('0 need attention');
+    expect(bell.title).toContain('0 unread');
+    expect(within(screen.getByRole('region', { name: 'Recent activity' })).getByText('Notification dismissed.')).toBeTruthy();
+  } finally { stop(); }
 });
 
 // A mesh that never reached upstream and a worktree that cannot be removed are
