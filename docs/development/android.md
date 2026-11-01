@@ -168,24 +168,60 @@ uses the dark theme regardless of the phone's system appearance.
 `MainActivity` owns the transparent system bars and their dark appearance through
 its edge-to-edge setup; the resource theme supplies the initial window background.
 
-Compose owns Overview/Work, mesh selection, node details and replies,
+Compose owns the mesh list and mesh pages, mesh selection, node details and replies,
 task capture, issue spawning, archive import/resume, changed files, selectable
-diffs, mesh-branch PR creation and connection settings. Connection settings also
+diffs, mesh-branch PR creation and settings. Settings also
 owns the background notifications switch, which is off until the user turns it
 on; the watch it starts is described under
 [Background agent notices](#background-agent-notices). Launch selections come
 from the backend menu, including saved configurations and capability filtering.
-Tapping an Overview mesh name selects its ID and opens Work for that mesh.
-Overview lists meshes only: it does not list agents, and Work does not offer a
-mesh selector, a search box, or an attention filter. A window at least 600dp
-wide, which covers a tablet and an unfolded fold, keeps that mesh list beside
-the selected mesh's agents instead of replacing one with the other. Mesh
+
+### Navigation
+
+The shell (`BuildmeshApp.kt`) separates *destinations*, which a person moves
+between at will, from *steps*, which they enter by tapping and leave with Back.
+The destinations are **Meshes**, **Usage** and **Settings** (`Destination`).
+They sit in a bottom navigation bar on a phone. A window at least 600dp wide,
+which covers a tablet and an unfolded fold, swaps the bar for a navigation rail
+and shows the mesh list beside the selected mesh's agents. The shell measures
+the window once and hands the answer to both the navigation component and
+`Dashboard(split = …)`, so one measurement decides both
+(`AppNavigationTest.aWideWindowSwapsTheBarForARailAndKeepsBothPanesOnScreen`
+pins the wide case). Only the destinations' own screens carry the bar or rail;
+an agent, its terminal, changes, Capture and the resource lists are full
+screens (`aMeshIsOneStepBelowMeshesAndBackClimbsOneStep`).
+
+Overview and Work used to be two bottom tabs. They were the two steps of one
+path (pick a mesh, then see its agents), so on a wide window, where both are on
+screen, the tabs had nothing left to switch. They are now the Meshes
+destination's two steps: the mesh list is its root, and tapping a mesh pushes
+that mesh's page (`screen == "mesh"`; a wide window folds it back into
+`"home"`). Capture was an action, not a place, so it is a **New task**
+floating button over Meshes on a phone, and at the head of the rail on a wide
+window, where it shows on all three destinations
+(`newTaskIsOnlyOfferedOverMeshes` covers the phone). It opens Capture for the
+selected mesh.
+
+Back climbs one step: an agent, a resource list (Issues, Pull requests,
+Archive) or the mesh page returns to the mesh; Capture returns to where it was
+opened; Meshes' root, Usage and Settings return to Meshes, and the system Back
+from Meshes leaves the app. Usage and Settings show no Back arrow in the app
+bar, as destinations reached from the bar. Opening an agent also selects its
+mesh (`openNode`), so Back lands on the mesh it belongs to however the agent
+was reached: a notification, the waiting deck, an issue or pull request, or a
+new task. Reselecting Meshes from a mesh page returns to the list. Rotating or
+unfolding into a wide window turns the mesh page into the list-and-agents
+layout, and the reverse leaves the list showing with the mesh still selected.
+
+Tapping a mesh name selects its ID and opens that mesh's agents.
+The mesh list shows meshes only: it does not list agents, and a mesh page does
+not offer a mesh selector, a search box, or an attention filter. Mesh
 headers summarize open (non-archived) nodes with wrapping status dots and a
 count. Empty mesh names use the muted text token; their actions remain
-available. Overview cards omit filesystem paths and put the compact Spawn
+available. Mesh cards omit filesystem paths and put the compact Spawn
 split button beside the name. Like the desktop sidebar, meshes with
 non-archived nodes come first; both groups preserve saved mesh order.
-The selected mesh's Work screen pins agents waiting on a person. An
+A mesh page pins agents waiting on a person. An
 `awaiting_input` node that carries a request is pinned above that mesh's other
 agents, with what it asked, its mesh and branch, and the one action its request
 supports. That action is read from
@@ -200,8 +236,8 @@ disable while a reply is in flight and retire only once the desktop accepted
 it; a send that fails signals the card, which clears the in-flight marker and
 hands the controls back instead of showing "Sending…" until the desktop
 replaces the request. State is keyed by the request rather than the node, so a
-node that asks again arrives with live controls. The deck is that mesh's Work
-list. A waiting agent who is on their own is left out of the rows under it. A paired group stays together in the rows. On a phone, Overview
+node that asks again arrives with live controls. The deck is that mesh's agent
+list. A waiting agent who is on their own is left out of the rows under it. A paired group stays together in the rows. On a phone, the mesh list
 shows meshes only; a wide window keeps the deck in the agents pane beside the
 mesh list. The dashboard refreshes by pull-to-refresh as well as through the app-bar
 action, and the app-bar progress bar belongs to the first load and to a read the
@@ -218,9 +254,9 @@ does not depend on scrolling. One indicator belongs to one gesture — the pull
 owns the indicator it shows, and the app-bar action keeps the thin progress
 bar — so a single gesture does not drive two spinners at once.
 
-Pull requests, Issues and Archive live on the selected mesh's Work screen,
+Pull requests, Issues and Archive live on the selected mesh's page,
 including when that mesh has no open agents.
-Work uses compact rows for the selected mesh, with the desktop status-circle shapes
+A mesh page uses compact rows for its agents, with the desktop status-circle shapes
 and Circuit orbit glyphs. Circuit-linked agents share one bracket, ordered with
 the representative first; each row opens that agent. Within a mesh group the
 activities that need a person come first — a failed or lost agent, then a
@@ -230,7 +266,7 @@ representative stays first, its members keep their order, and no activity
 leaves its mesh group. Missing or archived
 parents, cross-mesh links and cycles leave agents accessible. Desktop manual
 groups remain local desktop view state.
-Swipe a Work row toward the start edge to reveal **Close**, then tap it and
+Swipe an agent row toward the start edge to reveal **Close**, then tap it and
 confirm to stop and remove that individual agent. Swipe back or tap the row to
 hide the action; swiping alone does not close anything. TalkBack exposes the
 same action without a swipe. Closing keeps the worktree and files, including
@@ -266,7 +302,7 @@ after disconnecting or pairing with a different desktop.
 Mesh cards, issue cards and the mesh's open pull requests carry the same split
 button as the desktop spawn cluster (`SpawnSplitButton`). Issue and pull request
 buttons name the mesh's pinned default, or read **Mesh default** when the app-wide
-default applies, which the phone cannot see. Overview uses a compact **+** instead,
+default applies, which the phone cannot see. The mesh list uses a compact **+** instead,
 with that default name in its accessibility description. The chevron lists the backend menu in its
 own order, saved configurations included, without unavailable rows. On a mesh
 card both halves open Capture with that mesh and launch already selected, because
@@ -283,7 +319,7 @@ phone sends only a title hint and, for a pull request, the head fields from the
 feed. Archive resume accepts a Spawn Option only, so its picker offers no saved
 configurations and requires a resumable option.
 Archive HTTP 207 dismisses the launch dialog and reports the imported node and
-launch failure, so a user can inspect Work before attempting another import.
+launch failure, so a user can inspect the mesh page before attempting another import.
 Pull requests are created from an Agent Node, because the create route requires
 `node_id` (`create_requires_a_node_id_in_the_body`): the node screen previews `GET /api/meshes/{id}/pr/source?node_id=` and submits
 `node_id` with the previewed `head_branch`, so a worktree that moved since the
@@ -420,7 +456,7 @@ and publishes it on `/ws/events`. The phone can be told about it while the app
 is in the background, through a foreground service the user turns on
 themselves.
 
-**The switch.** Connection settings has a "Background notifications" toggle.
+**The switch.** Settings has a "Background notifications" toggle.
 It is off until the user turns it on. Turning it on asks for the notification
 permission on Android 13 and later; if the permission is refused the switch
 stays off and says why. Turning it off stops the service and clears the
