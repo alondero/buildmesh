@@ -5,7 +5,7 @@ import {
   type Toast, type ToastSeverity,
 } from '../lib/toastUtils';
 import {
-  isMeshSyncFailure, isWorktreeCleanup, limitNotifications, needsAttention, restoreNotifications,
+  agentInputSubject, isAgentInput, isMeshSyncFailure, isWorktreeCleanup, limitNotifications, needsAttention, restoreNotifications,
   type Notification, type NotificationAction, type WorktreeNotice,
 } from '../lib/notifications';
 
@@ -28,18 +28,23 @@ interface ToastState {
   clearReadNotifications: () => void;
   resolveWorktreeNotification: (path: string, resolution: string) => void;
   resolveMeshSyncNotification: (path: string, resolution: string) => void;
+  resolveAgentInputNotification: (nodeId: number, resolution: string) => void;
+  refreshAgentInputIdentity: (nodeId: number, agentName: string, meshName: string) => void;
   reconcileWorktrees: (entries: WorktreeNotice[], expectedRevision: number) => void;
 }
 
 let nextToastId = 0;
 
 /** The unresolved problem, if any, that a repeat of this action should merge
- *  into rather than stack beside. Keyed by *kind + path*, not path alone: two
+ *  into rather than stack beside. Agent requests use the owning node id;
+ *  filesystem problems use *kind + path*, not path alone: two
  *  kinds can legitimately name the same directory (a mesh whose root checkout
  *  is itself the blocked worktree), and collapsing them would drop one
  *  problem's record into another's. */
 function previousFor(notices: Notification[], action: NotificationAction): Notification | undefined {
-  return notices.find(n => needsAttention(n) && n.action?.kind === action.kind && n.action.path === action.path);
+  return notices.find(n => needsAttention(n) && (isAgentInput(action)
+    ? isAgentInput(n.action) && n.action.nodeId === action.nodeId
+    : n.action?.kind === action.kind && n.action.path === action.path));
 }
 
 // Storage failure must not prevent the toast or recovery state transition.
@@ -71,7 +76,7 @@ export const useToastStore = create<ToastState>()(persist((set) => ({
       // and be retained by the same rules, or the same failure would file two
       // differently-behaving records depending on which entry point reported it.
       const silent = options?.silent === true && action !== undefined;
-      const incoming = { id: ++nextToastId, provider, message, createdAt: now, severity };
+      const incoming = { id: ++nextToastId, provider, message, createdAt: now, severity, action };
       const merged = silent ? state.toasts : dedupToasts(state.toasts, incoming, now, TOAST_DEDUP_TTL_MS);
       // The record the history entry is built from: the toast as it ended up on
       // the stack after dedup, or the incoming record when there is no stack.
@@ -117,6 +122,30 @@ export const useToastStore = create<ToastState>()(persist((set) => ({
       && n.action.path === path
       ? { ...n, action: { ...n.action, resolution } } : n)),
   })),
+  resolveAgentInputNotification: (nodeId, resolution) => set(state => ({
+    toasts: state.toasts.filter(t => !isAgentInput(t.action) || t.action.nodeId !== nodeId),
+    notifications: limitNotifications(state.notifications.map(n => isAgentInput(n.action) && needsAttention(n)
+      && n.action.nodeId === nodeId ? { ...n, action: { ...n.action, resolution } } : n)),
+  })),
+  refreshAgentInputIdentity: (nodeId, agentName, meshName) => set(state => {
+    let changed = false;
+    const refresh = <T extends Toast>(notice: T): T => {
+      const action = notice.action;
+      if (!isAgentInput(action) || action.nodeId !== nodeId || action.resolution
+        || (action.agentName === agentName && action.meshName === meshName)) return notice;
+      const previousSubject = agentInputSubject(action);
+      const updated = { ...action, agentName, meshName };
+      changed = true;
+      return { ...notice, action: updated,
+        // Replace only our known identity prefix, retaining the issue and
+        // request verbatim. Other callers' message formats stay intact.
+        message: notice.message.startsWith(`${previousSubject} needs your input`)
+          ? agentInputSubject(updated) + notice.message.slice(previousSubject.length) : notice.message };
+    };
+    const toasts = state.toasts.map(refresh);
+    const notifications = state.notifications.map(refresh);
+    return changed ? { toasts, notifications } : state;
+  }),
   reconcileWorktrees: (entries, expectedRevision) => set(state => {
     // A failure event or manual recovery after this read began owns the newer state.
     if (state.worktreeRevision !== expectedRevision) return state;

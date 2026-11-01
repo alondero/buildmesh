@@ -584,6 +584,27 @@ Enter when you are ready to send it.
 WSL sessions, other harnesses, and the mobile terminal continue to receive
 clipboard text through the terminal connection.
 
+## Respond to an agent's input request
+
+When a Circuit agent needs your input, its toast names the agent and Mesh.
+Click the message or **Open agent** to go directly to that agent's terminal
+and input controls, including when it is in another Mesh or a reviewer tab.
+The notification includes the question when the harness supplies it.
+
+If the toast has disappeared, open the title-bar bell and find the request
+under **Needs attention**. **Open agent** works there too, including after
+restarting Buildmesh. Opening a request marks the notification read; it stays
+in Needs attention until Buildmesh observes the agent resume work or leave its
+input wait. Those requests then move to Recent activity. A Circuit may also
+need help after an agent finishes its turn; restarting preserves that alert.
+If the agent has been removed, the notification explains that it is no longer
+available.
+
+Use **Dismiss notification** on a request card to remove it from Needs attention
+and the bell count, including when the agent is no longer available. This only
+dismisses the notification; it does not answer the agent. If the request arrived
+before startup loaded the agent, its name and Mesh update when that data arrives.
+
 ## Hand work over to another node
 
 Select text in an agent's terminal and right-click it to hand that selection on

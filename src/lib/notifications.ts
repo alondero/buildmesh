@@ -48,7 +48,19 @@ export interface MeshSyncNotificationAction {
   resolution?: string;
 }
 
-export type NotificationAction = WorktreeNotificationAction | MeshSyncNotificationAction;
+export interface AgentInputNotificationAction {
+  kind: 'agent-input';
+  nodeId: number;
+  agentName: string;
+  meshName: string;
+  resolution?: string;
+}
+
+export function agentInputSubject({ agentName, meshName }: Pick<AgentInputNotificationAction, 'agentName' | 'meshName'>): string {
+  return meshName ? `${agentName} in ${meshName}` : agentName;
+}
+
+export type NotificationAction = WorktreeNotificationAction | MeshSyncNotificationAction | AgentInputNotificationAction;
 
 /** The worktree cleanup queue is the only thing that can resolve a cleanup
  *  notice on its own (ADR-0043: the durable queue is the source of truth, and
@@ -61,16 +73,17 @@ export const isWorktreeCleanup = (
   action: NotificationAction | undefined,
 ): action is WorktreeNotificationAction => action?.kind === 'worktree-cleanup';
 
-/** The counterpart guard. Together the two partition `NotificationAction`, so
- *  a surface can branch exhaustively and TypeScript proves the sync card is
- *  never handed a cleanup action (whose fields it cannot render). */
+/** Narrow a sync action to the fields its recovery card renders. */
 export const isMeshSyncFailure = (
   action: NotificationAction | undefined,
 ): action is MeshSyncNotificationAction => action?.kind === 'mesh-sync-failure';
 
+export const isAgentInput = (
+  action: NotificationAction | undefined,
+): action is AgentInputNotificationAction => action?.kind === 'agent-input';
+
 export interface Notification extends Toast {
   read: boolean;
-  action?: NotificationAction;
 }
 
 export interface WorktreeNotice {
@@ -82,8 +95,8 @@ export interface WorktreeNotice {
 }
 
 export const NOTIFICATION_HISTORY_LIMIT = 100;
-/** An unresolved problem the user is expected to act on: a blocked worktree
- *  cleanup or a mesh sync that did not complete. Resolution text moves a
+/** An unresolved problem the user is expected to act on: an agent input
+ *  request, blocked worktree cleanup or incomplete mesh sync. Resolution text moves a
  *  notice out of this set and back into ordinary history. */
 export const needsAttention = (notice: Notification): boolean =>
   notice.action !== undefined && !notice.action.resolution;
@@ -103,6 +116,13 @@ function restoreAction(value: unknown): NotificationAction | null {
   const a = value as Record<string, unknown>;
   const resolutionOk = a.resolution === undefined || typeof a.resolution === 'string';
   if (!resolutionOk) return null;
+  if (a.kind === 'agent-input') {
+    return Number.isSafeInteger(a.nodeId) && (a.nodeId as number) > 0
+      && typeof a.agentName === 'string' && typeof a.meshName === 'string'
+      ? { kind: 'agent-input', nodeId: a.nodeId as number, agentName: a.agentName,
+        meshName: a.meshName, resolution: a.resolution as string | undefined }
+      : null;
+  }
   if (a.kind === 'worktree-cleanup') {
     return typeof a.path === 'string' && typeof a.nodeName === 'string'
       && typeof a.detail === 'string'
