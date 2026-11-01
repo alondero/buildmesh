@@ -33,8 +33,8 @@
  * resolutions.
  *
  * The header shows the active destination's icon in a tinted chip next to its
- * label, with the explicit lens/subject and the fixed-or-following mode
- * visible so each destination body stays free of redundant context chrome.
+ * label on the first line and its scope on the second. Selection-following
+ * behavior is disclosed by expanding the scope line.
  * Issue #2075 promoted that lens/subject line to a legible weight: since
  * #2073 removed Probe Context Pins, disclosure is the only thing making a
  * selection-following destination's subject drift visible, so the subject is
@@ -46,7 +46,7 @@
  * `prefers-reduced-motion` via the global media query.
  */
 
-import { Suspense, useRef } from 'react';
+import { Suspense, useEffect, useLayoutEffect, useRef } from 'react';
 import { useUIStore, type ProbeTab } from '../../stores/uiStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import {
@@ -129,10 +129,7 @@ function ProbePanelContent() {
   // expansion into a single +8 step per render.
   const bodyWidthRef = useRef(bodyWidth);
   bodyWidthRef.current = bodyWidth;
-  // The inspector header surfaces the destination's explicit lens and subject.
-  // Unlike the old mesh-only subheading, this keeps Host usage from inheriting
-  // a misleading mesh name and makes selection-following behavior visible
-  // before a stateful action is taken.
+  // Scope comes from the shared resolver so Host probes never inherit a Mesh name.
   const context = useProbeContext();
 
   // Issue #1375 — the inspector is fully on-demand: closed means GONE. There
@@ -140,11 +137,28 @@ function ProbePanelContent() {
   // title-bar Usage action, and contextual entries own reopening.
   const activeDef = PROBE_TABS.find((t) => t.tab === probeTab) ?? PROBE_TABS[0];
   const ActiveIcon = activeDef.icon;
-  // Issue #2073 — the mode vocabulary is exactly two values: a Host-owned
-  // destination is fixed, every Mesh/Agent destination follows the selection.
-  const contextModeLabel = context.mode === 'fixed'
-    ? 'Host-wide'
-    : 'Following selection';
+  const scopeLabel = context.mode === 'fixed' ? 'Host-wide' : context.subjectLabel;
+  const scopeTitle = [scopeLabel, context.detailLabel, context.mode === 'following' ? 'Following selection' : null]
+    .filter(Boolean).join(' · ');
+  const scopeRef = useRef<HTMLDetailsElement>(null);
+
+  useLayoutEffect(() => {
+    // Close stale details without replacing the focused summary.
+    if (scopeRef.current) scopeRef.current.open = false;
+  }, [scopeTitle]);
+
+  useEffect(() => {
+    const dismissOutside = (event: Event) => {
+      const details = scopeRef.current;
+      if (details?.open && event.target instanceof Node && !details.contains(event.target)) {
+        details.open = false;
+      }
+    };
+    document.addEventListener('pointerdown', dismissOutside, true);
+    return () => {
+      document.removeEventListener('pointerdown', dismissOutside, true);
+    };
+  }, []);
 
   return (
     // Outer wrapper is `relative` but does NOT carry `overflow-hidden` —
@@ -214,15 +228,7 @@ function ProbePanelContent() {
         aria-label="Probe panel"
         className="flex flex-col h-full w-full overflow-hidden border-l border-border-subtle"
       >
-        {/* Header — active destination icon chip + label (title) + explicit
-            lens/subject + fixed-or-following mode + close button. The subject
-            line replaces the directory-path strip the Issues / PRs tabs
-            used to render individually, so every destination makes its
-            ownership visible in the same place — and since #2075 that
-            disclosure renders at a weight that is actually readable at a
-            glance (see the comment on the subject row below). Only live-scope
-            information is here: #2073 removed the pin, so the header carries
-            no captured subject to disagree with the selection. */}
+        {/* Two lines: destination, then current scope. */}
         <div
           className="flex items-center justify-between gap-2 pl-3 pr-2 py-2 border-b border-border-subtle min-h-[56px]"
         >
@@ -241,6 +247,7 @@ function ProbePanelContent() {
                   header would stop saying which is the destination. */}
               <span
                 data-testid="probe-context-title"
+                title={activeDef.label}
                 className="text-sm text-text-primary font-semibold truncate"
               >
                 {activeDef.label}
@@ -257,39 +264,60 @@ function ProbePanelContent() {
                   meaning, so colour is never the only signal. Size and colour
                   live on the spans rather than the row, so the row cannot
                   re-introduce the muted run by inheritance. */}
-              <div
-                data-testid="probe-context-subject"
-                className="flex items-center gap-1 min-w-0"
-                title={context.detailLabel
-                  ? `${context.subjectLabel} · ${context.detailLabel}`
-                  : context.subjectLabel}
+              <details
+                ref={scopeRef}
+                className="group relative min-w-0"
+                onBlur={(event) => {
+                  if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false;
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape' && event.currentTarget.open) {
+                    event.currentTarget.open = false;
+                    event.currentTarget.querySelector('summary')?.focus();
+                    event.preventDefault();
+                    event.stopPropagation();
+                  }
+                }}
               >
-                <span
-                  data-testid="probe-context-subject-name"
-                  className="truncate min-w-0 text-sm font-medium text-text-primary"
+                <summary
+                  data-testid="probe-context-subject"
+                  className="flex items-center gap-1 min-w-0 min-h-[24px] cursor-pointer rounded-sm hover:bg-bg-card focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-cyan"
+                  title={scopeTitle}
+                  aria-label={scopeTitle}
                 >
-                  {context.subjectLabel}
-                </span>
-                {/* Mixed-ownership qualifier: Project Files' working tree vs the
-                    repository root, an Agent lens' parent Mesh. One step below
-                    the subject it qualifies, and off `text-text-muted` — it is
-                    the load-bearing half of the disclosure for the two
-                    destinations whose subject moves under the user (#732). */}
-                {context.detailLabel && (
                   <span
-                    data-testid="probe-context-subject-detail"
-                    className="truncate min-w-0 text-xs text-text-secondary"
+                    data-testid="probe-context-subject-name"
+                    className="truncate min-w-0 text-sm font-medium text-text-primary"
                   >
-                    · {context.detailLabel}
+                    {scopeLabel}
                   </span>
-                )}
-              </div>
-              <span
-                data-testid="probe-context-mode"
-                className="text-2xs text-text-secondary truncate"
-              >
-                {contextModeLabel}
-              </span>
+                  {/* Mixed-ownership qualifier: Project Files' working tree vs the
+                      repository root, an Agent lens' parent Mesh. One step below
+                      the subject it qualifies, and off `text-text-muted` — it is
+                      the load-bearing half of the disclosure for the two
+                      destinations whose subject moves under the user (#732). */}
+                  {context.detailLabel && (
+                    <span
+                      data-testid="probe-context-subject-detail"
+                      className="truncate min-w-0 text-xs text-text-secondary"
+                    >
+                      · {context.detailLabel}
+                    </span>
+                  )}
+                  <svg aria-hidden="true" className="w-3 h-3 shrink-0 text-text-secondary group-open:rotate-180" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <path d="m4 6 4 4 4-4" />
+                  </svg>
+                </summary>
+                <div
+                  data-testid="probe-context-details"
+                  tabIndex={-1 /* Keep text clicks inside the blur boundary so the help stays open. */}
+                  className="absolute top-full left-0 right-0 z-20 max-h-[50vh] overflow-y-auto p-2 rounded-md border border-border-strong bg-bg-overlay text-xs text-text-secondary break-words shadow-sm"
+                >
+                  {context.mode === 'following'
+                    ? scopeTitle
+                    : 'Host-wide · Applies across all Meshes and Agent Nodes on this host.'}
+                </div>
+              </details>
             </div>
           </div>
           <button

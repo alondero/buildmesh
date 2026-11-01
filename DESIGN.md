@@ -70,6 +70,23 @@ inverse text for the primary action, bordered secondary actions, and the
 surface hover tokens for quiet controls. Existing reduced-motion rules apply
 to feedback and transitions on these surfaces.
 
+### Affordances and progressive disclosure
+
+Use familiar application conventions to make actions and state recognisable:
+standard icons, clear hierarchy, selected states and direct manipulation.
+Give icon controls accessible names and tooltips. Keep visible copy to the
+identity, scope and information needed for the current decision; place
+supporting explanation in contextual help, menus or expandable details.
+Keep errors and recovery actions visible where the user needs to act.
+
+Probe headers have two lines: the destination name, then its current scope.
+Show Host-wide once for Host probes; show the selected Mesh or Agent identity
+and relevant working-tree detail for selection-scoped probes. Disclose
+selection-following behavior and full names in the expandable scope line,
+available by pointer, touch and keyboard. See
+[ADR-0052](docs/adr/0052-probe-scope-progressive-disclosure.md) for the proposed
+disclosure decision.
+
 ## Colour
 
 ### Surfaces
