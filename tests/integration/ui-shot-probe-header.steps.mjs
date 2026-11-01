@@ -70,9 +70,14 @@ export default async function ({ page }) {
   await page.keyboard.press('Space');
   await expect(details).toBeVisible();
 
-  // A non-focusable outside target isolates pointer dismissal from focus loss.
-  await title.click();
+  // Open with focus outside so the title press cannot blur the disclosure.
+  await separator.focus();
   await expect(details).toBeHidden();
+  await scope.evaluate(summary => { summary.parentElement.open = true; });
+  await expect(details).toBeVisible();
+  await expect(separator).toBeFocused();
+  await title.click();
+  await expect(details, 'Outside pointer-down must dismiss with focus starting on the separator').toBeHidden();
   await scope.press('Enter');
   await expect(details).toBeVisible();
   await separator.focus();

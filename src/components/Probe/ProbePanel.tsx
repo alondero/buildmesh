@@ -310,7 +310,7 @@ function ProbePanelContent() {
                 </summary>
                 <div
                   data-testid="probe-context-details"
-                  tabIndex={-1}
+                  tabIndex={-1 /* Keep text clicks inside the blur boundary so the help stays open. */}
                   className="absolute top-full left-0 right-0 z-20 max-h-[50vh] overflow-y-auto p-2 rounded-md border border-border-strong bg-bg-overlay text-xs text-text-secondary break-words shadow-sm"
                 >
                   {context.mode === 'following'
