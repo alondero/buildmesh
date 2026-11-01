@@ -194,4 +194,25 @@ class AppNavigationTest {
             compose.onNodeWithContentDescription("New task").assertIsDisplayed()
         }
     }
+
+    // The rail offers New task on every destination, so Back from Capture has
+    // to return to the destination it was started from, not to Meshes.
+    @Test fun backFromNewTaskReturnsToTheDestinationItWasStartedFrom() {
+        withApp(density = wideDensity()) {
+            val rail = hasAnyAncestor(hasTestTag("navigation-rail"))
+            compose.onNode(hasText("Settings") and rail).performClick()
+            compose.onNodeWithContentDescription("New task").performClick()
+            compose.onNodeWithText("Mesh: Buildmesh").assertIsDisplayed()
+            compose.onNodeWithContentDescription("Back").performClick()
+            compose.onNodeWithText("Paired desktop").assertIsDisplayed()
+            compose.onNode(hasText("Settings") and rail).assertIsSelected()
+
+            compose.onNode(hasText("Usage") and rail).performClick()
+            compose.onNodeWithContentDescription("New task").performClick()
+            compose.onNodeWithText("Mesh: Buildmesh").assertIsDisplayed()
+            Espresso.pressBack()
+            compose.onNode(hasText("Usage") and rail).assertIsSelected()
+            compose.onNodeWithText("Paired desktop").assertDoesNotExist()
+        }
+    }
 }

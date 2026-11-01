@@ -92,7 +92,7 @@ private fun BuildmeshShell(vm: BuildmeshViewModel, invitation: String, requested
     fun openCapture(id: Long, option: String) {
         meshId = id
         launch = option
-        captureOrigin = if (screen == "mesh") "mesh" else "home"
+        captureOrigin = screen
         screen = "capture"
     }
     LaunchedEffect(state.paired) { if (!state.paired) screen = "home" }
@@ -125,7 +125,9 @@ private fun BuildmeshShell(vm: BuildmeshViewModel, invitation: String, requested
             "terminal", "changes", "pr" -> "node"
             "diff" -> "changes"
             "node", "issues", "pulls", "archive" -> meshScreen()
-            "capture" -> if (captureOrigin == "mesh") meshScreen() else "home"
+            // The mesh page is re-derived, because the window may have changed
+            // width while Capture was open; any other origin is a destination.
+            "capture" -> if (captureOrigin == "mesh") meshScreen() else captureOrigin
             else -> "home"
         }
     }
