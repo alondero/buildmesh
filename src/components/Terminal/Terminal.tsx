@@ -12,6 +12,7 @@ import { resolveZoomKeyAction } from './terminalKeyAction';
 import { isMac, isWindows } from '../../lib/platform';
 import { TerminalRegistry, type TerminalInstance } from './TerminalRegistry';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
+import { rememberTerminalFocusRequest, shouldAdoptTerminalFocus, type DeferredTerminalFocus } from './terminalFocus';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
 import { dropdownId } from '../../lib/dropdownId';
@@ -99,13 +100,24 @@ export function AgentTerminal({ nodeId, provider, focusOnAttach = true, focusReq
   const providerRef = useRef(provider);
   providerRef.current = provider;
 
+  // The element that held focus when a pointer selected this node before its
+  // xterm existed. Cleared once that request is applied or dropped.
+  const deferredFocus = useRef<DeferredTerminalFocus | null>(null);
+
   // Node activity tabs own the focus intent, while the terminal owns the
   // actual xterm focus. This effect handles a mounted terminal when a pointer
-  // selects it; attach-time focus remains in the async attach callback below.
+  // selects it. A terminal that is still loading remembers the focused
+  // element and applies the request when attach resolves.
   useEffect(() => {
     if (focusRequest === 0 || !focusOnAttachRef.current) return;
     if (nodeId !== useAgentNodeStore.getState().activeNodeId) return;
-    terminalManager.getInstance(nodeId)?.term.focus();
+    const inst = terminalManager.getInstance(nodeId);
+    if (inst) {
+      deferredFocus.current = null;
+      inst.term.focus();
+    } else {
+      deferredFocus.current = rememberTerminalFocusRequest();
+    }
   }, [focusRequest, nodeId]);
   const containerRef = useRef<HTMLDivElement>(null);
   const instRef = useRef<TerminalInstance | null>(null);
@@ -410,9 +422,17 @@ export function AgentTerminal({ nodeId, provider, focusOnAttach = true, focusReq
       scrollDisposableRef.current = inst.term.onScroll(updateAtBottom);
       updateAtBottom();
 
-      // Initial activation focuses the terminal. Subsequent tab selection is
-      // delegated by NodeCard, so keyboard navigation keeps focus on the tab.
-      if (nodeId === useAgentNodeStore.getState().activeNodeId && focusOnAttachRef.current) {
+      // Take focus only when this attach still owns it. A node click records
+      // the element that held focus and can resolve after the user has moved
+      // to another control; that control keeps focus. A cold mount takes focus
+      // when the document body or the terminal itself holds it. Tab selection of an
+      // already-mounted terminal is the effect above, so keyboard navigation
+      // keeps focus on the tab. Abort is handled at the top of this callback,
+      // so a stale attach does not drop a newer request.
+      const deferred = deferredFocus.current;
+      deferredFocus.current = null;
+      const stillActive = nodeId === useAgentNodeStore.getState().activeNodeId && focusOnAttachRef.current;
+      if (stillActive && shouldAdoptTerminalFocus(container, deferred)) {
         inst.term.focus();
       }
     });
