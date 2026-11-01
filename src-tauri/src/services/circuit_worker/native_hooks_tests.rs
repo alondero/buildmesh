@@ -1797,3 +1797,175 @@ fn a_hook_survives_persistence_and_replays_identically_after_a_restart() {
         );
     }
 }
+
+/// Runs 774, 775, 781 and 782, end to end through the production pipeline.
+/// The prompted turn backgrounds `npm run verify` and its Stop hook lists the
+/// task. Claude Code then opens a turn of its own (`<task-notification>`)
+/// when the task finishes; Buildmesh sent no prompt for it, so its receipts
+/// carry no submission correlation or input stamp, exactly as the ledger
+/// recorded them. Its Stop registry no longer lists the task.
+///
+/// `normalize` builds `expected` from each hook's own turn, so the
+/// notification turn is reduced-confidence, not rejected. That turn resets
+/// the prompted turn's foreground evidence and report: the prompted report
+/// ("waiting for verify") is superseded and must not be what gets classified.
+/// The handoff comes from the transcript report, which readiness admits once
+/// the registry has retired the finished task, and the step completes.
+#[test]
+fn a_task_notification_turn_releases_and_completes_a_step_held_by_finished_background_work() {
+    use crate::circuit::context::CircuitContext;
+    use crate::circuit::model::{CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind};
+    use crate::circuit::observation::{
+        CircuitObservationBlocker, ObservationDisposition, WorkEvidence,
+    };
+    use crate::circuit::stepper::{advance, CircuitEvent, RunState, RunView, StepStatus, StepView};
+    use crate::models::SessionStatus;
+
+    let mut context = CircuitContext::new();
+    context.set("source.agent_id", "900");
+    let mut run = RunView {
+        run_id: 42,
+        state: RunState::Running,
+        context,
+        graph: CircuitGraph {
+            version: 1,
+            blueprint: None,
+            edges: vec![CircuitEdge {
+                from: "await_source".into(),
+                to: "done".into(),
+                condition: Default::default(),
+            }],
+            nodes: vec![
+                CircuitNode {
+                    id: "await_source".into(),
+                    kind: CircuitNodeKind::AwaitAgentTurn {
+                        target_node_id: Some("$source".into()),
+                    },
+                },
+                CircuitNode {
+                    id: "done".into(),
+                    kind: CircuitNodeKind::Notify {
+                        message: "Finished".into(),
+                    },
+                },
+            ],
+        },
+        steps: vec![StepView {
+            node_id: "await_source".into(),
+            status: StepStatus::Running,
+            attempt: 1,
+            outcome: None,
+            error: None,
+            agent_node_id: None,
+        }],
+    };
+    let receive = |run: &mut RunView, id: i64, correlated: bool, body: &[u8]| {
+        let receipt = NativeReceipt {
+            agent_node_id: 900,
+            input_stamp: correlated.then(|| "100:1".to_owned()),
+            session_incarnation: Some("100".into()),
+            source_id: format!("receipt-{id}"),
+            received_at_ms: id,
+            turn_fenced: true,
+            explicit_turn_mismatch: false,
+            submission_correlated: correlated,
+            submission_seq: correlated.then_some(1),
+            hook: NativeHook::parse("claude", body).unwrap(),
+        };
+        let entry = crate::db::circuit::evidence::CircuitHistoryEntry {
+            id,
+            node_id: Some("await_source".into()),
+            attempt: Some(1),
+            kind: "native_hook_received".into(),
+            detail: String::new(),
+            source: None,
+            disposition: None,
+            observed_at: String::new(),
+        };
+        let event = normalize(
+            42,
+            entry,
+            receipt,
+            Some("session".into()),
+            Some("100".into()),
+            Some("100:1".into()),
+        );
+        advance(run, &event)
+    };
+
+    receive(
+        &mut run,
+        1,
+        true,
+        br#"{"hook_event_name":"Stop","session_id":"session","prompt_id":"prompt","background_tasks":[{"id":"verify"}],"session_crons":[],"last_assistant_message":"Waiting for the background verify run"}"#,
+    );
+    assert_eq!(
+        run.report_blocker("await_source"),
+        Some(CircuitObservationBlocker::KnownWorkOutstanding)
+    );
+
+    for (id, body) in [
+        (2, br#"{"hook_event_name":"UserPromptSubmit","session_id":"session","prompt_id":"notification","prompt":"<task-notification><task-id>verify</task-id><status>completed</status></task-notification>"}"#.as_slice()),
+        (3, br#"{"hook_event_name":"Stop","session_id":"session","prompt_id":"notification","background_tasks":[],"session_crons":[],"last_assistant_message":"Verify passed; round complete"}"#.as_slice()),
+    ] {
+        let transition = receive(&mut run, id, false, body);
+        assert!(
+            transition
+                .observations
+                .iter()
+                .all(|record| record.disposition == ObservationDisposition::ReducedConfidence),
+            "the notification turn is the session's own, never rejected: {:?}",
+            transition.observations
+        );
+    }
+    run.context = CircuitContext::from_json(&run.context.to_json().unwrap()).unwrap();
+    let evidence: WorkEvidence =
+        serde_json::from_str(run.context.get("node.await_source.evidence.1").unwrap()).unwrap();
+    assert_eq!(evidence.children.get("task:verify"), Some(&true));
+    assert!(
+        evidence.report.is_none(),
+        "the prompted turn's report is superseded by the notification turn"
+    );
+    assert_eq!(run.report_blocker("await_source"), None);
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    std::fs::write(&path, "{\"type\":\"message\",\"timestamp\":\"2026-11-01T12:22:41Z\",\"message\":{\"role\":\"assistant\",\"content\":\"Verify passed; round complete\"}}\n").unwrap();
+    let report = crate::services::transcript_reader::report_snapshot::from_file(
+        &path,
+        crate::services::transcript_reader::TranscriptFormat::CommandCode,
+    )
+    .unwrap();
+    let agent = crate::models::AgentNode {
+        id: 900,
+        provider: "claude".into(),
+        status: SessionStatus::Ready,
+        cli_session_id: Some("session".into()),
+        ..Default::default()
+    };
+    let candidate = super::super::readiness::prepare(
+        &run,
+        "await_source",
+        &agent,
+        Some("100:1"),
+        Ok("100:1".into()),
+        Ok(report),
+    )
+    .expect("finished background work no longer blocks the handoff")
+    .expect("a yielded agent with a current report is a handoff candidate");
+    assert_eq!(candidate.output, "Verify passed; round complete");
+
+    advance(
+        &mut run,
+        &CircuitEvent::TurnClassified {
+            node_id: "await_source".into(),
+            classification: Some(crate::circuit::evaluator::Classification::Completed),
+            output: Some(candidate.output.clone()),
+            binding: Some(candidate.binding),
+        },
+    );
+    assert_eq!(
+        run.step("await_source").unwrap().status,
+        StepStatus::Completed
+    );
+}

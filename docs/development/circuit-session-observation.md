@@ -59,7 +59,10 @@ for it, and that turn's registry is the only completion evidence a backgrounded
 Bash command produces. Without it a step waited on finished work until its
 evidence window expired (runs 774, 775, 781 and 782). A reduced-confidence
 snapshot only retires work; it never adds a child. A child known only from
-`OwnedStarted` still ends only with its own `OwnedTerminated`.
+`OwnedStarted` still ends only with its own `OwnedTerminated`. The notification
+turn still supersedes the prompted turn's foreground evidence and report, which
+usually only says it is waiting for the background work; readiness hands off
+the transcript's current report instead.
 
 The shared `circuit::report_admission` policy reads the last persisted harness
 lifecycle report as negative evidence: explicit questions and permissions block
