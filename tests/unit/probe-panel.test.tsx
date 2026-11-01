@@ -165,7 +165,7 @@ describe('ProbePanel', () => {
   });
 
   it('shows the active lens and Mesh subject in the header', () => {
-    // Scope stays visible; selection behavior is available on hover.
+    // Scope stays visible; the disclosure provides selection behavior on demand.
     useUIStore.setState({ probeOpen: true, probeTab: 'files' });
     render(<ProbePanel />);
 
@@ -400,8 +400,9 @@ describe('ProbePanel', () => {
       const scope = screen.getByTestId('probe-context-subject');
       expect(scope.title).toContain(mode);
       expect(screen.queryByTestId('probe-context-mode')).toBeNull();
-      expect(scope.parentElement?.children.length).toBe(2);
-      expect(scope.parentElement?.firstElementChild).toBe(screen.getByTestId('probe-context-title'));
+      const header = screen.getByTestId('probe-context-title').parentElement;
+      expect(header?.children.length).toBe(2);
+      expect(header?.lastElementChild?.contains(scope)).toBe(true);
       const detailEl = screen.queryByTestId('probe-context-subject-detail');
       if (detail === null) {
         expect(detailEl).toBeNull();
@@ -426,6 +427,37 @@ describe('ProbePanel', () => {
     useUIStore.setState({ probeOpen: true, probeTab: 'usage' });
     render(<ProbePanel />);
     expect(screen.getByTestId('probe-context-subject').getAttribute('title')).toBe('Host-wide');
+  });
+
+  it('exposes complete scope and mode through a keyboard-focusable native disclosure', () => {
+    useUIStore.setState({ probeOpen: true, probeTab: 'files' });
+    render(<ProbePanel />);
+
+    const summary = screen.getByTestId('probe-context-subject');
+    expect(summary.tagName).toBe('SUMMARY');
+    expect(summary.getAttribute('aria-label')).toBe('Mesh: demo · Working tree: agent-1 · Following selection');
+    fireEvent.click(summary);
+    expect(summary.parentElement?.hasAttribute('open')).toBe(true);
+    expect(screen.getByTestId('probe-context-details').textContent).toBe(summary.getAttribute('aria-label'));
+
+    fireEvent.keyDown(summary, { key: 'Escape' });
+    expect(summary.parentElement?.hasAttribute('open')).toBe(false);
+    expect(document.activeElement).toBe(summary);
+    expect(useUIStore.getState().probeOpen).toBe(true);
+  });
+
+  it('closes stale scope details when the focused working tree changes', () => {
+    useUIStore.setState({ probeOpen: true, probeTab: 'files' });
+    render(<ProbePanel />);
+    fireEvent.click(screen.getByTestId('probe-context-subject'));
+    expect(screen.getByTestId('probe-context-subject').parentElement?.hasAttribute('open')).toBe(true);
+
+    act(() => seedAgentNodes([{ ...NODE, id: 8, name: 'agent-2' }], 8));
+
+    const summary = screen.getByTestId('probe-context-subject');
+    expect(summary.parentElement?.hasAttribute('open')).toBe(false);
+    expect(summary.getAttribute('aria-label')).toBe('Mesh: demo · Working tree: agent-2 · Following selection');
+    expect(screen.getByTestId('probe-context-subject-detail').textContent).toContain('agent-2');
   });
 
   it('reaches the unavailable-subject empty state through ordinary selection loss (issue #2075)', () => {

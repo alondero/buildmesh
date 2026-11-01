@@ -88,8 +88,10 @@ read seam for the shell and destination tabs: use its subject, resolved IDs,
 paths, and `hasRequiredContext` instead of reconstructing ownership from
 `selectedMeshId` or `activeNodeId`. The Probe header follows the two-line
 [design contract](../../DESIGN.md#affordances-and-progressive-disclosure);
-the current subject stays visible at a legible weight, and the scope tooltip
-includes selection-following behavior. The context mode has exactly two values,
+the current subject stays visible at a legible weight, and the expandable scope
+line exposes full names and selection-following behavior by pointer, touch or
+keyboard. [ADR-0052](../adr/0052-probe-scope-progressive-disclosure.md) revises
+the earlier permanent mode-label mandate. The context mode has exactly two values,
 `fixed` and `following`: no
 destination can hold a subject that disagrees with the sidebar selection, and a
 subject that disappears renders the explicit unavailable-context state instead

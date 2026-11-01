@@ -34,7 +34,7 @@
  *
  * The header shows the active destination's icon in a tinted chip next to its
  * label on the first line and its scope on the second. Selection-following
- * behavior is disclosed in the scope tooltip.
+ * behavior is disclosed by expanding the scope line.
  * Issue #2075 promoted that lens/subject line to a legible weight: since
  * #2073 removed Probe Context Pins, disclosure is the only thing making a
  * selection-following destination's subject drift visible, so the subject is
@@ -129,10 +129,7 @@ function ProbePanelContent() {
   // expansion into a single +8 step per render.
   const bodyWidthRef = useRef(bodyWidth);
   bodyWidthRef.current = bodyWidth;
-  // The inspector header surfaces the destination's explicit lens and subject.
-  // Unlike the old mesh-only subheading, this keeps Host usage from inheriting
-  // a misleading mesh name and makes selection-following behavior visible
-  // before a stateful action is taken.
+  // Scope comes from the shared resolver so Host probes never inherit a Mesh name.
   const context = useProbeContext();
 
   // Issue #1375 — the inspector is fully on-demand: closed means GONE. There
@@ -248,31 +245,56 @@ function ProbePanelContent() {
                   meaning, so colour is never the only signal. Size and colour
                   live on the spans rather than the row, so the row cannot
                   re-introduce the muted run by inheritance. */}
-              <div
-                data-testid="probe-context-subject"
-                className="flex items-center gap-1 min-w-0"
-                title={scopeTitle}
+              <details
+                key={scopeTitle}
+                className="group relative min-w-0"
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape' && event.currentTarget.open) {
+                    event.currentTarget.open = false;
+                    event.currentTarget.querySelector('summary')?.focus();
+                    event.preventDefault();
+                    event.stopPropagation();
+                  }
+                }}
               >
-                <span
-                  data-testid="probe-context-subject-name"
-                  className="truncate min-w-0 text-sm font-medium text-text-primary"
+                <summary
+                  data-testid="probe-context-subject"
+                  className="flex items-center gap-1 min-w-0 min-h-[24px] cursor-pointer rounded-sm hover:bg-bg-card focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-cyan"
+                  title={scopeTitle}
+                  aria-label={scopeTitle}
                 >
-                  {scopeLabel}
-                </span>
-                {/* Mixed-ownership qualifier: Project Files' working tree vs the
-                    repository root, an Agent lens' parent Mesh. One step below
-                    the subject it qualifies, and off `text-text-muted` — it is
-                    the load-bearing half of the disclosure for the two
-                    destinations whose subject moves under the user (#732). */}
-                {context.detailLabel && (
                   <span
-                    data-testid="probe-context-subject-detail"
-                    className="truncate min-w-0 text-xs text-text-secondary"
+                    data-testid="probe-context-subject-name"
+                    className="truncate min-w-0 text-sm font-medium text-text-primary"
                   >
-                    · {context.detailLabel}
+                    {scopeLabel}
                   </span>
-                )}
-              </div>
+                  {/* Mixed-ownership qualifier: Project Files' working tree vs the
+                      repository root, an Agent lens' parent Mesh. One step below
+                      the subject it qualifies, and off `text-text-muted` — it is
+                      the load-bearing half of the disclosure for the two
+                      destinations whose subject moves under the user (#732). */}
+                  {context.detailLabel && (
+                    <span
+                      data-testid="probe-context-subject-detail"
+                      className="truncate min-w-0 text-xs text-text-secondary"
+                    >
+                      · {context.detailLabel}
+                    </span>
+                  )}
+                  <svg aria-hidden="true" className="w-3 h-3 shrink-0 text-text-secondary group-open:rotate-180" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <path d="m4 6 4 4 4-4" />
+                  </svg>
+                </summary>
+                <div
+                  data-testid="probe-context-details"
+                  className="absolute top-full left-0 right-0 z-20 max-h-[50vh] overflow-y-auto p-2 rounded-md border border-border-strong bg-bg-overlay text-xs text-text-secondary break-words shadow-sm"
+                >
+                  {context.mode === 'following'
+                    ? scopeTitle
+                    : 'Host-wide · Applies across all Meshes and Agent Nodes on this host.'}
+                </div>
+              </details>
             </div>
           </div>
           <button

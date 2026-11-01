@@ -61,6 +61,15 @@ the same change.
    the same facts, drifts from them, and costs space twice. New status for a
    Circuit Run, for example, belongs on the card's Overview tab.
 
+Compact desktop controls still provide a **24 by 24 CSS pixel minimum hit
+area**. A small colour swatch or glyph may sit inside that area; the surrounding
+button owns pointer and keyboard input. Recovery actions remain visible in
+waiting and failed rows. First-session guidance presents repository, runtime
+and session readiness before advanced shortcuts. Use a solid accent and
+inverse text for the primary action, bordered secondary actions, and the
+surface hover tokens for quiet controls. Existing reduced-motion rules apply
+to feedback and transitions on these surfaces.
+
 ### Affordances and progressive disclosure
 
 Use familiar application conventions to make actions and state recognisable:
@@ -73,16 +82,10 @@ Keep errors and recovery actions visible where the user needs to act.
 Probe headers have two lines: the destination name, then its current scope.
 Show Host-wide once for Host probes; show the selected Mesh or Agent identity
 and relevant working-tree detail for selection-scoped probes. Disclose
-selection-following behavior in the scope tooltip.
-
-Compact desktop controls still provide a **24 by 24 CSS pixel minimum hit
-area**. A small colour swatch or glyph may sit inside that area; the surrounding
-button owns pointer and keyboard input. Recovery actions remain visible in
-waiting and failed rows. First-session guidance presents repository, runtime
-and session readiness before advanced shortcuts. Use a solid accent and
-inverse text for the primary action, bordered secondary actions, and the
-surface hover tokens for quiet controls. Existing reduced-motion rules apply
-to feedback and transitions on these surfaces.
+selection-following behavior and full names in the expandable scope line,
+available by pointer, touch and keyboard. See
+[ADR-0052](docs/adr/0052-probe-scope-progressive-disclosure.md) for the revised
+disclosure decision.
 
 ## Colour
 

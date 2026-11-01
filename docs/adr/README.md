@@ -27,6 +27,9 @@ successor's status before treating the old text as current.
 
 - [0046: WSL linked-worktree trust](0046-wsl-linked-worktree-trust.md)
 
+Probe header disclosure: [ADR 0052](0052-probe-scope-progressive-disclosure.md)
+partially supersedes the permanent mode text in ADR 0029 and ADR 0041.
+
 ## Adding an ADR
 
 Use the next numeric filename and include:
