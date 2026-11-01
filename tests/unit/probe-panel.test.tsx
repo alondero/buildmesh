@@ -446,15 +446,50 @@ describe('ProbePanel', () => {
     expect(useUIStore.getState().probeOpen).toBe(true);
   });
 
-  it('closes stale scope details when the focused working tree changes', () => {
+  it.each(['mouse', 'touch'])('dismisses scope details on an outside %s pointer-down', async (pointerType) => {
     useUIStore.setState({ probeOpen: true, probeTab: 'files' });
     render(<ProbePanel />);
-    fireEvent.click(screen.getByTestId('probe-context-subject'));
-    expect(screen.getByTestId('probe-context-subject').parentElement?.hasAttribute('open')).toBe(true);
+    await screen.findByText('File Tree');
+    const summary = screen.getByTestId('probe-context-subject');
+    fireEvent.click(summary);
+    fireEvent.pointerDown(screen.getByTestId('probe-context-details'), { pointerType });
+    expect(summary.parentElement?.hasAttribute('open')).toBe(true);
+
+    fireEvent.pointerDown(screen.getByTestId('probe-context-title'), { pointerType });
+    expect(summary.parentElement?.hasAttribute('open')).toBe(false);
+    expect(useUIStore.getState().probeOpen).toBe(true);
+  });
+
+  it.each(['outside control', 'page body'])('dismisses scope details when focus moves to %s without stealing focus back', async (target) => {
+    useUIStore.setState({ probeOpen: true, probeTab: 'files' });
+    render(<ProbePanel />);
+    await screen.findByText('File Tree');
+    const summary = screen.getByTestId('probe-context-subject');
+    summary.focus();
+    fireEvent.click(summary);
+    const closeButton = screen.getByRole('button', { name: 'Close panel' });
+
+    act(() => target === 'outside control' ? closeButton.focus() : summary.blur());
+
+    expect(summary.parentElement?.hasAttribute('open')).toBe(false);
+    expect(document.activeElement).toBe(target === 'outside control' ? closeButton : document.body);
+    expect(useUIStore.getState().probeOpen).toBe(true);
+  });
+
+  it('closes stale scope details and preserves summary focus when the working tree changes', async () => {
+    useUIStore.setState({ probeOpen: true, probeTab: 'files' });
+    render(<ProbePanel />);
+    await screen.findByText('File Tree');
+    const originalSummary = screen.getByTestId('probe-context-subject');
+    originalSummary.focus();
+    fireEvent.click(originalSummary);
+    expect(originalSummary.parentElement?.hasAttribute('open')).toBe(true);
 
     act(() => seedAgentNodes([{ ...NODE, id: 8, name: 'agent-2' }], 8));
 
     const summary = screen.getByTestId('probe-context-subject');
+    expect(summary).toBe(originalSummary);
+    expect(document.activeElement).toBe(summary);
     expect(summary.parentElement?.hasAttribute('open')).toBe(false);
     expect(summary.getAttribute('aria-label')).toBe('Mesh: demo · Working tree: agent-2 · Following selection');
     expect(screen.getByTestId('probe-context-subject-detail').textContent).toContain('agent-2');

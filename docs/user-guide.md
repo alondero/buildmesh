@@ -172,7 +172,9 @@ changes**, and **GitHub Issues** and **Pull Requests** under **GitHub**. Switch
 subviews inside the panel. The header shows the tool name, then its current
 scope. Host-wide tools apply across projects; Mesh and Agent tools follow your
 selection. Click or tap the scope line, or focus it and press Enter or Space,
-to read full names and scope behavior. Escape closes those details. Files
+to read full names and scope behavior. Escape closes the details while focus is
+inside the disclosure. Clicking or tapping outside, or moving focus away,
+also closes them. Files
 shows the working tree, while Agent Changes
 compares against HEAD or the selected repository's base merge point. Commands
 still open the exact requested view. The last Files subview is restored when

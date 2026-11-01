@@ -27,9 +27,6 @@ successor's status before treating the old text as current.
 
 - [0046: WSL linked-worktree trust](0046-wsl-linked-worktree-trust.md)
 
-Probe header disclosure: [ADR 0052](0052-probe-scope-progressive-disclosure.md)
-partially supersedes the permanent mode text in ADR 0029 and ADR 0041.
-
 ## Adding an ADR
 
 Use the next numeric filename and include:
@@ -51,3 +48,5 @@ Use the next numeric filename and include:
 - [0050: OpenCode major-version and node configuration isolation](0050-opencode-major-version-isolation.md)
 
 - [0051: The pairing verification warns; it does not gate the launch](0051-pairing-verification-warns-not-gates.md)
+
+- [0052: Probe scope uses progressive disclosure](0052-probe-scope-progressive-disclosure.md) (proposed)

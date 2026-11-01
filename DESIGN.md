@@ -84,7 +84,7 @@ Show Host-wide once for Host probes; show the selected Mesh or Agent identity
 and relevant working-tree detail for selection-scoped probes. Disclose
 selection-following behavior and full names in the expandable scope line,
 available by pointer, touch and keyboard. See
-[ADR-0052](docs/adr/0052-probe-scope-progressive-disclosure.md) for the revised
+[ADR-0052](docs/adr/0052-probe-scope-progressive-disclosure.md) for the proposed
 disclosure decision.
 
 ## Colour

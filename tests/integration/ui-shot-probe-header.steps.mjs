@@ -61,11 +61,36 @@ export default async function ({ page }) {
   await expect(panel.getByText('File Tree', { exact: true })).toBeVisible();
   await mkdir('.tmp', { recursive: true });
   await panel.screenshot({ path: '.tmp/probe-mesh-long-240.png' });
+  await details.click();
+  await expect(details).toBeVisible();
+  await expect(details).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(details).toBeHidden();
   await expect(scope).toBeFocused();
   await page.keyboard.press('Space');
   await expect(details).toBeVisible();
+
+  // A non-focusable outside target isolates pointer dismissal from focus loss.
+  await title.click();
+  await expect(details).toBeHidden();
+  await scope.press('Enter');
+  await expect(details).toBeVisible();
+  await separator.focus();
+  await expect(details).toBeHidden();
+  await expect(separator).toBeFocused();
+
+  // A scope update must close the panel while retaining the focused summary.
+  await scope.press('Enter');
+  await page.evaluate(async () => {
+    const { useAgentNodeStore } = await import('../../src/stores/agentNodeStore.ts');
+    useAgentNodeStore.getState().setActiveNode(2);
+  });
+  await expect(details).toBeHidden();
+  await expect(scope).toBeFocused();
+  await expect(scope).toHaveAccessibleName(`Mesh: ${MESH_NAME} · Working tree: ${NODE_NAMES[1]} · Following selection`);
+
+  await page.locator('[data-node-card-id="1"]').getByTestId('grid-node-header').click({ position: { x: 80, y: 12 } });
+  await expect(scope).toHaveAccessibleName(`Mesh: ${MESH_NAME} · Working tree: ${NODE_NAMES[0]} · Following selection`);
 
   await page.locator('[data-node-card-id="2"]').getByTestId('grid-node-header').click({ position: { x: 80, y: 12 } });
   await expect(details).toBeHidden();
@@ -85,7 +110,15 @@ export default async function ({ page }) {
   await expect(details).toContainText(MESH_NAME);
   await expect(panel.getByText('No changes vs Base Ref', { exact: true })).toBeVisible();
   await panel.screenshot({ path: '.tmp/probe-agent-long-240.png' });
+  const titleBox = await title.boundingBox();
+  await cdp.send('Input.dispatchTouchEvent', {
+    type: 'touchStart', touchPoints: [{ x: titleBox.x + titleBox.width / 2, y: titleBox.y + titleBox.height / 2 }],
+  });
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await expect(details).toBeHidden();
   await cdp.detach();
+  await scope.press('Enter');
+  await expect(details).toBeVisible();
   await scope.press('Escape');
   await expect(details).toBeHidden();
 

@@ -46,7 +46,7 @@
  * `prefers-reduced-motion` via the global media query.
  */
 
-import { Suspense, useRef } from 'react';
+import { Suspense, useEffect, useLayoutEffect, useRef } from 'react';
 import { useUIStore, type ProbeTab } from '../../stores/uiStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import {
@@ -140,6 +140,25 @@ function ProbePanelContent() {
   const scopeLabel = context.mode === 'fixed' ? 'Host-wide' : context.subjectLabel;
   const scopeTitle = [scopeLabel, context.detailLabel, context.mode === 'following' ? 'Following selection' : null]
     .filter(Boolean).join(' · ');
+  const scopeRef = useRef<HTMLDetailsElement>(null);
+
+  useLayoutEffect(() => {
+    // Close stale details without replacing the focused summary.
+    if (scopeRef.current) scopeRef.current.open = false;
+  }, [scopeTitle]);
+
+  useEffect(() => {
+    const dismissOutside = (event: Event) => {
+      const details = scopeRef.current;
+      if (details?.open && event.target instanceof Node && !details.contains(event.target)) {
+        details.open = false;
+      }
+    };
+    document.addEventListener('pointerdown', dismissOutside, true);
+    return () => {
+      document.removeEventListener('pointerdown', dismissOutside, true);
+    };
+  }, []);
 
   return (
     // Outer wrapper is `relative` but does NOT carry `overflow-hidden` —
@@ -246,8 +265,11 @@ function ProbePanelContent() {
                   live on the spans rather than the row, so the row cannot
                   re-introduce the muted run by inheritance. */}
               <details
-                key={scopeTitle}
+                ref={scopeRef}
                 className="group relative min-w-0"
+                onBlur={(event) => {
+                  if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false;
+                }}
                 onKeyDown={(event) => {
                   if (event.key === 'Escape' && event.currentTarget.open) {
                     event.currentTarget.open = false;
@@ -288,6 +310,7 @@ function ProbePanelContent() {
                 </summary>
                 <div
                   data-testid="probe-context-details"
+                  tabIndex={-1}
                   className="absolute top-full left-0 right-0 z-20 max-h-[50vh] overflow-y-auto p-2 rounded-md border border-border-strong bg-bg-overlay text-xs text-text-secondary break-words shadow-sm"
                 >
                   {context.mode === 'following'

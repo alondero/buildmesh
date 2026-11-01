@@ -90,7 +90,7 @@ paths, and `hasRequiredContext` instead of reconstructing ownership from
 [design contract](../../DESIGN.md#affordances-and-progressive-disclosure);
 the current subject stays visible at a legible weight, and the expandable scope
 line exposes full names and selection-following behavior by pointer, touch or
-keyboard. [ADR-0052](../adr/0052-probe-scope-progressive-disclosure.md) revises
+keyboard. [ADR-0052](../adr/0052-probe-scope-progressive-disclosure.md) proposes revising
 the earlier permanent mode-label mandate. The context mode has exactly two values,
 `fixed` and `following`: no
 destination can hold a subject that disagrees with the sidebar selection, and a
