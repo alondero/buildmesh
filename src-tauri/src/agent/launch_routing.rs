@@ -36,8 +36,10 @@ fn routing_cache_key(
 }
 
 /// Memo for [`prepare`]'s value-only results, invalidated by the preferences
-/// generation (issue #1752). Keyed by `(spawn option, harness, runtime)` — the
-/// `(provider, mesh env fingerprint)` triple the resolution actually depends on.
+/// source and generation (issues #1752 and #1482). Keyed by `(spawn option,
+/// harness, runtime)` — the `(provider, mesh env fingerprint)` triple the
+/// resolution actually depends on — against the profile revision they were
+/// computed from.
 ///
 /// Generation handling is deliberately strict about *direction*. The map-level
 /// `generation` only ever moves **forward**: a caller that sampled an older
@@ -49,16 +51,33 @@ fn routing_cache_key(
 /// computed from `G`'s preferences — the entry is dead on arrival rather than
 /// becoming serveable state. The per-entry generation check is kept as the
 /// read-side twin, so a rotation can never be served from a stale entry.
+///
+/// `source` is the profile identity (issue #1482). Two stores can sit at the
+/// same revision number on paper, and a spawn resolved against one profile must
+/// never be served to the other, so the map is bound to the source it was
+/// populated from: a different source clears the map the same way a newer
+/// generation does. The cache is one process-wide mutex in every build — the
+/// key carries the isolation, not a `cfg(test)` alternate primitive.
 #[derive(Default)]
 struct RoutingCache {
+    /// The preferences store the resident entries were resolved against.
+    source: u64,
     generation: u64,
     entries: HashMap<RoutingCacheKey, (u64, PreparedLaunchRouting)>,
 }
 
 impl RoutingCache {
-    fn get(&mut self, key: &RoutingCacheKey, generation: u64) -> Option<PreparedLaunchRouting> {
-        if generation > self.generation {
+    fn get(
+        &mut self,
+        key: &RoutingCacheKey,
+        source: u64,
+        generation: u64,
+    ) -> Option<PreparedLaunchRouting> {
+        if source != self.source || generation > self.generation {
+            // Another profile, or a newer revision: nothing the map holds was
+            // resolved against this read.
             self.entries.clear();
+            self.source = source;
             self.generation = generation;
         }
         match self.entries.get(key) {
@@ -69,40 +88,33 @@ impl RoutingCache {
         }
     }
 
-    fn put(&mut self, key: RoutingCacheKey, generation: u64, routing: PreparedLaunchRouting) {
+    fn put(
+        &mut self,
+        key: RoutingCacheKey,
+        source: u64,
+        generation: u64,
+        routing: PreparedLaunchRouting,
+    ) {
         // A stale generation means the map has already moved past this entry's
-        // inputs — drop it instead of inserting dead state.
-        if generation != self.generation {
+        // inputs — drop it instead of inserting dead state. A different source
+        // means the map now belongs to another profile, so this entry would be
+        // served for preferences it was not resolved against.
+        if source != self.source || generation != self.generation {
             return;
         }
         self.entries.insert(key, (generation, routing));
     }
 }
 
-// Global in production (one preferences source per process); per-test-thread in
-// tests, mirroring `preferences::storage` — a shared static would let one
-// test's routing leak into another's, since tests use thread-local prefs.
-#[cfg(not(test))]
+/// One routing cache per process, in every build (issue #1482).
 static ROUTING_CACHE: once_cell::sync::Lazy<std::sync::Mutex<RoutingCache>> =
     once_cell::sync::Lazy::new(|| std::sync::Mutex::new(RoutingCache::default()));
 
-#[cfg(test)]
-thread_local! {
-    static ROUTING_CACHE: std::cell::RefCell<RoutingCache> =
-        std::cell::RefCell::new(RoutingCache::default());
-}
-
 fn with_routing_cache<R>(f: impl FnOnce(&mut RoutingCache) -> R) -> R {
-    #[cfg(not(test))]
-    let result = {
-        let mut guard = ROUTING_CACHE
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        f(&mut guard)
-    };
-    #[cfg(test)]
-    let result = ROUTING_CACHE.with(|cell| f(&mut cell.borrow_mut()));
-    result
+    let mut guard = ROUTING_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f(&mut guard)
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -398,10 +410,12 @@ pub fn prepare(
 
     // Cache lookup FIRST (issue #1752). `resolved_harness_profile` below walks
     // the detected profile set on every spawn; resolving it before consulting
-    // the cache would defeat the memo entirely.
-    let generation = preferences::generation();
+    // the cache would defeat the memo entirely. Source and generation are
+    // sampled together (issue #1482), so an entry is always filed under the
+    // profile that produced it.
+    let (source, generation) = preferences::identity();
     let cache_key = routing_cache_key(spawn_option_id, provider, resolved.env_type);
-    if let Some(cached) = with_routing_cache(|cache| cache.get(&cache_key, generation)) {
+    if let Some(cached) = with_routing_cache(|cache| cache.get(&cache_key, source, generation)) {
         return Ok(cached);
     }
 
@@ -442,7 +456,7 @@ pub fn prepare(
         routing,
         PreparedLaunchRouting::Native { .. } | PreparedLaunchRouting::Environment { .. }
     ) {
-        with_routing_cache(|cache| cache.put(cache_key, generation, routing.clone()));
+        with_routing_cache(|cache| cache.put(cache_key, source, generation, routing.clone()));
     }
     Ok(routing)
 }

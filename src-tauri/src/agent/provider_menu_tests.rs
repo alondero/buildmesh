@@ -1902,10 +1902,13 @@ fn memo_row() -> ProviderInfo {
     }
 }
 
-/// The memo key a test pins: the preferences generation plus the detection
-/// epoch (issue #2532).
+/// The memo key a test pins: the preferences source + generation plus the
+/// detection epoch (issues #1482 and #2532). Every test pins the same source
+/// unless it is exercising a source change, the way one profile has a single
+/// store in production.
 fn memo_key(generation: u64, detection_epoch: u64) -> MenuKey {
     MenuKey {
+        source: 1,
         generation,
         detection_epoch,
     }
@@ -1918,13 +1921,14 @@ fn memo_key(generation: u64, detection_epoch: u64) -> MenuKey {
 /// reason.
 #[test]
 fn a_repeat_read_within_the_ttl_does_not_re_derive() {
+    let mut cache = DerivedMenuCache::default();
     let mut derivations = 0;
     let mut derive = || {
         derivations += 1;
         vec![memo_row()]
     };
-    let first = derived_menu_at(memo_key(7, 0), &mut derive);
-    let second = derived_menu_at(memo_key(7, 0), &mut derive);
+    let first = derived_menu_in(&mut cache, memo_key(7, 0), &mut derive);
+    let second = derived_menu_in(&mut cache, memo_key(7, 0), &mut derive);
     assert_eq!(derivations, 1, "the second read must be a memo hit");
     let ids = |rows: &[ProviderInfo]| {
         rows.iter()
@@ -1943,16 +1947,40 @@ fn a_repeat_read_within_the_ttl_does_not_re_derive() {
 /// generation must derive again.
 #[test]
 fn a_newer_generation_re_derives_the_menu() {
+    let mut cache = DerivedMenuCache::default();
     let mut derivations = 0;
     let mut derive = || {
         derivations += 1;
         vec![memo_row()]
     };
-    derived_menu_at(memo_key(7, 0), &mut derive);
-    derived_menu_at(memo_key(8, 0), &mut derive);
+    derived_menu_in(&mut cache, memo_key(7, 0), &mut derive);
+    derived_menu_in(&mut cache, memo_key(8, 0), &mut derive);
     assert_eq!(
         derivations, 2,
         "a settings write must invalidate the memoized menu"
+    );
+}
+
+/// The source is part of the memo key (issue #1482): equal revision numbers
+/// from two stores must not become a hit, because the rows are derived from
+/// different profiles.
+#[test]
+fn a_different_preferences_source_re_derives_the_menu() {
+    let mut cache = DerivedMenuCache::default();
+    let mut derivations = 0;
+    let mut derive = || {
+        derivations += 1;
+        vec![memo_row()]
+    };
+    derived_menu_in(&mut cache, memo_key(7, 0), &mut derive);
+    let other_source = MenuKey {
+        source: memo_key(7, 0).source + 1,
+        ..memo_key(7, 0)
+    };
+    derived_menu_in(&mut cache, other_source, &mut derive);
+    assert_eq!(
+        derivations, 2,
+        "a different preferences profile must not share a memo entry"
     );
 }
 
@@ -1962,13 +1990,14 @@ fn a_newer_generation_re_derives_the_menu() {
 /// timer.
 #[test]
 fn a_newer_detection_epoch_re_derives_the_menu() {
+    let mut cache = DerivedMenuCache::default();
     let mut derivations = 0;
     let mut derive = || {
         derivations += 1;
         vec![memo_row()]
     };
-    derived_menu_at(memo_key(7, 0), &mut derive);
-    derived_menu_at(memo_key(7, 1), &mut derive);
+    derived_menu_in(&mut cache, memo_key(7, 0), &mut derive);
+    derived_menu_in(&mut cache, memo_key(7, 1), &mut derive);
     assert_eq!(
         derivations, 2,
         "a new detection epoch must invalidate the memoized menu"
@@ -1999,6 +2028,40 @@ fn a_memoized_menu_expires_after_the_ttl() {
             .get(memo_key(0, 0), derived_at + DERIVED_MENU_TTL)
             .is_none(),
         "an expired menu must re-derive so an out-of-process install shows up"
+    );
+}
+
+/// Issue #1482 review: a derivation for one profile that completes *after* the
+/// slot moved to a newer revision of another profile cannot publish. The
+/// revision watermark is process-wide, so "stale" is judged against every
+/// profile, not just the resident one — otherwise a switch of source would be
+/// enough to let an old row set become serveable state.
+#[test]
+fn a_derivation_for_another_source_cannot_publish_over_a_newer_revision() {
+    let mut cache = DerivedMenuCache::default();
+    let now = Instant::now();
+    // The slot moved to source 2 at revision 9...
+    let newer = MenuKey {
+        source: 2,
+        generation: 9,
+        detection_epoch: 0,
+    };
+    cache.get(newer, now);
+    // ...and a derivation started earlier for source 1 at revision 4 finishes
+    // late. It must be dropped, not adopted as the resident source.
+    let stale = MenuKey {
+        source: 1,
+        generation: 4,
+        detection_epoch: 0,
+    };
+    cache.put(stale, now, Arc::new(Vec::new()));
+    assert!(
+        cache.get(newer, now).is_none(),
+        "the newer slot must not be replaced by a stale derivation"
+    );
+    assert_eq!(
+        cache.key, newer,
+        "a stale cross-source derivation must not move the key backwards"
     );
 }
 

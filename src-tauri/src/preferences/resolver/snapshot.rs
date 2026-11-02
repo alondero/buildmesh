@@ -12,11 +12,11 @@
 //! values the derivation consumes, all from one generation, plus the
 //! generation number itself so a caller can key a memo on it.
 
+use super::super::compat;
 use super::super::model::{
     AppPreferences, HarnessProfile, PairingVerification, ProviderAccount, ProviderPairing,
     ProxiedProviderOrder,
 };
-use super::super::storage::{generation, load};
 use super::accounts::effective_provider_accounts;
 use super::catalog::default_provider_accounts;
 use super::harness::{default_harness_profiles, effective_harness_profiles};
@@ -41,8 +41,13 @@ pub struct PreferencesSnapshot {
     /// The effective harness profiles — the code-defined defaults with the
     /// user's stored rows merged over them by `id`.
     pub harness_profiles: Vec<HarnessProfile>,
-    /// The preferences generation this snapshot was read at.
+    /// The preferences generation this snapshot was read at. With
+    /// [`Self::source`] it identifies the exact value the lists were resolved
+    /// from, so a derived cache keyed on the pair cannot serve another
+    /// profile's rows.
     pub generation: u64,
+    /// The identity of the store that produced this snapshot (issue #1482).
+    pub source: u64,
     /// The preferences value the lists above were resolved from.
     ///
     /// `None` when the read failed: a derivation then renders no
@@ -93,21 +98,20 @@ impl PreferencesSnapshot {
 
 /// Read preferences once and resolve the effective view.
 ///
-/// One `load()` feeds the lists, so a derivation does not straddle a write.
-///
-/// The generation is sampled **before** the read, so the number a caller
-/// memoises on is not newer than the data it holds. A write that lands
-/// between the two costs one extra derivation later; it does not let a stale
-/// menu be served under a fresh key.
+/// One store read feeds the lists **and** the identity a caller memoises on:
+/// the value, source and revision are sampled together under the store's cache
+/// lock, so a derivation cannot straddle a write or pin a revision that is
+/// newer than the data it holds.
 pub fn load_snapshot() -> Result<PreferencesSnapshot, String> {
-    let generation = generation();
-    let mut prefs = load()?;
+    let snapshot = compat::snapshot()?;
+    let mut prefs = snapshot.preferences;
     let accounts = effective_provider_accounts(&mut prefs);
     let harness_profiles = effective_harness_profiles(&prefs.harness_profiles);
     Ok(PreferencesSnapshot {
         accounts,
         harness_profiles,
-        generation,
+        generation: snapshot.revision,
+        source: snapshot.source,
         prefs: Some(prefs),
     })
 }
@@ -127,7 +131,8 @@ pub fn snapshot_or_default() -> PreferencesSnapshot {
             PreferencesSnapshot {
                 accounts: default_provider_accounts(),
                 harness_profiles: default_harness_profiles(),
-                generation: generation(),
+                generation: compat::generation(),
+                source: compat::source(),
                 prefs: None,
             }
         }

@@ -272,6 +272,10 @@ fn key(id: &str) -> RoutingCacheKey {
     (id.to_string(), "anthropic", "windows")
 }
 
+/// The profile every test pins unless it is exercising a source change, the
+/// way one running app has a single installed store.
+const SOURCE: u64 = 1;
+
 fn native(path: &str) -> PreparedLaunchRouting {
     PreparedLaunchRouting::Native {
         executable: Some(PathBuf::from(path)),
@@ -280,19 +284,29 @@ fn native(path: &str) -> PreparedLaunchRouting {
 }
 
 /// Store `routing` at `generation`, going through `get` first exactly as
-/// `prepare` does — `put` only accepts the map's current generation, so a
-/// bare `put` would be dropped.
+/// `prepare` does — `put` only accepts the map's current source and generation,
+/// so a bare `put` would be dropped.
 fn seed(
     cache: &mut RoutingCache,
     key: RoutingCacheKey,
     generation: u64,
     routing: PreparedLaunchRouting,
 ) {
+    seed_from(cache, key, SOURCE, generation, routing);
+}
+
+fn seed_from(
+    cache: &mut RoutingCache,
+    key: RoutingCacheKey,
+    source: u64,
+    generation: u64,
+    routing: PreparedLaunchRouting,
+) {
     assert!(
-        cache.get(&key, generation).is_none(),
+        cache.get(&key, source, generation).is_none(),
         "seed expects a cold key"
     );
-    cache.put(key, generation, routing);
+    cache.put(key, source, generation, routing);
 }
 
 /// A hit returns the stored value; a repeated read at the same generation
@@ -300,9 +314,12 @@ fn seed(
 #[test]
 fn get_returns_the_value_stored_at_the_current_generation() {
     let mut cache = RoutingCache::default();
-    assert!(cache.get(&key("claude"), 7).is_none(), "cold cache misses");
-    cache.put(key("claude"), 7, native("/usr/bin/claude"));
-    match cache.get(&key("claude"), 7) {
+    assert!(
+        cache.get(&key("claude"), SOURCE, 7).is_none(),
+        "cold cache misses"
+    );
+    cache.put(key("claude"), SOURCE, 7, native("/usr/bin/claude"));
+    match cache.get(&key("claude"), SOURCE, 7) {
         Some(PreparedLaunchRouting::Native { executable, .. }) => {
             assert_eq!(
                 executable.as_deref(),
@@ -319,7 +336,7 @@ fn a_generation_bump_invalidates_every_entry() {
     let mut cache = RoutingCache::default();
     seed(&mut cache, key("claude"), 7, native("/usr/bin/claude"));
     assert!(
-        cache.get(&key("claude"), 8).is_none(),
+        cache.get(&key("claude"), SOURCE, 8).is_none(),
         "a bumped generation must drop entries computed before it"
     );
 }
@@ -331,12 +348,43 @@ fn a_generation_bump_invalidates_every_entry() {
 fn put_drops_an_entry_computed_before_a_bump() {
     let mut cache = RoutingCache::default();
     // The map was already advanced to generation 8 by another caller...
-    assert!(cache.get(&key("claude"), 8).is_none());
+    assert!(cache.get(&key("claude"), SOURCE, 8).is_none());
     // ...then a slow spawn tries to insert its generation-7 result.
-    cache.put(key("claude"), 7, native("/usr/bin/claude"));
+    cache.put(key("claude"), SOURCE, 7, native("/usr/bin/claude"));
     assert!(
-        cache.get(&key("claude"), 8).is_none(),
+        cache.get(&key("claude"), SOURCE, 8).is_none(),
         "a put stamped with a stale generation must be dropped, not stored"
+    );
+}
+
+/// Issue #1482: a spawn resolved against one profile must never be served to
+/// another, even at the same revision number. The map is bound to the source it
+/// was populated from, so a different source starts cold.
+#[test]
+fn a_different_preferences_source_never_reuses_an_entry() {
+    let mut cache = RoutingCache::default();
+    seed_from(&mut cache, key("claude"), 1, 7, native("/usr/bin/claude"));
+    assert!(
+        cache.get(&key("claude"), 2, 7).is_none(),
+        "an entry resolved from another profile must not be a hit"
+    );
+    // ...and the map now belongs to the new profile, so the old entry is gone.
+    assert!(
+        cache.get(&key("claude"), 1, 7).is_none(),
+        "a source change must not leave the previous profile's entries serveable"
+    );
+}
+
+/// The write-side twin: a spawn that resolved against a profile the map has
+/// since moved away from cannot publish its result.
+#[test]
+fn put_drops_an_entry_resolved_against_another_source() {
+    let mut cache = RoutingCache::default();
+    assert!(cache.get(&key("claude"), 2, 7).is_none());
+    cache.put(key("claude"), 1, 7, native("/usr/bin/claude"));
+    assert!(
+        cache.get(&key("claude"), 2, 7).is_none(),
+        "an entry from another profile must not become serveable state"
     );
 }
 
@@ -346,9 +394,9 @@ fn a_stale_reader_does_not_evict_newer_entries() {
     let mut cache = RoutingCache::default();
     seed(&mut cache, key("claude"), 8, native("/usr/bin/claude"));
     // A slow reader that sampled generation 7 must miss, not clear the map.
-    assert!(cache.get(&key("claude"), 7).is_none());
+    assert!(cache.get(&key("claude"), SOURCE, 7).is_none());
     assert!(
-        cache.get(&key("claude"), 8).is_some(),
+        cache.get(&key("claude"), SOURCE, 8).is_some(),
         "the generation-8 entry must survive a generation-7 reader"
     );
 }
@@ -366,7 +414,7 @@ fn the_runtime_is_part_of_the_fingerprint() {
     );
     assert!(
         cache
-            .get(&("claude".to_string(), "anthropic", "windows"), 1)
+            .get(&("claude".to_string(), "anthropic", "windows"), SOURCE, 1)
             .is_none(),
         "a Windows lookup must not reuse the WSL entry"
     );
@@ -385,7 +433,7 @@ fn the_provider_is_part_of_the_fingerprint() {
     );
     assert!(
         cache
-            .get(&("claude".to_string(), "codex", "windows"), 1)
+            .get(&("claude".to_string(), "codex", "windows"), SOURCE, 1)
             .is_none(),
         "a different harness must not reuse the entry"
     );

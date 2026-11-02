@@ -24,6 +24,7 @@
 
 use super::model::AppPreferences;
 use std::collections::HashSet;
+use std::path::Path;
 
 /// Slot of the deprecated flat `minimax_api_key` field.
 const LEGACY_MINIMAX_SLOT: &str = "minimax-api-key";
@@ -32,19 +33,28 @@ fn account_slot(account_id: &str) -> String {
     format!("provider-account:{account_id}")
 }
 
-/// The profile the running instance owns: the app-data directory's leaf, which
-/// is the bundle identifier (`com.alond.buildmesh` / `com.alond.buildmesh.dev`).
-fn profile() -> String {
-    super::storage::app_data_dir()
-        .and_then(|dir| {
-            dir.file_name()
-                .map(|leaf| leaf.to_string_lossy().into_owned())
-        })
+/// The credential-store profile a directory owns: its leaf name, which is the
+/// bundle identifier (`com.alond.buildmesh` / `com.alond.buildmesh.dev`).
+///
+/// The profile comes from the directory rather than a global, so a
+/// [`super::store::PreferencesStore`] addresses its own keys: the store owns
+/// which profile a read or write belongs to (issue #1482).
+pub(crate) fn profile_for(dir: &Path) -> String {
+    dir.file_name()
+        .map(|leaf| leaf.to_string_lossy().into_owned())
         .unwrap_or_else(|| "default".to_string())
 }
 
-fn target(slot: &str) -> String {
-    format!("buildmesh:{}:{slot}", profile())
+/// The profile of the default store, for callers that work on that store's
+/// paths without holding its handle.
+fn profile() -> String {
+    super::compat::app_data_dir()
+        .map(|dir| profile_for(&dir))
+        .unwrap_or_else(|| "default".to_string())
+}
+
+fn target(profile: &str, slot: &str) -> String {
+    format!("buildmesh:{profile}:{slot}")
 }
 
 fn non_empty(value: &Option<String>) -> Option<&str> {
@@ -116,14 +126,14 @@ fn non_empty_json<'a>(
 /// cue to [`scrub_file`] it. A store read error is logged (never the value) and
 /// leaves the key absent for this session; it is not an error, because every
 /// other setting must keep working.
-pub(crate) fn hydrate_json(value: &mut serde_json::Value) -> bool {
+pub(crate) fn hydrate_json(value: &mut serde_json::Value, profile: &str) -> bool {
     let mut plaintext_in_file = false;
     visit_secret_fields(value, |owner, field, slot| {
         if non_empty_json(owner, field).is_some() {
             plaintext_in_file = true;
             return;
         }
-        match backend::get(&target(&slot)) {
+        match backend::get(&target(profile, &slot)) {
             Ok(Some(secret)) if !secret.is_empty() => {
                 owner.insert(field.to_string(), serde_json::Value::String(secret));
             }
@@ -150,7 +160,11 @@ pub(crate) fn hydrate_json(value: &mut serde_json::Value) -> bool {
 /// last-known-good backup, which is older: there a key is only stored when the
 /// store has none, and is otherwise just dropped, so an old backup can never
 /// overwrite a newer key.
-pub(crate) fn scrub_file(path: &std::path::Path, authoritative: bool) -> Result<(), String> {
+pub(crate) fn scrub_file(
+    path: &std::path::Path,
+    authoritative: bool,
+    profile: &str,
+) -> Result<(), String> {
     let raw = match std::fs::read(path) {
         Ok(raw) => raw,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -165,13 +179,13 @@ pub(crate) fn scrub_file(path: &std::path::Path, authoritative: bool) -> Result<
             return;
         };
         if !authoritative
-            && matches!(backend::get(&target(&slot)), Ok(Some(stored)) if !stored.is_empty())
+            && matches!(backend::get(&target(profile, &slot)), Ok(Some(stored)) if !stored.is_empty())
         {
             owner.insert(field.to_string(), serde_json::Value::Null);
             changed = true;
             return;
         }
-        match backend::set(&target(&slot), &secret) {
+        match backend::set(&target(profile, &slot), &secret) {
             Ok(()) => {
                 owner.insert(field.to_string(), serde_json::Value::Null);
                 changed = true;
@@ -199,21 +213,21 @@ pub(crate) fn with_keys_inlined(raw: Vec<u8>) -> Vec<u8> {
         Ok(value) if value.is_object() => value,
         _ => return raw,
     };
-    hydrate_json(&mut value);
+    hydrate_json(&mut value, &profile());
     serde_json::to_vec_pretty(&value).unwrap_or(raw)
 }
 
 /// Struct-level counterpart of [`hydrate_json`], for a backup restored through
 /// `recovery` (which classifies the bytes itself). A backup is always written in
 /// the current shape, so skipping the pre-migration ordering is safe here.
-pub(crate) fn hydrate(prefs: &mut AppPreferences) -> bool {
+pub(crate) fn hydrate(prefs: &mut AppPreferences, profile: &str) -> bool {
     let mut plaintext_in_file = false;
     let mut fill = |field: &mut Option<String>, slot: String| {
         if non_empty(field).is_some() {
             plaintext_in_file = true;
             return;
         }
-        match backend::get(&target(&slot)) {
+        match backend::get(&target(profile, &slot)) {
             Ok(Some(value)) if !value.is_empty() => *field = Some(value),
             Ok(_) => {}
             Err(error) => {
@@ -294,7 +308,7 @@ fn account_ids_with_keys_in_file(path: &std::path::Path) -> HashSet<String> {
 ///
 /// Sorted, so the Settings list is stable between reads.
 pub(crate) fn account_ids_with_keys_on_disk() -> Vec<String> {
-    let Ok(primary) = super::storage::preferences_path() else {
+    let Ok(primary) = super::compat::preferences_path() else {
         return Vec::new();
     };
     let mut ids = account_ids_with_keys_in_file(&primary);
@@ -314,13 +328,14 @@ pub(crate) fn account_ids_with_keys_on_disk() -> Vec<String> {
 pub(crate) fn externalize(
     prefs: &AppPreferences,
     previous: Option<&AppPreferences>,
+    profile: &str,
 ) -> AppPreferences {
     let mut on_disk = prefs.clone();
     let move_out = |field: &mut Option<String>, slot: String| {
         let Some(value) = non_empty(field) else {
             return;
         };
-        match backend::set(&target(&slot), value) {
+        match backend::set(&target(profile, &slot), value) {
             Ok(()) => *field = None,
             Err(error) => {
                 tracing::warn!(%slot, %error, "credential store write failed; the key stays in preferences.json");
@@ -339,7 +354,7 @@ pub(crate) fn externalize(
     if let Some(previous) = previous {
         let live = keyed_slots(prefs);
         for slot in keyed_slots(previous).difference(&live) {
-            if let Err(error) = backend::delete(&target(slot)) {
+            if let Err(error) = backend::delete(&target(profile, slot)) {
                 tracing::warn!(%slot, %error, "credential store delete failed; a stale key entry remains");
             }
         }
@@ -464,7 +479,11 @@ pub(crate) mod test_support {
     /// Store `value` as the key of provider account `id` in the current profile,
     /// as if a build had saved it there.
     pub(crate) fn seed_account_secret(id: &str, value: &str) {
-        super::backend::set(&super::target(&super::account_slot(id)), value).unwrap();
+        super::backend::set(
+            &super::target(&super::profile(), &super::account_slot(id)),
+            value,
+        )
+        .unwrap();
     }
 
     /// Every secret value currently held by the in-memory credential store.
