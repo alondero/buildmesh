@@ -116,7 +116,7 @@ fn add_rename_and_remove_write_preferences_and_keep_the_folder() {
     assert_eq!(renamed.home, added.home, "renaming never moves the home");
 
     // A configuration pinned to the login is unpinned when it goes.
-    crate::preferences::storage::try_update(|prefs| {
+    crate::preferences::try_update(|prefs| {
         prefs.spawn_configurations.push(
             crate::preferences::spawn_configurations::SpawnConfiguration {
                 id: "launch/codex-work".into(),

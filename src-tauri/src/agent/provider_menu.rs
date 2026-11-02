@@ -14,6 +14,7 @@
 #[cfg(test)]
 use crate::agent::provider::AgentProvider;
 use crate::agent::provider::{EffectivePermissionMode, Platform, ProviderInfo};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::command;
@@ -319,46 +320,53 @@ fn discover_codex_runtimes_concurrently(
 
 /// Wall-clock bound on one memoized menu.
 ///
-/// The preferences generation is what makes the memo correct: it bumps on every
+/// The preferences revision is what makes the memo correct: it advances on every
 /// durable preference write, and a change reaches the rest of the app only once
 /// one of those lands, so a memoized menu is never older than the preferences
-/// cache every other reader sees. What the generation cannot see is a change
+/// cache every other reader sees. What the revision cannot see is a change
 /// made outside Buildmesh — a `npm i -g @openai/codex` (or a WSL-side install)
 /// while the window is open. 45s matches `codex::CODEX_INSTALL_CACHE_TTL`, the
 /// staleness bound the Codex install probe already accepts, so the menu never
 /// serves install metadata older than the probe behind it.
 const DERIVED_MENU_TTL: Duration = Duration::from_secs(45);
 
-/// The Spawn Menu memo key: the preferences generation plus the detection
-/// epoch (issue #2532).
+/// The key a Spawn Menu derivation is memoised on.
 ///
-/// The derivation's preferences and detection inputs are these two — the
-/// preferences it read and the detection observation it filtered the harnesses
-/// against. Keying on the pair is what makes the memo *complete* for them:
-/// an input that can change the rows appears in the key, so a memo hit is not
-/// stale on either count.
+/// The preference **source** and **revision** identify the profile state the
+/// derivation read; the detection epoch identifies the harness-detection state
+/// it observed. Those are the derivation's inputs — the preferences it read
+/// and the detection observation it filtered the harnesses against. Keying on
+/// them is what makes the memo *complete* for them: an input that can change
+/// the rows appears in the key, so a memo hit is not stale on either count.
 ///
-/// Both components only move forward, so the ordering rule below holds for the
-/// pair the way it held for the generation alone.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+/// All three only move forward, so the ordering rule below holds for the
+/// triple the way it held for the revision alone (issue #1482).
+///
+/// The source is part of the key because a revision alone is not comparable
+/// across stores: two stores can sit at the same revision number while
+/// holding different preferences, and neither may serve the other's menu.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
 struct MenuKey {
-    /// The preferences generation the derivation read at.
-    generation: u64,
+    /// The preference source the derivation read from.
+    source: crate::preferences::SourceIdentity,
+    /// The preferences revision the derivation read at.
+    revision: u64,
     /// The detection epoch the derivation observed.
     detection_epoch: u64,
 }
 
-/// Single-slot memo for the Spawn Menu derivation (issue #2349), keyed on the
-/// preferences generation and the detection epoch. The generation is the key
-/// `agent::launch_routing` uses for its routing cache; the epoch is this
-/// memo's addition (issue #2532). The key only moves **forward**, so a caller
-/// that sampled an older one must not evict the newer entry or publish its
-/// own: `get` clears only on a strictly newer key, and `put` drops a
-/// derivation whose inputs have already moved past it. `now` is a parameter
-/// rather than an internal clock read so the TTL is testable without
-/// sleeping.
+/// One memo slot per preference source.
+///
+/// The single-slot memo this replaced was keyed on the preferences revision
+/// and the detection epoch. Scoping the slot to the source keeps that shape
+/// while making two stores with equal revisions independent (issue #1482).
 #[derive(Default)]
 struct DerivedMenuCache {
+    slots: HashMap<crate::preferences::SourceIdentity, MenuSlot>,
+}
+
+#[derive(Default)]
+struct MenuSlot {
     key: MenuKey,
     derived_at: Option<Instant>,
     menu: Option<Arc<Vec<ProviderInfo>>>,
@@ -366,56 +374,57 @@ struct DerivedMenuCache {
 
 impl DerivedMenuCache {
     fn get(&mut self, key: MenuKey, now: Instant) -> Option<Arc<Vec<ProviderInfo>>> {
-        if key < self.key {
+        let slot = self.slots.entry(key.source.clone()).or_default();
+        if key < slot.key {
             // A caller holding an older key must not evict the newer entry.
             return None;
         }
-        if key > self.key {
-            self.key = key;
-            self.derived_at = None;
-            self.menu = None;
+        if key > slot.key {
+            slot.key = key.clone();
+            slot.derived_at = None;
+            slot.menu = None;
         }
-        let derived_at = self.derived_at?;
-        let menu = self.menu.clone()?;
+        let derived_at = slot.derived_at?;
+        let menu = slot.menu.clone()?;
         (now.saturating_duration_since(derived_at) < DERIVED_MENU_TTL).then_some(menu)
     }
 
     fn put(&mut self, key: MenuKey, now: Instant, menu: Arc<Vec<ProviderInfo>>) {
+        // A slot that does not exist yet is established by this derivation:
+        // there is no earlier key for it to be stale against. `get` creates
+        // the slot too, so in production this path is only taken when a
+        // caller publishes without reading first.
+        let slot = self
+            .slots
+            .entry(key.source.clone())
+            .or_insert_with(|| MenuSlot {
+                key: key.clone(),
+                ..Default::default()
+            });
         // A stale key means the slot already moved past this derivation's
         // inputs — dropping it beats storing dead state.
-        if key != self.key {
+        if slot.key != key {
             return;
         }
-        self.derived_at = Some(now);
-        self.menu = Some(menu);
+        slot.derived_at = Some(now);
+        slot.menu = Some(menu);
     }
 }
 
-// Global in production (one preferences source per process); per-test-thread
-// in tests, mirroring `agent::launch_routing` — under `cfg(test)` the
-// preferences app-data dir is thread-local (issue #1386), so a shared static
-// would serve one test's preferences to another thread.
-#[cfg(not(test))]
+// One cache for the whole process, in every build. The thread-local fork this
+// replaced (issue #1482) gave tests a *different* synchronization
+// implementation from production, so a test could not establish what
+// production does. Isolation now comes from the cache **key**: the memo is
+// scoped to the preference source that produced it, so a test's own store
+// cannot be served another test's menu.
 static DERIVED_MENU_CACHE: once_cell::sync::Lazy<std::sync::Mutex<DerivedMenuCache>> =
     once_cell::sync::Lazy::new(|| std::sync::Mutex::new(DerivedMenuCache::default()));
 
-#[cfg(test)]
-thread_local! {
-    static DERIVED_MENU_CACHE: std::cell::RefCell<DerivedMenuCache> =
-        std::cell::RefCell::new(DerivedMenuCache::default());
-}
-
 fn with_derived_menu<R>(f: impl FnOnce(&mut DerivedMenuCache) -> R) -> R {
-    #[cfg(not(test))]
-    let result = {
-        let mut guard = DERIVED_MENU_CACHE
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        f(&mut guard)
-    };
-    #[cfg(test)]
-    let result = DERIVED_MENU_CACHE.with(|cell| f(&mut cell.borrow_mut()));
-    result
+    let mut guard = DERIVED_MENU_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f(&mut guard)
 }
 
 /// Derive the Spawn Menu, or serve the memoized menu (issue #2349).
@@ -434,10 +443,10 @@ fn with_derived_menu<R>(f: impl FnOnce(&mut DerivedMenuCache) -> R) -> R {
 /// would have produced — the same derivation, less the probes.
 ///
 /// The preferences snapshot is read **before** the memo lookup (issue #2532):
-/// its generation is half the memo key, and the derivation consumes the very
-/// same snapshot, so a memo hit serves rows built from the read that was keyed.
-/// The detection snapshot is read the same way — its epoch is the other half of
-/// the key.
+/// its source and revision are the preference half of the memo key, and the
+/// derivation consumes the very same snapshot, so a memo hit serves rows built
+/// from the read that was keyed. The detection snapshot is read the same way —
+/// its epoch is the other half of the key.
 fn derived_menu(
     snapshot: crate::preferences::PreferencesSnapshot,
     derive: impl FnOnce(
@@ -447,20 +456,17 @@ fn derived_menu(
 ) -> Vec<ProviderInfo> {
     let detection = crate::agent::detection::detection_snapshot();
     let key = MenuKey {
-        generation: snapshot.generation,
+        source: snapshot.source.clone(),
+        revision: snapshot.revision,
         detection_epoch: detection.epoch,
     };
     derived_menu_at(key, move || derive(snapshot, &detection))
 }
 
 /// [`derived_menu`] with the cache key supplied, so a unit test can pin a
-/// generation and an epoch. Sampling the real ones is inherently racy under a
-/// parallel test binary: `preferences::generation` is process-wide (one
-/// preferences source per process) while the preferences themselves are
-/// per-test-thread, so any other thread's `save`/`update` moves the key
-/// mid-test.
+/// source, a revision and an epoch.
 fn derived_menu_at(key: MenuKey, derive: impl FnOnce() -> Vec<ProviderInfo>) -> Vec<ProviderInfo> {
-    if let Some(menu) = with_derived_menu(|cache| cache.get(key, Instant::now())) {
+    if let Some(menu) = with_derived_menu(|cache| cache.get(key.clone(), Instant::now())) {
         return menu.as_ref().clone();
     }
     let menu = Arc::new(derive());

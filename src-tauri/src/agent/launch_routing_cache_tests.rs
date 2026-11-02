@@ -279,30 +279,46 @@ fn native(path: &str) -> PreparedLaunchRouting {
     }
 }
 
-/// Store `routing` at `generation`, going through `get` first exactly as
-/// `prepare` does — `put` only accepts the map's current generation, so a
+/// A distinct preference source, as a derived cache sees it.
+///
+/// The identity comes from a real store — it is what the cache keys on, so a
+/// test must not invent one. The directory is returned with it so the caller
+/// can keep it alive.
+fn source() -> (tempfile::TempDir, SourceIdentity) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::preferences::PreferencesStore::new(dir.path().to_path_buf());
+    (dir, store.source().clone())
+}
+
+/// Store `routing` at `revision`, going through `get` first exactly as
+/// `prepare` does — `put` only accepts the source's current revision, so a
 /// bare `put` would be dropped.
 fn seed(
     cache: &mut RoutingCache,
+    source: &SourceIdentity,
+    revision: u64,
     key: RoutingCacheKey,
-    generation: u64,
     routing: PreparedLaunchRouting,
 ) {
     assert!(
-        cache.get(&key, generation).is_none(),
+        cache.get(source, revision, &key).is_none(),
         "seed expects a cold key"
     );
-    cache.put(key, generation, routing);
+    cache.put(source, revision, key, routing);
 }
 
-/// A hit returns the stored value; a repeated read at the same generation
+/// A hit returns the stored value; a repeated read at the same revision
 /// keeps hitting (the memo's whole point).
 #[test]
-fn get_returns_the_value_stored_at_the_current_generation() {
+fn get_returns_the_value_stored_at_the_current_revision() {
+    let (_dir, source) = source();
     let mut cache = RoutingCache::default();
-    assert!(cache.get(&key("claude"), 7).is_none(), "cold cache misses");
-    cache.put(key("claude"), 7, native("/usr/bin/claude"));
-    match cache.get(&key("claude"), 7) {
+    assert!(
+        cache.get(&source, 7, &key("claude")).is_none(),
+        "cold cache misses"
+    );
+    cache.put(&source, 7, key("claude"), native("/usr/bin/claude"));
+    match cache.get(&source, 7, &key("claude")) {
         Some(PreparedLaunchRouting::Native { executable, .. }) => {
             assert_eq!(
                 executable.as_deref(),
@@ -313,43 +329,58 @@ fn get_returns_the_value_stored_at_the_current_generation() {
     }
 }
 
-/// A generation bump invalidates the map — the settings-change path.
+/// A revision bump invalidates the map — the settings-change path.
 #[test]
-fn a_generation_bump_invalidates_every_entry() {
+fn a_revision_bump_invalidates_every_entry() {
+    let (_dir, source) = source();
     let mut cache = RoutingCache::default();
-    seed(&mut cache, key("claude"), 7, native("/usr/bin/claude"));
+    seed(
+        &mut cache,
+        &source,
+        7,
+        key("claude"),
+        native("/usr/bin/claude"),
+    );
     assert!(
-        cache.get(&key("claude"), 8).is_none(),
-        "a bumped generation must drop entries computed before it"
+        cache.get(&source, 8, &key("claude")).is_none(),
+        "a bumped revision must drop entries computed before it"
     );
 }
 
-/// The write-side race guard: a slow spawn that sampled generation 7 must
+/// The write-side race guard: a slow spawn that sampled revision 7 must
 /// not be able to publish its result once the map has moved to 8. Without
 /// this `put` a rotated endpoint/key could become serveable state.
 #[test]
 fn put_drops_an_entry_computed_before_a_bump() {
+    let (_dir, source) = source();
     let mut cache = RoutingCache::default();
-    // The map was already advanced to generation 8 by another caller...
-    assert!(cache.get(&key("claude"), 8).is_none());
-    // ...then a slow spawn tries to insert its generation-7 result.
-    cache.put(key("claude"), 7, native("/usr/bin/claude"));
+    // The map was already advanced to revision 8 by another caller...
+    assert!(cache.get(&source, 8, &key("claude")).is_none());
+    // ...then a slow spawn tries to insert its revision-7 result.
+    cache.put(&source, 7, key("claude"), native("/usr/bin/claude"));
     assert!(
-        cache.get(&key("claude"), 8).is_none(),
-        "a put stamped with a stale generation must be dropped, not stored"
+        cache.get(&source, 8, &key("claude")).is_none(),
+        "a put stamped with a stale revision must be dropped, not stored"
     );
 }
 
-/// A caller holding an older generation must not evict the newer entries.
+/// A caller holding an older revision must not evict the newer entries.
 #[test]
 fn a_stale_reader_does_not_evict_newer_entries() {
+    let (_dir, source) = source();
     let mut cache = RoutingCache::default();
-    seed(&mut cache, key("claude"), 8, native("/usr/bin/claude"));
-    // A slow reader that sampled generation 7 must miss, not clear the map.
-    assert!(cache.get(&key("claude"), 7).is_none());
+    seed(
+        &mut cache,
+        &source,
+        8,
+        key("claude"),
+        native("/usr/bin/claude"),
+    );
+    // A slow reader that sampled revision 7 must miss, not clear the map.
+    assert!(cache.get(&source, 7, &key("claude")).is_none());
     assert!(
-        cache.get(&key("claude"), 8).is_some(),
-        "the generation-8 entry must survive a generation-7 reader"
+        cache.get(&source, 8, &key("claude")).is_some(),
+        "the revision-8 entry must survive a revision-7 reader"
     );
 }
 
@@ -357,16 +388,18 @@ fn a_stale_reader_does_not_evict_newer_entries() {
 /// not satisfy a Windows lookup of the same spawn option.
 #[test]
 fn the_runtime_is_part_of_the_fingerprint() {
+    let (_dir, source) = source();
     let mut cache = RoutingCache::default();
     seed(
         &mut cache,
-        ("claude".to_string(), "anthropic", "wsl"),
+        &source,
         1,
+        ("claude".to_string(), "anthropic", "wsl"),
         native("/home/u/bin/claude"),
     );
     assert!(
         cache
-            .get(&("claude".to_string(), "anthropic", "windows"), 1)
+            .get(&source, 1, &("claude".to_string(), "anthropic", "windows"))
             .is_none(),
         "a Windows lookup must not reuse the WSL entry"
     );
@@ -376,17 +409,78 @@ fn the_runtime_is_part_of_the_fingerprint() {
 /// string resolved under a different executor must not reuse the entry.
 #[test]
 fn the_provider_is_part_of_the_fingerprint() {
+    let (_dir, source) = source();
     let mut cache = RoutingCache::default();
     seed(
         &mut cache,
-        ("claude".to_string(), "anthropic", "windows"),
+        &source,
         1,
+        ("claude".to_string(), "anthropic", "windows"),
         native("/usr/bin/claude"),
     );
     assert!(
         cache
-            .get(&("claude".to_string(), "codex", "windows"), 1)
+            .get(&source, 1, &("claude".to_string(), "codex", "windows"))
             .is_none(),
         "a different harness must not reuse the entry"
+    );
+}
+
+/// Two stores can hold the **same revision number** while carrying different
+/// preferences — revisions are per store, so they are not comparable across
+/// stores. The source identity is what keeps their entries apart
+/// (issue #1482).
+#[test]
+fn two_sources_at_the_same_revision_do_not_share_entries() {
+    let (_first_dir, first) = source();
+    let (_second_dir, second) = source();
+    let mut cache = RoutingCache::default();
+
+    seed(
+        &mut cache,
+        &first,
+        4,
+        key("claude"),
+        native("/first/claude"),
+    );
+    assert!(
+        cache.get(&second, 4, &key("claude")).is_none(),
+        "an entry computed against another profile must not be a hit"
+    );
+    assert!(
+        cache.get(&first, 4, &key("claude")).is_some(),
+        "the entry must still serve its own profile"
+    );
+}
+
+/// A revision bump in one profile must not disturb another profile's
+/// entries — the rotation is scoped to the source that moved.
+#[test]
+fn a_revision_bump_in_one_source_leaves_another_source_alone() {
+    let (_first_dir, first) = source();
+    let (_second_dir, second) = source();
+    let mut cache = RoutingCache::default();
+
+    seed(
+        &mut cache,
+        &first,
+        4,
+        key("claude"),
+        native("/first/claude"),
+    );
+    seed(
+        &mut cache,
+        &second,
+        4,
+        key("claude"),
+        native("/second/claude"),
+    );
+
+    // The first profile's preferences change.
+    assert!(cache.get(&first, 5, &key("claude")).is_none());
+
+    assert!(
+        cache.get(&second, 4, &key("claude")).is_some(),
+        "another profile's entry must survive this profile's revision bump"
     );
 }

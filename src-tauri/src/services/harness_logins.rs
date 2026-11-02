@@ -211,7 +211,7 @@ pub(crate) fn add_in(
     // Create the folder before the preference write, outside the preferences
     // lock: a login is only listed once its home exists.
     model::seed_home(Path::new(&login.home), Some(default_home))?;
-    crate::preferences::storage::try_update(|prefs| {
+    crate::preferences::try_update(|prefs| {
         ensure_label_free(&prefs.harness_logins, None, &label)?;
         if prefs
             .harness_logins
@@ -246,7 +246,7 @@ fn ensure_label_free(
 pub fn rename_blocking(id: &str, label: &str) -> Result<HarnessLogin, String> {
     let label = model::validate_label(label)?;
     let mut renamed: Option<HarnessLogin> = None;
-    crate::preferences::storage::try_update(|prefs| {
+    crate::preferences::try_update(|prefs| {
         ensure_label_free(&prefs.harness_logins, Some(id), &label)?;
         let login = prefs
             .harness_logins
@@ -266,7 +266,7 @@ pub fn rename_blocking(id: &str, label: &str) -> Result<HarnessLogin, String> {
 /// keep their frozen home.
 pub fn remove_blocking(id: &str) -> Result<(), String> {
     cancel_sign_in_for(id);
-    crate::preferences::storage::try_update(|prefs| {
+    crate::preferences::try_update(|prefs| {
         let before = prefs.harness_logins.len();
         prefs.harness_logins.retain(|login| login.id != id);
         if prefs.harness_logins.len() == before {

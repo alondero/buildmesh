@@ -5,18 +5,20 @@
 //! [`super::pairings::provider_pairings`], [`super::harness::harness_profiles`]
 //! and friends. Each accessor loaded on its own, so a write landing between
 //! two of them could hand the derivation a **torn** view: the accounts from
-//! one generation and the pairings from another. The derivation could not
+//! one read and the pairings from another. The derivation could not
 //! notice, because each read looked healthy on its own.
 //!
 //! This module owns the single read. A [`PreferencesSnapshot`] carries the
-//! values the derivation consumes, all from one generation, plus the
-//! generation number itself so a caller can key a memo on it.
+//! values the derivation consumes, all from one read, plus the **source
+//! identity** and the **revision** of the store that produced it, so a
+//! caller can key a memo on the exact profile state it derived from
+//! (issue #1482).
 
 use super::super::model::{
     AppPreferences, HarnessProfile, PairingVerification, ProviderAccount, ProviderPairing,
     ProxiedProviderOrder,
 };
-use super::super::storage::{generation, load};
+use super::super::store::{PreferencesStore, SourceIdentity};
 use super::accounts::effective_provider_accounts;
 use super::catalog::default_provider_accounts;
 use super::harness::{default_harness_profiles, effective_harness_profiles};
@@ -24,8 +26,11 @@ use super::harness::{default_harness_profiles, effective_harness_profiles};
 /// One consistent view of the preferences a derivation reads.
 ///
 /// The lists come from the same read, so no derivation observes two
-/// generations at once. `generation` is the number a caller memoises on: it
-/// bumps on each durable preference write, and it only moves forward.
+/// revisions at once. `revision` and `source` are the key a caller memoises
+/// on: the revision bumps on each durable preference write and only moves
+/// forward, and the source names the profile the value came from — so an
+/// entry computed against another profile, or against an older revision of
+/// this one, cannot become a hit.
 ///
 /// The stored collections are **views** over [`Self::prefs`] rather than
 /// copies of it: one storage, two access paths, so the snapshot and the
@@ -41,8 +46,17 @@ pub struct PreferencesSnapshot {
     /// The effective harness profiles — the code-defined defaults with the
     /// user's stored rows merged over them by `id`.
     pub harness_profiles: Vec<HarnessProfile>,
-    /// The preferences generation this snapshot was read at.
-    pub generation: u64,
+    /// The preferences revision this snapshot was read at.
+    ///
+    /// It only moves forward, and it only advances after a durable write has
+    /// landed — so it identifies a persisted value, never one a failed write
+    /// manufactured.
+    pub revision: u64,
+    /// The identity of the preference source this snapshot was read from.
+    ///
+    /// Two stores can hold the same revision number without sharing
+    /// anything, so a derived cache needs this alongside the revision.
+    pub source: SourceIdentity,
     /// The preferences value the lists above were resolved from.
     ///
     /// `None` when the read failed: a derivation then renders no
@@ -91,23 +105,26 @@ impl PreferencesSnapshot {
     }
 }
 
-/// Read preferences once and resolve the effective view.
-///
-/// One `load()` feeds the lists, so a derivation does not straddle a write.
-///
-/// The generation is sampled **before** the read, so the number a caller
-/// memoises on is not newer than the data it holds. A write that lands
-/// between the two costs one extra derivation later; it does not let a stale
-/// menu be served under a fresh key.
+/// Read the ambient preferences once and resolve the effective view.
 pub fn load_snapshot() -> Result<PreferencesSnapshot, String> {
-    let generation = generation();
-    let mut prefs = load()?;
-    let accounts = effective_provider_accounts(&mut prefs);
+    load_snapshot_from(&super::super::store::ambient_store()?)
+}
+
+/// [`load_snapshot`] against an explicit store.
+///
+/// One read of that store feeds the lists, so a derivation does not straddle
+/// a write, and the snapshot is stamped with **that** store's identity and
+/// revision — not the ambient one's. A caller that owns its store can
+/// therefore key a memo on exactly the state it read.
+pub fn load_snapshot_from(store: &PreferencesStore) -> Result<PreferencesSnapshot, String> {
+    let (mut prefs, revision) = store.load_with_revision()?;
+    let accounts = effective_provider_accounts(store, &mut prefs);
     let harness_profiles = effective_harness_profiles(&prefs.harness_profiles);
     Ok(PreferencesSnapshot {
         accounts,
         harness_profiles,
-        generation,
+        revision,
+        source: store.source().clone(),
         prefs: Some(prefs),
     })
 }
@@ -120,17 +137,46 @@ pub fn load_snapshot() -> Result<PreferencesSnapshot, String> {
 /// so the policy is stated once instead of restated per accessor (issue
 /// #2532).
 pub fn snapshot_or_default() -> PreferencesSnapshot {
-    match load_snapshot() {
-        Ok(snapshot) => snapshot,
+    match super::super::store::ambient_store() {
+        Ok(store) => snapshot_or_default_from(&store),
         Err(e) => {
             tracing::warn!("preferences::snapshot load failed, using defaults: {}", e);
             PreferencesSnapshot {
                 accounts: default_provider_accounts(),
                 harness_profiles: default_harness_profiles(),
-                generation: generation(),
+                revision: 0,
+                source: SourceIdentity::unbound(),
                 prefs: None,
             }
         }
+    }
+}
+
+/// [`snapshot_or_default`] against an explicit store.
+///
+/// The same load-failure policy, applied to a store the caller owns: the
+/// fallback is stamped with *that* store's identity, so a caller can still
+/// tell which profile failed to load.
+pub fn snapshot_or_default_from(store: &PreferencesStore) -> PreferencesSnapshot {
+    match load_snapshot_from(store) {
+        Ok(snapshot) => snapshot,
+        Err(e) => {
+            tracing::warn!("preferences::snapshot load failed, using defaults: {}", e);
+            defaults_snapshot(store)
+        }
+    }
+}
+
+/// The answer to a read that failed: the code-defined defaults, stamped with
+/// the store's identity so a caller can still tell *which* profile failed to
+/// load.
+fn defaults_snapshot(store: &PreferencesStore) -> PreferencesSnapshot {
+    PreferencesSnapshot {
+        accounts: default_provider_accounts(),
+        harness_profiles: default_harness_profiles(),
+        revision: store.revision(),
+        source: store.source().clone(),
+        prefs: None,
     }
 }
 

@@ -1,7 +1,7 @@
 //! Confirm-before-quit preference (issue #1501) — default-true contract.
 
 use super::super::model::AppPreferences;
-use super::super::storage::{load, save};
+use super::super::store::{load, save};
 use super::with_temp_dir;
 
 #[test]
@@ -20,8 +20,10 @@ fn missing_field_in_legacy_json_loads_as_true() {
 #[test]
 fn explicit_false_round_trips() {
     with_temp_dir(|_| {
-        let mut prefs = AppPreferences::default();
-        prefs.confirm_before_quit = false;
+        let prefs = AppPreferences {
+            confirm_before_quit: false,
+            ..Default::default()
+        };
         save(prefs).unwrap();
         assert!(!load().unwrap().confirm_before_quit);
     });

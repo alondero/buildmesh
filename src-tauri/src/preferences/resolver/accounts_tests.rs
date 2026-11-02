@@ -3,7 +3,7 @@
 
 use super::super::super::model::ProviderAccount;
 use super::super::effective_pairings;
-use crate::preferences::tests::with_temp_dir;
+use crate::preferences::tests::with_store;
 use crate::preferences::{ApiSurface, AppPreferences, ModelTiers, ProviderPairing};
 
 #[test]
@@ -105,18 +105,19 @@ fn effective_pairings_skips_unkeyed_disabled_or_self_auth_accounts() {
 
 #[test]
 fn minimax_api_key_resolved_prefers_account_then_legacy_field() {
-    with_temp_dir(|_| {
+    with_store(|store| {
         // Legacy field only
-        super::super::super::storage::update(|p| {
-            p.minimax_api_key = Some("legacy".to_string());
-        })
-        .unwrap();
+        store
+            .update(|p| {
+                p.minimax_api_key = Some("legacy".to_string());
+            })
+            .unwrap();
         assert_eq!(
-            crate::preferences::minimax_api_key_resolved(),
+            crate::preferences::minimax_api_key_resolved_from(store),
             Some("legacy".to_string())
         );
         // Account wins over legacy
-        let mut prefs = super::super::super::storage::load().unwrap();
+        let mut prefs = store.load().unwrap();
         prefs.provider_accounts.push(ProviderAccount {
             id: "minimax".to_string(),
             name: "MiniMax".to_string(),
@@ -125,9 +126,9 @@ fn minimax_api_key_resolved_prefers_account_then_legacy_field() {
             claude_compatible: true,
             api_key: Some("account-key".to_string()),
         });
-        super::super::super::storage::save(prefs).unwrap();
+        store.save(prefs).unwrap();
         assert_eq!(
-            crate::preferences::minimax_api_key_resolved(),
+            crate::preferences::minimax_api_key_resolved_from(store),
             Some("account-key".to_string())
         );
     });
@@ -135,21 +136,22 @@ fn minimax_api_key_resolved_prefers_account_then_legacy_field() {
 
 #[test]
 fn provider_accounts_folds_legacy_minimax_key_into_effective_snapshot() {
-    with_temp_dir(|_| {
-        super::super::super::storage::update(|prefs| {
-            prefs.minimax_api_key = Some("legacy".to_string());
-            prefs.provider_accounts.push(ProviderAccount {
-                id: "minimax".to_string(),
-                name: "MiniMax".to_string(),
-                enabled: true,
-                billing_mode: crate::preferences::BillingMode::PayAsYouGo,
-                claude_compatible: true,
-                api_key: None,
-            });
-        })
-        .unwrap();
+    with_store(|store| {
+        store
+            .update(|prefs| {
+                prefs.minimax_api_key = Some("legacy".to_string());
+                prefs.provider_accounts.push(ProviderAccount {
+                    id: "minimax".to_string(),
+                    name: "MiniMax".to_string(),
+                    enabled: true,
+                    billing_mode: crate::preferences::BillingMode::PayAsYouGo,
+                    claude_compatible: true,
+                    api_key: None,
+                });
+            })
+            .unwrap();
 
-        let accounts = crate::preferences::provider_accounts();
+        let accounts = crate::preferences::provider_accounts_from(store);
         let minimax = accounts
             .iter()
             .find(|account| account.id == "minimax")
@@ -160,8 +162,8 @@ fn provider_accounts_folds_legacy_minimax_key_into_effective_snapshot() {
 
 /// The `id`s actually stored in `preferences.json` — the list a load must not
 /// grow on its own.
-fn stored_account_ids() -> Vec<String> {
-    let path = super::super::super::storage::preferences_path().unwrap();
+fn stored_account_ids(store: &crate::preferences::PreferencesStore) -> Vec<String> {
+    let path = store.preferences_path();
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     value["provider_accounts"]
@@ -179,20 +181,21 @@ fn stored_account_ids() -> Vec<String> {
 /// accounts the user had not chosen.
 #[test]
 fn loading_preferences_never_persists_builtin_defaults_as_stored_accounts() {
-    with_temp_dir(|_| {
-        super::super::super::storage::update(|prefs| {
-            prefs.provider_accounts = vec![ProviderAccount {
-                id: "kimi-via-claude".to_string(),
-                name: "Kimi (via Claude)".to_string(),
-                enabled: true,
-                billing_mode: crate::preferences::BillingMode::PayAsYouGo,
-                claude_compatible: true,
-                api_key: Some("key-from-companion".to_string()),
-            }];
-        })
-        .unwrap();
+    with_store(|store| {
+        store
+            .update(|prefs| {
+                prefs.provider_accounts = vec![ProviderAccount {
+                    id: "kimi-via-claude".to_string(),
+                    name: "Kimi (via Claude)".to_string(),
+                    enabled: true,
+                    billing_mode: crate::preferences::BillingMode::PayAsYouGo,
+                    claude_compatible: true,
+                    api_key: Some("key-from-companion".to_string()),
+                }];
+            })
+            .unwrap();
 
-        let accounts = crate::preferences::provider_accounts();
+        let accounts = crate::preferences::provider_accounts_from(store);
         assert!(
             !accounts.iter().any(|a| a.id == "kimi-via-claude"),
             "the stale companion row survived the load"
@@ -207,7 +210,7 @@ fn loading_preferences_never_persists_builtin_defaults_as_stored_accounts() {
         // companion's key was folded into. Whatever `default_provider_accounts()`
         // contributes stays code-defined and out of the file.
         assert_eq!(
-            stored_account_ids(),
+            stored_account_ids(store),
             vec!["kimi"],
             "a read wrote built-in defaults into the user's stored accounts"
         );
@@ -220,10 +223,10 @@ fn loading_preferences_never_persists_builtin_defaults_as_stored_accounts() {
 /// disk as it found them.
 #[test]
 fn loading_a_legacy_kimi_companion_file_leaves_it_byte_identical() {
-    with_temp_dir(|tmp| {
+    with_store(|store| {
         // No plaintext key, so the #830 scrub (which legitimately rewrites the
         // file on load) is not what this assertion is measuring.
-        let path = tmp.join("preferences.json");
+        let path = store.preferences_path();
         std::fs::write(
             &path,
             r#"{"provider_accounts": [{"id": "kimi-via-claude", "name": "Kimi (via Claude)", "enabled": true, "billing_mode": "pay_as_you_go", "claude_compatible": true}], "provider_pairings": []}"#,
@@ -231,7 +234,7 @@ fn loading_a_legacy_kimi_companion_file_leaves_it_byte_identical() {
         .unwrap();
         let before = std::fs::read(&path).unwrap();
 
-        let accounts = crate::preferences::provider_accounts();
+        let accounts = crate::preferences::provider_accounts_from(store);
         assert!(!accounts.iter().any(|a| a.id == "kimi-via-claude"));
         assert!(
             accounts.iter().any(|a| a.id == "kimi"),

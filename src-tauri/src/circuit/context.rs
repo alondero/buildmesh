@@ -257,6 +257,8 @@ pub(crate) fn is_lifecycle_blocker_key(key: &str) -> bool {
 }
 
 #[cfg(test)]
+// allow-test-in-production: this inline suite predates the sibling-test-file rule. Issue #1482
+// only moves the preferences fixture to its new module path; moving the suite is out of scope.
 mod tests {
     use super::*;
 
@@ -359,7 +361,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        crate::preferences::storage::init_for_tests(dir.clone());
+        crate::preferences::init_for_tests(dir.clone());
         crate::preferences::update(|prefs| {
             prefs.issue_spawn_prompt = Some("Circuit: {{owner}}/{{repo}}#{{number}}".into());
         })
@@ -379,7 +381,7 @@ mod tests {
             "Circuit: alondero/buildmesh#7"
         );
 
-        crate::preferences::storage::reset_for_tests();
+        crate::preferences::reset_for_tests();
         let _ = std::fs::remove_dir_all(&dir);
     }
 

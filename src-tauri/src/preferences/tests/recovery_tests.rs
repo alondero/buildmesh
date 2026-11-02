@@ -19,11 +19,11 @@
 
 use super::super::model::AppPreferences;
 use super::super::recovery::{self, CorruptionReason};
-use super::super::storage::{
-    init_for_tests, load, read_state, reset_for_tests, save, update, LoadState,
-};
+use super::super::secrets::profile_for;
+use super::super::storage::{read_state, LoadState};
+use super::super::store::PreferencesStore;
 use super::super::{migrations, PreferencesStatus};
-use super::{test_dir, with_temp_dir};
+use super::{test_dir, with_store};
 
 /// A legacy-shaped payload: the pre-#1188 `autopilot_pool_size` key and a
 /// keyed account still carrying the endpoint fields ADR-0025 migrates.
@@ -161,13 +161,13 @@ fn every_corrupt_shape_survives_a_load_and_an_attempted_update_unchanged() {
         ),
     ];
     for (label, payload) in cases {
-        with_temp_dir(|tmp| {
-            let path = tmp.join("preferences.json");
+        with_store(|store| {
+            let path = store.profile_dir().join("preferences.json");
             std::fs::write(&path, payload).unwrap();
 
             // A read must not repair, normalise, or migrate the file — and
             // must not publish defaults as the authoritative cache.
-            let loaded = load().expect("a corrupt read still serves defaults");
+            let loaded = store.load().expect("a corrupt read still serves defaults");
             assert_eq!(
                 loaded,
                 AppPreferences::default(),
@@ -175,7 +175,8 @@ fn every_corrupt_shape_survives_a_load_and_an_attempted_update_unchanged() {
             );
             assert_eq!(read(&path), payload, "{label}: a read rewrote the file");
 
-            let error = update(|prefs| prefs.default_provider = Some("must-not-land".into()))
+            let error = store
+                .update(|prefs| prefs.default_provider = Some("must-not-land".into()))
                 .expect_err("{label}: an ordinary update must be refused");
             assert!(
                 error.contains("PREFERENCES_CORRUPT"),
@@ -187,11 +188,12 @@ fn every_corrupt_shape_survives_a_load_and_an_attempted_update_unchanged() {
                 "{label}: an ordinary update overwrote the corrupt file"
             );
 
-            let error = save(AppPreferences {
-                default_provider: Some("must-not-land".into()),
-                ..Default::default()
-            })
-            .expect_err("{label}: an ordinary save must be refused");
+            let error = store
+                .save(AppPreferences {
+                    default_provider: Some("must-not-land".into()),
+                    ..Default::default()
+                })
+                .expect_err("{label}: an ordinary save must be refused");
             assert!(error.contains("PREFERENCES_CORRUPT"), "{label}: {error:?}");
             assert_eq!(read(&path), payload, "{label}: a save overwrote it");
         });
@@ -203,13 +205,15 @@ fn a_corrupt_file_is_refused_even_after_a_cached_read_populated_the_cache() {
     // The cache is the trap: pre-#1523 a load published defaults and every
     // later write trusted them. The write gate re-reads the file, so a warm
     // cache cannot launder a corrupt file into an overwrite.
-    with_temp_dir(|tmp| {
-        let path = tmp.join("preferences.json");
+    with_store(|store| {
+        let path = store.profile_dir().join("preferences.json");
         let payload = b"{\"default_provider\":\"claude\"";
         std::fs::write(&path, payload).unwrap();
 
-        assert!(load().is_ok());
-        let error = update(|prefs| prefs.default_provider = Some("x".into())).unwrap_err();
+        assert!(store.load().is_ok());
+        let error = store
+            .update(|prefs| prefs.default_provider = Some("x".into()))
+            .unwrap_err();
         assert!(error.contains("PREFERENCES_CORRUPT"), "{error:?}");
         assert_eq!(read(&path), payload);
     });
@@ -217,29 +221,33 @@ fn a_corrupt_file_is_refused_even_after_a_cached_read_populated_the_cache() {
 
 #[test]
 fn the_health_command_reports_corruption_with_recovery_context() {
-    with_temp_dir(|tmp| {
+    with_store(|store| {
         // Missing is not corrupt.
-        let health = super::super::storage::health().unwrap();
+        let health = store.health().unwrap();
         assert_eq!(health.status, PreferencesStatus::Missing);
         assert!(health.corruption.is_none());
-        assert_eq!(health.preferences_directory, tmp.display().to_string());
+        assert_eq!(
+            health.preferences_directory,
+            store.profile_dir().display().to_string()
+        );
 
         // A healthy file is healthy, and the directory is reported so the
         // UI can offer "open file location" without a second round trip.
-        save(AppPreferences {
-            default_provider: Some("claude".into()),
-            ..Default::default()
-        })
-        .unwrap();
-        let health = super::super::storage::health().unwrap();
+        store
+            .save(AppPreferences {
+                default_provider: Some("claude".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let health = store.health().unwrap();
         assert_eq!(health.status, PreferencesStatus::Healthy);
         assert!(health.corruption.is_none());
 
         // A corrupt file is corrupt, and the report carries the path, the
         // size, and whether a recovery is possible.
-        let path = tmp.join("preferences.json");
+        let path = store.profile_dir().join("preferences.json");
         std::fs::write(&path, b"not json at all").unwrap();
-        let health = super::super::storage::health().unwrap();
+        let health = store.health().unwrap();
         assert_eq!(health.status, PreferencesStatus::Corrupt);
         let info = health.corruption.expect("corrupt must carry detail");
         assert_eq!(info.reason, CorruptionReason::InvalidJson);
@@ -252,7 +260,13 @@ fn the_health_command_reports_corruption_with_recovery_context() {
         );
         assert_eq!(
             info.backup_path,
-            Some(tmp.join(recovery::BACKUP_SUFFIX).display().to_string())
+            Some(
+                store
+                    .profile_dir()
+                    .join(recovery::BACKUP_SUFFIX)
+                    .display()
+                    .to_string()
+            )
         );
     });
 }
@@ -263,15 +277,15 @@ fn the_health_command_reports_corruption_with_recovery_context() {
 
 #[test]
 fn a_successful_write_leaves_the_last_known_good_backup() {
-    with_temp_dir(|tmp| {
-        let backup = tmp.join(recovery::BACKUP_SUFFIX);
+    with_store(|store| {
+        let backup = store.profile_dir().join(recovery::BACKUP_SUFFIX);
         assert!(!backup.exists(), "no write yet, so no backup");
 
         let saved = AppPreferences {
             default_provider: Some("claude:minimax".into()),
             ..Default::default()
         };
-        save(saved.clone()).unwrap();
+        store.save(saved.clone()).unwrap();
 
         assert!(backup.exists(), "the write must refresh the backup");
         let backed_up: AppPreferences =
@@ -284,9 +298,9 @@ fn a_successful_write_leaves_the_last_known_good_backup() {
 #[cfg(unix)]
 fn the_backup_is_owner_only() {
     use std::os::unix::fs::PermissionsExt;
-    with_temp_dir(|tmp| {
-        save(AppPreferences::default()).unwrap();
-        let mode = std::fs::metadata(tmp.join(recovery::BACKUP_SUFFIX))
+    with_store(|store| {
+        store.save(AppPreferences::default()).unwrap();
+        let mode = std::fs::metadata(store.profile_dir().join(recovery::BACKUP_SUFFIX))
             .unwrap()
             .permissions()
             .mode();
@@ -300,7 +314,7 @@ fn the_backup_is_owner_only() {
 
 #[test]
 fn restoring_the_backup_returns_provider_and_pairing_fields() {
-    with_temp_dir(|tmp| {
+    with_store(|store| {
         // A realistic last-known-good state: a keyed provider account with
         // its credential, attached to a harness over a pairing.
         let saved = AppPreferences {
@@ -322,21 +336,24 @@ fn restoring_the_backup_returns_provider_and_pairing_fields() {
             }],
             ..Default::default()
         };
-        save(saved).unwrap();
+        store.save(saved).unwrap();
 
         // The file goes bad underneath the app, then the app restarts: the
         // cache is dropped, so the next read has to classify the file.
-        let path = tmp.join("preferences.json");
+        let path = store.profile_dir().join("preferences.json");
         let corrupt = b"{\"provider_accounts\": [";
         std::fs::write(&path, corrupt).unwrap();
-        init_for_tests(tmp.clone());
+        let store = PreferencesStore::new(store.profile_dir().to_path_buf());
 
         // Read-only callers keep working off defaults…
-        assert_eq!(load().unwrap(), AppPreferences::default());
+        assert_eq!(store.load().unwrap(), AppPreferences::default());
         // …but the corruption is reported, not silently absorbed.
-        assert!(matches!(read_state().unwrap(), LoadState::Corrupt(_)));
+        assert!(matches!(
+            read_state(&path, &profile_for(store.profile_dir())).unwrap(),
+            LoadState::Corrupt(_)
+        ));
 
-        let outcome = super::super::storage::restore_backup().unwrap();
+        let outcome = store.restore_backup().unwrap();
         assert_eq!(
             outcome.preferences.default_provider.as_deref(),
             Some("claude:minimax")
@@ -363,26 +380,25 @@ fn restoring_the_backup_returns_provider_and_pairing_fields() {
 
         // Recovery is complete: reads and writes work normally again.
         assert_eq!(
-            load().unwrap().default_provider.as_deref(),
+            store.load().unwrap().default_provider.as_deref(),
             Some("claude:minimax")
         );
-        update(|prefs| prefs.reviewer_provider = Some("codex".into())).unwrap();
-        assert_eq!(
-            super::super::storage::reviewer_provider().as_deref(),
-            Some("codex")
-        );
+        store
+            .update(|prefs| prefs.reviewer_provider = Some("codex".into()))
+            .unwrap();
+        assert_eq!(store.reviewer_provider().as_deref(), Some("codex"));
     });
 }
 
 #[test]
 fn restoring_without_a_backup_fails_without_touching_the_file() {
-    with_temp_dir(|tmp| {
-        let path = tmp.join("preferences.json");
+    with_store(|store| {
+        let path = store.profile_dir().join("preferences.json");
         let corrupt = b"nonsense";
         std::fs::write(&path, corrupt).unwrap();
-        init_for_tests(tmp.clone());
+        let store = PreferencesStore::new(store.profile_dir().to_path_buf());
 
-        let error = super::super::storage::restore_backup().unwrap_err();
+        let error = store.restore_backup().unwrap_err();
         assert!(
             error.contains("no last-known-good backup"),
             "unhelpful error: {error}"
@@ -393,15 +409,19 @@ fn restoring_without_a_backup_fails_without_touching_the_file() {
 
 #[test]
 fn a_backup_that_no_longer_deserializes_is_refused_rather_than_restored() {
-    with_temp_dir(|tmp| {
+    with_store(|store| {
         // Both files unreadable: restoring would trade one broken file for
         // another and destroy the only remaining copy of the original.
-        let path = tmp.join("preferences.json");
+        let path = store.profile_dir().join("preferences.json");
         std::fs::write(&path, b"broken primary").unwrap();
-        std::fs::write(tmp.join(recovery::BACKUP_SUFFIX), b"broken backup").unwrap();
-        init_for_tests(tmp.clone());
+        std::fs::write(
+            store.profile_dir().join(recovery::BACKUP_SUFFIX),
+            b"broken backup",
+        )
+        .unwrap();
+        let store = PreferencesStore::new(store.profile_dir().to_path_buf());
 
-        let error = super::super::storage::restore_backup().unwrap_err();
+        let error = store.restore_backup().unwrap_err();
         assert!(
             error.contains("itself unreadable"),
             "unhelpful error: {error}"
@@ -419,13 +439,23 @@ fn a_backup_that_cannot_be_read_is_not_offered_as_a_recovery() {
     // "Restore" must not be offered as a dead end: a backup that no longer
     // deserializes would trade one broken file for another and destroy the
     // only remaining copy of the user's real settings.
-    with_temp_dir(|tmp| {
-        std::fs::write(tmp.join("preferences.json"), b"broken primary").unwrap();
-        std::fs::write(tmp.join(recovery::BACKUP_SUFFIX), b"{not json").unwrap();
-        init_for_tests(tmp.clone());
+    with_store(|store| {
+        std::fs::write(
+            store.profile_dir().join("preferences.json"),
+            b"broken primary",
+        )
+        .unwrap();
+        std::fs::write(
+            store.profile_dir().join(recovery::BACKUP_SUFFIX),
+            b"{not json",
+        )
+        .unwrap();
+        let store = PreferencesStore::new(store.profile_dir().to_path_buf());
 
-        assert!(recovery::backup_available(&tmp.join("preferences.json")).is_none());
-        let health = super::super::storage::health().unwrap();
+        assert!(
+            recovery::backup_available(&store.profile_dir().join("preferences.json")).is_none()
+        );
+        let health = store.health().unwrap();
         let info = health.corruption.expect("corrupt");
         assert!(
             !info.backup_available,
@@ -441,19 +471,21 @@ fn a_backup_that_cannot_be_read_is_not_offered_as_a_recovery() {
 
 #[test]
 fn an_explicit_reset_is_the_only_path_that_replaces_corrupt_data_and_it_archives() {
-    with_temp_dir(|tmp| {
-        let path = tmp.join("preferences.json");
+    with_store(|store| {
+        let path = store.profile_dir().join("preferences.json");
         let corrupt = b"{\"provider_accounts\":[oops";
         std::fs::write(&path, corrupt).unwrap();
-        init_for_tests(tmp.clone());
+        let store = PreferencesStore::new(store.profile_dir().to_path_buf());
 
         // Every ordinary route is still refused…
-        assert!(save(AppPreferences::default()).is_err());
-        assert!(update(|prefs| prefs.default_provider = Some("x".into())).is_err());
+        assert!(store.save(AppPreferences::default()).is_err());
+        assert!(store
+            .update(|prefs| prefs.default_provider = Some("x".into()))
+            .is_err());
         assert_eq!(read(&path), corrupt);
 
         // …and the explicit reset replaces it while preserving the bytes.
-        let outcome = super::super::storage::reset().unwrap();
+        let outcome = store.reset().unwrap();
         assert_eq!(outcome.preferences, AppPreferences::default());
         let archive = outcome
             .archive_path
@@ -477,47 +509,48 @@ fn an_explicit_reset_is_the_only_path_that_replaces_corrupt_data_and_it_archives
         // The live file is a valid payload again and the app is writable.
         let rewritten: AppPreferences = serde_json::from_slice(&read(&path)).unwrap();
         assert_eq!(rewritten, AppPreferences::default());
-        assert_eq!(
-            super::super::storage::health().unwrap().status,
-            PreferencesStatus::Healthy
-        );
-        update(|prefs| prefs.default_provider = Some("claude".into())).unwrap();
+        assert_eq!(store.health().unwrap().status, PreferencesStatus::Healthy);
+        store
+            .update(|prefs| prefs.default_provider = Some("claude".into()))
+            .unwrap();
     });
 }
 
 #[test]
 fn a_reset_keeps_the_last_known_good_backup_so_a_reset_is_still_recoverable() {
-    with_temp_dir(|tmp| {
-        save(AppPreferences {
-            default_provider: Some("claude:minimax".into()),
-            ..Default::default()
-        })
-        .unwrap();
-        let path = tmp.join("preferences.json");
+    with_store(|store| {
+        store
+            .save(AppPreferences {
+                default_provider: Some("claude:minimax".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let path = store.profile_dir().join("preferences.json");
         std::fs::write(&path, b"broken").unwrap();
-        init_for_tests(tmp.clone());
+        let store = PreferencesStore::new(store.profile_dir().to_path_buf());
 
-        super::super::storage::reset().unwrap();
+        store.reset().unwrap();
 
         // Reset is the one write that knowingly discards data, so it must
         // not also discard the artifact that could bring it back.
         let backup: AppPreferences =
-            serde_json::from_slice(&read(&tmp.join(recovery::BACKUP_SUFFIX))).unwrap();
+            serde_json::from_slice(&read(&store.profile_dir().join(recovery::BACKUP_SUFFIX)))
+                .unwrap();
         assert_eq!(backup.default_provider.as_deref(), Some("claude:minimax"));
     });
 }
 
 #[test]
 fn successive_resets_do_not_clobber_an_earlier_archive() {
-    with_temp_dir(|tmp| {
-        let path = tmp.join("preferences.json");
-        let first = super::super::storage::reset().unwrap();
+    with_store(|store| {
+        let path = store.profile_dir().join("preferences.json");
+        let first = store.reset().unwrap();
         assert!(first.archive_path.is_none(), "nothing to archive yet");
 
         std::fs::write(&path, b"first corrupt").unwrap();
-        let second = super::super::storage::reset().unwrap();
+        let second = store.reset().unwrap();
         std::fs::write(&path, b"second corrupt").unwrap();
-        let third = super::super::storage::reset().unwrap();
+        let third = store.reset().unwrap();
 
         let a = second.archive_path.unwrap();
         let b = third.archive_path.unwrap();
@@ -533,8 +566,8 @@ fn successive_resets_do_not_clobber_an_earlier_archive() {
 
 #[test]
 fn a_valid_old_schema_file_migrates_in_memory_and_persists_exactly_once() {
-    with_temp_dir(|tmp| {
-        let path = tmp.join("preferences.json");
+    with_store(|store| {
+        let path = store.profile_dir().join("preferences.json");
         let legacy = legacy_json();
         std::fs::write(&path, &legacy).unwrap();
 
@@ -543,7 +576,7 @@ fn a_valid_old_schema_file_migrates_in_memory_and_persists_exactly_once() {
         // pre-migration shape of a file that *is* recoverable. The one thing a
         // read does change is the plaintext API key, which moves into the
         // credential store (issue #830) — everything else stays as written.
-        let loaded = load().unwrap();
+        let loaded = store.load().unwrap();
         assert_eq!(loaded.circuit_agent_pool_size, Some(3));
         let mut expected: serde_json::Value = serde_json::from_str(&legacy).unwrap();
         expected["provider_accounts"][0]["api_key"] = serde_json::Value::Null;
@@ -558,12 +591,12 @@ fn a_valid_old_schema_file_migrates_in_memory_and_persists_exactly_once() {
             "the key must still be served from the credential store"
         );
         assert!(
-            !tmp.join(recovery::BACKUP_SUFFIX).exists(),
+            !store.profile_dir().join(recovery::BACKUP_SUFFIX).exists(),
             "a read must not fabricate a last-known-good backup"
         );
 
         // The explicit write persists the migrated shape.
-        save(loaded).unwrap();
+        store.save(loaded).unwrap();
         let persisted: serde_json::Value = serde_json::from_slice(&read(&path)).unwrap();
         assert_eq!(persisted["circuit_agent_pool_size"], serde_json::json!(3));
         assert!(
@@ -595,30 +628,30 @@ fn a_schema_mismatch_never_persists_the_migrated_payload() {
     // The migration rewrites the payload *before* deserialization, so a
     // payload that then fails to deserialize has already been mutated in
     // memory. Nothing may write that mutation back.
-    with_temp_dir(|tmp| {
-        let path = tmp.join("preferences.json");
+    with_store(|store| {
+        let path = store.profile_dir().join("preferences.json");
         let payload = br#"{"autopilot_pool_size":7,"spawn_configurations":"not-an-array"}"#;
         std::fs::write(&path, payload).unwrap();
 
-        assert!(load().is_ok(), "reads still serve defaults");
+        assert!(store.load().is_ok(), "reads still serve defaults");
         assert_eq!(
             read(&path),
             payload,
             "a failed deserialization must leave the file byte-identical"
         );
-        assert!(!tmp.join(recovery::BACKUP_SUFFIX).exists());
+        assert!(!store.profile_dir().join(recovery::BACKUP_SUFFIX).exists());
     });
 }
 
 #[test]
 fn a_forward_version_type_change_is_preserved_not_overwritten() {
-    with_temp_dir(|tmp| {
-        let path = tmp.join("preferences.json");
+    with_store(|store| {
+        let path = store.profile_dir().join("preferences.json");
         // A newer Buildmesh changed `spawn_configurations` to an object map.
         let payload = br#"{"spawn_configurations":{"claude":{"model":"opus"}}}"#;
         std::fs::write(&path, payload).unwrap();
 
-        let health = super::super::storage::health().unwrap();
+        let health = store.health().unwrap();
         assert_eq!(health.status, PreferencesStatus::Corrupt);
         assert_eq!(
             health.corruption.unwrap().reason,
@@ -637,17 +670,19 @@ fn an_unreadable_file_is_refused_rather_than_replaced_by_defaults() {
     //
     // A directory in the file's place produces exactly that: a read error
     // that is *not* `NotFound`, so the "no file yet" path cannot be blamed.
-    with_temp_dir(|tmp| {
-        let path = tmp.join("preferences.json");
+    with_store(|store| {
+        let path = store.profile_dir().join("preferences.json");
         std::fs::create_dir(&path).unwrap();
 
-        let error = read_state().expect_err("reading a directory must fail");
+        let error = read_state(&path, &profile_for(store.profile_dir()))
+            .expect_err("reading a directory must fail");
         assert!(
             !error.contains("PREFERENCES_CORRUPT"),
             "an unreadable file is not a corrupt one, got {error:?}"
         );
 
-        let error = update(|prefs| prefs.default_provider = Some("must-not-land".into()))
+        let error = store
+            .update(|prefs| prefs.default_provider = Some("must-not-land".into()))
             .expect_err("an unreadable file must not be overwritten");
         assert!(
             !error.contains("PREFERENCES_CORRUPT"),
@@ -672,20 +707,25 @@ fn a_missing_path_component_is_missing_on_every_platform() {
     let file_instead_of_dir = test_dir();
     let sentinel = b"not a directory";
     std::fs::write(&file_instead_of_dir, sentinel).unwrap();
-    init_for_tests(file_instead_of_dir.clone());
+    let store = PreferencesStore::new(file_instead_of_dir.clone());
 
     assert!(
-        matches!(read_state().unwrap(), LoadState::Missing),
+        matches!(
+            read_state(
+                &file_instead_of_dir.join("preferences.json"),
+                &profile_for(&file_instead_of_dir)
+            )
+            .unwrap(),
+            LoadState::Missing
+        ),
         "a path under a non-directory is Missing, not an I/O error"
     );
     // Reads still work and yield defaults; the cache is publishable because
     // there is genuinely nothing to preserve.
-    assert_eq!(load().unwrap(), AppPreferences::default());
+    assert_eq!(store.load().unwrap(), AppPreferences::default());
 
     let after = std::fs::read(&file_instead_of_dir).expect("the sentinel still exists");
     assert_eq!(after, sentinel, "a read must not modify the path");
-
-    reset_for_tests();
     let _ = std::fs::remove_file(&file_instead_of_dir);
 }
 
@@ -702,17 +742,27 @@ fn a_corrupt_file_in_one_directory_cannot_affect_another() {
     std::fs::create_dir_all(&broken_dir).unwrap();
     std::fs::write(broken_dir.join("preferences.json"), b"broken").unwrap();
 
-    with_temp_dir(|_| {
-        save(AppPreferences {
-            default_provider: Some("claude".into()),
-            ..Default::default()
-        })
-        .unwrap();
-        assert_eq!(load().unwrap().default_provider.as_deref(), Some("claude"));
+    with_store(|store| {
+        store
+            .save(AppPreferences {
+                default_provider: Some("claude".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            store.load().unwrap().default_provider.as_deref(),
+            Some("claude")
+        );
     });
 
-    init_for_tests(broken_dir.clone());
-    assert!(matches!(read_state().unwrap(), LoadState::Corrupt(_)));
-    reset_for_tests();
+    let broken_store = PreferencesStore::new(broken_dir.clone());
+    assert!(matches!(
+        read_state(
+            &broken_store.preferences_path(),
+            &profile_for(broken_store.profile_dir())
+        )
+        .unwrap(),
+        LoadState::Corrupt(_)
+    ));
     let _ = std::fs::remove_dir_all(&broken_dir);
 }

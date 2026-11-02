@@ -2524,7 +2524,7 @@ fn regenerate_reload_blocking_returns_fresh_node() {
 fn regenerate_apply_blocking_keeps_the_login_of_a_resumed_session() {
     let prefs_dir = tempfile::tempdir().unwrap();
     crate::preferences::init_for_tests(prefs_dir.path().into());
-    crate::preferences::storage::try_update(|prefs| {
+    crate::preferences::try_update(|prefs| {
         prefs
             .harness_logins
             .push(crate::preferences::harness_logins::HarnessLogin {
@@ -2589,7 +2589,7 @@ fn regenerate_apply_blocking_keeps_the_login_of_a_resumed_session() {
 fn regenerate_apply_blocking_keeps_the_default_login_of_a_resumed_session() {
     let prefs_dir = tempfile::tempdir().unwrap();
     crate::preferences::init_for_tests(prefs_dir.path().into());
-    crate::preferences::storage::try_update(|prefs| {
+    crate::preferences::try_update(|prefs| {
         prefs
             .harness_logins
             .push(crate::preferences::harness_logins::HarnessLogin {

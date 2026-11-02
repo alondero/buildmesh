@@ -6,7 +6,7 @@ use super::super::compatibility::{
     remove_harness_default, resolve_provider_env, upsert_harness_default, validate_harness_default,
 };
 use super::super::model::{HarnessConfigValue, ModelTiers, ProviderPairing};
-use super::super::storage::{load, save};
+use super::super::store::{load, save};
 use super::with_temp_dir;
 use crate::agent::provider::SpawnOptionId;
 use crate::preferences::ApiSurface;

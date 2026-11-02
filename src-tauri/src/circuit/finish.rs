@@ -144,13 +144,15 @@ pub fn finish_prompt(issue_number: Option<i64>, action_on_success: Option<&str>)
 }
 
 #[cfg(test)]
+// allow-test-in-production: this inline suite predates the sibling-test-file rule. Issue #1482
+// only moves the preferences fixture to its new module path; moving the suite is out of scope.
 mod tests {
     use super::*;
 
     #[test]
     fn custom_legacy_template_migrates_once_without_becoming_a_live_dependency() {
         let directory = tempfile::tempdir().unwrap();
-        crate::preferences::storage::init_for_tests(directory.path().to_path_buf());
+        crate::preferences::init_for_tests(directory.path().to_path_buf());
         let legacy = directory.path().join("autopilot");
         std::fs::create_dir_all(&legacy).unwrap();
         std::fs::write(
@@ -187,7 +189,7 @@ mod tests {
     #[test]
     fn an_unmodified_seeded_copy_of_a_superseded_default_follows_the_new_default() {
         let directory = tempfile::tempdir().unwrap();
-        crate::preferences::storage::init_for_tests(directory.path().to_path_buf());
+        crate::preferences::init_for_tests(directory.path().to_path_buf());
         let current = directory.path().join("circuits/finish.md");
         std::fs::create_dir_all(current.parent().unwrap()).unwrap();
         let seeded_with_crlf = SUPERSEDED_DEFAULT_TEMPLATES[0].replace('\n', "\r\n");
@@ -203,7 +205,7 @@ mod tests {
     #[test]
     fn an_edited_copy_of_a_superseded_default_is_kept() {
         let directory = tempfile::tempdir().unwrap();
-        crate::preferences::storage::init_for_tests(directory.path().to_path_buf());
+        crate::preferences::init_for_tests(directory.path().to_path_buf());
         let current = directory.path().join("circuits/finish.md");
         std::fs::create_dir_all(current.parent().unwrap()).unwrap();
         let edited = format!(

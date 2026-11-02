@@ -9,7 +9,7 @@ const WORK_HOME: &str = "C:/Users/u/.codex-accounts/work";
 fn setup() -> (tempfile::TempDir, i64) {
     let root = tempfile::tempdir().unwrap();
     crate::preferences::init_for_tests(root.path().join("prefs"));
-    crate::preferences::storage::try_update(|prefs| {
+    crate::preferences::try_update(|prefs| {
         prefs.harness_logins.push(HarnessLogin {
             id: "work".into(),
             harness_id: "codex".into(),

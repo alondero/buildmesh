@@ -8,6 +8,7 @@ use crate::agent::provider::LaunchRuntime;
 use crate::env::ResolvedPath;
 use crate::models::Provider;
 use crate::preferences;
+use crate::preferences::SourceIdentity;
 
 /// Everything the resolution reads: the spawn option, the harness executor it
 /// resolves to, and the runtime it resolved for. Neither `EnvType` nor
@@ -36,73 +37,91 @@ fn routing_cache_key(
 }
 
 /// Memo for [`prepare`]'s value-only results, invalidated by the preferences
-/// generation (issue #1752). Keyed by `(spawn option, harness, runtime)` — the
-/// `(provider, mesh env fingerprint)` triple the resolution actually depends on.
+/// revision (issue #1752) and scoped to the preference source the routing was
+/// computed from (issue #1482).
 ///
-/// Generation handling is deliberately strict about *direction*. The map-level
-/// `generation` only ever moves **forward**: a caller that sampled an older
-/// generation must neither evict the newer entries nor be able to publish its
-/// result. `get` therefore clears only on a strictly newer generation, and
-/// `put` drops any insertion whose generation is not the map's current one.
-/// That closes the race where a slow spawn samples generation `G`, a settings
-/// write publishes + bumps to `G+1`, and the slow spawn then inserts an entry
-/// computed from `G`'s preferences — the entry is dead on arrival rather than
-/// becoming serveable state. The per-entry generation check is kept as the
-/// read-side twin, so a rotation can never be served from a stale entry.
+/// The key is `(source, revision, spawn option, harness, runtime)` — the
+/// preference identity plus the `(provider, mesh env fingerprint)` triple the
+/// resolution actually depends on. The source is part of the key because a
+/// revision alone is not comparable across stores: two stores can sit at the
+/// same revision number while holding different preferences, and neither may
+/// serve the other's routing.
+///
+/// Revision handling is deliberately strict about *direction*. The per-source
+/// revision only ever moves **forward**: a caller that sampled an older
+/// revision must neither evict the newer entries nor be able to publish its
+/// result. `get` therefore clears only on a strictly newer revision, and
+/// `put` drops any insertion whose revision is not the source's current one.
+/// That closes the race where a slow spawn samples revision `R`, a settings
+/// write publishes + advances to `R+1`, and the slow spawn then inserts an
+/// entry computed from `R`'s preferences — the entry is dead on arrival
+/// rather than becoming serveable state. The per-entry revision check is
+/// kept as the read-side twin, so a rotation can never be served from a
+/// stale entry.
 #[derive(Default)]
 struct RoutingCache {
-    generation: u64,
-    entries: HashMap<RoutingCacheKey, (u64, PreparedLaunchRouting)>,
+    /// The newest revision observed per preference source.
+    latest: HashMap<SourceIdentity, u64>,
+    /// The memoised routings, keyed by source + revision + routing key.
+    entries: HashMap<(SourceIdentity, u64, RoutingCacheKey), PreparedLaunchRouting>,
 }
 
 impl RoutingCache {
-    fn get(&mut self, key: &RoutingCacheKey, generation: u64) -> Option<PreparedLaunchRouting> {
-        if generation > self.generation {
-            self.entries.clear();
-            self.generation = generation;
+    fn get(
+        &mut self,
+        source: &SourceIdentity,
+        revision: u64,
+        key: &RoutingCacheKey,
+    ) -> Option<PreparedLaunchRouting> {
+        let latest = self.latest.entry(source.clone()).or_insert(revision);
+        if revision > *latest {
+            *latest = revision;
+            // Only this source's entries are dropped: another profile's
+            // memoised routings stay valid.
+            self.entries
+                .retain(|(entry_source, _, _), _| entry_source != source);
         }
-        match self.entries.get(key) {
-            Some((entry_generation, routing)) if *entry_generation == generation => {
-                Some(routing.clone())
-            }
-            _ => None,
+        if revision < *latest {
+            // A stale reader must miss, not evict the newer entries.
+            return None;
         }
+        self.entries
+            .get(&(source.clone(), revision, key.clone()))
+            .cloned()
     }
 
-    fn put(&mut self, key: RoutingCacheKey, generation: u64, routing: PreparedLaunchRouting) {
-        // A stale generation means the map has already moved past this entry's
-        // inputs — drop it instead of inserting dead state.
-        if generation != self.generation {
+    fn put(
+        &mut self,
+        source: &SourceIdentity,
+        revision: u64,
+        key: RoutingCacheKey,
+        routing: PreparedLaunchRouting,
+    ) {
+        // A revision that is not the source's current one means the map has
+        // already moved past this entry's inputs — drop it instead of
+        // inserting dead state.
+        if self.latest.get(source) != Some(&revision) {
             return;
         }
-        self.entries.insert(key, (generation, routing));
+        self.entries
+            .insert((source.clone(), revision, key), routing);
     }
 }
 
-// Global in production (one preferences source per process); per-test-thread in
-// tests, mirroring `preferences::storage` — a shared static would let one
-// test's routing leak into another's, since tests use thread-local prefs.
-#[cfg(not(test))]
+// One cache for the whole process, in every build. The thread-local fork this
+// replaced (issue #1482) gave tests a *different* synchronization
+// implementation from production, so a test could not establish what
+// production does. Isolation now comes from the cache **key**: the memo is
+// scoped to the preference source that produced it, so a test's own store
+// cannot be served another test's routing.
 static ROUTING_CACHE: once_cell::sync::Lazy<std::sync::Mutex<RoutingCache>> =
     once_cell::sync::Lazy::new(|| std::sync::Mutex::new(RoutingCache::default()));
 
-#[cfg(test)]
-thread_local! {
-    static ROUTING_CACHE: std::cell::RefCell<RoutingCache> =
-        std::cell::RefCell::new(RoutingCache::default());
-}
-
 fn with_routing_cache<R>(f: impl FnOnce(&mut RoutingCache) -> R) -> R {
-    #[cfg(not(test))]
-    let result = {
-        let mut guard = ROUTING_CACHE
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        f(&mut guard)
-    };
-    #[cfg(test)]
-    let result = ROUTING_CACHE.with(|cell| f(&mut cell.borrow_mut()));
-    result
+    let mut guard = ROUTING_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f(&mut guard)
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -396,20 +415,30 @@ pub fn prepare(
         );
     }
 
-    // Cache lookup FIRST (issue #1752). `resolved_harness_profile` below walks
-    // the detected profile set on every spawn; resolving it before consulting
-    // the cache would defeat the memo entirely.
-    let generation = preferences::generation();
+    // One preferences read serves both the memo key and the profile lookup,
+    // so the routing is never derived from a different revision than the one
+    // it is keyed on (issue #1482). The source identity is part of the key:
+    // a revision alone is not comparable across stores.
+    //
+    // The trade: a hit now pays for one snapshot read, where the memo used to
+    // be consulted on a bare revision counter. That is the price of keying on
+    // the revision *and* the profile identity — the key and the data have to
+    // come from the same read, or a routing could be served under a key that
+    // describes a different revision than the one it was computed from.
+    let snapshot = preferences::snapshot_or_default();
+    let source = snapshot.source.clone();
+    let revision = snapshot.revision;
     let cache_key = routing_cache_key(spawn_option_id, provider, resolved.env_type);
-    if let Some(cached) = with_routing_cache(|cache| cache.get(&cache_key, generation)) {
+    if let Some(cached) = with_routing_cache(|cache| cache.get(&source, revision, &cache_key)) {
         return Ok(cached);
     }
 
     // Miss. The WSL-distro guard reads only preferences (covered by the
-    // generation) plus the process-static default distro, so skipping it on a
-    // hit cannot mask a settings change — any change already bumped the
-    // generation and forced this path.
-    let profile_for_distro = preferences::resolved_harness_profile(spawn_option_id);
+    // revision) plus the process-static default distro, so skipping it on a
+    // hit cannot mask a settings change — any change already advanced the
+    // revision and forced this path.
+    let profile_for_distro =
+        preferences::resolved_harness_profile_from(&snapshot.harness_profiles, spawn_option_id);
     if let Some(distro) = profile_for_distro
         .as_ref()
         .and_then(|profile| profile.wsl_distro.clone())
@@ -442,7 +471,7 @@ pub fn prepare(
         routing,
         PreparedLaunchRouting::Native { .. } | PreparedLaunchRouting::Environment { .. }
     ) {
-        with_routing_cache(|cache| cache.put(cache_key, generation, routing.clone()));
+        with_routing_cache(|cache| cache.put(&source, revision, cache_key, routing.clone()));
     }
     Ok(routing)
 }

@@ -224,6 +224,11 @@ export const RUST_SIBLING_TESTS = {
   // `tests/result_handoff.rs`) the parent declares.
   'src-tauri/src/services/circuit_worker/readiness.rs': 'services::circuit_worker::tests',
   'src-tauri/src/services/github/pagination.rs': 'services::github::pagination_tests',
+  // The preferences production files carry no tests of their own: the suites
+  // the `preferences::tests` parent declares cover them.
+  'src-tauri/src/preferences/secrets.rs': 'preferences::tests::secrets_tests',
+  'src-tauri/src/preferences/storage.rs': 'preferences::tests::storage_tests',
+  'src-tauri/src/preferences/store.rs': 'preferences::tests::store_tests',
 };
 
 // Private implementations keep their contract tests at the owning facade.

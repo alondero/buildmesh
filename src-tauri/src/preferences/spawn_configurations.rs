@@ -210,7 +210,7 @@ fn save_with_route_inner(
     let mut value = validate(value)?;
     normalize_id(&mut value);
     value.resolved = None;
-    super::storage::try_update(|prefs| {
+    super::store::try_update(|prefs| {
         prepare_route(prefs, &value, route.clone())?;
         value.generated = prefs
             .spawn_configurations

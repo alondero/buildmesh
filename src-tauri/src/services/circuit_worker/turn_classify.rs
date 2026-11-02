@@ -1640,6 +1640,8 @@ mod result_continuation_tests {
 }
 
 #[cfg(test)]
+// allow-test-in-production: this inline suite predates the sibling-test-file rule. Issue #1482
+// only moves the preferences fixture to its new module path; moving the suite is out of scope.
 mod classifier_selection_tests {
     use super::classifier_provider;
 
@@ -1652,7 +1654,7 @@ mod classifier_selection_tests {
         };
         assert_eq!(classifier_provider(&preferences), "claude");
         let directory = tempfile::tempdir().unwrap();
-        crate::preferences::storage::init_for_tests(directory.path().to_path_buf());
+        crate::preferences::init_for_tests(directory.path().to_path_buf());
         crate::preferences::save(preferences.clone()).unwrap();
         let backend = crate::session_naming::naming_backend_env(classifier_provider(&preferences));
         assert!(

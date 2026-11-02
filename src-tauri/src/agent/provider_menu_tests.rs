@@ -1742,7 +1742,7 @@ fn available_providers_emits_one_greppable_derivation_log_line() {
     //
     // The derivation itself, not `available_providers`: the memo
     // (issue #2349) turns a second call in the same preferences
-    // generation into a cache hit, and a hit logs nothing. The line
+    // revision into a cache hit, and a hit logs nothing. The line
     // belongs to the derivation, so drive that directly.
     let run_once = || {
         tracing::dispatcher::with_default(
@@ -1902,29 +1902,46 @@ fn memo_row() -> ProviderInfo {
     }
 }
 
-/// The memo key a test pins: the preferences generation plus the detection
-/// epoch (issue #2532).
-fn memo_key(generation: u64, detection_epoch: u64) -> MenuKey {
+/// The memo key a test pins: the preference **source**, the preferences
+/// revision, plus the detection epoch (issue #2532, #1482).
+fn memo_key(
+    source: &crate::preferences::SourceIdentity,
+    revision: u64,
+    detection_epoch: u64,
+) -> MenuKey {
     MenuKey {
-        generation,
+        source: source.clone(),
+        revision,
         detection_epoch,
     }
 }
 
-/// A repeat read inside one generation must not re-derive. Driven
-/// through the memo seam with a pinned generation and a counting closure
-/// rather than through wall-clock: the count is the observable, and no
+/// A distinct preference source, as the memo sees it.
+///
+/// The identity comes from a real store — the memo keys on it, so a test must
+/// not invent one. The directory is returned with it so the caller can keep
+/// it alive.
+fn memo_source() -> (tempfile::TempDir, crate::preferences::SourceIdentity) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::preferences::PreferencesStore::new(dir.path().to_path_buf());
+    (dir, store.source().clone())
+}
+
+/// A repeat read inside one revision must not re-derive. Driven
+/// through the memo seam with a pinned source and revision and a counting
+/// closure rather than through wall-clock: the count is the observable, and no
 /// sleep (or racing preferences write) can make it pass for the wrong
 /// reason.
 #[test]
 fn a_repeat_read_within_the_ttl_does_not_re_derive() {
+    let (_dir, source) = memo_source();
     let mut derivations = 0;
     let mut derive = || {
         derivations += 1;
         vec![memo_row()]
     };
-    let first = derived_menu_at(memo_key(7, 0), &mut derive);
-    let second = derived_menu_at(memo_key(7, 0), &mut derive);
+    let first = derived_menu_at(memo_key(&source, 7, 0), &mut derive);
+    let second = derived_menu_at(memo_key(&source, 7, 0), &mut derive);
     assert_eq!(derivations, 1, "the second read must be a memo hit");
     let ids = |rows: &[ProviderInfo]| {
         rows.iter()
@@ -1938,18 +1955,19 @@ fn a_repeat_read_within_the_ttl_does_not_re_derive() {
     );
 }
 
-/// The invalidation that keeps the memo honest is the preferences
-/// generation, which every preference write bumps. A read at the next
-/// generation must derive again.
+/// The invalidation that keeps the memo honest is the preferences revision,
+/// which every preference write advances. A read at the next revision must
+/// derive again.
 #[test]
-fn a_newer_generation_re_derives_the_menu() {
+fn a_newer_revision_re_derives_the_menu() {
+    let (_dir, source) = memo_source();
     let mut derivations = 0;
     let mut derive = || {
         derivations += 1;
         vec![memo_row()]
     };
-    derived_menu_at(memo_key(7, 0), &mut derive);
-    derived_menu_at(memo_key(8, 0), &mut derive);
+    derived_menu_at(memo_key(&source, 7, 0), &mut derive);
+    derived_menu_at(memo_key(&source, 8, 0), &mut derive);
     assert_eq!(
         derivations, 2,
         "a settings write must invalidate the memoized menu"
@@ -1962,13 +1980,14 @@ fn a_newer_generation_re_derives_the_menu() {
 /// timer.
 #[test]
 fn a_newer_detection_epoch_re_derives_the_menu() {
+    let (_dir, source) = memo_source();
     let mut derivations = 0;
     let mut derive = || {
         derivations += 1;
         vec![memo_row()]
     };
-    derived_menu_at(memo_key(7, 0), &mut derive);
-    derived_menu_at(memo_key(7, 1), &mut derive);
+    derived_menu_at(memo_key(&source, 7, 0), &mut derive);
+    derived_menu_at(memo_key(&source, 7, 1), &mut derive);
     assert_eq!(
         derivations, 2,
         "a new detection epoch must invalidate the memoized menu"
@@ -1977,18 +1996,19 @@ fn a_newer_detection_epoch_re_derives_the_menu() {
 
 /// The TTL is the only thing bounding a change made *outside* Buildmesh
 /// (a `npm i -g @openai/codex` while the window is open), and the
-/// generation cannot see that. Pinned with a synthetic clock so the
+/// preferences revision cannot see that. Pinned with a synthetic clock so the
 /// bound is asserted, not slept through.
 #[test]
 fn a_memoized_menu_expires_after_the_ttl() {
+    let (_dir, source) = memo_source();
     let mut cache = DerivedMenuCache::default();
     let derived_at = Instant::now();
     let menu = Arc::new(Vec::<ProviderInfo>::new());
-    cache.put(memo_key(0, 0), derived_at, Arc::clone(&menu));
+    cache.put(memo_key(&source, 0, 0), derived_at, Arc::clone(&menu));
     assert!(
         cache
             .get(
-                memo_key(0, 0),
+                memo_key(&source, 0, 0),
                 derived_at + DERIVED_MENU_TTL - Duration::from_nanos(1)
             )
             .is_some(),
@@ -1996,28 +2016,29 @@ fn a_memoized_menu_expires_after_the_ttl() {
     );
     assert!(
         cache
-            .get(memo_key(0, 0), derived_at + DERIVED_MENU_TTL)
+            .get(memo_key(&source, 0, 0), derived_at + DERIVED_MENU_TTL)
             .is_none(),
         "an expired menu must re-derive so an out-of-process install shows up"
     );
 }
 
 /// The write-side race guard, mirrored from `agent::launch_routing`: a
-/// derivation that sampled generation `G` cannot publish or evict once a
-/// settings write has moved the slot to `G+1`.
+/// derivation that sampled revision `R` cannot publish or evict once a
+/// settings write has moved the slot to `R+1`.
 #[test]
-fn a_derivation_from_an_older_generation_cannot_publish() {
+fn a_derivation_from_an_older_revision_cannot_publish() {
+    let (_dir, source) = memo_source();
     let mut cache = DerivedMenuCache::default();
     let now = Instant::now();
-    cache.get(memo_key(2, 0), now); // moves the slot to generation 2
-    cache.put(memo_key(1, 0), now, Arc::new(Vec::new()));
+    cache.get(memo_key(&source, 2, 0), now); // moves the slot to revision 2
+    cache.put(memo_key(&source, 1, 0), now, Arc::new(Vec::new()));
     assert!(
-        cache.get(memo_key(2, 0), now).is_none(),
+        cache.get(memo_key(&source, 2, 0), now).is_none(),
         "a stale derivation must not become serveable state"
     );
     assert!(
-        cache.get(memo_key(1, 0), now).is_none(),
-        "an older reader must not evict the newer generation"
+        cache.get(memo_key(&source, 1, 0), now).is_none(),
+        "an older reader must not evict the newer revision"
     );
 }
 
@@ -2026,17 +2047,40 @@ fn a_derivation_from_an_older_generation_cannot_publish() {
 /// `E+1`.
 #[test]
 fn a_derivation_from_an_older_detection_epoch_cannot_publish() {
+    let (_dir, source) = memo_source();
     let mut cache = DerivedMenuCache::default();
     let now = Instant::now();
-    cache.get(memo_key(2, 1), now); // moves the slot to epoch 1
-    cache.put(memo_key(2, 0), now, Arc::new(Vec::new()));
+    cache.get(memo_key(&source, 2, 1), now); // moves the slot to epoch 1
+    cache.put(memo_key(&source, 2, 0), now, Arc::new(Vec::new()));
     assert!(
-        cache.get(memo_key(2, 1), now).is_none(),
+        cache.get(memo_key(&source, 2, 1), now).is_none(),
         "a stale derivation must not become serveable state"
     );
     assert!(
-        cache.get(memo_key(2, 0), now).is_none(),
+        cache.get(memo_key(&source, 2, 0), now).is_none(),
         "an older reader must not evict the newer detection epoch"
+    );
+}
+
+/// Two stores can hold the **same revision number** while carrying different
+/// preferences — revisions are per store, so they are not comparable across
+/// stores. The source identity is what keeps their memos apart
+/// (issue #1482).
+#[test]
+fn two_sources_at_the_same_revision_do_not_share_a_memo() {
+    let (_first_dir, first) = memo_source();
+    let (_second_dir, second) = memo_source();
+    let mut cache = DerivedMenuCache::default();
+    let now = Instant::now();
+
+    cache.put(memo_key(&first, 4, 0), now, Arc::new(Vec::new()));
+    assert!(
+        cache.get(memo_key(&second, 4, 0), now).is_none(),
+        "a memo computed against another profile must not be a hit"
+    );
+    assert!(
+        cache.get(memo_key(&first, 4, 0), now).is_some(),
+        "the memo must still serve its own profile"
     );
 }
 

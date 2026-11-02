@@ -1,13 +1,17 @@
 //! Shared test fixtures for the `preferences` submodules.
 //!
-//! Issue #1386: each `cargo test` worker thread owns its own `APP_DATA_DIR`
-//! and `CACHE` (per-thread `RefCell` under `cfg(test)`), so concurrent tests
-//! never collide on the same static. No `TEST_LOCK` is needed — every test
-//! pointing [`with_temp_dir`] at a unique [`test_dir()`] is fully isolated
-//! from its siblings, including prefs-touching tests in other modules (e.g.
-//! `services::provider_verification`).
+//! Issue #1482: the preferences state belongs to a [`PreferencesStore`] — one
+//! handle per profile directory, owning the cached value, the revision and
+//! the locks. A test that owns its state constructs a store over a temporary
+//! directory and passes the handle in; it never mutates an ambient global to
+//! achieve isolation.
+//!
+//! [`with_temp_dir`] remains for the suites that drive *production* code
+//! paths, which still read preferences through the free-function façade. The
+//! store it installs is the production implementation — the thread-local slot
+//! selects *which* store, not how it synchronizes.
 
-use super::storage::{init_for_tests, reset_for_tests};
+use super::store::PreferencesStore;
 use std::path::PathBuf;
 
 // Per-feature test files. Each tests a single concern; the cross-module
@@ -25,6 +29,7 @@ mod pairing_compat_tests;
 mod recovery_tests;
 mod secrets_tests;
 mod storage_tests;
+mod store_tests;
 
 static TEST_DIR_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -33,18 +38,40 @@ pub(crate) fn test_dir() -> PathBuf {
     std::env::temp_dir().join(format!("buildmesh-prefs-test-{}-{id}", std::process::id()))
 }
 
+/// Run `f` with a store over a fresh temporary directory.
+///
+/// The store is a real [`PreferencesStore`] — the same implementation
+/// production uses — so the code under test runs against production's
+/// synchronization. Only the *instance* is test-scoped, and the handle is
+/// handed to the test explicitly.
+pub(crate) fn with_store<F: FnOnce(&PreferencesStore)>(f: F) -> PathBuf {
+    let tmp = test_dir();
+    std::fs::create_dir_all(&tmp).unwrap();
+    let store = PreferencesStore::new(tmp.clone());
+    // The credential-store double is per-thread; a fresh vault keeps the
+    // secrets a test seeds invisible to its siblings.
+    super::secrets::test_support::reset();
+    f(&store);
+    super::secrets::test_support::reset();
+    let _ = std::fs::remove_dir_all(&tmp);
+    tmp
+}
+
+/// Run `f` with the ambient store pointed at a fresh temporary directory.
+///
+/// The migration seam for the suites that drive production code paths, which
+/// read preferences through the free-function façade rather than through an
+/// explicit handle. The installed store is the production implementation —
+/// the thread-local slot selects *which* store, not how it synchronizes.
 pub(crate) fn with_temp_dir<F: FnOnce(&PathBuf)>(f: F) -> PathBuf {
-    // No TEST_LOCK: per-thread `APP_DATA_DIR` (issue #1386). Two parallel
-    // tests run on different threads and each write to its own
-    // `test_dir()`-derived path, so the thread-local statics stay clean.
     let tmp = test_dir();
     std::fs::create_dir_all(&tmp).unwrap();
 
-    init_for_tests(tmp.clone());
+    super::store::init_for_tests(tmp.clone());
 
     f(&tmp);
 
-    reset_for_tests();
+    super::store::reset_for_tests();
     let _ = std::fs::remove_dir_all(&tmp);
     tmp
 }
