@@ -23,7 +23,7 @@ pub struct SpawnCommandInput<'a> {
     ///
     /// `PreparedLaunchRouting::Environment`'s values are the per-profile backend
     /// selection resolved by the caller
-    /// (`preferences::resolve_provider_env(&node.provider)`): the
+    /// (`preferences::resolve_provider_env`): the
     /// `ANTHROPIC_*` variables a custom Claude-compatible profile
     /// (MiniMax/DeepSeek) needs to target its endpoint. Empty for the built-in
     /// Anthropic subscription and for the native-binary providers (Codex, Grok,

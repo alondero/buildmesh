@@ -440,9 +440,9 @@ pub fn prepare_from(
 /// The preferences source a routing resolution reads from.
 ///
 /// The ambient source is the store production installs at startup; the owned
-/// source is a store the caller owns (issue #1482). Each read goes through the
-/// preferences module's own façade or its store-scoped twin, so the rule is
-/// implemented once and the two paths cannot drift.
+/// source is a store the caller owns (issue #1482). Both resolve through the
+/// preferences module's own snapshot loader, so the rule is implemented once
+/// and the two paths cannot drift.
 #[derive(Clone, Copy)]
 enum PreferenceSource<'a> {
     Ambient,
@@ -451,52 +451,16 @@ enum PreferenceSource<'a> {
 
 impl PreferenceSource<'_> {
     /// The preferences snapshot this source resolves against.
+    ///
+    /// This is the **one** read the routing is derived from: the pairing, the
+    /// preflight and the spawn env all come from this snapshot, so the routing
+    /// and the revision it is memoised under describe the same read
+    /// (issue #1482).
     fn snapshot(self) -> preferences::PreferencesSnapshot {
         match self {
             PreferenceSource::Ambient => preferences::snapshot_or_default(),
             PreferenceSource::Owned(store) => {
                 preferences::resolver::snapshot::snapshot_or_default_from(store)
-            }
-        }
-    }
-
-    /// The spawn env for a Spawn Option.
-    fn provider_env(self, spawn_option_id: &str) -> Vec<(String, String)> {
-        match self {
-            PreferenceSource::Ambient => preferences::resolve_provider_env(spawn_option_id),
-            PreferenceSource::Owned(store) => {
-                preferences::compatibility::resolve_provider_env_from(store, spawn_option_id)
-            }
-        }
-    }
-
-    /// The preflight gate that refuses a custom endpoint without a primary
-    /// model.
-    fn preflight(self, spawn_option_id: &str) -> Result<(), String> {
-        match self {
-            PreferenceSource::Ambient => {
-                preferences::preflight_resolve_provider_env(spawn_option_id)
-            }
-            PreferenceSource::Owned(store) => {
-                preferences::compatibility::preflight_resolve_provider_env_from(
-                    store,
-                    spawn_option_id,
-                )
-            }
-        }
-    }
-
-    /// The stored pairing and the account it belongs to, if any.
-    fn stored_pairing_and_account(
-        self,
-        spawn_option_id: &str,
-    ) -> Result<Option<(preferences::ProviderPairing, preferences::ProviderAccount)>, String> {
-        match self {
-            PreferenceSource::Ambient => {
-                preferences::resolve_stored_pairing_and_account(spawn_option_id)
-            }
-            PreferenceSource::Owned(store) => {
-                resolve_stored_pairing_and_account_from(store, spawn_option_id)
             }
         }
     }
@@ -521,7 +485,7 @@ fn require_interoperable_wsl_host(resolved: &ResolvedPath) -> Result<(), String>
 
 /// The body both routing entry points share.
 ///
-/// One preferences read serves both the memo key and the profile lookup, so
+/// One preferences read serves the memo key **and** the whole derivation, so
 /// the routing is never derived from a different revision than the one it is
 /// keyed on (issue #1482). The source identity is part of the key: a revision
 /// alone is not comparable across stores.
@@ -538,6 +502,22 @@ fn prepare_with_source(
     resolved: &ResolvedPath,
 ) -> Result<PreparedLaunchRouting, String> {
     let snapshot = source.snapshot();
+    prepare_from_snapshot(&snapshot, spawn_option_id, provider, resolved)
+}
+
+/// The memoised routing for an already-loaded preferences snapshot.
+///
+/// Everything the routing is derived from — the pairing, the preflight and the
+/// spawn env — comes from `snapshot`, and the memo key carries that snapshot's
+/// source identity and revision. A write that lands after the snapshot was
+/// taken therefore cannot publish a routing under a revision that does not
+/// describe it (issue #1482).
+fn prepare_from_snapshot(
+    snapshot: &preferences::PreferencesSnapshot,
+    spawn_option_id: &str,
+    provider: Provider,
+    resolved: &ResolvedPath,
+) -> Result<PreparedLaunchRouting, String> {
     let source_identity = snapshot.source.clone();
     let revision = snapshot.revision;
     let cache_key = routing_cache_key(spawn_option_id, provider, resolved.env_type);
@@ -578,7 +558,7 @@ fn prepare_with_source(
     );
 
     let routing = resolve_routing(
-        source,
+        snapshot,
         spawn_option_id,
         provider,
         resolved,
@@ -644,11 +624,15 @@ fn spawn_time_executable(
     })
 }
 
-/// The uncached body of [`prepare_with_source`] — resolved pairing → routing.
-/// Split out so [`prepare_with_source`] owns the memo while this keeps the
+/// The uncached body of [`prepare_from_snapshot`] — resolved pairing → routing.
+/// Split out so [`prepare_from_snapshot`] owns the memo while this keeps the
 /// resolution exact.
+///
+/// Every read here comes from `snapshot`: the pairing, the preflight and the
+/// spawn env are resolved against the same preferences state the caller
+/// memoises the result under (issue #1482).
 fn resolve_routing(
-    source: PreferenceSource<'_>,
+    snapshot: &preferences::PreferencesSnapshot,
     spawn_option_id: &str,
     provider: Provider,
     resolved: &ResolvedPath,
@@ -660,8 +644,8 @@ fn resolve_routing(
     // exact pairing lookup below; otherwise a legacy `cline:<account>` launch
     // (and its snapshot resume) is rejected as "pairing no longer exists".
     if provider == Provider::Cline && spawn_option_id.contains(':') {
-        source.preflight(spawn_option_id)?;
-        let env = source.provider_env(spawn_option_id);
+        preferences::preflight_resolve_provider_env(snapshot, spawn_option_id)?;
+        let env = preferences::resolve_provider_env(snapshot, spawn_option_id);
         if env.is_empty() {
             return Err(format!(
                 "selected proxied pairing '{spawn_option_id}' no longer exists"
@@ -672,7 +656,12 @@ fn resolve_routing(
             executable: executable_override,
         });
     }
-    let Some((pairing, account)) = source.stored_pairing_and_account(spawn_option_id)? else {
+    let Some((pairing, account)) =
+        preferences::resolver::pairings::resolve_stored_pairing_and_account_from_snapshot(
+            snapshot,
+            spawn_option_id,
+        )?
+    else {
         if spawn_option_id.contains(':') {
             return Err(format!(
                 "selected proxied pairing '{spawn_option_id}' no longer exists"
@@ -684,10 +673,10 @@ fn resolve_routing(
         });
     };
 
-    source.preflight(spawn_option_id)?;
+    preferences::preflight_resolve_provider_env(snapshot, spawn_option_id)?;
     if provider == Provider::Anthropic {
         return Ok(PreparedLaunchRouting::Environment {
-            values: source.provider_env(spawn_option_id),
+            values: preferences::resolve_provider_env(snapshot, spawn_option_id),
             executable: executable_override,
         });
     }
@@ -699,35 +688,6 @@ fn resolve_routing(
         None,
         executable_override,
     )
-}
-
-/// The store-scoped twin of [`preferences::resolve_stored_pairing_and_account`].
-///
-/// The preferences module owns this lookup and has not published a store-scoped
-/// twin of it yet, so the rule is resolved here against the caller's own
-/// store: the same account lookup, the same pairing resolution (delegated to
-/// the preferences module's own primitive), and the same error messages.
-fn resolve_stored_pairing_and_account_from(
-    store: &preferences::PreferencesStore,
-    spawn_option_id: &str,
-) -> Result<Option<(preferences::ProviderPairing, preferences::ProviderAccount)>, String> {
-    let snapshot = preferences::resolver::snapshot::snapshot_or_default_from(store);
-    let id = crate::agent::provider::SpawnOptionId::from(spawn_option_id);
-    let Some(provider_id) = id.provider_id() else {
-        return Ok(None);
-    };
-    let account = snapshot
-        .accounts
-        .iter()
-        .find(|account| account.id == provider_id)
-        .ok_or_else(|| format!("provider account '{provider_id}' is missing"))?;
-    let pairing = preferences::resolver::pairings::resolve_pairing(
-        id.harness_id(),
-        account,
-        snapshot.pairings(),
-    )
-    .ok_or_else(|| format!("pairing '{}:{}' is missing", id.harness_id(), provider_id))?;
-    Ok(Some((pairing, account.clone())))
 }
 
 /// Production path — the store installed at startup.

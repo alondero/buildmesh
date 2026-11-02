@@ -37,14 +37,9 @@ fn cline_legacy_pairing_uses_cline_auth_environment() {
         raw_path: "C:/work".into(),
         env_type: crate::models::EnvType::Windows,
     };
-    let routing = resolve_routing(
-        PreferenceSource::Owned(&store),
-        "cline:minimax",
-        Provider::Cline,
-        &resolved,
-        None,
-    )
-    .unwrap();
+    let snapshot = preferences::resolver::snapshot::snapshot_or_default_from(&store);
+    let routing =
+        resolve_routing(&snapshot, "cline:minimax", Provider::Cline, &resolved, None).unwrap();
     let PreparedLaunchRouting::Environment { values: env, .. } = routing else {
         panic!("expected Cline environment routing");
     };
@@ -504,4 +499,117 @@ fn a_revision_bump_in_one_source_leaves_another_source_alone() {
         cache.get(&second, 4, &key("claude")).is_some(),
         "another profile's entry must survive this profile's revision bump"
     );
+}
+
+/// The routing and the revision it is memoised under must describe the **same**
+/// preferences read (issue #1482).
+///
+/// The memo key names the revision the routing was computed from, so a write
+/// that lands after the snapshot was taken must not change what that snapshot
+/// derives: otherwise the routing would be published under a revision that
+/// does not describe it, and a caller holding that revision would be served a
+/// routing from a different read.
+#[test]
+fn a_routing_is_derived_from_the_snapshot_it_is_keyed_on() {
+    // The credential-store double is per-thread: reset it so this test's
+    // seeded key cannot reach another test on the same thread.
+    crate::preferences::secrets::test_support::reset();
+    let temp = tempfile::tempdir().unwrap();
+    let store = preferences::PreferencesStore::new(temp.path().to_path_buf());
+    let resolved = resolved_windows();
+    let token = |routing: PreparedLaunchRouting| {
+        let PreparedLaunchRouting::Environment { values: env, .. } = routing else {
+            panic!("expected Claude environment routing");
+        };
+        env.iter()
+            .find(|(key, _)| key == "ANTHROPIC_AUTH_TOKEN")
+            .map(|(_, value)| value.clone())
+    };
+
+    store.save(proxied_prefs("key-one")).unwrap();
+    // The read the memo key is built from.
+    let snapshot = preferences::resolver::snapshot::snapshot_or_default_from(&store);
+    // A write lands after that read.
+    store.save(proxied_prefs("key-two")).unwrap();
+
+    let routed = token(
+        prepare_from_snapshot(&snapshot, "claude:minimax", Provider::Anthropic, &resolved).unwrap(),
+    );
+    assert_eq!(
+        routed.as_deref(),
+        Some("key-one"),
+        "the routing must describe the snapshot it is keyed on"
+    );
+
+    // The later revision derives the later value: the two reads really differ.
+    let fresh = preferences::resolver::snapshot::snapshot_or_default_from(&store);
+    let routed = token(
+        prepare_from_snapshot(&fresh, "claude:minimax", Provider::Anthropic, &resolved).unwrap(),
+    );
+    assert_eq!(routed.as_deref(), Some("key-two"));
+    crate::preferences::secrets::test_support::reset();
+}
+
+/// The routing reads preferences **exactly once** (issue #1482).
+///
+/// The memo key names the revision the routing is derived from, so the key and
+/// the derivation must come from the same read. A second read could answer
+/// from a newer revision than the key names, and the routing would then be
+/// published under a revision that does not describe it.
+///
+/// The counter is per-thread, like the preferences cache itself, so a parallel
+/// test on another worker thread leaves this thread's count alone.
+#[test]
+fn a_routing_reads_preferences_exactly_once() {
+    crate::preferences::secrets::test_support::reset();
+    let temp = tempfile::tempdir().unwrap();
+    let store = preferences::PreferencesStore::new(temp.path().to_path_buf());
+    store.save(proxied_prefs("key-one")).unwrap();
+    let resolved = resolved_windows();
+
+    let before = crate::preferences::load_count();
+    let _routing =
+        prepare_from(&store, "claude:minimax", Provider::Anthropic, &resolved).expect("routing");
+    assert_eq!(
+        crate::preferences::load_count() - before,
+        1,
+        "the routing must read preferences exactly once — the memo key and the \
+         derived routing must describe the same read"
+    );
+    crate::preferences::secrets::test_support::reset();
+}
+
+/// A proxied provider with one credential, for the routing tests above.
+fn proxied_prefs(key: &str) -> preferences::AppPreferences {
+    preferences::AppPreferences {
+        provider_accounts: vec![preferences::ProviderAccount {
+            id: "minimax".into(),
+            name: "MiniMax".into(),
+            enabled: true,
+            billing_mode: preferences::BillingMode::PayAsYouGo,
+            claude_compatible: true,
+            api_key: Some(key.into()),
+        }],
+        provider_pairings: vec![preferences::ProviderPairing {
+            harness_id: "claude".into(),
+            provider_id: "minimax".into(),
+            surface: preferences::ApiSurface::Anthropic,
+            base_url: Some("https://example.invalid/anthropic".into()),
+            model_tiers: preferences::ModelTiers {
+                default: Some("MiniMax-M3".into()),
+                ..Default::default()
+            },
+        }],
+        ..Default::default()
+    }
+}
+
+/// The resolved path the routing tests spawn against.
+fn resolved_windows() -> crate::env::ResolvedPath {
+    crate::env::ResolvedPath {
+        host_path: "C:/work".into(),
+        spawn_path: "C:/work".into(),
+        raw_path: "C:/work".into(),
+        env_type: crate::models::EnvType::Windows,
+    }
 }

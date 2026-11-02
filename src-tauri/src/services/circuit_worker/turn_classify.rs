@@ -52,7 +52,10 @@ pub(super) struct MissingResult {
 impl readiness::Candidate {
     /// Finish interpretation against the current assistant turn. The live
     /// observation is deferred until a continuation actually needs it.
-    fn into_classified_turn(
+    ///
+    /// `pub(super)` so the sibling suite can drive the downgrade a stale
+    /// freshness observation causes (issue #1482).
+    pub(super) fn into_classified_turn(
         self,
         view: &RunView,
         node_id: &str,
@@ -391,16 +394,55 @@ fn classify_step_turn_with(
     }
     let mut classified =
         candidate.into_classified_turn(view, node_id, classification, readiness, stamp, || {
-            (
-                super::result_handoff::current_turn_revision(active.run.id, &agent),
-                crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id),
-            )
+            observe_turn(store, active.run.id, &agent, agent_node_id)
         });
     if classified.classification.is_none() {
         classified.classifier_error = classifier_error.into_inner();
     }
     tracing::info!("circuits: bound report classification for run {} step {node_id} agent {agent_node_id}: {:?}", active.run.id, classified.classification);
     Some(classified)
+}
+
+/// The freshness observation the classification makes about the turn it is
+/// about: the revision of that turn, and whether the agent is still alive.
+///
+/// The revision comes from the **profile the classification read** — see
+/// [`observe_turn_revision`]. This is the observation the classification
+/// passes to [`readiness::Candidate::into_classified_turn`], so it is the one
+/// place that decides whether a `Continue` is still fresh.
+///
+/// `pub(super)` so the sibling suite can drive the downgrade a stale freshness
+/// observation causes (issue #1482).
+pub(super) fn observe_turn(
+    store: Option<&crate::preferences::PreferencesStore>,
+    run_id: i64,
+    agent: &crate::models::AgentNode,
+    agent_node_id: i64,
+) -> (Option<String>, bool) {
+    (
+        observe_turn_revision(store, run_id, agent),
+        crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id),
+    )
+}
+
+/// The revision of the turn the classification is about.
+///
+/// The freshness check that decides whether a `Continue` is still fresh must
+/// read the **profile the classification read**: the owed result file was
+/// found through the caller's store, so a revision taken from the ambient
+/// store would compare a file-only continuation against a marker it cannot
+/// see, and downgrade a fresh `Continue` to `Working` — the circuit would
+/// then not recognise the continuation at all (issue #1482).
+fn observe_turn_revision(
+    store: Option<&crate::preferences::PreferencesStore>,
+    run_id: i64,
+    agent: &crate::models::AgentNode,
+) -> Option<String> {
+    match store {
+        Some(store) => super::result_handoff::current_turn_revision_from(store, run_id, agent),
+        // No profile is known: the ambient read is the only one there is.
+        None => super::result_handoff::current_turn_revision(run_id, agent),
+    }
 }
 
 pub(super) fn awaits_review_turn(view: &RunView, node_id: &str) -> bool {

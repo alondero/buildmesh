@@ -947,6 +947,35 @@ concurrent `save` cannot leave the cache and the file disagreeing.
 The reverse order is never taken. `restore_backup` and `reset` need the write
 lock on its own, so they release it before publishing.
 
+## The launch routing derives from one preferences read
+
+`agent::launch_routing` memoises a routing under the key (the preference source
+identity, the preferences revision, the spawn option, the provider and the
+runtime). The value it stores and the key it stores it under must describe the
+**same** preferences read: a caller holding one revision must not be served a
+routing that was computed from another.
+
+So the routing takes **one** snapshot and derives everything from it. The
+stored pairing and its account
+(`preferences::resolver::pairings::resolve_stored_pairing_and_account_from_snapshot`),
+the preflight that refuses a custom endpoint without a primary model
+(`preferences::preflight_resolve_provider_env`) and the spawn env
+(`preferences::resolve_provider_env`) all read that snapshot. A write that
+lands after the snapshot was taken therefore cannot publish a routing under a
+revision that does not describe it — the write advances the revision, so the
+next caller reads the newer snapshot and derives again.
+
+This is why the env and the preflight take a **snapshot** rather than a store.
+A store-scoped call reads preferences again, and that second read can answer
+from a newer revision than the key names. The store-scoped twins
+(`preferences::compatibility::resolve_provider_env_from`,
+`preferences::compatibility::preflight_resolve_provider_env_from`) exist for
+the sibling suites that own a store.
+
+The rules are pinned by
+`agent::launch_routing::routing_cache_tests::a_routing_reads_preferences_exactly_once`
+and `::a_routing_is_derived_from_the_snapshot_it_is_keyed_on`.
+
 ## The Spawn Menu derivation reads one preferences snapshot and one alias table
 
 Both production readers of the Spawn Menu — `available_providers` (the mobile

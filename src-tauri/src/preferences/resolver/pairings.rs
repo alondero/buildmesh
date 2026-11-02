@@ -174,17 +174,31 @@ pub(crate) fn resolve_pairing(
 pub fn resolve_stored_pairing_and_account(
     spawn_option_id: &str,
 ) -> Result<Option<(ProviderPairing, ProviderAccount)>, String> {
+    let snapshot = super::snapshot::snapshot_or_default();
+    resolve_stored_pairing_and_account_from_snapshot(&snapshot, spawn_option_id)
+}
+
+/// [`resolve_stored_pairing_and_account`] against an **already-loaded** snapshot.
+///
+/// The account and the pairing come from the snapshot the caller read, so a
+/// caller that memoises its result under that snapshot's revision cannot
+/// publish a pairing resolved from a different read (issue #1482).
+pub fn resolve_stored_pairing_and_account_from_snapshot(
+    snapshot: &super::snapshot::PreferencesSnapshot,
+    spawn_option_id: &str,
+) -> Result<Option<(ProviderPairing, ProviderAccount)>, String> {
     let id = crate::agent::provider::SpawnOptionId::from(spawn_option_id);
     let harness_id = id.harness_id();
     let Some(provider_id) = id.provider_id() else {
         return Ok(None);
     };
-    let accounts = provider_accounts();
-    let account = accounts
-        .into_iter()
+    let account = snapshot
+        .accounts
+        .iter()
         .find(|account| account.id == provider_id)
+        .cloned()
         .ok_or_else(|| format!("provider account '{provider_id}' is missing"))?;
-    let pairing = resolve_pairing(harness_id, &account, &provider_pairings())
+    let pairing = resolve_pairing(harness_id, &account, snapshot.pairings())
         .ok_or_else(|| format!("pairing '{harness_id}:{provider_id}' is missing"))?;
     Ok(Some((pairing, account)))
 }

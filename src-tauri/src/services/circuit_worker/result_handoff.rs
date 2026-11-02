@@ -63,16 +63,18 @@ pub(crate) fn turn_revision(result: &Path) -> String {
 /// classification and the continuation delivery both read it through here, so
 /// a file-only turn compares like with like.
 pub(crate) fn current_turn_revision(run_id: i64, agent: &AgentNode) -> Option<String> {
-    current_turn_revision_with(None, run_id, agent)
+    match crate::preferences::ambient_store() {
+        Ok(store) => current_turn_revision_from(&store, run_id, agent),
+        // No profile is known: the turn owes no result file, so the transcript
+        // report is the only revision there is.
+        Err(_) => current_turn_revision_with(None, run_id, agent),
+    }
 }
 
 /// [`current_turn_revision`] against an explicit store.
 ///
 /// The caller owns the store, so the result-file turn this names is the one
 /// under *that* profile directory rather than the ambient one (issue #1482).
-#[cfg(test)]
-// allow-test-in-production: the store-scoped twin is reached from the sibling suite that owns a
-// store.
 pub(crate) fn current_turn_revision_from(
     store: &crate::preferences::PreferencesStore,
     run_id: i64,
