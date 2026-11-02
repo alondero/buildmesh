@@ -7,6 +7,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { AppSettingsModal } from '../../src/components/AppSettings/AppSettingsModal';
+import { SettingsRow } from '../../src/components/AppSettings/SettingsRow';
 import { openSettingsPane } from '../utils/settings-panes';
 
 function mockBackend() {
@@ -44,6 +45,14 @@ function mockBackend() {
 
 describe('Settings — InfoTip help affordance', () => {
   beforeEach(() => vi.mocked(invoke).mockReset());
+
+  it('keeps short help behind the row disclosure and preserves the control label', () => {
+    render(<SettingsRow label="Example" htmlFor="example" summary="Additional context"><input id="example" /></SettingsRow>);
+    expect(screen.getByRole('textbox', { name: 'Example' })).toBeTruthy();
+    expect(screen.queryByText('Additional context')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'About Example' }));
+    expect(screen.getByRole('tooltip').textContent).toBe('Additional context');
+  });
 
   it('hides the explanation until the ⓘ is activated, then Escape dismisses just the tip', async () => {
     mockBackend();

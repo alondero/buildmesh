@@ -186,7 +186,7 @@ describe('CanvasEmptyState (issue #1536)', () => {
     const cbs = { ...noopCallbacks, onCreateMesh: vi.fn() };
     render(<CanvasEmptyState input={input({ meshCount: 0 })} callbacks={cbs} />);
 
-    expect(screen.getByText('Buildmesh')).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Add a repository' })).toBeTruthy();
     fireEvent.click(screen.getByTestId('canvas-empty-create-mesh'));
     expect(cbs.onCreateMesh).toHaveBeenCalledTimes(1);
   });
@@ -249,11 +249,11 @@ describe('CanvasEmptyState (issue #1536)', () => {
 
   // The Pinned-empty branch was previously covered by a standalone
   // test file against a now-removed `PinnedEmptyState` component.
-  // Its contract now lives here — the same heading, body, and
+  // Its contract now lives here — the same heading and
   // "View All Nodes" CTA wired through the `onViewAll` callback
   // (so the parent's `setViewMode('all')` doesn't leak into the
   // component itself).
-  it('pinned-empty branch: heading + body + View All Nodes CTA fires onViewAll', () => {
+  it('pinned-empty branch: heading + View All Nodes CTA fires onViewAll', () => {
     const cbs = { ...noopCallbacks, onViewAll: vi.fn() };
     render(
       <CanvasEmptyState
@@ -263,7 +263,6 @@ describe('CanvasEmptyState (issue #1536)', () => {
     );
 
     expect(screen.getByText('No pinned nodes')).toBeTruthy();
-    expect(screen.getByText(/Pin agents from any mesh/)).toBeTruthy();
     fireEvent.click(screen.getByTestId('canvas-empty-view-all'));
     expect(cbs.onViewAll).toHaveBeenCalledTimes(1);
   });
@@ -277,7 +276,7 @@ describe('CanvasEmptyState (issue #1536)', () => {
       />,
     );
 
-    expect(screen.getByText('No agents in this mesh')).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Set up an agent' })).toBeTruthy();
     fireEvent.click(screen.getByTestId('canvas-empty-open-setup'));
     expect(cbs.onOpenSetup).toHaveBeenCalledTimes(1);
     expect(cbs.onOpenSpawnMenu).not.toHaveBeenCalled();
