@@ -15,10 +15,23 @@ struct Output {
     last_output: Option<Instant>,
 }
 
-pub(super) struct Snapshot {
+pub(super) struct Activity {
     pub cursor: u64,
     pub quiet: Option<Duration>,
+}
+
+pub(super) struct Snapshot {
+    pub activity: Activity,
     pub text: String,
+}
+
+impl Output {
+    fn activity(&self, now: Instant) -> Activity {
+        Activity {
+            cursor: self.bytes,
+            quiet: self.last_output.map(|at| now.saturating_duration_since(at)),
+        }
+    }
 }
 
 impl OutputObservation {
@@ -40,6 +53,11 @@ impl OutputObservation {
         }
     }
 
+    /// Cursor and quiet time require no text allocation or ANSI cleaning.
+    pub(super) fn activity(&self, now: Instant) -> Activity {
+        self.0.lock().unwrap().activity(now)
+    }
+
     pub(super) fn snapshot(&self, since: u64, now: Instant) -> Snapshot {
         let output = self.0.lock().unwrap();
         let retained_start = output.bytes.saturating_sub(output.tail.len() as u64);
@@ -50,10 +68,7 @@ impl OutputObservation {
             start += 1;
         }
         Snapshot {
-            cursor: output.bytes,
-            quiet: output
-                .last_output
-                .map(|at| now.saturating_duration_since(at)),
+            activity: output.activity(now),
             text: crate::session_naming::ANSI_ESCAPE
                 .replace_all(&output.tail[start..], "")
                 .into_owned(),

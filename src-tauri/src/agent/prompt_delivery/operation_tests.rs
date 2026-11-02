@@ -111,6 +111,9 @@ impl DeliveryIo for ScriptedIo {
         }
         Ok(Some(self.stamp.get().to_string()))
     }
+    fn activity(&self) -> observation::Activity {
+        self.output.activity(self.now())
+    }
     fn output(&self, since: u64) -> observation::Snapshot {
         self.output.snapshot(since, self.now())
     }
@@ -301,6 +304,71 @@ fn backpressure_retries_only_refused_bytes_and_checks_ownership_again() {
 }
 
 #[test]
+fn ordinary_startup_requires_output_quiet_and_the_adapter_marker() {
+    let prompt = PreparedPrompt::for_adapter(1, &CODEX, "work");
+    for events in [
+        vec![(3_000, Event::HumanInput)],
+        vec![
+            (250, Event::Output("still booting".into())),
+            (5_000, Event::HumanInput),
+        ],
+        vec![
+            (250, Event::Output("Ask Codex to do anything".into())),
+            (1_500, Event::HumanInput),
+        ],
+        vec![
+            (250, Event::Output("Ask Codex to do anything".into())),
+            (1_000, Event::Output("redraw".into())),
+            (2_250, Event::HumanInput),
+        ],
+    ] {
+        let io = ScriptedIo::new(events);
+        let result = io.run(
+            &CODEX,
+            &prompt,
+            DeliveryMode::OrdinaryStartup,
+            ObservationRequirement::Unobserved,
+        );
+        assert_eq!(result.progress, DeliveryProgress::NotStaged);
+        assert_eq!(result.stop, Some(DeliveryStop::Superseded));
+        assert!(
+            io.writes.borrow().is_empty(),
+            "startup must still be waiting"
+        );
+    }
+}
+
+#[test]
+fn ordinary_startup_stages_once_after_the_last_output_is_quiet() {
+    let prompt = PreparedPrompt::for_adapter(1, &CODEX, "work");
+    for (events, finished_at) in [
+        (
+            vec![(250, Event::Output("Ask Codex to do anything".into()))],
+            2_750,
+        ),
+        (
+            vec![
+                (250, Event::Output("Ask Codex to do anything".into())),
+                (1_000, Event::Output("redraw".into())),
+            ],
+            3_500,
+        ),
+    ] {
+        let io = ScriptedIo::new(events);
+        let result = io.run(
+            &CODEX,
+            &prompt,
+            DeliveryMode::OrdinaryStartup,
+            ObservationRequirement::Unobserved,
+        );
+        assert_eq!(result.stop, None);
+        assert_eq!(result.progress, DeliveryProgress::EnterSent { attempts: 1 });
+        assert_eq!(io.elapsed.get(), Duration::from_millis(finished_at));
+        assert_eq!(*io.writes.borrow(), vec![b"work".to_vec(), b"\r".to_vec()]);
+    }
+}
+
+#[test]
 fn ordinary_deadline_is_best_effort_and_circuit_deadline_remains_unverified() {
     let prompt = PreparedPrompt::for_adapter(1, &CODEX, "work");
     let ordinary = ScriptedIo::new(vec![]);
@@ -337,7 +405,8 @@ fn absent_acceptance_is_bounded_and_never_repastes_the_draft() {
     );
     assert_eq!(result.progress, DeliveryProgress::EnterSent { attempts: 3 });
     assert!(matches!(result.stop, Some(DeliveryStop::Unverified(_))));
-    assert!(result.require_acknowledgement().is_err());
+    assert_eq!(result.require_acknowledgement().unwrap_err(),
+        "Prompt delivery remained unverified: No acknowledgement followed the bounded Enter attempts; inspect the existing draft before retrying");
     assert_eq!(
         *io.writes.borrow(),
         vec![
@@ -479,6 +548,7 @@ fn live_registry_generation_fences_a_request_even_with_an_independent_output_buf
         replacement
             .delivery_output
             .snapshot(0, Instant::now())
+            .activity
             .cursor,
         0
     );
@@ -534,17 +604,88 @@ fn absent_rendered_paste_evidence_leaves_one_staged_prompt_without_enter() {
 }
 
 #[test]
+fn split_paste_matching_uses_the_delivery_clock_and_stops_at_its_deadline() {
+    let prompt = PreparedPrompt::for_adapter(
+        1,
+        &CODEX,
+        &format!("Review this change\n{}", "x".repeat(1000)),
+    );
+    let mut io = ScriptedIo::new(vec![(
+        250,
+        Event::Output("Review this change [Pasted Content 1000 chars]".into()),
+    )]);
+    // Offset the clock from wall time without depending on the host's uptime.
+    io.start += Duration::from_secs(600);
+    io.acknowledge.set(true);
+    let result = io.run(
+        &CODEX,
+        &prompt,
+        DeliveryMode::LaterTurn,
+        ObservationRequirement::Required,
+    );
+    assert_eq!(
+        result.progress,
+        DeliveryProgress::EnterAcknowledged { attempts: 1 }
+    );
+    assert_eq!(result.stop, None);
+    assert_eq!(io.elapsed.get(), Duration::from_millis(1_250));
+    let deadline = io.now() + Duration::from_secs(1);
+    let now = || io.now();
+    let rendered = RenderedPastePrompt::new(prompt.text());
+    let output = "Review this change [Pasted Content 1000 chars]";
+    assert!(rendered.visible_with_budget(output, &mut PasteMatchBudget::with_clock(deadline, &now)));
+    io.sleep(Duration::from_secs(1));
+    assert!(
+        !rendered.visible_with_budget(output, &mut PasteMatchBudget::with_clock(deadline, &now))
+    );
+}
+
+#[test]
+fn native_receipt_preparation_is_owned_by_the_adapter_and_can_prevent_staging() {
+    let _db = crate::db::test_support::isolated();
+    let (id, _) = crate::db::test_support::installed_node_id_range().unwrap();
+    assert!(CODEX
+        .prompt_acceptance_receipt(id, "follow up")
+        .unwrap()
+        .is_none());
+    assert!(
+        MUSE.prompt_acceptance_receipt(id, "follow up").is_err(),
+        "Muse must identify its native session before staging"
+    );
+    let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
+    let prompt = PreparedPrompt::for_adapter(id, &MUSE, "follow up");
+    let result = deliver(
+        &registry,
+        &MUSE,
+        DeliveryRequest {
+            prompt: &prompt,
+            mode: DeliveryMode::LaterTurn,
+            observation: ObservationRequirement::Required,
+            expected_input: None,
+            still_current: &|| Ok(true),
+        },
+    );
+    registry.kill_session(id);
+    assert_eq!(result.progress, DeliveryProgress::NotStaged);
+    assert!(matches!(result.stop, Some(DeliveryStop::Unverified(_))));
+    assert!(writes.try_recv().is_err());
+}
+
+#[test]
 fn output_observation_retains_a_bounded_utf8_tail_and_fresh_cursor() {
     let output = OutputObservation::default();
     let now = Instant::now();
     output.record(&"é".repeat(10_000), now);
     let snapshot = output.snapshot(0, now);
-    assert!(snapshot.text.len() <= 16_000);
-    assert_eq!(snapshot.cursor, 20_000);
+    assert_eq!(snapshot.text, "é".repeat(8_000));
+    assert_eq!(snapshot.activity.cursor, 20_000);
     output.record("\x1b[31mready\x1b[0m", now + Duration::from_secs(1));
-    let fresh = output.snapshot(snapshot.cursor, now + Duration::from_secs(2));
+    let fresh = output.snapshot(snapshot.activity.cursor, now + Duration::from_secs(2));
     assert_eq!(fresh.text, "ready");
-    assert_eq!(fresh.quiet, Some(Duration::from_secs(1)));
+    assert_eq!(fresh.activity.quiet, Some(Duration::from_secs(1)));
+    let activity = output.activity(now + Duration::from_secs(2));
+    assert_eq!(activity.cursor, 20_014);
+    assert_eq!(activity.quiet, Some(Duration::from_secs(1)));
 }
 
 #[test]

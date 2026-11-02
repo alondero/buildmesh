@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 mod observation;
 pub(crate) use observation::OutputObservation;
 
-/// Observation is chosen by the caller, never by evaluator membership.
+/// Callers choose observation explicitly; delivery does not infer Circuit ownership.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ObservationRequirement {
     /// Ordinary prompts keep a timed paste gap and exactly one unobserved Enter.
@@ -54,6 +54,17 @@ pub(crate) enum DeliveryStop {
     TransportFailure(InputWriteError),
 }
 
+impl std::fmt::Display for DeliveryStop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Superseded => f.write_str("Terminal input or process ownership changed; inspect the existing draft before retrying"),
+            Self::ProcessExited => f.write_str("The agent process exited before delivery finished"),
+            Self::Unverified(reason) => f.write_str(reason),
+            Self::TransportFailure(error) => write!(f, "Could not write to the agent terminal: {error}"),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct DeliveryOutcome {
     pub progress: DeliveryProgress,
@@ -61,17 +72,28 @@ pub(crate) struct DeliveryOutcome {
 }
 
 impl DeliveryOutcome {
-    /// Preserve Circuit's existing acknowledgement policy while distinguishing
+    /// Require Circuit acknowledgement while distinguishing
     /// PTY activity from native acceptance in the returned progress.
     pub(crate) fn require_acknowledgement(self) -> Result<(), String> {
-        match (&self.progress, &self.stop) {
+        let reason = match (&self.progress, &self.stop) {
             (
                 DeliveryProgress::AcceptanceObserved { .. }
                 | DeliveryProgress::EnterAcknowledged { .. },
                 None,
-            ) => Ok(()),
-            _ => Err(format!("Prompt delivery remained unverified: {self:?}")),
-        }
+            ) => return Ok(()),
+            (_, Some(stop)) => stop.to_string(),
+            (DeliveryProgress::NotStaged, None) => "The prompt was not staged".into(),
+            (DeliveryProgress::TextStaged, None) => {
+                "The prompt is staged, but Enter was not sent".into()
+            }
+            (DeliveryProgress::EnterSent { .. }, None) => {
+                "Enter was sent, but the harness did not acknowledge it".into()
+            }
+            (DeliveryProgress::AutoSubmitted, None) => {
+                "The launch submitted the prompt without observed acknowledgement".into()
+            }
+        };
+        Err(format!("Prompt delivery remained unverified: {reason}"))
     }
 }
 
@@ -91,6 +113,7 @@ trait DeliveryIo {
     fn alive(&self) -> bool;
     fn input_is_current(&self, stamp: &str) -> bool;
     fn write(&self, bytes: &[u8], stamp: &str) -> Result<Option<String>, InputWriteError>;
+    fn activity(&self) -> observation::Activity;
     fn output(&self, since: u64) -> observation::Snapshot;
     fn receipt_accepted(&self) -> Option<bool>;
     fn prepare_receipt(&self, _prompt: &PreparedPrompt) -> Result<(), String> {
@@ -102,8 +125,9 @@ struct LiveDelivery<'a> {
     registry: &'a AgentProcessRegistry,
     node_id: i64,
     output: Arc<OutputObservation>,
+    adapter: &'a dyn AgentProvider,
     capture_receipt: bool,
-    receipt: std::cell::RefCell<Option<crate::services::muse_watcher::PromptReceipt>>,
+    receipt: std::cell::RefCell<Option<Box<dyn crate::agent::provider::PromptAcceptanceReceipt>>>,
 }
 
 impl DeliveryIo for LiveDelivery<'_> {
@@ -123,6 +147,9 @@ impl DeliveryIo for LiveDelivery<'_> {
         self.registry
             .write_bytes_if_current(self.node_id, bytes, stamp)
     }
+    fn activity(&self) -> observation::Activity {
+        self.output.activity(self.now())
+    }
     fn output(&self, since: u64) -> observation::Snapshot {
         self.output.snapshot(since, self.now())
     }
@@ -134,10 +161,9 @@ impl DeliveryIo for LiveDelivery<'_> {
     }
     fn prepare_receipt(&self, prompt: &PreparedPrompt) -> Result<(), String> {
         if self.capture_receipt {
-            let node =
-                crate::db::get_agent_node_by_id(self.node_id).map_err(|error| error.to_string())?;
-            *self.receipt.borrow_mut() =
-                crate::services::muse_watcher::PromptReceipt::capture(&node, prompt.text())?;
+            *self.receipt.borrow_mut() = self
+                .adapter
+                .prompt_acceptance_receipt(self.node_id, prompt.text())?;
         }
         Ok(())
     }
@@ -187,12 +213,12 @@ fn deliver_to_process(
         registry,
         node_id,
         output: Arc::clone(&process.delivery_output),
+        adapter,
         capture_receipt: request.observation == ObservationRequirement::Required
             && !matches!(
                 request.mode,
                 DeliveryMode::Prefilled | DeliveryMode::AutoSubmitted
-            )
-            && adapter.id() == "muse",
+            ),
         receipt: Default::default(),
     };
     execute(&io, adapter, &request, stamp)
@@ -262,12 +288,13 @@ fn wait_ready(
         let ready = match request.mode {
             DeliveryMode::OrdinaryStartup => {
                 output
+                    .activity
                     .quiet
                     .is_some_and(|quiet| quiet.as_millis() >= MIN_QUIET_MS)
                     && adapter.ready_for_initial_prompt(&output.text)
             }
             DeliveryMode::VerifiedStartup => adapter.ready_for_initial_prompt(&output.text),
-            DeliveryMode::Prefilled => output.quiet.is_some_and(|quiet| {
+            DeliveryMode::Prefilled => output.activity.quiet.is_some_and(|quiet| {
                 ready_to_submit(
                     &normalize_for_match(&output.text),
                     &marker,
@@ -356,19 +383,21 @@ fn settle_after_paste(
         let mut seen = false;
         loop {
             check_owner(io, request, stamp)?;
-            let output = io.output(*output_cursor);
-            seen |= rendered_paste_visible(&output.text, *chars, *normalized_chars, content)
-                || split_marker_prompt.as_ref().is_some_and(|prompt| {
-                    prompt.visible(
-                        &output.text,
-                        Instant::now() + deadline.saturating_duration_since(io.now()),
-                    )
-                });
-            if seen
-                && output
-                    .quiet
-                    .is_some_and(|quiet| quiet.as_millis() >= PASTE_SETTLE_QUIET_MS)
-            {
+            let quiet = if seen {
+                io.activity().quiet
+            } else {
+                let output = io.output(*output_cursor);
+                seen = rendered_paste_visible(&output.text, *chars, *normalized_chars, content)
+                    || split_marker_prompt.as_ref().is_some_and(|prompt| {
+                        let now = || io.now();
+                        prompt.visible_with_budget(
+                            &output.text,
+                            &mut PasteMatchBudget::with_clock(deadline, &now),
+                        )
+                    });
+                output.activity.quiet
+            };
+            if seen && quiet.is_some_and(|quiet| quiet.as_millis() >= PASTE_SETTLE_QUIET_MS) {
                 return Ok(());
             }
             if io.now() >= deadline {
@@ -384,7 +413,7 @@ fn settle_after_paste(
     while io.now() < started + PASTE_ECHO_DEADLINE {
         check_owner(io, request, stamp)?;
         if output_seen_within(
-            io.output(0).quiet.map(|quiet| quiet.as_millis()),
+            io.activity().quiet.map(|quiet| quiet.as_millis()),
             io.now().saturating_duration_since(started).as_millis(),
         ) {
             break;
@@ -395,7 +424,7 @@ fn settle_after_paste(
     while io.now() < deadline {
         check_owner(io, request, stamp)?;
         if io
-            .output(0)
+            .activity()
             .quiet
             .is_none_or(|quiet| quiet.as_millis() >= PASTE_SETTLE_QUIET_MS)
         {
@@ -421,7 +450,7 @@ fn submit(
             };
             return Ok(());
         }
-        let cursor = io.output(0).cursor;
+        let cursor = io.activity().cursor;
         write_owned(io, request, stamp, b"\r")?;
         *progress = DeliveryProgress::EnterSent { attempts: attempt };
         if request.observation == ObservationRequirement::Unobserved {
@@ -431,7 +460,7 @@ fn submit(
         loop {
             check_owner(io, request, stamp)?;
             let receipt = io.receipt_accepted();
-            let accepted = receipt.unwrap_or_else(|| io.output(0).cursor > cursor);
+            let accepted = receipt.unwrap_or_else(|| io.activity().cursor > cursor);
             if accepted {
                 *progress = if receipt == Some(true) {
                     DeliveryProgress::AcceptanceObserved { attempts: attempt }
@@ -471,7 +500,7 @@ fn execute(
                 adapter,
                 request.prompt.text(),
                 request.observation,
-                io.output(0).cursor,
+                io.activity().cursor,
             );
             let body = match &readiness {
                 PasteReadiness::RenderedMultiline {
@@ -810,21 +839,23 @@ struct PasteMatchState {
     used: Vec<RenderedPasteMarker>,
 }
 
-struct PasteMatchBudget {
+struct PasteMatchBudget<'a> {
     deadline: Instant,
     remaining_states: usize,
+    now: &'a dyn Fn() -> Instant,
 }
 
-impl PasteMatchBudget {
-    fn new(deadline: Instant) -> Self {
+impl<'a> PasteMatchBudget<'a> {
+    fn with_clock(deadline: Instant, now: &'a dyn Fn() -> Instant) -> Self {
         Self {
             deadline,
             remaining_states: MAX_PASTE_MATCH_STATES,
+            now,
         }
     }
 
     fn within_deadline(&self) -> bool {
-        Instant::now() < self.deadline
+        (self.now)() < self.deadline
     }
 
     fn queue_state(&mut self) -> bool {
@@ -855,7 +886,7 @@ impl CountedPasteText {
         &self,
         markers: &[RenderedPasteMarker],
         inline: &[String],
-        budget: &mut PasteMatchBudget,
+        budget: &mut PasteMatchBudget<'_>,
     ) -> bool {
         let total = self.offsets.len() - 1;
         for last in (0..markers.len()).rev() {
@@ -987,11 +1018,7 @@ impl RenderedPastePrompt {
         }
     }
 
-    fn visible(&self, output: &str, deadline: Instant) -> bool {
-        self.visible_with_budget(output, &mut PasteMatchBudget::new(deadline))
-    }
-
-    fn visible_with_budget(&self, output: &str, budget: &mut PasteMatchBudget) -> bool {
+    fn visible_with_budget(&self, output: &str, budget: &mut PasteMatchBudget<'_>) -> bool {
         static MARKER: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
             // Codex puts duplicate-size ordinals after the closing bracket.
             regex::Regex::new(r"\[PastedContent([0-9]+)chars\]").unwrap()

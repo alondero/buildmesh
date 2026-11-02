@@ -258,7 +258,7 @@ rechecks ownership before queue retries and Enter retries. Process replacement
 and human input supersede the request. A refused queue write can be retried;
 an uncertain staged prompt is never pasted again by this operation.
 
-The observable profiles below preserve the pre-refactor execution paths:
+Callers select these delivery profiles:
 
 | Caller / mode | Readiness and deadline | Submission and cancellation |
 |---|---|---|
@@ -267,21 +267,31 @@ The observable profiles below preserve the pre-refactor execution paths:
 | Staged CLI prefill | Distinctive rendered head/tail marker plus 1.5s quiet, 300s deadline | No second paste; guarded Enter and bounded acknowledgement |
 | Auto-submitted CLI prompt | Launch owns submission | No additional Enter; launch is not observed acceptance |
 | Ordinary handover | Live process and available input ownership | Timed paste gap and one unobserved Enter; accepted file pointers retain their files if submission is uncertain |
+| Handover to a Circuit-owned or borrowed agent | Live process and available input ownership | Required adapter paste evidence and bounded acknowledgement; incomplete staged delivery raises attention and retains accepted file pointers |
 | Circuit later turn, continuation or nudge | Live process, caller's durable dispatch claim | Required adapter paste evidence and bounded acknowledgement; the worker maps the result into its checkpoint/effect journal |
+| Circuit retry on an existing live agent | Live process, caller's durable spawn claim | Synchronously require paste evidence and acknowledgement before acknowledging attachment; uncertain delivery parks the step as Unverified |
+
+Live-agent retries deliberately change the former asynchronous submit policy:
+previously a staged prompt could attach successfully while Enter failed in the
+background. The worker now waits for the bounded delivery outcome. A missing
+acknowledgement leaves the spawn effect at `possible_dispatch`, retains the
+payload and turn identity, and parks the step for inspection without automatic
+redispatch. The node stays `Running`: input may have reached the harness, so
+rolling back its turn start would claim knowledge the worker does not have.
 
 The result keeps progress (`NotStaged`, `TextStaged`, `EnterSent`,
 `EnterAcknowledged`, `AcceptanceObserved`, or `AutoSubmitted`) separate from why delivery stopped:
 superseded ownership, process exit, unverified evidence, or transport failure.
 An Enter write is not acceptance. `EnterAcknowledged` reports fresh PTY
 output, which can include a redraw; `AcceptanceObserved` requires Muse's
-matching session receipt. Circuit mapping preserves the existing required
-acknowledgement policy. Neither result proves turn completion or approval.
+matching session receipt. Neither result proves turn completion or approval.
 Circuit callers retain canonical payloads and submission digests and own
 checkpoint progression. Ordinary callers own attention feedback.
 
 Each process owns a 16,000-byte bounded output observation. Its reader feeds
 that instance, so a retired reader cannot add output to a replacement's
-delivery proof. Readiness and submission do not consult Circuit evaluator
+delivery proof. The handover caller selects required observation from the
+target's Circuit ownership; the delivery module does not consult evaluator
 membership. The evaluator keeps its separate classification tail and turn
 boundaries. [PTY input](terminals.md#pty-input) documents raw keystrokes and the
 canonical/transport/rendered text distinction.
@@ -289,8 +299,14 @@ canonical/transport/rendered text distinction.
 Scripted operation tests in `agent/prompt_delivery/operation_tests.rs` use a
 controlled clock and output/input events. Existing paste/count regression names
 moved from `circuit::delivery::tests` to `agent::prompt_delivery::tests`; prefill
-predicate tests moved to `agent::prompt_delivery::prefill_tests`. The broad
-`agent::` shard owns these tests, and `scripts/harness-check.mjs` maps their
+predicate tests moved to `agent::prompt_delivery::prefill_tests`.
+
+The six former `startup_prompt` tests were removed with the armed-node map.
+Their readiness cases now run through the complete operation: absent/recent
+output, quiet without the adapter marker, marker plus 1.5s quiet, and the 45s
+fallback. Bounded UTF-8 retention and process-generation isolation cover the
+per-process observations that replace the armed-only buffer.
+The broad `agent::` shard owns these tests, and `scripts/harness-check.mjs` maps their
 sibling files and private implementation to that owner. Mock output does not
 establish real ConPTY or harness acceptance.
 

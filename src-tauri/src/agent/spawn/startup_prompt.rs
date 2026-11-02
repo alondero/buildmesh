@@ -12,10 +12,14 @@ pub(super) fn deliver_after_boot(
 ) {
     let registry = &crate::agent::process::PROCESS_REGISTRY;
     let Some(process) = registry.get(&node_id) else {
+        tracing::warn!(
+            node_id,
+            "Initial prompt not delivered: agent process is missing"
+        );
         return;
     };
     // Input accepted during launch already supersedes this automatic first turn.
-    let stamp = format!("{}:0", process.generation);
+    let stamp = crate::agent::process::InputStamp::at_process_start(process.generation).encode();
     let spawned = std::thread::Builder::new()
         .name(format!("startup-prompt-{node_id}"))
         .spawn(move || {

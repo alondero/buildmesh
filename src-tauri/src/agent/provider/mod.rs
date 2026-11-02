@@ -481,6 +481,12 @@ pub enum PasteGatePolicy {
     RenderedWithSplitMarker,
 }
 
+/// A native session receipt captured before staging a prompt. PTY redraws do
+/// not satisfy this evidence; the adapter owns its native acceptance format.
+pub trait PromptAcceptanceReceipt: Send {
+    fn accepted(&self) -> bool;
+}
+
 /// Behaviour an agent provider must declare.
 ///
 /// Implementations live as zero-sized structs under `adapters/`, exposed as
@@ -729,6 +735,16 @@ pub trait AgentProvider: Send + Sync {
     /// name strings.
     fn paste_gate_policy(&self) -> PasteGatePolicy {
         PasteGatePolicy::Generic
+    }
+
+    /// Capture the native receipt for this prompt before writing it. `None`
+    /// uses fresh PTY output as acknowledgement; errors prevent staging.
+    fn prompt_acceptance_receipt(
+        &self,
+        _node_id: i64,
+        _prompt: &str,
+    ) -> Result<Option<Box<dyn PromptAcceptanceReceipt>>, String> {
+        Ok(None)
     }
 
     /// Whether a staged multi-line paste must carry CR line endings.

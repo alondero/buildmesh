@@ -77,6 +77,7 @@ fn circuit_empty_first_turn_stays_fresh() {
 #[test]
 fn initial_delivery_sees_command_cancellation_before_durable_state_changes() {
     let _db = db::test_support::isolated();
+    db::test_support::seed_unique_circuit_run_ids();
     let mesh = db::create_mesh("prompt cancellation", ".").unwrap();
     let graph = CircuitGraph::walking_skeleton("work");
     let circuit = db::create_autopilot_circuit(

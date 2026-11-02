@@ -518,7 +518,9 @@ pub(super) fn spawn_circuit_agent_in_background(
         // the task waits for a worker must invalidate this launch's request.
         let expected_input = crate::agent::process::PROCESS_REGISTRY
             .get(&node_id)
-            .map(|process| format!("{}:0", process.generation));
+            .map(|process| {
+                crate::agent::process::InputStamp::at_process_start(process.generation).encode()
+            });
         if !run_accepts_effects_async(run_id).await {
             abort_circuit_spawn_async(run_id, node_id).await;
             return;
@@ -877,34 +879,15 @@ fn spawn_step_agent_with(
                 node_id,
                 run_id
             );
-            let _ = db::update_agent_node_status(existing_agent_id, SessionStatus::Running);
-            crate::circuit::evaluator::note_turn_start(existing_agent_id);
-            set_agent_turn_for(store, run_id, existing_agent_id, handoff_turn.as_ref());
-            retain_initial_prompt(
+            return retry_live_agent(
                 store,
                 run_id,
                 view,
                 node_id,
-                existing_agent_id,
                 &resolved_prompt,
                 handoff_turn.as_ref(),
-            )?;
-            deliver_existing_prompt(
-                existing_agent_id,
-                &resolved_prompt,
-                crate::agent::prompt_delivery::DeliveryMode::LaterTurn,
-                None,
-                &|| run_accepts_effects(run_id),
-            )
-            .map_err(|e| format!("PTY write failed on retry: {}", e))?;
-            attach_spawned_agent(
-                run_id,
-                view,
-                node_id,
-                existing_agent_id,
                 parent_agent_node_id,
-            )?;
-            return Ok(());
+            );
         }
 
         // Process is dead/exited: reuse its worktree path/branch to spawn a fresh process
@@ -1093,6 +1076,37 @@ fn spawn_step_agent_with(
     )?;
 
     Ok(())
+}
+
+/// A retry on a live agent waits for acknowledgement before acknowledging its
+/// attachment. If delivery is uncertain, dispatch parks the step; the retained
+/// payload, turn identity and Running status describe input that may have landed.
+pub(super) fn retry_live_agent(
+    store: Option<&PreferencesStore>,
+    run_id: i64,
+    view: &mut RunView,
+    node_id: &str,
+    prompt: &str,
+    turn: Option<&crate::circuit::handoff::HandoffTurn>,
+    parent_agent_node_id: Option<i64>,
+) -> Result<(), String> {
+    let agent_id = view
+        .step(node_id)
+        .and_then(|step| step.agent_node_id)
+        .ok_or("Retry step has no existing agent")?;
+    let _ = db::update_agent_node_status(agent_id, SessionStatus::Running);
+    crate::circuit::evaluator::note_turn_start(agent_id);
+    set_agent_turn_for(store, run_id, agent_id, turn);
+    retain_initial_prompt(store, run_id, view, node_id, agent_id, prompt, turn)?;
+    deliver_existing_prompt(
+        agent_id,
+        prompt,
+        crate::agent::prompt_delivery::DeliveryMode::LaterTurn,
+        None,
+        &|| run_accepts_effects(run_id),
+    )
+    .map_err(|error| format!("Prompt delivery failed on retry: {error}"))?;
+    attach_spawned_agent(run_id, view, node_id, agent_id, parent_agent_node_id)
 }
 
 fn retain_initial_prompt(

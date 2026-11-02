@@ -2355,9 +2355,9 @@ fn output_seen_within_only_counts_output_newer_than_the_mark() {
 // ── submit posture (#874): what a target that cannot be observed gets ───
 //
 // The staged-submit path verifies its Enter against the evaluator's output
-// clock, which exists only for nodes the evaluator buffers. The terminal's
-// "Handover to node" injects into a target a human spawned, which is never
-// buffered — and that case previously ran the retry ladder anyway, typing
+// clock, which existed only for nodes the evaluator buffered. The terminal's
+// "Handover to node" can target an ordinary human-spawned node — and that
+// case previously ran the retry ladder anyway, typing
 // two extra carriage returns into an agent already working on the prompt and
 // then reporting "never submitted" (which marks the node for attention).
 
@@ -2480,6 +2480,18 @@ fn a_staged_prompt_needs_a_live_process_not_a_db_row() {
 // operation_tests drives the complete request with an injected clock and output.
 use crate::circuit::evaluator;
 
+impl PasteMatchBudget<'static> {
+    fn new(deadline: Instant) -> Self {
+        Self::with_clock(deadline, &Instant::now)
+    }
+}
+
+impl RenderedPastePrompt {
+    fn visible(&self, output: &str, deadline: Instant) -> bool {
+        self.visible_with_budget(output, &mut PasteMatchBudget::new(deadline))
+    }
+}
+
 impl PreparedPrompt {
     pub(crate) fn from_raw(node_id: i64, text: impl Into<String>) -> Self {
         Self {
@@ -2512,11 +2524,16 @@ impl DeliveryIo for TestIo<'_> {
         self.registry
             .write_bytes_if_current(self.node_id, bytes, stamp)
     }
-    fn output(&self, since: u64) -> observation::Snapshot {
-        observation::Snapshot {
+    fn activity(&self) -> observation::Activity {
+        observation::Activity {
             cursor: evaluator::tests::output_cursor(self.node_id).unwrap_or(0),
             quiet: evaluator::millis_since_last_output(self.node_id)
                 .map(|ms| Duration::from_millis(ms as u64)),
+        }
+    }
+    fn output(&self, since: u64) -> observation::Snapshot {
+        observation::Snapshot {
+            activity: self.activity(),
             text: evaluator::tests::cleaned_output_since(self.node_id, since),
         }
     }

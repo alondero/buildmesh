@@ -187,7 +187,7 @@ impl AgentProcess {
             child: Arc::new(Mutex::new(child)),
             writer_tx: Mutex::new(Some(writer_tx)),
             queue,
-            input_version: std::sync::atomic::AtomicU64::new(0),
+            input_version: std::sync::atomic::AtomicU64::new(InputStamp::INITIAL_VERSION),
             last_submit_ms: std::sync::atomic::AtomicI64::new(0),
             retired: AtomicBool::new(false),
             input_decoder: Mutex::new(TerminalInput::default()),

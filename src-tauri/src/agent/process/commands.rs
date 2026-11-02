@@ -414,7 +414,7 @@ pub(super) fn deliver_prepared_handover(
 /// backing command for the terminal context menu's "Handover to node" rows.
 ///
 /// Uses Agent Node prompt delivery to stage one bracketed paste and send a
-/// separate Enter. Ordinary handover explicitly selects unobserved submission.
+/// separate Enter. Circuit-owned and borrowed targets require acknowledgement.
 #[command]
 pub async fn handover_to_agent(
     app: AppHandle,
@@ -426,41 +426,55 @@ pub async fn handover_to_agent(
         let prepared =
             prepare_existing_node_handover(target_node_id, &text, app_data_dir.as_deref())?;
         deliver_prepared_handover(prepared, |prompt| {
-            use crate::agent::prompt_delivery::{
-                self, DeliveryMode, DeliveryProgress, DeliveryRequest, DeliveryStop,
-                ObservationRequirement, PreparedPrompt,
-            };
+            use crate::agent::prompt_delivery::PreparedPrompt;
             let node =
                 db::get_agent_node_by_id(target_node_id).map_err(|error| error.to_string())?;
             let provider = crate::preferences::resolve_harness_provider(&node.provider);
             let prepared = PreparedPrompt::for_adapter(target_node_id, provider.adapter(), prompt);
-            let outcome = prompt_delivery::deliver(
-                &PROCESS_REGISTRY,
-                provider.adapter(),
-                DeliveryRequest {
-                    prompt: &prepared,
-                    mode: DeliveryMode::LaterTurn,
-                    observation: ObservationRequirement::Unobserved,
-                    expected_input: None,
-                    still_current: &|| Ok(true),
-                },
-            );
-            tracing::info!(target_node_id, ?outcome, "Handover delivery finished");
-            if let Some(stop) = outcome.stop {
-                if outcome.progress == DeliveryProgress::NotStaged {
-                    return Err(format!("Handover was not staged: {stop:?}"));
-                }
-                if matches!(
-                    stop,
-                    DeliveryStop::Unverified(_) | DeliveryStop::TransportFailure(_)
-                ) {
-                    crate::commands::attention::mark_attention(target_node_id, &app);
-                }
-            }
-            Ok(())
+            deliver_handover_prompt(&PROCESS_REGISTRY, provider.adapter(), &prepared, || {
+                crate::commands::attention::mark_attention(target_node_id, &app);
+            })
         })
     })
     .await
+}
+
+pub(super) fn deliver_handover_prompt(
+    registry: &AgentProcessRegistry,
+    adapter: &dyn crate::agent::provider::AgentProvider,
+    prepared: &crate::agent::prompt_delivery::PreparedPrompt,
+    mark_attention: impl FnOnce(),
+) -> Result<(), String> {
+    use crate::agent::prompt_delivery::{
+        self, DeliveryMode, DeliveryProgress, DeliveryRequest, ObservationRequirement,
+    };
+    let target_node_id = prepared.node_id();
+    let observation = if crate::circuit::evaluator::is_circuit_piloted(target_node_id) {
+        ObservationRequirement::Required
+    } else {
+        ObservationRequirement::Unobserved
+    };
+    let outcome = prompt_delivery::deliver(
+        registry,
+        adapter,
+        DeliveryRequest {
+            prompt: prepared,
+            mode: DeliveryMode::LaterTurn,
+            observation,
+            expected_input: None,
+            still_current: &|| Ok(true),
+        },
+    );
+    tracing::info!(target_node_id, ?outcome, "Handover delivery finished");
+    if let Some(stop) = outcome.stop {
+        if outcome.progress == DeliveryProgress::NotStaged {
+            return Err(format!("Handover was not staged: {stop}"));
+        }
+        // The pointer may already be in the composer. Keep its brief and make
+        // any incomplete submission visible, including human takeover or exit.
+        mark_attention();
+    }
+    Ok(())
 }
 
 #[command]
