@@ -94,13 +94,6 @@ use storage::DIGEST_KEY;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ContextRevision(String);
 
-impl Default for ContextRevision {
-    /// The revision of an empty stored context.
-    fn default() -> Self {
-        Self::of_column("")
-    }
-}
-
 impl ContextRevision {
     /// The revision of a stored context column.
     ///
@@ -133,11 +126,37 @@ impl StoredContext {
     /// A caller that has the run's column in hand — because it loaded the run
     /// row — reads the decision-relevant half through this, without asking
     /// the database for it again.
+    ///
+    /// A payload that is not a flat string map has no decision-relevant
+    /// values, and this serves an empty half rather than an error: the
+    /// caller that reads a revision does not need the values, and a
+    /// historical payload must not stop the fence from comparing revisions.
     pub fn of_column(column_json: &str) -> Self {
         Self {
             small: stored_small(column_json),
             revision: ContextRevision::of_column(column_json),
         }
+    }
+
+    /// The stored view of a column, read strictly.
+    ///
+    /// A payload that is not a flat string map has no decision-relevant
+    /// values: this reports that as an error, the way a logical read does,
+    /// rather than serving an empty half that reads as "the run holds
+    /// nothing". A caller that needs a value must not mistake an unreadable
+    /// payload for an unset key.
+    ///
+    /// This is the one strict read of the decision-relevant half. A caller
+    /// that reads a key through it never learns which half the key is in:
+    /// the half a decision-relevant key belongs to is the seam's business.
+    pub fn strict_of_column(column_json: &str) -> Result<Self, DbError> {
+        Ok(Self {
+            small: small_values(column_json)?
+                .into_iter()
+                .filter(|(key, _)| !crate::circuit::context::is_lifecycle_blocker_key(key))
+                .collect(),
+            revision: ContextRevision::of_column(column_json),
+        })
     }
 
     /// The freshness token of the stored context.
@@ -295,8 +314,17 @@ impl ContextMutation {
     ///
     /// The value lands in whichever half of the storage it belongs to; the
     /// caller does not choose, and does not have to know.
+    ///
+    /// The reserved fingerprint key is not a value of the run's context: the
+    /// seam recomputes it from the stored set on every write, so a value that
+    /// claims to be one is dropped rather than stored. This is the same rule
+    /// [`ContextReplacement::with_values`] applies.
     pub fn put(&mut self, key: impl Into<String>, value: impl Into<String>) -> &mut Self {
-        self.puts.insert(key.into(), value.into());
+        let key = key.into();
+        if key == DIGEST_KEY {
+            return self;
+        }
+        self.puts.insert(key, value.into());
         self
     }
 
@@ -339,7 +367,13 @@ impl ContextMutation {
 /// A replacement cannot be built from a partial view. [`StoredContext`] is
 /// the partial view — the decision-relevant half alone — and it offers no
 /// way to become a replacement.
-#[derive(Debug, Clone, Default)]
+///
+/// There is deliberately no `Default`: an empty replacement is not "no
+/// change", it is "delete everything the run holds", and a struct literal
+/// that fills in the rest with `..Default::default()` would say so by
+/// accident. A caller that means it builds one with
+/// [`ContextReplacement::with_values`].
+#[derive(Debug, Clone)]
 pub struct ContextReplacement {
     values: BTreeMap<String, String>,
     /// The payload as it stands when it is not a flat string map.
@@ -430,6 +464,12 @@ pub fn ensure_table(conn: &Connection) -> SqlResult<()> {
 /// A run's stored half rides with the run: a sweep that removes runs removes
 /// their stored values with them. The caller owns the query that names the
 /// runs; the seam owns the table they live in.
+///
+/// The query is raw SQL and it names `autopilot_circuit_runs`: the seam
+/// hides the table it writes to, not the run table a caller's own sweep
+/// already queries. The fragment is interpolated into a `DELETE` over the
+/// side table, so it has to be a statement the caller wrote, not a value
+/// from a caller.
 pub fn delete_stored_values_for_runs(
     conn: &Connection,
     run_ids_query: &str,
@@ -507,7 +547,11 @@ pub fn adopt_split_storage(
 ///
 /// A stored payload that is not a flat map has no values: this reports that
 /// as an error, the way a logical read does.
-pub fn small_values(column_json: &str) -> Result<BTreeMap<String, String>, DbError> {
+///
+/// The seam's own strict read. A caller outside the seam reads the
+/// decision-relevant half through [`StoredContext::strict_of_column`], so
+/// the raw map — and the question of which half a key is in — stays inside.
+fn small_values(column_json: &str) -> Result<BTreeMap<String, String>, DbError> {
     let values: BTreeMap<String, String> = serde_json::from_str(column_json)
         .map_err(|error| DbError::Rendered(format!("invalid context_json: {error}")))?;
     Ok(values

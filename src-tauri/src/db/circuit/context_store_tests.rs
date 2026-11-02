@@ -470,6 +470,38 @@ fn the_digest_covers_the_settled_set() {
 }
 
 #[test]
+fn a_mutation_cannot_store_the_reserved_fingerprint_key() {
+    let conn = schema();
+    seed(&conn);
+    let mut mutation = ContextMutation::new();
+    mutation.put(
+        super::storage::DIGEST_KEY,
+        "a fingerprint the caller made up",
+    );
+    mutation.put("circuit.id", "7");
+    let column = mutate(&conn, 1, &mutation);
+
+    let stored: BTreeMap<String, String> = serde_json::from_str(&column).unwrap();
+    assert_eq!(stored.get("circuit.id").map(String::as_str), Some("7"));
+    assert!(
+        !stored.contains_key(super::storage::DIGEST_KEY),
+        "the fingerprint is storage state, so a value that claims to be one is dropped"
+    );
+}
+
+#[test]
+fn the_strict_stored_read_refuses_a_payload_it_cannot_read() {
+    let flat = StoredContext::strict_of_column(r#"{"circuit.id":"7"}"#).unwrap();
+    assert_eq!(flat.get("circuit.id"), Some("7"));
+
+    let error = StoredContext::strict_of_column(r#"{"x":{"y":"z"}}"#).unwrap_err();
+    assert!(
+        matches!(&error, DbError::Rendered(message) if message.contains("invalid context_json")),
+        "a payload that is not a flat map has no decision-relevant values to read: {error:?}"
+    );
+}
+
+#[test]
 fn the_run_card_projection_serves_the_bulky_half() {
     let conn = schema();
     seed(&conn);

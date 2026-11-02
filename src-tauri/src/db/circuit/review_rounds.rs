@@ -36,7 +36,7 @@ pub(crate) fn current_limit(
     // A payload that is not a flat map has no budget to read. The selector
     // reports that rather than answering "no budget": a run whose context
     // cannot be read must not look like a run that was never given one.
-    let context = super::context_store::small_values(&run.context_json)
+    let context = super::context_store::StoredContext::strict_of_column(&run.context_json)
         .map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
     if let Some(limit) = context
         .get("review.round_limit")
@@ -45,7 +45,7 @@ pub(crate) fn current_limit(
     {
         return Ok(Some(limit));
     }
-    let preset = (context.get("source.review_preset").map(String::as_str) == Some("1"))
+    let preset = (context.get("source.review_preset") == Some("1"))
         .then(|| {
             context
                 .get("retry.max_retries")

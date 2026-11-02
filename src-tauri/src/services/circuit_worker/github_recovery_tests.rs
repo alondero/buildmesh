@@ -918,7 +918,9 @@ fn dispatch_fixture() -> DispatchFixture {
         run_id,
         Some("running"),
         &crate::db::circuit::context_store::ContextChange::from(
-            crate::db::circuit::context_store::ContextReplacement::default(),
+            crate::db::circuit::context_store::ContextReplacement::with_values(
+                std::collections::BTreeMap::new(),
+            ),
         ),
         &[
             CircuitStepOp {

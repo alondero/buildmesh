@@ -441,7 +441,7 @@ pub(crate) fn extend_failed_review_locked(
     let next_attempt = last_attempt
         .checked_add(1)
         .ok_or_else(|| DbError::conflict("Review round limit reached."))?;
-    let context = super::context_store::small_values(&run.context_json)?;
+    let context = super::context_store::StoredContext::strict_of_column(&run.context_json)?;
     let prior_limit = context
         .get("review.round_limit")
         .and_then(|value| value.parse::<i32>().ok())
@@ -485,7 +485,7 @@ pub(crate) fn extend_failed_review_locked(
         }
         let current = super::ledger::get_circuit_run_inner(&tx, root)?
             .ok_or_else(|| DbError::conflict("Review lineage is incomplete."))?;
-        let context = super::context_store::small_values(&current.context_json)?;
+        let context = super::context_store::StoredContext::strict_of_column(&current.context_json)?;
         match context
             .get("recovery.from_run_id")
             .and_then(|id| id.parse::<i64>().ok())

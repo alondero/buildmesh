@@ -180,8 +180,10 @@ pub(super) fn load_bulky_for_runs(
 
 /// Store one bulky value.
 ///
-/// A value that did not change is left alone entirely — not even touched —
-/// so a repeated advance does not dirty the side table's pages.
+/// This always writes. The caller holds the values the run already stores,
+/// so it skips the call when the value did not change: a repeated advance
+/// leaves an unchanged value alone entirely — not even touched — and does
+/// not dirty the side table's pages.
 pub(super) fn upsert_bulky(
     conn: &Connection,
     run_id: i64,

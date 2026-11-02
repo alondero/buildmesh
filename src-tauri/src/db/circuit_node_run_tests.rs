@@ -89,6 +89,16 @@ fn set_context(conn: &mut Connection, run: i64, pairs: &[(&str, &str)]) {
     .unwrap();
 }
 
+/// A historical payload that is not a flat string map, written the way an
+/// older build left it: straight into the column, with no seam involved.
+fn set_raw_context(conn: &Connection, run: i64, payload: &str) {
+    conn.execute(
+        "UPDATE autopilot_circuit_runs SET context_json = ?1 WHERE id = ?2",
+        rusqlite::params![payload, run],
+    )
+    .unwrap();
+}
+
 fn only(conn: &Connection) -> NodeCircuitRun {
     let mut runs = list_node_circuit_runs_inner(conn).unwrap();
     assert_eq!(runs.len(), 1, "expected exactly one node run: {runs:?}");
@@ -491,6 +501,42 @@ fn only_the_latest_live_or_unacknowledged_run_per_node_is_listed() {
     assert!(
         list_node_circuit_runs_inner(&conn).unwrap().is_empty(),
         "dismissing attention on the desktop clears it from the phone too"
+    );
+}
+
+#[test]
+fn a_completed_run_with_a_non_flat_context_does_not_fail_the_listing() {
+    let mut conn = conn();
+    let (_, node) = source(&conn, "historical");
+    let run = review(&mut conn, node, 3);
+    commit_circuit_advance_locked(&mut conn, run, Some("completed"), None, &[]).unwrap();
+    set_raw_context(&conn, run, r#"{"x":{"y":"z"}}"#);
+
+    assert!(
+        list_node_circuit_runs_inner(&conn).unwrap().is_empty(),
+        "a completed run is not listed, so its historical payload is never read"
+    );
+}
+
+#[test]
+fn a_listed_run_with_a_non_flat_context_still_refuses_the_listing() {
+    let mut conn = conn();
+    let (_, node) = source(&conn, "malformed");
+    let run = review(&mut conn, node, 3);
+    commit_circuit_advance_locked(
+        &mut conn,
+        run,
+        Some("running"),
+        None,
+        &[step_op("verdict", "running", 1, None)],
+    )
+    .unwrap();
+    set_raw_context(&conn, run, r#"{"x":{"y":"z"}}"#);
+
+    let error = list_node_circuit_runs_inner(&conn).unwrap_err();
+    assert!(
+        matches!(&error, DbError::Rendered(message) if message.contains("invalid context_json")),
+        "a listed run still needs a logical map, so the malformed payload is refused: {error:?}"
     );
 }
 
