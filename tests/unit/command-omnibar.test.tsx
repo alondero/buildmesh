@@ -149,7 +149,6 @@ function viewModeForRow(rowText: string): string {
   if (rowText.includes('Mesh Grid')) return 'mesh';
   if (rowText.includes('Pinned')) return 'pinned';
   if (rowText.includes('All Nodes')) return 'all';
-  if (rowText.includes('Filtered')) return 'filtered';
   throw new Error(`Unexpected view row text: ${rowText}`);
 }
 
@@ -499,16 +498,6 @@ describe('CommandOmnibar — command execution routing', () => {
     expect(useUIStore.getState().viewMode).toBe('single');
   });
 
-  it('routes the view-filtered command to the Filtered view (#1609)', () => {
-    executeOmnibarItem('command:view-filtered', {
-      meshes: [mesh],
-      spawnOptions: [],
-      setViewMode: useUIStore.getState().setViewMode,
-      openProbeTab: vi.fn(),
-    });
-    expect(useUIStore.getState().viewMode).toBe('filtered');
-    expect(useUIStore.getState().lastNonSingleMode).toBe('filtered');
-  });
 
   it('selects a mesh and aligns the canvas with Mesh Grid', () => {
     useUIStore.setState({ viewMode: 'pinned' });
@@ -881,7 +870,7 @@ describe('CommandOmnibar — go to Mesh entry (issue #2077)', () => {
 
   it('view-mesh returns the canvas to the selected Mesh Grid without asking again', () => {
     useMeshStore.setState({ selectedMeshId: mesh.id });
-    useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered' });
+    useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all' });
 
     runOmnibarCommand('view-mesh', {
       meshes: [mesh, projectY],

@@ -120,8 +120,6 @@ describe('cycleGridMode (#987 Ctrl+Alt+G / Cmd+Alt+G view-mode cycle)', () => {
     cycleGridMode();
     expect(useUIStore.getState().viewMode).toBe('all');
     cycleGridMode();
-    expect(useUIStore.getState().viewMode).toBe('filtered');
-    cycleGridMode();
     expect(useUIStore.getState().viewMode).toBe('mesh');
   });
 
@@ -136,10 +134,8 @@ describe('cycleGridMode (#987 Ctrl+Alt+G / Cmd+Alt+G view-mode cycle)', () => {
     // selectedMeshId null and the 'all' step keeps it null.
     cycleGridMode(); // mesh → pinned
     cycleGridMode(); // pinned → all
-    cycleGridMode(); // all → filtered
     expect(useUIStore.getState().openScopePickerRequest).toBe(0);
-
-    cycleGridMode(); // filtered → mesh, with no Mesh selected
+    cycleGridMode();
 
     expect(useUIStore.getState().viewMode).toBe('mesh');
     // The mode still flips — the ask never suppresses the path it describes.
@@ -151,7 +147,7 @@ describe('cycleGridMode (#987 Ctrl+Alt+G / Cmd+Alt+G view-mode cycle)', () => {
     // The common case: a selection exists, so Mesh Grid is not a dead end
     // and there is nothing to ask about. Same as the segment.
     useMeshStore.setState({ selectedMeshId: 3 });
-    useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered' });
+    useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all' });
 
     cycleGridMode(); // filtered → mesh
 
@@ -186,16 +182,6 @@ describe('cycleGridMode (#987 Ctrl+Alt+G / Cmd+Alt+G view-mode cycle)', () => {
     expect(useUIStore.getState().viewMode).toBe('all');
   });
 
-  it('re-enters at a remembered Filtered mode and advances from there (#1609)', () => {
-    // Alt+G opened Single from the Filtered view; the cycle must land the
-    // first Ctrl+Alt+G back on Filtered, then keep rotating.
-    useUIStore.setState({ viewMode: 'single', lastNonSingleMode: 'filtered' });
-    cycleGridMode();
-    expect(useUIStore.getState().viewMode).toBe('filtered');
-    cycleGridMode();
-    expect(useUIStore.getState().viewMode).toBe('mesh');
-  });
-
   it('records each grid mode it lands on as the Single restore target', () => {
     // Every non-single mode set updates lastNonSingleMode (uiStore.setViewMode),
     // so a later Alt+G solo/exit returns to wherever the cycle left the user.
@@ -203,8 +189,8 @@ describe('cycleGridMode (#987 Ctrl+Alt+G / Cmd+Alt+G view-mode cycle)', () => {
     expect(useUIStore.getState().lastNonSingleMode).toBe('pinned');
     cycleGridMode(); // pinned → all
     expect(useUIStore.getState().lastNonSingleMode).toBe('all');
-    cycleGridMode(); // all → filtered (#1609)
-    expect(useUIStore.getState().lastNonSingleMode).toBe('filtered');
+    cycleGridMode();
+    expect(useUIStore.getState().lastNonSingleMode).toBe('mesh');
   });
 
   it('never lands on Single — the solo toggle owns that gesture (Alt+G)', () => {

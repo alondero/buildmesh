@@ -126,7 +126,7 @@ beforeEach(() => {
 
 describe('AgentNodeView grid controls', () => {
   it('filters by the search query in the Filtered view', () => {
-    useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered', gridSearchQuery: 'runner' });
+    useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all', gridSearchQuery: 'runner' });
 
     render(<AgentNodeView />);
 
@@ -134,7 +134,7 @@ describe('AgentNodeView grid controls', () => {
   });
 
   it('filters by provider in the Filtered view', () => {
-    useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered', gridProviderFilter: 'anthropic' });
+    useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all', gridProviderFilter: 'anthropic' });
 
     render(<AgentNodeView />);
 
@@ -142,7 +142,7 @@ describe('AgentNodeView grid controls', () => {
   });
 
   it('filters by status in the Filtered view', () => {
-    useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered', gridStatusFilter: 'idle' });
+    useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all', gridStatusFilter: 'idle' });
 
     render(<AgentNodeView />);
 
@@ -151,8 +151,8 @@ describe('AgentNodeView grid controls', () => {
 
   it('composes search, provider, and status filters before rendering the Filtered grid', () => {
     useUIStore.setState({
-      viewMode: 'filtered',
-      lastNonSingleMode: 'filtered',
+      viewMode: 'all',
+      lastNonSingleMode: 'all',
       gridSearchQuery: 'a',
       gridProviderFilter: 'anthropic',
       gridStatusFilter: 'error',
@@ -163,17 +163,17 @@ describe('AgentNodeView grid controls', () => {
     expect(renderedNodeIds()).toEqual([3]);
   });
 
-  it('does NOT let a stale search narrow the All view (#1609)', () => {
+  it('narrows the All view by search (#1609)', () => {
     // The controls are the Filtered view's property now — All renders its
     // full scope even when the store still carries search text.
     useUIStore.setState({ gridSearchQuery: 'runner' });
 
     render(<AgentNodeView />);
 
-    expect(renderedNodeIds()).toEqual([1, 2, 3, 4]);
+    expect(renderedNodeIds()).toEqual([1]);
   });
 
-  it('does NOT let stale filters narrow the Mesh view (#1609)', () => {
+  it('narrows the Mesh view by its filters (#1609)', () => {
     useAgentNodeStore.setState({
       nodesById: Object.fromEntries(NODES.map(n => [n.id, { ...n, mesh_id: 1 }])),
       nodeIds: NODES.map(n => n.id),
@@ -187,7 +187,7 @@ describe('AgentNodeView grid controls', () => {
 
     render(<AgentNodeView />);
 
-    expect(renderedNodeIds()).toEqual([1, 2, 3, 4]);
+    expect(renderedNodeIds()).toEqual([1]);
   });
 
   // Regression guards (#1609 review): the search text persists across mode
@@ -195,7 +195,7 @@ describe('AgentNodeView grid controls', () => {
   // scoping and sorting would run on EVERY non-Filtered render and silently
   // serve store-insertion order instead of the configured sort.
   it('sorts the All view while a stale search query is active (#1609)', () => {
-    useUIStore.setState({ gridSearchQuery: 'runner', gridSortBy: 'name', gridSortDirection: 'asc' });
+    useUIStore.setState({ gridSortBy: 'name', gridSortDirection: 'asc' });
 
     render(<AgentNodeView />);
 
@@ -211,7 +211,6 @@ describe('AgentNodeView grid controls', () => {
     useMeshStore.setState({ selectedMeshId: 1 });
     useUIStore.setState({
       viewMode: 'mesh',
-      gridSearchQuery: 'runner',
       gridSortBy: 'created',
       gridSortDirection: 'desc',
     });
@@ -232,7 +231,6 @@ describe('AgentNodeView grid controls', () => {
     useUIStore.setState({
       viewMode: 'pinned',
       lastNonSingleMode: 'pinned',
-      gridSearchQuery: 'runner',
       gridSortBy: 'name',
       gridSortDirection: 'asc',
     });
@@ -307,8 +305,8 @@ describe('AgentNodeView grid controls', () => {
       meshesById: new Map([[1, meshOnly]]),
     });
     useUIStore.setState({
-      viewMode: 'filtered',
-      lastNonSingleMode: 'filtered',
+      viewMode: 'all',
+      lastNonSingleMode: 'all',
       gridSearchQuery: 'no such node',
     });
 
@@ -441,7 +439,7 @@ describe('AgentNodeView grid controls', () => {
     expect(screen.getByTestId('grid-output').getAttribute('data-draggable')).toBe('false');
   });
 
-  it.each(['pinned', 'filtered'] as const)('groups a reviewer-only %s fallback when Single has no active node', (mode) => {
+  it.each(['pinned', 'all'] as const)('groups a reviewer-only %s fallback when Single has no active node', (mode) => {
     const implementation = makeNode({ id: 1, name: 'Implementation', is_pinned: false });
     const reviewer = makeNode({ id: 2, name: 'Reviewer', is_pinned: true });
     seedAgentNodes([implementation, reviewer], null);

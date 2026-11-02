@@ -525,17 +525,37 @@ describe('TitleBar (bespoke window chrome)', () => {
       }
     });
 
-    it('hides the Search Nodes bar outside the Filtered view (#1609)', async () => {
+    it('keeps filters unchanged while Single is shown', async () => {
+      useUIStore.setState({ viewMode: 'single', lastNonSingleMode: 'mesh', gridSearchQuery: 'runner' });
       await renderTitleBar();
-      // Default boot mode (all) → no search input, no placeholder competing
-      // with the wordmark/switcher for width.
-      expect(screen.queryByTestId('grid-controls')).toBeNull();
+      expect(screen.getByTestId('grid-controls').hidden).toBe(true);
+      act(() => useUIStore.getState().exitSingleMode());
+      expect((screen.getByTestId('grid-search-input') as HTMLInputElement).value).toBe('runner');
+    });
+
+    it('does not refocus search on returning from Single without a new search request', async () => {
+      useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all', focusGridSearchRequest: 0 });
+      await renderTitleBar();
+      const search = screen.getByTestId('grid-search-input');
+      act(() => useUIStore.getState().focusScopedSearch());
+      expect(document.activeElement).toBe(search);
+      act(() => useUIStore.getState().setViewMode('single'));
+      const destination = screen.getByRole('button', { name: 'Open settings' });
+      destination.focus();
+      expect(document.activeElement).toBe(destination);
+      act(() => useUIStore.getState().exitSingleMode());
+      expect(document.activeElement).toBe(destination);
+    });
+
+    it('shows search in the All Nodes scope', async () => {
+      await renderTitleBar();
+      expect(screen.getByTestId('grid-controls')).toBeTruthy();
     });
 
     it('mounts the Search Nodes bar beside the switcher only in the Filtered view (#1609)', async () => {
       await renderTitleBar();
       act(() => {
-        useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered' });
+        useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all' });
       });
       const controls = screen.getByTestId('grid-controls');
       // The search mounts in the LEFT cell (wordmark → switcher → search):
@@ -553,13 +573,13 @@ describe('TitleBar (bespoke window chrome)', () => {
       // unmounts — the store value is never reset by a mode change.
       await renderTitleBar();
       act(() => {
-        useUIStore.setState({ viewMode: 'filtered', gridSearchQuery: 'alpha' });
+        useUIStore.setState({ viewMode: 'all', gridSearchQuery: 'alpha' });
       });
       expect((screen.getByTestId('grid-search-input') as HTMLInputElement).value).toBe('alpha');
       act(() => {
         useUIStore.setState({ viewMode: 'all' });
       });
-      expect(screen.queryByTestId('grid-search-input')).toBeNull();
+      expect((screen.getByTestId('grid-search-input') as HTMLInputElement).value).toBe('alpha');
       expect(useUIStore.getState().gridSearchQuery).toBe('alpha');
     });
   });
@@ -609,7 +629,7 @@ describe('TitleBar (bespoke window chrome)', () => {
 
     it('mounts in the left cell between the switcher and the Filtered search bar', async () => {
       act(() => {
-        useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered' });
+        useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all' });
       });
       await renderTitleBar();
       const cell = screen.getByTestId('scope-indicator').closest('[data-tauri-drag-region]')!;
@@ -656,7 +676,6 @@ describe('TitleBar (bespoke window chrome)', () => {
     it.each([
       ['all', null, '', 'All meshes · 3 nodes'],
       ['pinned', 1, '', 'Pinned across meshes · 1 node'],
-      ['filtered', 1, 'agent-c', 'Filtered across meshes · 1 of 3 nodes'],
     ] as [ViewMode, number | null, string, string][])(
       'renders the honest cross-Mesh label and count in the %s view (%#)',
       async (viewMode, selectedMeshId, query, label) => {
@@ -670,11 +689,7 @@ describe('TitleBar (bespoke window chrome)', () => {
         // string, except that Pinned and Filtered draw the short form without
         // their mode word (#2421 round 4): the highlighted segment names the mode.
         expect(trigger.getAttribute('aria-label')).toBe(label);
-        const shortLabel = viewMode === 'filtered'
-          ? label.replace(/^Filtered across meshes · (\d+ of \d+) nodes$/, 'all meshes · $1')
-          : viewMode === 'pinned'
-            ? label.replace(/^Pinned across meshes/, 'all meshes')
-            : label;
+        const shortLabel = viewMode === 'pinned' ? label.replace(/^Pinned across meshes/, 'all meshes') : label;
         expect(trigger.textContent).toBe(shortLabel);
         // A cross-Mesh mode must never name a Mesh — pinned and filtered
         // legitimately keep a sidebar selection, and that Mesh is NOT the
@@ -683,13 +698,10 @@ describe('TitleBar (bespoke window chrome)', () => {
       },
     );
 
-    it('names the narrowed count against the scope total in Filtered, so an empty result is distinguishable', async () => {
-      act(() => {
-        useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered', gridSearchQuery: 'no-such-node' });
-      });
+    it('reports an empty filtered All scope', async () => {
+      act(() => useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all', gridSearchQuery: 'no-such-node' }));
       await renderTitleBar();
-      // 0 of 3 — "the filters excluded everything", not "the app is broken".
-      expect(screen.getByTestId('scope-indicator').getAttribute('aria-label')).toBe('Filtered across meshes · 0 of 3 nodes');
+      expect(screen.getByTestId('scope-indicator').getAttribute('aria-label')).toBe('All meshes \u00b7 0 nodes');
     });
 
     it('says so honestly in Mesh Grid with no Mesh selected', async () => {

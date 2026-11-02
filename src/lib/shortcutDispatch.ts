@@ -185,7 +185,7 @@ function traverseGrid(direction: ArrowDirection): void {
 
   // Phase 2: walk the grid the active View Mode actually renders. Ticket
   // #987 — `readScope` returns exactly the on-screen node set (Mesh for the
-  // selected mesh, Pinned cross-mesh, All, or Filtered narrowed by the Grid
+  // selected mesh, Pinned cross-mesh, or All narrowed by the Grid
   // Controls — #1609) in the store's canonical (mesh_id, position) order, so
   // traversal matches AgentNodeView cell-for-cell. This replaces the old
   // `mesh_id === activeNode.mesh_id` filter, which stranded Ctrl+Alt+Arrow
@@ -458,42 +458,13 @@ export const SHORTCUT_ACTIONS: readonly ShortcutActionSpec[] = [
     },
   },
   {
-    // Issue #998 — Ctrl+F (Win/Linux) / ⌘+⌥+F (macOS) focuses the grid search
-    // input. The platform branch and the macOS collision carve-out live in
-    // `buildFocusGridSearchBinding` so they can be unit-tested directly.
-    //
-    // Since #1609 the search lives in the Filtered view (its controls are
-    // hidden in other modes), so the shortcut first lands the canvas there —
-    // matching every editor's "find in files" gesture — then bumps the
-    // request counter. The actual `.focus()` + `.select()` calls live in
-    // `GridControls`' `useLayoutEffect` (which subscribes to
-    // `useUIStore.focusGridSearchRequest`). A request counter is the
-    // React-idiomatic channel for "imperative command from outside the
-    // component tree" — no ref forwarding, no module-level singleton, no leaky
-    // DOM registration. Ordering is guaranteed by React, not by defensive
-    // no-ops: `enterFilteredFromSearch` flips the mode and bumps the counter in
-    // one store action, so React re-renders ONCE (18 batching) with both
-    // values — TitleBar mounts GridControls, the input ref attaches during
-    // commit, and GridControls' `useLayoutEffect` runs after the DOM mutation
-    // but before paint, reading the already-bumped counter. There is no
-    // intermediate committed frame in which the input is absent, so no press
-    // can be dropped; no "input not mounted yet" state exists to defend
-    // against.
-    //
-    // No rate limit: a held key must not burn a window — the user
-    // re-pressing while already focused is a harmless re-focus, and the
-    // counter pattern (0 → 1 → 2) naturally fires the effect on every
-    // distinct press.
-    //
-    // #2076 — the flip, the focus request and the "these results span Meshes"
-    // notice are one store action, shared with the Filtered segment. The
-    // notice is informational and runs after the mode flip and the focus bump,
-    // so it can never suppress either.
+    // Focus search within the current scope; Single first returns to its grid.
+    // The request counter lets GridControls focus after it mounts.
     action: 'focus-grid-search',
     // `buildFocusGridSearchBinding` returns a whole binding object because it
     // predates the table (issue #998); the table only needs the accelerator.
     accelerator: mac => buildFocusGridSearchBinding(mac).key,
-    run: () => { useUIStore.getState().enterFilteredFromSearch(); },
+    run: () => { useUIStore.getState().focusScopedSearch(); },
     catalog: {
       group: 'grid',
       description: 'Focus grid search',

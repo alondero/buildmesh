@@ -17,7 +17,6 @@ import { ScopeIndicator } from '../../src/components/TitleBar/ScopeIndicator';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useToastStore } from '../../src/stores/toastStore';
-import { SEARCH_ESCAPE_NOTICE } from '../../src/lib/scopeNotices';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
 
@@ -67,17 +66,16 @@ describe('ViewModeSwitcher (wayfinder #982 / #983 / #986)', () => {
       expect(screen.getByRole('button', { name: /mesh grid/i })).toBeTruthy();
       expect(screen.getByRole('button', { name: /pinned/i })).toBeTruthy();
       expect(screen.getByRole('button', { name: /all nodes/i })).toBeTruthy();
-      expect(screen.getByRole('button', { name: /filtered/i })).toBeTruthy();
     });
 
     it('marks exactly the active segment with aria-pressed=true', () => {
       useUIStore.setState({ viewMode: 'pinned' });
       render(<ViewModeSwitcher />);
-      const segments = ['Single', 'Mesh Grid', 'Pinned', 'All Nodes', 'Filtered'];
+      const segments = ['Single', 'Mesh Grid', 'Pinned', 'All Nodes'];
       const activeIndexes = segments
         .map((s) => screen.getByRole('button', { name: new RegExp(s, 'i') }))
         .map((btn) => btn.getAttribute('aria-pressed') === 'true');
-      expect(activeIndexes).toEqual([false, false, true, false, false]);
+      expect(activeIndexes).toEqual([false, false, true, false]);
     });
   });
 
@@ -153,25 +151,7 @@ describe('ViewModeSwitcher (wayfinder #982 / #983 / #986)', () => {
       expect(useUIStore.getState().viewMode).toBe('mesh');
     });
 
-    it('clicking Filtered switches to the filtered mode AND arms the search-focus request (#1609)', () => {
-      // The segment owns both halves of the gesture: the mode flip makes
-      // TitleBar mount the search bar, the request counter focuses it once
-      // mounted. The counter must bump even though the mode was already
-      // 'filtered' in a prior interaction — the click means "get me to the
-      // search box".
-      render(<ViewModeSwitcher />);
-      fireEvent.click(screen.getByRole('button', { name: /filtered/i }));
-      expect(useUIStore.getState().viewMode).toBe('filtered');
-      expect(useUIStore.getState().lastNonSingleMode).toBe('filtered');
-      expect(useUIStore.getState().focusGridSearchRequest).toBe(1);
-    });
 
-    it('re-clicking Filtered while already filtered re-arms the focus request without a mode churn', () => {
-      useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered' });
-      render(<ViewModeSwitcher />);
-      fireEvent.click(screen.getByRole('button', { name: /filtered/i }));
-      expect(useUIStore.getState().focusGridSearchRequest).toBe(1);
-    });
   });
 
   // #2074 — the switcher picks the View Mode, the indicator beside it names
@@ -198,8 +178,7 @@ describe('ViewModeSwitcher (wayfinder #982 / #983 / #986)', () => {
       // empty scope apart from a broken render.
       expect(screen.getByTestId('scope-indicator').getAttribute('aria-label')).toBe('Pinned across meshes · 0 nodes');
 
-      fireEvent.click(screen.getByRole('button', { name: /filtered/i }));
-      expect(screen.getByTestId('scope-indicator').getAttribute('aria-label')).toBe('Filtered across meshes · 2 of 2 nodes');
+
     });
 
     it('names the Mesh Grid scope only once a Mesh is selected — the segment still picks nothing', () => {
@@ -295,72 +274,6 @@ describe('ViewModeSwitcher (wayfinder #982 / #983 / #986)', () => {
       });
     });
 
-    describe('a search that leaves the Mesh scope', () => {
-      beforeEach(() => {
-        seedAgentNodes([NODE_A, NODE_B]);
-        useMeshStore.setState({
-          meshes: [MESH_1, MESH_2],
-          meshesById: new Map([[1, MESH_1], [2, MESH_2]]),
-          selectedMeshId: 1,
-        });
-        useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh' });
-      });
 
-      it('announces the cross-Mesh results exactly once', () => {
-        renderToolbar();
-        fireEvent.click(screen.getByRole('button', { name: /filtered/i }));
-
-        const toasts = useToastStore.getState().toasts;
-        expect(toasts).toHaveLength(1);
-        expect(toasts[0].message).toBe(SEARCH_ESCAPE_NOTICE);
-        // The live path still runs: mode switched, search focused.
-        expect(useUIStore.getState().viewMode).toBe('filtered');
-        expect(useUIStore.getState().focusGridSearchRequest).toBe(1);
-      });
-
-      it('does not announce again on a Filtered re-click — no escape happened', () => {
-        renderToolbar();
-        // Exact segment name: once Filtered is active the indicator's label
-        // reads "Filtered across meshes · …", which a loose match would also
-        // hit.
-        fireEvent.click(screen.getByRole('button', { name: 'Filtered' }));
-        // Clear the stack first, so a second announcement would be visible
-        // instead of hidden by the toast dedup (same key → same slot).
-        useToastStore.setState({ toasts: [] });
-
-        fireEvent.click(screen.getByRole('button', { name: 'Filtered' }));
-
-        expect(useToastStore.getState().toasts).toEqual([]);
-        // The re-click still does what it advertises.
-        expect(useUIStore.getState().focusGridSearchRequest).toBe(2);
-      });
-
-      it('does not announce when the search started in a cross-Mesh view', () => {
-        useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all' });
-        renderToolbar();
-
-        fireEvent.click(screen.getByRole('button', { name: /filtered/i }));
-
-        expect(useToastStore.getState().toasts).toEqual([]);
-        expect(useUIStore.getState().viewMode).toBe('filtered');
-      });
-
-      it('does not announce on every keystroke — the notice rides the escape, not the query', () => {
-        renderToolbar();
-        fireEvent.click(screen.getByRole('button', { name: /filtered/i }));
-        useToastStore.setState({ toasts: [] });
-
-        // Typing is `setGridSearchQuery` per keystroke, with no route back
-        // through the escape gesture.
-        act(() => {
-          useUIStore.getState().setGridSearchQuery('a');
-          useUIStore.getState().setGridSearchQuery('ag');
-          useUIStore.getState().setGridSearchQuery('agent');
-        });
-
-        expect(useToastStore.getState().toasts).toEqual([]);
-        expect(useUIStore.getState().gridSearchQuery).toBe('agent');
-      });
-    });
   });
 });

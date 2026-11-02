@@ -189,7 +189,7 @@ describe('below 1440px: one labelled View selector', () => {
     expect(selector().getAttribute('aria-expanded')).toBe('true');
     const views = within(panel).getByRole('group', { name: 'View' });
     const rows = within(views).getAllByRole('button');
-    expect(rows.map(row => row.textContent)).toEqual(['Single', 'Mesh Grid', 'Pinned', 'All Nodes', 'Filtered']);
+    expect(rows.map(row => row.textContent)).toEqual(['Single', 'Mesh Grid', 'Pinned', 'All Nodes']);
     expect(within(views).getByRole('button', { name: 'All Nodes' }).getAttribute('aria-pressed')).toBe('true');
     expect(within(views).getByRole('button', { name: 'Pinned' }).getAttribute('aria-pressed')).toBe('false');
     // Colour is never the only signal: the active row carries a check glyph
@@ -232,21 +232,6 @@ describe('below 1440px: one labelled View selector', () => {
     const meshes = within(panel).getByRole('group', { name: 'Mesh' });
     expect(within(meshes).getByRole('button', { name: 'demo-2' }).getAttribute('aria-current')).toBe('true');
     expect(within(meshes).getByRole('button', { name: 'demo-1' }).getAttribute('aria-current')).toBeNull();
-  });
-
-  it('hands focus to the node search when Filtered is chosen', async () => {
-    await renderAt(1280);
-    const panel = openSelector();
-    vi.useFakeTimers({ toFake: ['requestAnimationFrame'] });
-    try {
-      fireEvent.click(within(panel).getByRole('button', { name: 'Filtered' }));
-      act(() => { vi.advanceTimersToNextFrame(); });
-    } finally {
-      vi.useRealTimers();
-    }
-    expect(useUIStore.getState().viewMode).toBe('filtered');
-    expect(document.activeElement).toBe(screen.getByTestId('grid-search-input'));
-    expect(selector().textContent).toContain('Filtered');
   });
 
   it('closes on an outside click without taking focus back from what the user clicked (#2421 review)', async () => {
@@ -437,15 +422,6 @@ describe('scope picker and tier edges (#2421 round 3)', () => {
     await renderAt(1440);
     expect(screen.getByRole('group', { name: /view mode/i })).toBeTruthy();
     expect(screen.queryByTestId('view-selector')).toBeNull();
-  });
-
-  it('shows the short Filtered label in the bar so the command field keeps its room, with the full name in aria-label (#2421 round 4)', async () => {
-    useUIStore.setState({ viewMode: 'filtered' });
-    await renderAt(1920);
-    const scope = screen.getByTestId('scope-indicator');
-    const visible = scope.querySelector('span')?.textContent ?? '';
-    expect(visible).toMatch(/^all meshes · \d+ of \d+$/);
-    expect(scope.getAttribute('aria-label')).toMatch(/^Filtered across meshes · \d+ of \d+ nodes$/);
   });
 
   it('folds the utilities at 1699px and returns them at 1700px', async () => {

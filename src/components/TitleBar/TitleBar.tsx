@@ -46,11 +46,8 @@ import { UsageIcon } from '../Probe/probeIcons';
  * Settings and Remote Access pills. Usage/Settings/Remote Access are
  * entry points, not readouts — their state lives in the surface they open.
  *
- * Issue #1609 reshaped the clusters: the utility pills dropped their
- * borders and joined the switcher's label ladder of the time (since #2421 the
- * bar mounts different controls per width tier, see `titleBarTiers.ts`), and the GridControls "Search nodes" bar moved from
- * the right cluster into the left, mounted only while the Filtered view is
- * active — it is that view's control, not a global fixture.
+ * The search control sits beside the scope selector and narrows its grid.
+ * It is hidden while Single displays an agent.
  *
  * The Zoom pill (left of Usage) is the exception to "entry points, not
  * readouts": it discloses a popover with the terminal text-size slider and
@@ -136,7 +133,7 @@ function NavigationControls() {
         // track gets half of what this field leaves, and the widest left
         // cluster (labelled segments plus a scope label at its 10rem cap)
         // measured 727px, so 1460px is twice that (#2421). max-w-full lets
-        // Filtered search and the native caption controls claim their
+        // Grid search and the native caption controls claim their
         // required space first.
         className="@container flex h-10 w-[clamp(20rem,calc(100vw_-_1460px),640px)] min-w-0 max-w-full items-center gap-2 rounded-md border border-border-default bg-bg-base px-3 text-sm text-text-muted transition-colors hover:border-accent-cyan/50 hover:text-text-primary"
       >
@@ -413,9 +410,6 @@ export function TitleBar() {
   const appSettingsOpen = useUIStore((s) => s.appSettingsOpen);
   const appSettingsTab = useUIStore((s) => s.appSettingsTab);
   const remoteAccessOpen = useUIStore((s) => s.remoteAccessOpen);
-  // #1609 — the Filtered view owns the Search Nodes bar; the mode lives in
-  // uiStore so Omnibar view commands ("Switch view: Filtered") slide the
-  // bar in through the same state the switcher writes.
   const viewMode = useUIStore((s) => s.viewMode);
   // #2421 — which controls each width tier mounts (see `titleBarTiers`). The
   // thresholds are 100%-text measurements, so a larger interface text size
@@ -473,11 +467,10 @@ export function TitleBar() {
 
   return (
     <>
-      {/* Filtered and compact layouts budget side-cluster width first.
-          Regular wide layouts keep the command field viewport-centered. */}
+      {/* Budget the scope and window controls before the command field. */}
       <header
         data-tauri-drag-region
-        className={`grid h-14 shrink-0 grid-cols-[auto_minmax(0,1fr)_auto] items-stretch bg-bg-surface border-b border-border-subtle select-none ${viewMode === 'filtered' ? '' : 'min-[1100px]:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]'}`}
+        className="grid h-14 shrink-0 grid-cols-[auto_minmax(0,1fr)_auto] items-stretch bg-bg-surface border-b border-border-subtle select-none"
       >
         {/* Left cell — clusters hug the start edge. */}
         <div data-tauri-drag-region className="flex min-w-0 items-center pl-3 pr-2">
@@ -503,7 +496,7 @@ export function TitleBar() {
           <Wordmark />
           {/* #2074 — the scope indicator names the effective scope (the one
               `deriveScope` value) and doubles as the Mesh picker, between the
-              switcher that picks the View Mode and the Filtered search bar
+              switcher that picks the View Mode and the search bar
               that narrows it. #2421 — below the labelled tier both fold into
               one `ViewSelector` that names the view and scope in text, so a
               narrow window never shows a row of unlabelled mode glyphs. */}
@@ -515,14 +508,7 @@ export function TitleBar() {
           ) : (
             <ViewSelector />
           )}
-          {/* #1609 — the Search Nodes bar IS the Filtered view's control, so
-              it mounts beside the switcher only while that mode is active.
-              An honest conditional mount: CSS can't interpolate `width: auto`,
-              so a transition-all wrapper would snap anyway while leaving a
-              4px `ml-1` behind when unmounted — `ml-1` lives on GridControls'
-              own root instead, so nothing occupies layout space outside
-              Filtered. */}
-          {viewMode === 'filtered' && <GridControls />}
+          <GridControls hidden={viewMode === 'single'} />
         </div>
 
         {/* Centre cell — the #1375 command field. Non-draggable so clicks

@@ -63,7 +63,6 @@ export function runOmnibarCommand(id: string, ctx: OmnibarActionContext): boolea
     // #1609 — Filtered has no sidebar round-trip; the plain setViewMode path
     // is the whole gesture (the click-to-focus-search behaviour is the
     // switcher's, not the palette's).
-    case 'view-filtered':
     // `view-all` falls through here too — setViewMode('all') enforces the
     // All Nodes invariant (issue #1002), so the omnibar doesn't need its
     // own special case.

@@ -296,16 +296,7 @@ function fullScopeLabel(scope: DerivedScope, soloNode: AgentNode | null, meshes:
         Icon: CrossMeshGlyph,
         meshScoped: false,
       };
-    case 'filtered':
-      return {
-        // Both counts, so "the filters hid everything" reads differently from
-        // "nothing is in scope" (#1536) and from a broken render.
-        text: `Filtered across meshes · ${scope.visibleNodeCount} of ${nodeCount(scope.scopedNodeCount)}`,
-        detail: `all meshes · ${scope.visibleNodeCount} of ${scope.scopedNodeCount}`,
-        tooltip: `Filtered across every Mesh — ${scope.visibleNodeCount} of ${nodeCount(scope.scopedNodeCount)} match`,
-        Icon: CrossMeshGlyph,
-        meshScoped: false,
-      };
+
   }
 }
 
@@ -313,7 +304,7 @@ function fullScopeLabel(scope: DerivedScope, soloNode: AgentNode | null, meshes:
  *  (see `ScopeLabel.visible`); every other mode draws its full text. */
 function scopeLabel(scope: DerivedScope, soloNode: AgentNode | null, meshes: Mesh[]): ScopeLabel {
   const full = fullScopeLabel(scope, soloNode, meshes);
-  const crossMesh = scope.viewMode !== 'single' && !scope.isMeshScoped && (scope.gridMode === 'filtered' || scope.gridMode === 'pinned');
+  const crossMesh = scope.viewMode !== 'single' && !scope.isMeshScoped && scope.gridMode === 'pinned';
   return { ...full, visible: crossMesh ? full.detail : full.text };
 }
 
