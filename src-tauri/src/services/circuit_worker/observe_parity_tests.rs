@@ -14,6 +14,11 @@ use crate::circuit::model::{
 #[derive(Default)]
 pub(super) struct Script {
     pub(super) live_run: Option<i64>,
+    /// The profile the scripted source classifies against.
+    ///
+    /// `None` means no profile is known: the classifier read fails, which is
+    /// what the ambient path had before a profile was installed (issue #1482).
+    pub(super) store: Option<crate::preferences::PreferencesStore>,
     native: Vec<CircuitEvent>,
     clock_reads: usize,
     status: Option<SessionStatus>,
@@ -24,6 +29,20 @@ pub(super) struct Script {
     observed: bool,
     approvals: Vec<String>,
     pub(super) calls: Vec<&'static str>,
+}
+
+impl Script {
+    /// The scripted source, classifying through `store`.
+    ///
+    /// The live source classifies against the profile it observes, so the
+    /// scripted double reaches the same store-scoped classifier rather than
+    /// the ambient one (issue #1482).
+    pub(super) fn with_store(store: crate::preferences::PreferencesStore) -> Self {
+        Script {
+            store: Some(store),
+            ..Default::default()
+        }
+    }
 }
 
 impl Observations for Script {
@@ -91,11 +110,22 @@ impl Observations for Script {
     fn classify(&mut self, view: &RunView, step: &StepView) -> Option<ClassifiedTurn> {
         self.calls.push("classify");
         if let Some(run_id) = self.live_run {
-            super::turn_classify::classify_step_turn(
-                &super::tests::active_run(run_id),
-                view,
-                &step.node_id,
-            )
+            let active = super::tests::active_run(run_id);
+            match &self.store {
+                Some(store) => {
+                    self.calls.push("classify:store");
+                    super::turn_classify::classify_step_turn_from(
+                        store,
+                        &active,
+                        view,
+                        &step.node_id,
+                    )
+                }
+                None => {
+                    self.calls.push("classify:ambient");
+                    super::turn_classify::classify_step_turn(&active, view, &step.node_id)
+                }
+            }
         } else {
             self.turn.take()
         }
@@ -389,6 +419,42 @@ fn scripted_observe_event_parity() {
         ));
     }
     assert_eq!(snapshot.trim(), include_str!("observe_parity.snap").trim());
+}
+
+/// The scripted source classifies through the store it is given.
+///
+/// The live source classifies against the profile it observes, so the scripted
+/// double has to reach the same store-scoped classifier rather than the
+/// ambient one (issue #1482). Without a store it keeps the ambient path, so
+/// the two degrade the same way they did before a profile was known.
+#[test]
+fn the_scripted_source_classifies_against_the_store_it_is_given() {
+    let _db = crate::db::test_support::isolated();
+    let directory = tempfile::TempDir::new().expect("a scratch profile directory");
+    let store = crate::preferences::PreferencesStore::new(directory.path().join("app-data"));
+    let run = view(spawn(), RunState::Running, StepStatus::Running, Some(42));
+
+    let mut scoped = Script::with_store(store);
+    scoped.live_run = Some(1);
+    let mut events = Vec::new();
+    super::turn_classify::observe_gates_with(&run, &mut events, &mut scoped);
+    assert!(
+        scoped.calls.contains(&"classify:store"),
+        "the scripted source must classify through the store it was given: {:?}",
+        scoped.calls
+    );
+
+    let mut ambient = Script {
+        live_run: Some(1),
+        ..Default::default()
+    };
+    let mut events = Vec::new();
+    super::turn_classify::observe_gates_with(&run, &mut events, &mut ambient);
+    assert!(
+        ambient.calls.contains(&"classify:ambient"),
+        "without a store the scripted source keeps the ambient classifier: {:?}",
+        ambient.calls
+    );
 }
 
 #[test]

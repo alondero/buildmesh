@@ -10,6 +10,7 @@ use crate::circuit::model::CircuitNodeKind;
 use crate::circuit::stepper::RunView;
 use crate::db;
 use crate::models::{EnvType, SessionStatus};
+use crate::preferences::PreferencesStore;
 use crate::session_naming::{
     agent_reviewer_node_name, disambiguate_node_name, issue_node_name, issue_reviewer_node_name,
     pr_node_name, pr_reviewer_node_name,
@@ -659,7 +660,95 @@ fn staging_env(existing: Option<EnvType>, mesh_path: &str) -> EnvType {
     existing.unwrap_or_else(|| EnvType::from(crate::env::env_for_path(Path::new(mesh_path))))
 }
 
+/// Stages this step's prompt against the profile the spawn owns.
+///
+/// Without a store there is no profile directory to stage in, so the prompt is
+/// pasted inline — the degradation the ambient path had before a profile was
+/// known.
+fn stage_prompt_for(
+    store: Option<&PreferencesStore>,
+    run_id: i64,
+    node_id: &str,
+    attempt: i32,
+    env: EnvType,
+    full_prompt: &str,
+    requests_result: bool,
+) -> crate::circuit::handoff::StagedPrompt {
+    match store {
+        Some(store) => crate::circuit::handoff::stage_prompt_from(
+            store,
+            run_id,
+            node_id,
+            attempt,
+            env,
+            full_prompt,
+            requests_result,
+        ),
+        None => crate::circuit::handoff::stage_prompt(
+            run_id,
+            node_id,
+            attempt,
+            env,
+            full_prompt,
+            requests_result,
+        ),
+    }
+}
+
+/// Records which handoff the agent's current turn belongs to.
+fn set_agent_turn_for(
+    store: Option<&PreferencesStore>,
+    run_id: i64,
+    agent_node_id: i64,
+    turn: Option<&crate::circuit::handoff::HandoffTurn>,
+) {
+    match store {
+        Some(store) => {
+            crate::circuit::handoff::set_agent_turn_from(store, run_id, agent_node_id, turn)
+        }
+        None => crate::circuit::handoff::set_agent_turn(run_id, agent_node_id, turn),
+    }
+}
+
+/// Spawn the step's agent and stage the prompt it opens with.
 pub(super) fn spawn_step_agent(
+    app: &AppHandle,
+    run_id: i64,
+    mesh_id: i64,
+    view: &mut RunView,
+    node_id: &str,
+) -> Result<(), String> {
+    // The store installed at startup. Without one there is no profile
+    // directory to stage the prompt in, so the spawn degrades exactly as it
+    // did before a profile was known.
+    match crate::preferences::ambient_store() {
+        Ok(store) => spawn_step_agent_from(&store, app, run_id, mesh_id, view, node_id),
+        Err(_) => spawn_step_agent_with(None, app, run_id, mesh_id, view, node_id),
+    }
+}
+
+/// [`spawn_step_agent`] against an explicit store.
+///
+/// The caller owns the store, so the prompt, the turn marker and the retained
+/// payload this spawn writes land under **that** profile directory rather than
+/// the ambient one (issue #1482).
+pub(super) fn spawn_step_agent_from(
+    store: &PreferencesStore,
+    app: &AppHandle,
+    run_id: i64,
+    mesh_id: i64,
+    view: &mut RunView,
+    node_id: &str,
+) -> Result<(), String> {
+    spawn_step_agent_with(Some(store), app, run_id, mesh_id, view, node_id)
+}
+
+/// The spawn itself, over an optional store.
+///
+/// `None` means no profile is known: every handoff degrades to the inline
+/// fallback the ambient path had before a profile was installed.
+fn spawn_step_agent_with(
+    store: Option<&PreferencesStore>,
     app: &AppHandle,
     run_id: i64,
     mesh_id: i64,
@@ -784,7 +873,8 @@ pub(super) fn spawn_step_agent(
             .and_then(|id| db::get_agent_node_by_id(id).ok())
             .map(|node| node.env);
         let env = staging_env(existing_env, &mesh.path);
-        let staged = crate::circuit::handoff::stage_prompt(
+        let staged = stage_prompt_for(
+            store,
             run_id,
             node_id,
             attempt,
@@ -839,12 +929,9 @@ pub(super) fn spawn_step_agent(
             );
             let _ = db::update_agent_node_status(existing_agent_id, SessionStatus::Running);
             crate::circuit::evaluator::note_turn_start(existing_agent_id);
-            crate::circuit::handoff::set_agent_turn(
-                run_id,
-                existing_agent_id,
-                handoff_turn.as_ref(),
-            );
+            set_agent_turn_for(store, run_id, existing_agent_id, handoff_turn.as_ref());
             retain_initial_prompt(
+                store,
                 run_id,
                 view,
                 node_id,
@@ -931,8 +1018,9 @@ pub(super) fn spawn_step_agent(
                 "node-created",
                 crate::commands::agent::NodeCreatedPayload { id: new_node.id },
             );
-            crate::circuit::handoff::set_agent_turn(run_id, new_node.id, handoff_turn.as_ref());
+            set_agent_turn_for(store, run_id, new_node.id, handoff_turn.as_ref());
             retain_initial_prompt(
+                store,
                 run_id,
                 view,
                 node_id,
@@ -1025,8 +1113,9 @@ pub(super) fn spawn_step_agent(
     // uses prefill when supported and otherwise is injected after spawn.
     // Issue #1358: per-step model / effort / extra_args ride the explicit
     // layer through to `spawn_with_intent`, where capability masking occurs.
-    crate::circuit::handoff::set_agent_turn(run_id, node.id, handoff_turn.as_ref());
+    set_agent_turn_for(store, run_id, node.id, handoff_turn.as_ref());
     retain_initial_prompt(
+        store,
         run_id,
         view,
         node_id,
@@ -1051,6 +1140,7 @@ pub(super) fn spawn_step_agent(
 }
 
 fn retain_initial_prompt(
+    store: Option<&PreferencesStore>,
     run_id: i64,
     view: &mut RunView,
     node_id: &str,
@@ -1062,14 +1152,27 @@ fn retain_initial_prompt(
         return Ok(());
     }
     let prepared = crate::circuit::delivery::PreparedPrompt::prepare(agent, text)?;
-    let revision = crate::services::circuit_prompt::retain(
-        run_id,
-        node_id,
-        view.step(node_id).map_or(1, |s| s.attempt),
-        &prepared,
-        crate::services::circuit_prompt::DeliveryKind::Initial,
-        turn,
-    )
+    // Without a store the submission is recorded without a payload file,
+    // exactly as a failed write is.
+    let revision = match store {
+        Some(store) => crate::services::circuit_prompt::retain_from(
+            store,
+            run_id,
+            node_id,
+            view.step(node_id).map_or(1, |s| s.attempt),
+            &prepared,
+            crate::services::circuit_prompt::DeliveryKind::Initial,
+            turn,
+        ),
+        None => crate::services::circuit_prompt::retain(
+            run_id,
+            node_id,
+            view.step(node_id).map_or(1, |s| s.attempt),
+            &prepared,
+            crate::services::circuit_prompt::DeliveryKind::Initial,
+            turn,
+        ),
+    }
     .map_err(|e| e.to_string())?;
     view.context.set("evidence.revision", revision.to_string());
     Ok(())

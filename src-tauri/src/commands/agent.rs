@@ -637,6 +637,54 @@ pub(crate) fn create_issue_node_impl(
     provider: Option<String>,
     configuration_id: Option<String>,
 ) -> Result<(IssueNodeDraft, SpawnIntent), String> {
+    // The store installed at startup. A build with no store installed keeps
+    // reading the code-defined defaults, exactly as it did before
+    // (issue #1482).
+    let store = crate::preferences::default_store();
+    create_issue_node_impl_with(
+        store.as_ref(),
+        mesh_id,
+        issue_number,
+        issue_title,
+        provider,
+        configuration_id,
+    )
+}
+
+/// [`create_issue_node_impl`] against an explicit store.
+///
+/// The caller owns the store, so the launch selection and the saved
+/// configuration this node resolves are the ones the caller set up
+/// (issue #1482).
+#[cfg(test)]
+// allow-test-in-production: the sibling suites own a store and pass it in.
+pub(crate) fn create_issue_node_impl_from(
+    store: &crate::preferences::PreferencesStore,
+    mesh_id: i64,
+    issue_number: i64,
+    issue_title: String,
+    provider: Option<String>,
+    configuration_id: Option<String>,
+) -> Result<(IssueNodeDraft, SpawnIntent), String> {
+    create_issue_node_impl_with(
+        Some(store),
+        mesh_id,
+        issue_number,
+        issue_title,
+        provider,
+        configuration_id,
+    )
+}
+
+/// The body, over the store the caller resolved.
+fn create_issue_node_impl_with(
+    store: Option<&crate::preferences::PreferencesStore>,
+    mesh_id: i64,
+    issue_number: i64,
+    issue_title: String,
+    provider: Option<String>,
+    configuration_id: Option<String>,
+) -> Result<(IssueNodeDraft, SpawnIntent), String> {
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
     let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)
         .map_err(|e| format!("{} — cannot derive issue URL", e))?;
@@ -645,7 +693,7 @@ pub(crate) fn create_issue_node_impl(
         repo,
         number: issue_number,
         title: issue_title.clone(),
-        template: crate::preferences::issue_spawn_prompt(),
+        template: store.and_then(|store| store.issue_spawn_prompt()),
     });
     // Issue #1180 — `initial_prompt()` is the single source of truth for
     // the GitHub-issue prefill; the same intent is then passed to
@@ -668,7 +716,7 @@ pub(crate) fn create_issue_node_impl(
     let effective_provider = crate::preferences::resolve_default_provider(
         provider,
         mesh.default_provider.clone(),
-        crate::preferences::default_provider(),
+        store.and_then(|store| store.default_provider()),
     );
     // Issue #1658 step 5 — the mesh-lookup + branch + create_pending trio
     // is now a single shared runner. `pending: true` lands the row in
@@ -682,32 +730,46 @@ pub(crate) fn create_issue_node_impl(
     // helper own the resolution — one git lookup per call instead
     // of two — and `branch` becomes dead code that's been
     // removed.
-    let configuration = crate::preferences::spawn_configurations::resolve_saved(
-        &effective_provider,
-        configuration_id.as_deref().filter(|s| !s.trim().is_empty()),
-    )
+    let configuration = match store {
+        Some(store) => crate::preferences::spawn_configurations::resolve_saved_from(
+            store,
+            &effective_provider,
+            configuration_id.as_deref().filter(|s| !s.trim().is_empty()),
+        ),
+        None => crate::preferences::spawn_configurations::resolve_saved(
+            &effective_provider,
+            configuration_id.as_deref().filter(|s| !s.trim().is_empty()),
+        ),
+    }
     .map_err(|error| error.to_string())?;
-    let node = crate::services::agent_node::create_blocking_configured(
-        crate::services::agent_node::NodeCreateParams {
-            mesh_id: mesh.id,
-            // The runner reads the path from the mesh row it looks up.
-            path: "",
-            // branch_override = none — the helper owns the resolution.
-            branch: "",
-            provider: Some(&effective_provider),
-            source_issue: Some(issue_number),
-            source_pr: None,
-            source_pr_pinned_sha: None,
-            use_worktree_override: None, // falls back to mesh default
-            name_override: Some(&initial_name),
-            head_repo_owner: None,
-            head_repo_clone_url: None,
-            configuration: configuration.as_ref(),
-            initial_prompt: Some(prefill.as_str()),
-            operation: None,
-        },
-        true, // pending — Pending matches the prior create_pending(...) semantics
-    )
+    let params = crate::services::agent_node::NodeCreateParams {
+        mesh_id: mesh.id,
+        // The runner reads the path from the mesh row it looks up.
+        path: "",
+        // branch_override = none — the helper owns the resolution.
+        branch: "",
+        provider: Some(&effective_provider),
+        source_issue: Some(issue_number),
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree_override: None, // falls back to mesh default
+        name_override: Some(&initial_name),
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        configuration: configuration.as_ref(),
+        initial_prompt: Some(prefill.as_str()),
+        operation: None,
+    };
+    let node = match store {
+        Some(store) => crate::services::agent_node::create_blocking_configured_from(
+            store, params,
+            true, // pending — Pending matches the prior create_pending(...) semantics
+        ),
+        None => crate::services::agent_node::create_blocking_configured(
+            params,
+            true, // pending — Pending matches the prior create_pending(...) semantics
+        ),
+    }
     .map_err(|e| e.to_string())?
     .node;
 
@@ -936,22 +998,78 @@ pub(crate) fn create_pr_node_impl(
     })
 }
 
+/// [`create_pr_node_impl`] against an explicit store.
+///
+/// The caller owns the store, so the launch selection and the saved
+/// configuration this node resolves are the ones the caller set up
+/// (issue #1482).
+#[cfg(test)]
+// allow-test-in-production: the sibling suites own a store and pass it in.
+pub(crate) fn create_pr_node_impl_from(
+    store: &crate::preferences::PreferencesStore,
+    request: CreatePrNodeRequest,
+) -> Result<(IssueNodeDraft, SpawnIntent), String> {
+    create_pr_node_impl_configured_from(
+        store,
+        CreatePrNodeRequest {
+            configuration_id: None,
+            reviewer: None,
+            ..request
+        },
+    )
+}
+
 /// Reviewer-sibling counterpart of [`create_pr_node_impl`] — same args, but
 /// `reviewer = true`, so the node is named with the `review` marker and
 /// disambiguated against the mesh's existing worktree names. Test-only: this
 /// is the seam the PR pill's "Spawn reviewer agent" row exercises.
+///
+/// The sibling suites drive [`create_pr_reviewer_node_impl_from`], which owns
+/// the store it reads (issue #1482).
 #[cfg(test)]
-pub(crate) fn create_pr_reviewer_node_impl(
+// allow-test-in-production: the reviewer-sibling seam is reached from the sibling suite that
+// owns a store.
+pub(crate) fn create_pr_reviewer_node_impl_from(
+    store: &crate::preferences::PreferencesStore,
     request: CreatePrNodeRequest,
 ) -> Result<(IssueNodeDraft, SpawnIntent), String> {
-    create_pr_node_impl_configured(CreatePrNodeRequest {
-        configuration_id: None,
-        reviewer: Some(true),
-        ..request
-    })
+    create_pr_node_impl_configured_from(
+        store,
+        CreatePrNodeRequest {
+            configuration_id: None,
+            reviewer: Some(true),
+            ..request
+        },
+    )
 }
 
 pub(crate) fn create_pr_node_impl_configured(
+    request: CreatePrNodeRequest,
+) -> Result<(IssueNodeDraft, SpawnIntent), String> {
+    // The store installed at startup. A build with no store installed keeps
+    // reading the code-defined defaults, exactly as it did before
+    // (issue #1482).
+    let store = crate::preferences::default_store();
+    create_pr_node_impl_configured_with(store.as_ref(), request)
+}
+
+/// [`create_pr_node_impl_configured`] against an explicit store.
+///
+/// The caller owns the store, so the launch selection and the saved
+/// configuration this node resolves are the ones the caller set up
+/// (issue #1482).
+#[cfg(test)]
+// allow-test-in-production: the sibling suites own a store and pass it in.
+pub(crate) fn create_pr_node_impl_configured_from(
+    store: &crate::preferences::PreferencesStore,
+    request: CreatePrNodeRequest,
+) -> Result<(IssueNodeDraft, SpawnIntent), String> {
+    create_pr_node_impl_configured_with(Some(store), request)
+}
+
+/// The body, over the store the caller resolved.
+fn create_pr_node_impl_configured_with(
+    store: Option<&crate::preferences::PreferencesStore>,
     request: CreatePrNodeRequest,
 ) -> Result<(IssueNodeDraft, SpawnIntent), String> {
     let CreatePrNodeRequest {
@@ -991,7 +1109,7 @@ pub(crate) fn create_pr_node_impl_configured(
         owner,
         repo,
         number: pr_number,
-        template: crate::preferences::pr_spawn_prompt(),
+        template: store.and_then(|store| store.pr_spawn_prompt()),
     });
     // The custom template (if any) was resolved once above and travels
     // inside the intent, so this render and the background launch below
@@ -1035,7 +1153,7 @@ pub(crate) fn create_pr_node_impl_configured(
     let effective_provider = crate::preferences::resolve_default_provider(
         provider,
         mesh.default_provider.clone(),
-        crate::preferences::default_provider(),
+        store.and_then(|store| store.default_provider()),
     );
 
     // Issue #444 — `head_sha` is the exact-pinning handle. We persist it as
@@ -1051,29 +1169,42 @@ pub(crate) fn create_pr_node_impl_configured(
         Some(&head_sha)
     };
 
-    let configuration = crate::preferences::spawn_configurations::resolve_saved(
-        &effective_provider,
-        configuration_id.as_deref().filter(|s| !s.trim().is_empty()),
-    )
+    let configuration = match store {
+        Some(store) => crate::preferences::spawn_configurations::resolve_saved_from(
+            store,
+            &effective_provider,
+            configuration_id.as_deref().filter(|s| !s.trim().is_empty()),
+        ),
+        None => crate::preferences::spawn_configurations::resolve_saved(
+            &effective_provider,
+            configuration_id.as_deref().filter(|s| !s.trim().is_empty()),
+        ),
+    }
     .map_err(|error| error.to_string())?;
-    let node = crate::services::agent_node::create_pending_with_source_pr_fork_configured(
-        crate::services::agent_node::NodeCreateParams {
-            mesh_id: mesh.id,
-            path: &mesh.path,
-            branch: &head_ref,
-            provider: Some(&effective_provider),
-            source_issue: None,                   // source_issue
-            source_pr: Some(pr_number), // source_pr — the key field for stage-2 worktree adoption
-            source_pr_pinned_sha: pinned_sha_opt, // exact-pinning handle (issue #444)
-            use_worktree_override: None,
-            name_override: Some(&initial_name),
-            head_repo_owner: head_repo_owner.as_deref(), // fork meta (issue #443) — None for same-repo PRs
-            head_repo_clone_url: head_repo_clone_url.as_deref(),
-            configuration: configuration.as_ref(),
-            initial_prompt: Some(prefill.as_str()),
-            operation: None,
-        },
-    )
+    let params = crate::services::agent_node::NodeCreateParams {
+        mesh_id: mesh.id,
+        path: &mesh.path,
+        branch: &head_ref,
+        provider: Some(&effective_provider),
+        source_issue: None,                   // source_issue
+        source_pr: Some(pr_number), // source_pr — the key field for stage-2 worktree adoption
+        source_pr_pinned_sha: pinned_sha_opt, // exact-pinning handle (issue #444)
+        use_worktree_override: None,
+        name_override: Some(&initial_name),
+        head_repo_owner: head_repo_owner.as_deref(), // fork meta (issue #443) — None for same-repo PRs
+        head_repo_clone_url: head_repo_clone_url.as_deref(),
+        configuration: configuration.as_ref(),
+        initial_prompt: Some(prefill.as_str()),
+        operation: None,
+    };
+    let node = match store {
+        Some(store) => {
+            crate::services::agent_node::create_pending_with_source_pr_fork_configured_from(
+                store, params,
+            )
+        }
+        None => crate::services::agent_node::create_pending_with_source_pr_fork_configured(params),
+    }
     .map_err(|e| e.to_string())?;
 
     tracing::info!(
@@ -1219,8 +1350,20 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+// allow-test-in-production: this inline suite predates the sibling-test-file rule; the
+// issue #1482 migration edits it in place, and relocating the pre-existing suite is out of scope.
 mod tests {
     use super::*;
+
+    /// A store over a fresh temporary directory: the profile this test owns.
+    ///
+    /// The handle is passed into the command explicitly rather than installed
+    /// as an ambient store (issue #1482).
+    fn test_store() -> (tempfile::TempDir, crate::preferences::PreferencesStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::preferences::PreferencesStore::new(dir.path().to_path_buf());
+        (dir, store)
+    }
 
     // ----- create_pr_node wire contract (issue #2449) --------------------
     //
@@ -1468,10 +1611,12 @@ mod tests {
     #[test]
     fn create_issue_node_impl_rejects_a_prompt_the_harness_cannot_take() {
         let _db = ensure_pr_db();
+        let (_profile, store) = test_store();
         let (_tmp, mesh_id) =
             create_test_mesh("issue-terminal-prompt", "https://github.com/x/y.git");
 
-        let err = create_issue_node_impl(
+        let err = create_issue_node_impl_from(
+            &store,
             mesh_id,
             101,
             "fix the wobble".to_string(),
@@ -1489,20 +1634,24 @@ mod tests {
     #[test]
     fn create_pr_node_impl_rejects_a_prompt_the_harness_cannot_take() {
         let _db = ensure_pr_db();
+        let (_profile, store) = test_store();
         let (_tmp, mesh_id) = create_test_mesh("pr-terminal-prompt", "https://github.com/x/y.git");
 
-        let err = create_pr_node_impl(CreatePrNodeRequest {
-            mesh_id,
-            pr_number: 7,
-            pr_title: "review the race".to_string(),
-            head_ref: "feat/x".to_string(),
-            head_sha: "".to_string(),
-            provider: Some("terminal".to_string()),
-            head_repo_owner: None,
-            head_repo_clone_url: None,
-            configuration_id: None,
-            reviewer: None,
-        })
+        let err = create_pr_node_impl_from(
+            &store,
+            CreatePrNodeRequest {
+                mesh_id,
+                pr_number: 7,
+                pr_title: "review the race".to_string(),
+                head_ref: "feat/x".to_string(),
+                head_sha: "".to_string(),
+                provider: Some("terminal".to_string()),
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                configuration_id: None,
+                reviewer: None,
+            },
+        )
         .expect_err("Terminal cannot take a PR-spawn prompt");
 
         assert_eq!(err, crate::services::agent_node::INITIAL_PROMPT_UNSUPPORTED);
@@ -1525,6 +1674,7 @@ mod tests {
     #[test]
     fn create_pr_node_impl_wires_name_and_prefill_seam() {
         let _db = ensure_pr_db();
+        let (_profile, store) = test_store();
 
         let (_tmp, mesh_id) =
             create_test_mesh("pr-seam-test", "https://github.com/alondero/buildmesh.git");
@@ -1532,18 +1682,21 @@ mod tests {
         let pr_number: i64 = 445;
         let pr_title = "test(pr-spawn): Rust unit tests for create_pr_node + fetch_single_ref";
 
-        let (draft, intent) = create_pr_node_impl(CreatePrNodeRequest {
-            mesh_id,
-            pr_number,
-            pr_title: pr_title.to_string(),
-            head_ref: "feat/445-pr-spawn".to_string(),
-            head_sha: "0123456789abcdef0123456789abcdef01234567".to_string(),
-            provider: None,
-            head_repo_owner: None,
-            head_repo_clone_url: None,
-            configuration_id: None,
-            reviewer: None,
-        })
+        let (draft, intent) = create_pr_node_impl_from(
+            &store,
+            CreatePrNodeRequest {
+                mesh_id,
+                pr_number,
+                pr_title: pr_title.to_string(),
+                head_ref: "feat/445-pr-spawn".to_string(),
+                head_sha: "0123456789abcdef0123456789abcdef01234567".to_string(),
+                provider: None,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                configuration_id: None,
+                reviewer: None,
+            },
+        )
         .expect("create_pr_node_impl with valid inputs must succeed");
 
         // Prefill seam: matches the SpawnIntent's `initial_prompt()`
@@ -1602,6 +1755,7 @@ mod tests {
     #[test]
     fn create_pr_reviewer_node_impl_names_uniquely_per_spawn() {
         let _db = ensure_pr_db();
+        let (_profile, store) = test_store();
 
         let (_tmp, mesh_id) = create_test_mesh(
             "pr-reviewer-naming",
@@ -1610,18 +1764,21 @@ mod tests {
         let pr_number: i64 = 90210;
         let pr_title = "add reviewer spawn";
 
-        let (first, _intent) = create_pr_reviewer_node_impl(CreatePrNodeRequest {
-            mesh_id,
-            pr_number,
-            pr_title: pr_title.to_string(),
-            head_ref: "feat/90210-review".to_string(),
-            head_sha: "".to_string(),
-            provider: None,
-            head_repo_owner: None,
-            head_repo_clone_url: None,
-            configuration_id: None,
-            reviewer: Some(true),
-        })
+        let (first, _intent) = create_pr_reviewer_node_impl_from(
+            &store,
+            CreatePrNodeRequest {
+                mesh_id,
+                pr_number,
+                pr_title: pr_title.to_string(),
+                head_ref: "feat/90210-review".to_string(),
+                head_sha: "".to_string(),
+                provider: None,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                configuration_id: None,
+                reviewer: Some(true),
+            },
+        )
         .expect("first reviewer spawn must succeed");
 
         let expected_base = crate::session_naming::pr_reviewer_node_name(pr_number, pr_title);
@@ -1647,18 +1804,21 @@ mod tests {
             "the name drives the worktree directory, so worktree_name must carry it"
         );
 
-        let (second, _intent) = create_pr_reviewer_node_impl(CreatePrNodeRequest {
-            mesh_id,
-            pr_number,
-            pr_title: pr_title.to_string(),
-            head_ref: "feat/90210-review".to_string(),
-            head_sha: "".to_string(),
-            provider: None,
-            head_repo_owner: None,
-            head_repo_clone_url: None,
-            configuration_id: None,
-            reviewer: Some(true),
-        })
+        let (second, _intent) = create_pr_reviewer_node_impl_from(
+            &store,
+            CreatePrNodeRequest {
+                mesh_id,
+                pr_number,
+                pr_title: pr_title.to_string(),
+                head_ref: "feat/90210-review".to_string(),
+                head_sha: "".to_string(),
+                provider: None,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                configuration_id: None,
+                reviewer: Some(true),
+            },
+        )
         .expect("a repeat reviewer spawn must still succeed");
 
         assert_ne!(
@@ -1682,22 +1842,26 @@ mod tests {
     #[test]
     fn create_pr_node_impl_resolves_provider_chain() {
         let _db = ensure_pr_db();
+        let (_profile, store) = test_store();
 
         // Case 1: explicit caller value wins (no mesh, no app default).
         let (_tmp, mesh_id) =
             create_test_mesh("pr-provider-explicit", "https://github.com/x/y.git");
-        let draft = create_pr_node_impl(CreatePrNodeRequest {
-            mesh_id,
-            pr_number: 1,
-            pr_title: "t".to_string(),
-            head_ref: "feat/a".to_string(),
-            head_sha: "".to_string(),
-            provider: Some("codex".to_string()),
-            head_repo_owner: None, // explicit native selection
-            head_repo_clone_url: None,
-            configuration_id: None,
-            reviewer: None,
-        })
+        let draft = create_pr_node_impl_from(
+            &store,
+            CreatePrNodeRequest {
+                mesh_id,
+                pr_number: 1,
+                pr_title: "t".to_string(),
+                head_ref: "feat/a".to_string(),
+                head_sha: "".to_string(),
+                provider: Some("codex".to_string()),
+                head_repo_owner: None, // explicit native selection
+                head_repo_clone_url: None,
+                configuration_id: None,
+                reviewer: None,
+            },
+        )
         .map(|(draft, _intent)| draft)
         .expect("explicit provider must be accepted");
         assert_eq!(
@@ -1721,18 +1885,21 @@ mod tests {
         )
         .expect("set default_provider");
         drop(db);
-        let draft = create_pr_node_impl(CreatePrNodeRequest {
-            mesh_id: mesh_id2,
-            pr_number: 2,
-            pr_title: "t".to_string(),
-            head_ref: "feat/b".to_string(),
-            head_sha: "".to_string(),
-            provider: None,
-            head_repo_owner: None, // no explicit — fall through
-            head_repo_clone_url: None,
-            configuration_id: None,
-            reviewer: None,
-        })
+        let draft = create_pr_node_impl_from(
+            &store,
+            CreatePrNodeRequest {
+                mesh_id: mesh_id2,
+                pr_number: 2,
+                pr_title: "t".to_string(),
+                head_ref: "feat/b".to_string(),
+                head_sha: "".to_string(),
+                provider: None,
+                head_repo_owner: None, // no explicit — fall through
+                head_repo_clone_url: None,
+                configuration_id: None,
+                reviewer: None,
+            },
+        )
         .map(|(draft, _intent)| draft)
         .expect("mesh default must be accepted");
         assert_eq!(
@@ -1755,22 +1922,26 @@ mod tests {
     #[test]
     fn create_pr_node_impl_persists_pinned_sha_for_drift_check() {
         let _db = ensure_pr_db();
+        let (_profile, store) = test_store();
 
         // Case A: non-empty head_sha persists verbatim.
         let (_tmp_a, mesh_id_a) = create_test_mesh("pr-sha-pin-a", "https://github.com/x/y.git");
         let sha = "abcdef0123456789abcdef0123456789abcdef01";
-        let draft_a = create_pr_node_impl(CreatePrNodeRequest {
-            mesh_id: mesh_id_a,
-            pr_number: 1,
-            pr_title: "t".to_string(),
-            head_ref: "feat/a".to_string(),
-            head_sha: sha.to_string(),
-            provider: None,
-            head_repo_owner: None,
-            head_repo_clone_url: None,
-            configuration_id: None,
-            reviewer: None,
-        })
+        let draft_a = create_pr_node_impl_from(
+            &store,
+            CreatePrNodeRequest {
+                mesh_id: mesh_id_a,
+                pr_number: 1,
+                pr_title: "t".to_string(),
+                head_ref: "feat/a".to_string(),
+                head_sha: sha.to_string(),
+                provider: None,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                configuration_id: None,
+                reviewer: None,
+            },
+        )
         .map(|(draft, _intent)| draft)
         .expect("non-empty head_sha must be accepted");
         assert_eq!(
@@ -1781,18 +1952,21 @@ mod tests {
 
         // Case B: empty head_sha persists as None.
         let (_tmp_b, mesh_id_b) = create_test_mesh("pr-sha-pin-b", "https://github.com/x/y.git");
-        let draft_b = create_pr_node_impl(CreatePrNodeRequest {
-            mesh_id: mesh_id_b,
-            pr_number: 2,
-            pr_title: "t".to_string(),
-            head_ref: "feat/b".to_string(),
-            head_sha: "".to_string(),
-            provider: None,
-            head_repo_owner: None,
-            head_repo_clone_url: None,
-            configuration_id: None,
-            reviewer: None,
-        })
+        let draft_b = create_pr_node_impl_from(
+            &store,
+            CreatePrNodeRequest {
+                mesh_id: mesh_id_b,
+                pr_number: 2,
+                pr_title: "t".to_string(),
+                head_ref: "feat/b".to_string(),
+                head_sha: "".to_string(),
+                provider: None,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                configuration_id: None,
+                reviewer: None,
+            },
+        )
         .map(|(draft, _intent)| draft)
         .expect("empty head_sha must be accepted (drift check skipped)");
         assert_eq!(

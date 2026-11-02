@@ -1,7 +1,7 @@
 //! Tests for the resolver::pairings submodule — pairing upsert/remove,
 //! proxied-provider ordering, attach-form defaults.
 
-use crate::preferences::tests::with_temp_dir;
+use crate::preferences::tests::with_store;
 use crate::preferences::{ApiSurface, AppPreferences, ModelTiers, ProviderPairing};
 
 #[test]
@@ -46,15 +46,14 @@ fn upsert_and_remove_provider_pairing_by_harness_provider_key() {
 
 #[test]
 fn set_proxied_provider_order_round_trips() {
-    with_temp_dir(|_| {
-        crate::preferences::set_proxied_provider_order(
+    with_store(|store| {
+        crate::preferences::set_proxied_provider_order_in(
+            store,
             "claude".to_string(),
             vec!["minimax".to_string(), "kimi".to_string()],
         )
         .unwrap();
-        let stored = super::super::super::storage::load()
-            .unwrap()
-            .proxied_provider_order;
+        let stored = store.load().unwrap().proxied_provider_order;
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].harness_id, "claude");
         assert_eq!(
@@ -66,24 +65,24 @@ fn set_proxied_provider_order_round_trips() {
 
 #[test]
 fn set_proxied_provider_order_normalises_empty_to_drop_entry() {
-    with_temp_dir(|_| {
-        crate::preferences::set_proxied_provider_order(
+    with_store(|store| {
+        crate::preferences::set_proxied_provider_order_in(
+            store,
             "claude".to_string(),
             vec!["minimax".to_string()],
         )
         .unwrap();
-        crate::preferences::set_proxied_provider_order("claude".to_string(), vec![]).unwrap();
-        let stored = super::super::super::storage::load()
-            .unwrap()
-            .proxied_provider_order;
+        crate::preferences::set_proxied_provider_order_in(store, "claude".to_string(), vec![])
+            .unwrap();
+        let stored = store.load().unwrap().proxied_provider_order;
         assert!(stored.is_empty());
     });
 }
 
 #[test]
 fn proxied_order_for_returns_none_when_harness_unset() {
-    with_temp_dir(|_| {
-        assert!(crate::preferences::proxied_order_for("claude").is_none());
+    with_store(|store| {
+        assert!(crate::preferences::proxied_order_for_from(store, "claude").is_none());
     });
 }
 
@@ -93,8 +92,8 @@ fn proxied_order_for_returns_none_when_harness_unset() {
 /// through a stored pairing.
 #[test]
 fn compatible_providers_by_harness_covers_every_renderable_harness() {
-    with_temp_dir(|_| {
-        let mut prefs = crate::preferences::load().unwrap();
+    with_store(|store| {
+        let mut prefs = store.load().unwrap();
         // A keyed generic account is what makes a harness's attach picker
         // non-empty, so the map must actually carry one.
         crate::preferences::upsert_provider_account(
@@ -141,15 +140,15 @@ fn compatible_providers_by_harness_covers_every_renderable_harness() {
                 ..Default::default()
             },
         );
-        crate::preferences::save(prefs).unwrap();
+        store.save(prefs).unwrap();
 
-        let map = crate::preferences::compatible_providers_by_harness();
+        let map = crate::preferences::compatible_providers_by_harness_from(store);
 
         // Each entry is the single-harness computation, with the same result.
         for (harness_id, accounts) in &map {
             assert_eq!(
                 accounts,
-                &crate::preferences::compatible_providers_for_harness(harness_id),
+                &crate::preferences::compatible_providers_for_harness_from(store, harness_id),
                 "map entry for '{harness_id}' diverged from the per-harness resolver",
             );
         }
@@ -183,8 +182,8 @@ fn compatible_providers_by_harness_covers_every_renderable_harness() {
 /// indistinguishable from a real "no compatible provider here" answer.
 #[test]
 fn compatible_providers_by_harness_skips_empty_harness_ids() {
-    with_temp_dir(|_| {
-        let mut prefs = crate::preferences::load().unwrap();
+    with_store(|store| {
+        let mut prefs = store.load().unwrap();
         prefs.spawn_configurations.push(
             crate::preferences::spawn_configurations::SpawnConfiguration {
                 id: "cfg-blank".to_string(),
@@ -203,9 +202,9 @@ fn compatible_providers_by_harness_skips_empty_harness_ids() {
                 model_tiers: ModelTiers::default(),
             },
         );
-        crate::preferences::save(prefs).unwrap();
+        store.save(prefs).unwrap();
 
-        let map = crate::preferences::compatible_providers_by_harness();
+        let map = crate::preferences::compatible_providers_by_harness_from(store);
         assert!(
             !map.contains_key(""),
             "an empty harness id must not become a map key: {:?}",

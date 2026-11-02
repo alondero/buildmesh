@@ -63,11 +63,42 @@ pub(crate) fn turn_revision(result: &Path) -> String {
 /// classification and the continuation delivery both read it through here, so
 /// a file-only turn compares like with like.
 pub(crate) fn current_turn_revision(run_id: i64, agent: &AgentNode) -> Option<String> {
+    match crate::preferences::ambient_store() {
+        Ok(store) => current_turn_revision_from(&store, run_id, agent),
+        // No profile is known: the turn owes no result file, so the transcript
+        // report is the only revision there is.
+        Err(_) => current_turn_revision_with(None, run_id, agent),
+    }
+}
+
+/// [`current_turn_revision`] against an explicit store.
+///
+/// The caller owns the store, so the result-file turn this names is the one
+/// under *that* profile directory rather than the ambient one (issue #1482).
+pub(crate) fn current_turn_revision_from(
+    store: &crate::preferences::PreferencesStore,
+    run_id: i64,
+    agent: &AgentNode,
+) -> Option<String> {
+    current_turn_revision_with(Some(store), run_id, agent)
+}
+
+/// The revision, over the store the caller resolved.
+fn current_turn_revision_with(
+    store: Option<&crate::preferences::PreferencesStore>,
+    run_id: i64,
+    agent: &AgentNode,
+) -> Option<String> {
     crate::coordinator::enrichment::assistant_report(agent)
         .map(|report| report.revision)
         .or_else(|| {
-            crate::circuit::handoff::expected_result(run_id, agent.id)
-                .map(|path| turn_revision(&path))
+            let owed = match store {
+                Some(store) => {
+                    crate::circuit::handoff::expected_result_from(store, run_id, agent.id)
+                }
+                None => crate::circuit::handoff::expected_result(run_id, agent.id),
+            };
+            owed.map(|path| turn_revision(&path))
         })
 }
 

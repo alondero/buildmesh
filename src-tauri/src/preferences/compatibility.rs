@@ -2,7 +2,8 @@
 //!
 //! This module owns two flavours of compatibility:
 //! * **Env translation** ([`resolve_provider_env`], [`surface_env`],
-//!   [`anthropic_surface_env`], [`openai_surface_env`], [`preflight_resolve_provider_env`]):
+//!   [`anthropic_surface_env`], [`openai_surface_env`],
+//!   [`preflight_resolve_provider_env`]):
 //!   turns a `ProviderPairing` into the exact `ANTHROPIC_*` / `OPENAI_*` env vars
 //!   a binary expects, and refuses to spawn against a custom endpoint whose
 //!   primary model is unset.
@@ -18,10 +19,7 @@
 use super::model::{
     ApiSurface, AppPreferences, HarnessConfigValue, ModelTiers, ProviderAccount, ProviderPairing,
 };
-use super::resolver::{
-    claude_harness_id, harness_capabilities_for, provider_accounts, provider_pairings,
-    resolve_harness_provider,
-};
+use super::resolver::{claude_harness_id, harness_capabilities_for, resolve_harness_provider};
 use crate::agent::capabilities::EffortControlKind;
 
 // ----- Harness default validation ----------------------------------------
@@ -253,8 +251,32 @@ fn fallback_surfaces(harness_id: &str) -> &'static [ApiSurface] {
 /// spawn path resets inherited backend vars first (see
 /// [`crate::agent::provider::AgentProvider::resets_backend_env`]), so empty
 /// means a clean slate, not a leaked override.
-pub fn resolve_provider_env(spawn_option_id: &str) -> Vec<(String, String)> {
-    resolve_provider_env_with(spawn_option_id, &provider_accounts(), &provider_pairings())
+///
+/// The env is resolved from an **already-loaded** preferences snapshot, so the
+/// env and the revision the caller keys its memo on describe the same read: a
+/// write landing between two reads cannot hand back an env from a different
+/// revision than the one the caller cached it under (issue #1482).
+pub fn resolve_provider_env(
+    snapshot: &super::resolver::snapshot::PreferencesSnapshot,
+    spawn_option_id: &str,
+) -> Vec<(String, String)> {
+    resolve_provider_env_with(spawn_option_id, &snapshot.accounts, snapshot.pairings())
+}
+
+/// Store-scoped twin of [`resolve_provider_env`].
+///
+/// A test constructs its own [`super::store::PreferencesStore`] over a
+/// temporary directory and passes it here, so the preferences state this call
+/// sees is the one the caller set up (issue #1482).
+#[cfg(test)]
+// allow-test-in-production: the store-scoped twin is reached from the sibling suite that owns a
+// store.
+pub fn resolve_provider_env_from(
+    store: &super::store::PreferencesStore,
+    spawn_option_id: &str,
+) -> Vec<(String, String)> {
+    let snapshot = super::resolver::snapshot::snapshot_or_default_from(store);
+    resolve_provider_env(&snapshot, spawn_option_id)
 }
 
 /// Pure helper split out of [`resolve_provider_env`] so the consumer-aware
@@ -324,18 +346,50 @@ fn resolve_provider_env_with(
 /// reach. Returning `Err` here surfaces the issue as the spawn result, so the
 /// UI can prompt the user to fill the `Default model` tier on the **Harnesses**
 /// page (ADR-0025).
-pub fn preflight_resolve_provider_env(spawn_option_id: &str) -> Result<(), String> {
+///
+/// The gate reads the **snapshot the caller already loaded**: the launch
+/// routing is memoised under the revision of that snapshot, so a preflight
+/// that read preferences again could refuse a launch against a *different*
+/// revision than the one the routing was keyed on (issue #1482).
+pub fn preflight_resolve_provider_env(
+    snapshot: &super::resolver::snapshot::PreferencesSnapshot,
+    spawn_option_id: &str,
+) -> Result<(), String> {
+    preflight_resolve_provider_env_with(spawn_option_id, &snapshot.accounts, snapshot.pairings())
+}
+
+/// Store-scoped twin of [`preflight_resolve_provider_env`].
+///
+/// A test constructs its own [`super::store::PreferencesStore`] over a
+/// temporary directory and passes it here, so the preferences state this call
+/// sees is the one the caller set up (issue #1482).
+#[cfg(test)]
+// allow-test-in-production: the store-scoped twin is reached from the sibling suite that owns a
+// store.
+pub fn preflight_resolve_provider_env_from(
+    store: &super::store::PreferencesStore,
+    spawn_option_id: &str,
+) -> Result<(), String> {
+    let snapshot = super::resolver::snapshot::snapshot_or_default_from(store);
+    preflight_resolve_provider_env(&snapshot, spawn_option_id)
+}
+
+/// The pure part of the preflight: the resolved pairing and the account it
+/// belongs to, read from the caller's account and pairing lists.
+fn preflight_resolve_provider_env_with(
+    spawn_option_id: &str,
+    accounts: &[ProviderAccount],
+    pairings: &[ProviderPairing],
+) -> Result<(), String> {
     let id = crate::agent::provider::SpawnOptionId::from(spawn_option_id);
     let harness_id = id.harness_id();
     let provider_id = id.provider_id();
-    let accounts = provider_accounts();
-    let pairings = provider_pairings();
     let (pairing_opt, account_id) = match provider_id {
         Some(pid) => {
             let Some(account) = accounts.iter().find(|a| a.id == pid) else {
                 return Ok(());
             };
-            let pairing = resolve_pairing(harness_id, account, &pairings);
+            let pairing = resolve_pairing(harness_id, account, pairings);
             (pairing, account.id.clone())
         }
         None => {
@@ -343,7 +397,7 @@ pub fn preflight_resolve_provider_env(spawn_option_id: &str) -> Result<(), Strin
                 return Ok(());
             };
             let pairing =
-                stored_claude_anthropic_pairing(account, &pairings, &claude_harness_id()).cloned();
+                stored_claude_anthropic_pairing(account, pairings, &claude_harness_id()).cloned();
             (pairing, account.id.clone())
         }
     };

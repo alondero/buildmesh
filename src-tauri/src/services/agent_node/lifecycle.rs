@@ -61,6 +61,32 @@ pub fn get_worktree_close_safety(session_id: i64) -> Result<WorktreeCloseSafety,
 /// fast, and it's the one step we must finish before parting with the node so we
 /// never leave a live agent running or fighting the eventual removal (#239).
 pub fn delete(session_id: i64, remove_worktree: bool) -> Result<(), AgentNodeError> {
+    match crate::preferences::default_store() {
+        Some(store) => delete_from(&store, session_id, remove_worktree),
+        // A build with **no** store installed has no profile directory to
+        // reclaim, so the handover files stay where they are (issue #1482).
+        None => delete_with(None, session_id, remove_worktree),
+    }
+}
+
+/// [`delete`] against an explicit store.
+///
+/// The caller owns the store, so the handover files this delete reclaims are
+/// the ones under *that* profile directory (issue #1482).
+pub fn delete_from(
+    store: &crate::preferences::PreferencesStore,
+    session_id: i64,
+    remove_worktree: bool,
+) -> Result<(), AgentNodeError> {
+    delete_with(Some(store.profile_dir()), session_id, remove_worktree)
+}
+
+/// The delete itself, over the profile directory the caller resolved.
+fn delete_with(
+    app_data_dir: Option<&std::path::Path>,
+    session_id: i64,
+    remove_worktree: bool,
+) -> Result<(), AgentNodeError> {
     let node = find_agent_node_for_close(session_id)?;
 
     let removal_path = if remove_worktree {
@@ -107,7 +133,7 @@ pub fn delete(session_id: i64, remove_worktree: bool) -> Result<(), AgentNodeErr
         // the commit, not before: a tombstone refuses channel creation, so
         // retiring while the row could still survive an error above would leave
         // a live node that can never stream again.
-        let app_data_dir = crate::preferences::app_data_dir();
+        let app_data_dir = app_data_dir.map(|dir| dir.to_path_buf());
         crate::agent::node_teardown::release_after_delete(session_id, app_data_dir.as_deref());
         // Announce the deletion so a frontend that did not initiate it — the
         // Circuit worker's `CloseAgentNode`, cancelled-run retirement, abort
@@ -275,8 +301,43 @@ pub fn regenerate_apply_blocking(
     old_provider: &str,
     new_provider: &str,
 ) -> Result<bool, AgentNodeError> {
+    match crate::preferences::default_store() {
+        Some(store) => regenerate_apply_blocking_from(&store, node_id, old_provider, new_provider),
+        // A build with **no** store installed (a test that never installed one)
+        // reads the code-defined defaults, so a caller that does not depend on
+        // stored preferences keeps working (issue #1482).
+        None => regenerate_apply_blocking_with(
+            crate::preferences::AppPreferences::default(),
+            node_id,
+            old_provider,
+            new_provider,
+        ),
+    }
+}
+
+/// [`regenerate_apply_blocking`] against an explicit store.
+///
+/// The caller owns the store, so the saved configurations and the provider
+/// pairings this regenerate resolves are the ones the caller set up
+/// (issue #1482).
+pub fn regenerate_apply_blocking_from(
+    store: &crate::preferences::PreferencesStore,
+    node_id: i64,
+    old_provider: &str,
+    new_provider: &str,
+) -> Result<bool, AgentNodeError> {
+    let prefs = store.load().map_err(AgentNodeError::Backend)?;
+    regenerate_apply_blocking_with(prefs, node_id, old_provider, new_provider)
+}
+
+/// The apply itself, with the preferences already read.
+fn regenerate_apply_blocking_with(
+    prefs: crate::preferences::AppPreferences,
+    node_id: i64,
+    old_provider: &str,
+    new_provider: &str,
+) -> Result<bool, AgentNodeError> {
     let node = db::get_agent_node_by_id(node_id)?;
-    let prefs = crate::preferences::load().map_err(AgentNodeError::Backend)?;
     let mut plan = crate::preferences::launch_configurations::resolve(
         &prefs,
         new_provider,

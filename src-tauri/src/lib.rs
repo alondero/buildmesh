@@ -802,6 +802,12 @@ fn run_profile_startup(
     // list, which requires `APP_DATA_DIR` to be set. See
     // `db::migrate_agent_node_provider_id_custom_accounts` (issue #575).
     preferences::init(app_dir.clone());
+    // The composition root owns the handle from here on. The store is the
+    // one place a profile's state lives — its cached value, its revision and
+    // its locks — and the free functions elsewhere are its façade (issue
+    // #1482).
+    let preferences_store: preferences::PreferencesStore =
+        preferences::default_store().expect("preferences::init installs the process-wide store");
     // A `preferences.json` that will not parse degrades to defaults by design
     // — the resolver accessors log and carry on — so this is deliberately NOT
     // a fatal `StartupStage`: `preferences::init` cannot fail, and refusing to
@@ -810,22 +816,29 @@ fn run_profile_startup(
     // effect are, so make it loud and name the file. This is the first read
     // of it in the session, and — unlike the resolver's own line — it lands in
     // `buildmesh.log` now that the bootstrap subscriber is installed.
-    if let Err(error) = preferences::load() {
-        tracing::error!(
-            "startup stage=preferences: could not read {} — running with \
-             default preferences for this session: {}",
-            app_dir.join("preferences.json").display(),
-            error
-        );
-    }
-    for pairing in preferences::provider_pairings()
-        .into_iter()
+    let startup_snapshot = match preferences_store.snapshot() {
+        Ok(snapshot) => Some(snapshot),
+        Err(error) => {
+            tracing::error!(
+                "startup stage=preferences: could not read {} — running with \
+                 default preferences for this session: {}",
+                app_dir.join("preferences.json").display(),
+                error
+            );
+            None
+        }
+    };
+    for pairing in startup_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.pairings())
+        .unwrap_or_default()
+        .iter()
         .filter(|pairing| pairing.surface == preferences::ApiSurface::OpenAI)
     {
         commands::preferences::schedule_pairing_verification(
             app.handle().clone(),
-            pairing.harness_id,
-            pairing.provider_id,
+            pairing.harness_id.clone(),
+            pairing.provider_id.clone(),
         );
     }
 

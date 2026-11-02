@@ -860,6 +860,20 @@ pub fn create_agent_node(node: NewAgentNode<'_>) -> SqlResult<AgentNode> {
     create_agent_node_configured(node, None)
 }
 
+/// [`create_agent_node`] against an explicit store.
+///
+/// The caller owns the store, so the harness runtime this node resolves comes
+/// from *that* store's stored harness profiles (issue #1482).
+#[cfg(test)]
+// allow-test-in-production: the store-scoped twin of `create_agent_node`, reached
+// from the sibling suite that owns a store.
+pub fn create_agent_node_from(
+    store: &crate::preferences::PreferencesStore,
+    node: NewAgentNode<'_>,
+) -> SqlResult<AgentNode> {
+    create_agent_node_configured_from(store, node, None)
+}
+
 pub fn create_agent_node_configured(
     node: NewAgentNode<'_>,
     configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
@@ -870,6 +884,37 @@ pub fn create_agent_node_configured(
         node.use_worktree,
         node.env,
     );
+    create_agent_node_configured_with_env(node, configuration, env)
+}
+
+/// [`create_agent_node_configured`] against an explicit store.
+///
+/// The caller owns the store, so the harness runtime this node resolves comes
+/// from *that* store's stored harness profiles (issue #1482).
+#[cfg(test)]
+// allow-test-in-production: the store-scoped twin of `create_agent_node_configured`,
+// reached from the sibling suite that owns a store.
+pub fn create_agent_node_configured_from(
+    store: &crate::preferences::PreferencesStore,
+    node: NewAgentNode<'_>,
+    configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
+) -> SqlResult<AgentNode> {
+    let env = resolve_spawn_env_from(
+        store,
+        node.provider,
+        node.worktree_path,
+        node.use_worktree,
+        node.env,
+    );
+    create_agent_node_configured_with_env(node, configuration, env)
+}
+
+/// The insert itself, with the spawn environment already resolved.
+fn create_agent_node_configured_with_env(
+    node: NewAgentNode<'_>,
+    configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
+    env: EnvType,
+) -> SqlResult<AgentNode> {
     let snapshot = configuration
         .map(serde_json::to_string)
         .transpose()
@@ -1022,12 +1067,39 @@ fn resolve_spawn_env(
     use_worktree: bool,
     default: EnvType,
 ) -> EnvType {
-    crate::preferences::harness_runtime(provider).unwrap_or_else(|| {
-        worktree_path
-            .filter(|path| use_worktree && !path.trim().is_empty())
-            .map(|path| crate::env::resolve_raw_path(path).env_type)
-            .unwrap_or(default)
-    })
+    crate::preferences::harness_runtime(provider)
+        .unwrap_or_else(|| fallback_spawn_env(worktree_path, use_worktree, default))
+}
+
+/// [`resolve_spawn_env`] against an explicit store.
+///
+/// The caller owns the store, so the harness runtime this resolves comes from
+/// *that* store's stored harness profiles (issue #1482).
+#[cfg(test)]
+// allow-test-in-production: the store-scoped twin of `resolve_spawn_env`, reached
+// from the sibling suite that owns a store.
+fn resolve_spawn_env_from(
+    store: &crate::preferences::PreferencesStore,
+    provider: &str,
+    worktree_path: Option<&str>,
+    use_worktree: bool,
+    default: EnvType,
+) -> EnvType {
+    crate::preferences::harness_runtime_from(store, provider)
+        .unwrap_or_else(|| fallback_spawn_env(worktree_path, use_worktree, default))
+}
+
+/// The environment a node falls back to when its provider names no known
+/// harness: the worktree path's own environment, else the caller's default.
+fn fallback_spawn_env(
+    worktree_path: Option<&str>,
+    use_worktree: bool,
+    default: EnvType,
+) -> EnvType {
+    worktree_path
+        .filter(|path| use_worktree && !path.trim().is_empty())
+        .map(|path| crate::env::resolve_raw_path(path).env_type)
+        .unwrap_or(default)
 }
 
 /// Per-test isolated variant of [`create_agent_node`] (issue #1691).
@@ -1276,8 +1348,42 @@ pub(crate) fn adopt_manual_pool_slug_with_path_inner(
 /// silently drop a real rewrite if the comparison string ever drifted
 /// from the column's storage form.
 #[cfg(test)]
+// allow-test-in-production: this test-only helper predates the sibling-test-file rule; the
+// issue #1482 migration edits it in place, and relocating the pre-existing suite is out of scope.
 pub fn set_agent_node_provider(id: i64, provider: &str) -> SqlResult<()> {
     let runtime = match crate::preferences::harness_runtime(provider) {
+        Some(runtime) => runtime,
+        None => match get_agent_node_by_id(id) {
+            Ok(node) => {
+                crate::env::resolve_raw_path(&crate::env::node_working_path(&node).raw_path)
+                    .env_type
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(()),
+            Err(error) => return Err(error),
+        },
+    }
+    .to_string();
+    let db = write_conn();
+    db.execute(
+        "UPDATE agent_nodes SET provider = ?1, env = ?3, spawn_configuration = NULL WHERE id = ?2",
+        params![provider, id, runtime],
+    )?;
+    Ok(())
+}
+
+/// [`set_agent_node_provider`] against an explicit store.
+///
+/// The caller owns the store, so the harness runtime this node resolves comes
+/// from *that* store's stored harness profiles (issue #1482).
+#[cfg(test)]
+// allow-test-in-production: the store-scoped twin of `set_agent_node_provider`, reached
+// from the sibling suite that owns a store.
+pub fn set_agent_node_provider_from(
+    store: &crate::preferences::PreferencesStore,
+    id: i64,
+    provider: &str,
+) -> SqlResult<()> {
+    let runtime = match crate::preferences::harness_runtime_from(store, provider) {
         Some(runtime) => runtime,
         None => match get_agent_node_by_id(id) {
             Ok(node) => {

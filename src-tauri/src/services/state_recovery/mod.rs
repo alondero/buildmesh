@@ -385,7 +385,10 @@ pub(crate) fn build_bundle(
             // Provider API keys live in the credential store, not the file
             // (issue #830). Put them back first so a full-fidelity copy still
             // restores them and a redacted one still reports what it left out.
-            let raw = crate::preferences::secrets::with_keys_inlined(raw);
+            let raw = crate::preferences::secrets::with_keys_inlined(
+                raw,
+                &crate::preferences::credential_profile(),
+            );
             let bytes = if redact {
                 let cleaned = redact::redact_preferences(&raw)?;
                 if let Some(report) = redaction.as_mut() {

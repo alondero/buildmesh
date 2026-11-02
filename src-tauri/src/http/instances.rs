@@ -24,8 +24,10 @@
 //! without probing, because it is the one address that cannot be wrong.
 
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use crate::preferences::PreferencesStore;
 
 /// Directory that holds one file per running instance, named after its port.
 ///
@@ -41,11 +43,27 @@ const REGISTRY_DIR: &str = "buildmesh-instances";
 /// entry cannot stall a spawn.
 const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 
-/// Where the registry lives, or `None` before the profile is resolved (a
-/// headless tool, a test that never called `preferences::init`).
+/// Where the registry lives for the ambient profile, or `None` before the
+/// profile is resolved (a headless tool, a test that never called
+/// `preferences::init`).
+#[cfg(test)]
+// allow-test-in-production: the ambient registry lookup, asserted by the sibling suite
+// that pins the "no profile, no registry" contract.
 fn registry_dir() -> Option<PathBuf> {
-    let profile = crate::preferences::app_data_dir()?;
+    registry_dir_for(crate::preferences::app_data_dir()?.as_path())
+}
+
+/// The registry directory for one profile directory.
+fn registry_dir_for(profile: &Path) -> Option<PathBuf> {
     Some(profile.parent()?.join(REGISTRY_DIR))
+}
+
+/// [`registry_dir`] against an explicit store.
+///
+/// The caller owns the store, so the registry this resolves is the one beside
+/// *that* profile directory (issue #1482).
+fn registry_dir_from(store: &PreferencesStore) -> Option<PathBuf> {
+    registry_dir_for(store.profile_dir())
 }
 
 /// Publish `port` so sibling instances can address this one.
@@ -54,10 +72,26 @@ fn registry_dir() -> Option<PathBuf> {
 /// write must never stop the server from starting. It only degrades to the
 /// old last-writer-wins behaviour for a *sibling* instance's MiniMax nodes.
 pub(crate) fn publish(port: u16) {
-    let Some(dir) = registry_dir() else {
+    let Some(store) = crate::preferences::default_store() else {
         return;
     };
-    if let Err(error) = std::fs::create_dir_all(&dir) {
+    publish_from(&store, port);
+}
+
+/// [`publish`] against an explicit store.
+///
+/// The caller owns the store, so this instance publishes into the registry
+/// beside *that* profile directory (issue #1482).
+pub(crate) fn publish_from(store: &PreferencesStore, port: u16) {
+    let Some(dir) = registry_dir_from(store) else {
+        return;
+    };
+    publish_in(&dir, port);
+}
+
+/// The publish itself, into one resolved registry directory.
+fn publish_in(dir: &Path, port: u16) {
+    if let Err(error) = std::fs::create_dir_all(dir) {
         tracing::warn!("http::instances: cannot create {}: {error}", dir.display());
         return;
     }
@@ -77,9 +111,25 @@ pub(crate) fn publish(port: u16) {
 /// Drop this instance's entry after a clean exit. A crash leaves the file
 /// behind for [`live_ports`]' probe to prune.
 pub(crate) fn unpublish(port: u16) {
-    let Some(dir) = registry_dir() else {
+    let Some(store) = crate::preferences::default_store() else {
         return;
     };
+    unpublish_from(&store, port);
+}
+
+/// [`unpublish`] against an explicit store.
+///
+/// The caller owns the store, so the retired entry is the one beside *that*
+/// profile directory (issue #1482).
+pub(crate) fn unpublish_from(store: &PreferencesStore, port: u16) {
+    let Some(dir) = registry_dir_from(store) else {
+        return;
+    };
+    unpublish_in(&dir, port);
+}
+
+/// The retirement itself, from one resolved registry directory.
+fn unpublish_in(dir: &Path, port: u16) {
     let path = dir.join(port.to_string());
     match std::fs::remove_file(&path) {
         Ok(()) => {}
@@ -99,7 +149,20 @@ pub(crate) fn unpublish(port: u16) {
 /// one callback, delivered to each live instance, accepted by the one that
 /// owns the node.
 pub fn live_ports(own: u16) -> Vec<u16> {
-    let entries = registry_dir()
+    match crate::preferences::default_store() {
+        Some(store) => live_ports_from(&store, own),
+        // Without a resolved profile there is no registry to read, and the
+        // caller still gets its own port back.
+        None => vec![own],
+    }
+}
+
+/// [`live_ports`] against an explicit store.
+///
+/// The caller owns the store, so the registry this reads is the one beside
+/// *that* profile directory (issue #1482).
+pub fn live_ports_from(store: &PreferencesStore, own: u16) -> Vec<u16> {
+    let entries = registry_dir_from(store)
         .map(|dir| published_names(&dir))
         .unwrap_or_default();
     ports_from(&entries, accepts_connection, own)
@@ -153,6 +216,8 @@ fn profile_label() -> String {
 }
 
 #[cfg(test)]
+// allow-test-in-production: this inline suite predates the sibling-test-file rule; the
+// issue #1482 migration edits it in place, and relocating the pre-existing suite is out of scope.
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
@@ -253,6 +318,11 @@ mod tests {
         std::fs::create_dir_all(&hub).expect("hub profile dir");
         std::fs::create_dir_all(&dev).expect("dev profile dir");
 
+        // Each instance owns its own store over its own profile directory —
+        // there is no ambient profile to swap (issue #1482).
+        let dev_store = PreferencesStore::new(dev.clone());
+        let hub_store = PreferencesStore::new(hub);
+
         // A real listener standing in for the sibling instance.
         let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
         let live_port = listener.local_addr().expect("addr").port();
@@ -263,14 +333,12 @@ mod tests {
         };
 
         // The dev instance publishes itself into the shared parent.
-        crate::preferences::init_for_tests(dev.clone());
-        publish(dead_port);
+        publish_from(&dev_store, dead_port);
 
         // The hub instance reads the same shared directory.
-        crate::preferences::init_for_tests(hub);
         let published: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(
-                registry_dir()
+                registry_dir_from(&hub_store)
                     .expect("registry dir")
                     .join(dead_port.to_string()),
             )
@@ -284,14 +352,14 @@ mod tests {
             "the body identifies the instance that published it"
         );
         assert_eq!(
-            registry_dir(),
+            registry_dir_from(&hub_store),
             Some(root.path().to_path_buf().join(REGISTRY_DIR)),
             "both profiles must resolve the one shared registry directory"
         );
 
         // A crashed instance's entry is dropped by the probe; a live sibling
         // is kept alongside our own port.
-        let mut entries = published_names(&registry_dir().expect("registry dir"));
+        let mut entries = published_names(&registry_dir_from(&hub_store).expect("registry dir"));
         assert_eq!(entries.len(), 1, "the dev instance published one entry");
         entries.push(live_port.to_string());
         let ports = ports_from(&entries, accepts_connection, 2992);
@@ -304,26 +372,22 @@ mod tests {
         assert!(ports.contains(&2992), "our own port must: {ports:?}");
 
         // A clean exit retires the entry instead of leaving it for the probe.
-        crate::preferences::init_for_tests(dev.clone());
-        unpublish(dead_port);
+        unpublish_from(&dev_store, dead_port);
         assert_eq!(
-            published_names(&registry_dir().expect("registry dir")),
+            published_names(&registry_dir_from(&hub_store).expect("registry dir")),
             Vec::<String>::new(),
             "unpublish must remove exactly this instance's entry"
         );
         // Retiring an entry that is already gone is a no-op, not a warning:
         // a crashed instance's file outlives it, and a later instance can bind
         // the same port and replace it.
-        unpublish(dead_port);
-
-        crate::preferences::reset_for_tests();
+        unpublish_from(&dev_store, dead_port);
     }
 
     /// Without a resolved profile there is no registry to write, and no
     /// registry to read — the caller still gets its own port back.
     #[test]
     fn without_a_profile_the_registry_is_inert() {
-        crate::preferences::reset_for_tests();
         assert_eq!(registry_dir(), None);
         publish(1992);
         unpublish(1992);

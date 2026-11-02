@@ -302,6 +302,20 @@ fn dispatch(world: &mut World, host: &FakeHost, effects: &[Effect]) -> Dispatche
     dispatch_effects(host, &world.active, &mut world.view, effects, None).expect("dispatch runs")
 }
 
+/// Dispatch a batch against the profile the test owns.
+///
+/// The prompts, turn markers and retained payloads land under *that* profile
+/// directory rather than the ambient one (issue #1482).
+fn dispatch_in(
+    world: &mut World,
+    host: &FakeHost,
+    effects: &[Effect],
+    store: &crate::preferences::PreferencesStore,
+) -> DispatchedEffects {
+    dispatch_effects_from(store, host, &world.active, &mut world.view, effects, None)
+        .expect("dispatch runs")
+}
+
 fn effect_state(run_id: i64, node_id: &str, kind: &str) -> Option<String> {
     db::read_conn()
         .unwrap()
@@ -538,7 +552,9 @@ fn inject_pty_effect_claims_then_writes_the_prompt() {
 fn inject_pty_asks_a_file_only_harness_for_a_result_file() {
     for (provider, owes_result) in [("freebuff", true), ("perch", true), ("grok", false)] {
         let scratch = Scratch::new();
-        crate::preferences::init_for_tests(scratch.dir.path().join("app-data"));
+        // The profile this case owns: the brief and the turn marker the
+        // dispatch path stages live under it (issue #1482).
+        let store = crate::preferences::PreferencesStore::new(scratch.dir.path().join("app-data"));
         let agent = scratch.agent_on(provider);
         db::update_agent_node_status(agent.id, SessionStatus::Ready).unwrap();
         let mut context = CircuitContext::new();
@@ -558,7 +574,7 @@ fn inject_pty_asks_a_file_only_harness_for_a_result_file() {
         );
         let host = FakeHost::default();
         *host.input_stamp_value.borrow_mut() = Some("stamp-1".into());
-        dispatch(
+        dispatch_in(
             &mut world,
             &host,
             &[Effect::InjectPty {
@@ -566,19 +582,19 @@ fn inject_pty_asks_a_file_only_harness_for_a_result_file() {
                 prompt: "follow up".into(),
                 target_node_id: Some("$source".into()),
             }],
+            &store,
         );
         assert_eq!(host.prompts.borrow().len(), 1, "{provider}");
-        let brief = std::fs::read_to_string(
-            crate::circuit::handoff::paths_in(
-                &crate::preferences::app_data_dir().expect("test app data dir"),
-                world.run_id,
-                "inject",
-                1,
+        let brief_path =
+            crate::circuit::handoff::paths_in(store.profile_dir(), world.run_id, "inject", 1)
+                .prompt;
+        let brief = std::fs::read_to_string(&brief_path).unwrap_or_else(|error| {
+            panic!(
+                "{provider}: the dispatch path must stage the brief under the store's profile \
+                 directory ({brief_path:?}): {error}"
             )
-            .prompt,
-        )
-        .unwrap();
-        let owed = crate::circuit::handoff::expected_result(world.run_id, agent.id);
+        });
+        let owed = crate::circuit::handoff::expected_result_from(&store, world.run_id, agent.id);
         assert_eq!(owed.is_some(), owes_result, "{provider}");
         assert_eq!(
             brief.contains("write your final report"),
@@ -593,7 +609,8 @@ fn inject_pty_asks_a_file_only_harness_for_a_result_file() {
                 "the fake host has no transcript"
             );
             assert_eq!(
-                crate::services::circuit_worker::result_handoff::current_turn_revision(
+                crate::services::circuit_worker::result_handoff::current_turn_revision_from(
+                    &store,
                     world.run_id,
                     &agent
                 ),

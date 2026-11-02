@@ -5,7 +5,6 @@
 //! kept separate in their own modules.
 
 use super::super::model::HarnessProfile;
-use super::super::storage::{load, save};
 use crate::agent::capabilities::{capabilities_for, HarnessCapabilities};
 use crate::models::Provider;
 
@@ -37,6 +36,14 @@ pub fn harness_profiles() -> Vec<HarnessProfile> {
     super::snapshot::snapshot_or_default().harness_profiles
 }
 
+/// [`harness_profiles`] against an explicit store.
+///
+/// The caller owns the store, so the list comes from *that* store's read
+/// rather than from the ambient one.
+pub fn harness_profiles_from(store: &super::super::store::PreferencesStore) -> Vec<HarnessProfile> {
+    super::snapshot::snapshot_or_default_from(store).harness_profiles
+}
+
 /// The effective harness profile list for an already-loaded preferences value:
 /// the code-defined defaults with the user's stored `harness_profiles` merged
 /// over them by `id`.
@@ -58,7 +65,34 @@ pub fn harness_runtime(profile_id: &str) -> Option<crate::models::EnvType> {
     resolved_harness_profile(profile_id)?.runtime
 }
 
+/// [`harness_runtime`] against an explicit store.
+///
+/// The caller owns the store, so the profile comes from *that* store's read
+/// rather than from the ambient one.
+#[cfg(test)]
+// allow-test-in-production: the store-scoped twin of `harness_runtime`, reached
+// from the sibling suites that own a store (issue #2450).
+pub fn harness_runtime_from(
+    store: &super::super::store::PreferencesStore,
+    profile_id: &str,
+) -> Option<crate::models::EnvType> {
+    resolved_harness_profile_from(&harness_profiles_from(store), profile_id)?.runtime
+}
+
 pub fn resolved_harness_profile(profile_id: &str) -> Option<HarnessProfile> {
+    resolved_harness_profile_from(&harness_profiles(), profile_id)
+}
+
+/// [`resolved_harness_profile`] against an already-loaded profile list.
+///
+/// The caller already holds a preferences snapshot, so resolving from it
+/// keeps one derivation on one read: the routing path used to read
+/// preferences a second time to find the profile, which could hand it a
+/// different revision than the one it memoised under (issue #1482).
+pub fn resolved_harness_profile_from(
+    profiles: &[HarnessProfile],
+    profile_id: &str,
+) -> Option<HarnessProfile> {
     let selected = super::super::launch_configurations::selection_option(profile_id)
         .unwrap_or_else(|_| profile_id.into());
     let profile_id = selected.as_str();
@@ -68,9 +102,8 @@ pub fn resolved_harness_profile(profile_id: &str) -> Option<HarnessProfile> {
     // directly, so this binding didn't exist before.
     let id = crate::agent::provider::SpawnOptionId::from(profile_id);
     let harness_id = id.harness_id();
-    let profiles = harness_profiles();
     let preferred = crate::agent::detection::preferred_profiles(
-        &crate::agent::detection::currently_installed_profiles(profiles.clone()),
+        &crate::agent::detection::currently_installed_profiles(profiles.to_vec()),
         crate::agent::provider::Platform::current(),
         if cfg!(windows) {
             crate::env::get_default_wsl_distro()
@@ -123,10 +156,21 @@ pub fn resolved_harness_profile(profile_id: &str) -> Option<HarnessProfile> {
 /// the new order into the stored one via `merge_harness_order`, which keeps each
 /// dormant id pinned at its stored slot. Duplicate ids are dropped (first wins).
 pub fn set_harness_order(order: Vec<String>) -> Result<(), String> {
-    let mut prefs = load()?;
+    set_harness_order_in(&super::super::store::ambient_store()?, order)
+}
+
+/// [`set_harness_order`] against an explicit store.
+///
+/// The caller owns the store, so the write lands in *that* store rather than
+/// in the ambient one.
+pub fn set_harness_order_in(
+    store: &super::super::store::PreferencesStore,
+    order: Vec<String>,
+) -> Result<(), String> {
+    let mut prefs = store.load()?;
     let incoming = dedupe_keeping_first(order.into_iter().filter(|id| id != "terminal"));
     prefs.harness_order = merge_harness_order(&prefs.harness_order, incoming);
-    save(prefs)
+    store.save(prefs)
 }
 
 /// Dedupe an id sequence keeping the first occurrence of each id, preserving
@@ -190,7 +234,18 @@ fn merge_harness_order(stored: &[String], incoming: Vec<String>) -> Vec<String> 
 /// live outside the stored `harness_profiles` list and are re-merged on read by
 /// [`harness_profiles`].
 pub fn merge_detected_profiles(detected: Vec<HarnessProfile>) -> Result<usize, String> {
-    let mut prefs = load()?;
+    merge_detected_profiles_in(&super::super::store::ambient_store()?, detected)
+}
+
+/// [`merge_detected_profiles`] against an explicit store.
+///
+/// The caller owns the store, so the merge lands in *that* store rather than
+/// in the ambient one.
+pub fn merge_detected_profiles_in(
+    store: &super::super::store::PreferencesStore,
+    detected: Vec<HarnessProfile>,
+) -> Result<usize, String> {
+    let mut prefs = store.load()?;
     let before = prefs.harness_profiles.len();
     let mut executable_updated = false;
     for profile in detected {
@@ -214,7 +269,7 @@ pub fn merge_detected_profiles(detected: Vec<HarnessProfile>) -> Result<usize, S
     }
     let added = prefs.harness_profiles.len() - before;
     if added > 0 || executable_updated {
-        save(prefs)?;
+        store.save(prefs)?;
     }
     Ok(added)
 }

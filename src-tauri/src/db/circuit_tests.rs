@@ -2496,24 +2496,23 @@ fn node_review_ignores_ineligible_override_for_authored_circuit() {
 /// snapshots the stored app-wide Reviewer provider, so a stale ineligible
 /// value stored there (e.g. before the settings gate existed) must refuse
 /// the mint with Settings guidance instead of producing a run whose
-/// reviewer can never yield. Prefs are per-test-thread (issue #1386), so
-/// this never touches the real `preferences.json`.
+/// reviewer can never yield. The store below is this test's own, so the
+/// stored value never reaches the real `preferences.json` (issue #1482).
 #[test]
 fn node_review_refuses_stale_ineligible_app_wide_reviewer_on_inherit() {
-    let tmp = std::env::temp_dir().join(format!(
+    let store = crate::preferences::PreferencesStore::new(std::env::temp_dir().join(format!(
         "buildmesh-circuit-reviewer-inherit-{}-{}",
         std::process::id(),
         chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
-    ));
-    std::fs::create_dir_all(&tmp).expect("create temp dir");
-    crate::preferences::init_for_tests(tmp);
+    )));
     // Store the stale value directly, bypassing the now-validating
     // settings command — that is exactly the pre-gate state under test.
-    crate::preferences::save(crate::preferences::AppPreferences {
-        reviewer_provider: Some("terminal".to_string()),
-        ..Default::default()
-    })
-    .expect("store stale app-wide reviewer");
+    store
+        .save(crate::preferences::AppPreferences {
+            reviewer_provider: Some("terminal".to_string()),
+            ..Default::default()
+        })
+        .expect("store stale app-wide reviewer");
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "inherit-gate-mesh", "/tmp/inherit-gate").unwrap();
     let source = create_agent_node_inner(
@@ -2538,7 +2537,7 @@ fn node_review_refuses_stale_ineligible_app_wide_reviewer_on_inherit() {
     )
     .unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
-    let err = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None)
+    let err = create_node_circuit_run_locked_from(&mut conn, &store, source.id, None, 3, None)
         .unwrap_err()
         .to_string();
     assert!(
@@ -2550,12 +2549,14 @@ fn node_review_refuses_stale_ineligible_app_wide_reviewer_on_inherit() {
         "stale value must point at Settings, got {err:?}"
     );
     // An eligible stored value still inherits silently.
-    crate::preferences::save(crate::preferences::AppPreferences {
-        reviewer_provider: Some("codex".to_string()),
-        ..Default::default()
-    })
-    .expect("store eligible app-wide reviewer");
-    let run = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None).unwrap();
+    store
+        .save(crate::preferences::AppPreferences {
+            reviewer_provider: Some("codex".to_string()),
+            ..Default::default()
+        })
+        .expect("store eligible app-wide reviewer");
+    let run =
+        create_node_circuit_run_locked_from(&mut conn, &store, source.id, None, 3, None).unwrap();
     let ctx = crate::circuit::context::CircuitContext::from_json(
         &get_circuit_run_inner(&conn, run)
             .unwrap()
@@ -2564,7 +2565,6 @@ fn node_review_refuses_stale_ineligible_app_wide_reviewer_on_inherit() {
     )
     .unwrap();
     assert_eq!(ctx.get("review.provider"), Some("codex"));
-    crate::preferences::reset_for_tests();
 }
 
 // ---------------------------------------------------------------------------

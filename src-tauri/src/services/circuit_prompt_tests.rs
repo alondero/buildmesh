@@ -51,7 +51,7 @@ fn payload_command_rejects_missing_run_and_malformed_request() {
 fn payload_ipc_and_manual_outcome_use_the_retained_text_without_rebuilding_the_handoff() {
     let _db = crate::db::test_support::isolated();
     let dir = tempfile::tempdir().unwrap();
-    crate::preferences::init_for_tests(dir.path().to_path_buf());
+    let store = crate::preferences::PreferencesStore::new(dir.path().to_path_buf());
     {
         let db = crate::db::write_conn();
         db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
@@ -65,10 +65,11 @@ fn payload_ipc_and_manual_outcome_use_the_retained_text_without_rebuilding_the_h
         node_id: "send".into(),
         attempt: 1,
     };
-    handoff::set_agent_turn(1, 9, Some(&turn));
-    let result = handoff::paths_in(dir.path(), 1, "send", 1).result;
+    handoff::set_agent_turn_from(&store, 1, 9, Some(&turn));
+    let result = handoff::paths_in(store.profile_dir(), 1, "send", 1).result;
     handoff::write_prompt(&result, "Already finished\nRESULT: COMPLETED").unwrap();
-    let revision = retain(
+    let revision = retain_from(
+        &store,
         1,
         "send",
         1,
@@ -83,15 +84,12 @@ fn payload_ipc_and_manual_outcome_use_the_retained_text_without_rebuilding_the_h
         attempt: 1,
         expected_revision: revision,
     };
-    assert_eq!(
-        crate::commands::circuit::circuit_prompt_payload_blocking(request.clone()).unwrap(),
-        text
-    );
+    assert_eq!(payload_from(&store, &request).unwrap(), text);
     let stale = CircuitPromptRequest {
         expected_revision: 0,
         ..request.clone()
     };
-    assert!(crate::commands::circuit::circuit_prompt_payload_blocking(stale).is_err());
+    assert!(payload_from(&store, &stale).is_err());
     crate::db::circuit::evidence::record_outcome(&CheckpointRequest {
         run_id: 1,
         node_id: "send".into(),
@@ -101,11 +99,10 @@ fn payload_ipc_and_manual_outcome_use_the_retained_text_without_rebuilding_the_h
         reason: String::new(),
     })
     .unwrap();
-    assert_eq!(handoff::agent_turn(1, 9), Some(turn));
+    assert_eq!(handoff::agent_turn_from(&store, 1, 9), Some(turn));
     assert_eq!(
         std::fs::read_to_string(result).unwrap(),
         "Already finished\nRESULT: COMPLETED"
     );
-    assert!(crate::commands::circuit::circuit_prompt_payload_blocking(request).is_err());
-    crate::preferences::reset_for_tests();
+    assert!(payload_from(&store, &request).is_err());
 }

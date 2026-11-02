@@ -260,7 +260,18 @@ fn signature_for(
 }
 
 fn save_result(record: PairingVerification) -> Result<PairingVerification, String> {
-    preferences::update(|prefs| {
+    save_result_from(&preferences::ambient_store()?, record)
+}
+
+/// [`save_result`] against an explicit store.
+///
+/// The caller owns the store, so the verification record this writes is stored
+/// in *that* profile (issue #1482).
+fn save_result_from(
+    store: &preferences::PreferencesStore,
+    record: PairingVerification,
+) -> Result<PairingVerification, String> {
+    store.update(|prefs| {
         prefs.pairing_verifications.retain(|existing| {
             existing.harness_id != record.harness_id
                 || existing.provider_id != record.provider_id
@@ -371,15 +382,20 @@ pub fn verify_route_blocking(
 /// the records it holds to [`matching_verification_in`], so this loading form
 /// has no production caller left; it lives with the test suite that reads it
 /// (issue #2450).
+/// The verification-record lookup against an explicit store.
+///
+/// The caller owns the store, so the records this reads are the ones in *that*
+/// profile (issue #1482).
 #[cfg(test)]
-// allow-test-in-production: the loading form of the lookup, kept for the sibling suite
-// that reads it (issue #2450).
-fn matching_verification(
+// allow-test-in-production: the store-scoped twin of the loading form of the lookup,
+// reached from the sibling suite that owns a store.
+fn matching_verification_from(
+    store: &preferences::PreferencesStore,
     pairing: &ProviderPairing,
     account: &ProviderAccount,
     install: &codex::CodexInstall,
 ) -> Option<PairingVerification> {
-    let verifications = preferences::load().ok()?.pairing_verifications;
+    let verifications = store.load().ok()?.pairing_verifications;
     matching_verification_in(&verifications, pairing, account, install)
 }
 
