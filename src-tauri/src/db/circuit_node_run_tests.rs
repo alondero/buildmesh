@@ -598,6 +598,70 @@ fn a_reviewer_helper_node_is_not_listed_as_an_implementation_node() {
 }
 
 #[test]
+fn a_reviewer_child_row_with_a_non_flat_context_does_not_fail_the_listing() {
+    let mut conn = conn();
+    let (mesh, node) = source(&conn, "reviewer-child");
+    let run = review(&mut conn, node, 3);
+    commit_circuit_advance_locked(
+        &mut conn,
+        run,
+        Some("running"),
+        None,
+        &[step_op("verdict", "running", 1, None)],
+    )
+    .unwrap();
+    let reviewer = create_agent_node_inner(
+        &conn,
+        NewAgentNode {
+            mesh_id: mesh,
+            name: "Code reviewer",
+            path: "/tmp/reviewer-child",
+            branch: "review",
+            env: EnvType::Windows,
+            provider: "claude",
+            worktree_name: None,
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree: false,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            worktree_path: None,
+            spawn_configuration: None,
+        },
+    )
+    .unwrap();
+    commit_circuit_advance_locked(
+        &mut conn,
+        run,
+        Some("running"),
+        None,
+        &[CircuitStepOp {
+            agent_node_id: Some(reviewer.id),
+            ..step_op("reviewer", "running", 1, None)
+        }],
+    )
+    .unwrap();
+    set_circuit_step_agent_node_with_parent_inner(&conn, run, "reviewer", reviewer.id, Some(node))
+        .unwrap();
+    set_raw_context(&conn, run, r#"{"x":{"y":"z"}}"#);
+    // The source node is archived, so the reviewer helper's row is the only
+    // ownership row left for this run. The run is still live: the reviewer
+    // rule alone keeps it out of the listing.
+    update_agent_node_status_inner(&conn, node, SessionStatus::Archived).unwrap();
+
+    let listed = list_node_circuit_runs_inner(&conn);
+    assert!(
+        listed.is_ok(),
+        "a reviewer helper's row must not read the run's context: {listed:?}"
+    );
+    assert!(
+        listed.unwrap().is_empty(),
+        "a reviewer helper is not an implementation node, so it is not listed"
+    );
+}
+
+#[test]
 fn a_long_reviewer_report_is_shortened_on_a_character_boundary() {
     let report = "é".repeat(MAX_SUMMARY_CHARS + 50);
     let shortened = shorten_summary(&report);

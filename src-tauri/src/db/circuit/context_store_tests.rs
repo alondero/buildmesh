@@ -609,6 +609,66 @@ fn a_batch_read_issues_a_bounded_number_of_queries() {
 }
 
 #[test]
+fn a_logical_batch_read_issues_a_bounded_number_of_queries() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use rusqlite::trace::{TraceEvent, TraceEventCodes};
+
+    let mut conn = schema();
+    seed(&conn);
+    // Every run carries a bulky value of its own, the seeded one included.
+    let mut first = BTreeMap::new();
+    first.insert("source.output".to_string(), "report 1".repeat(400));
+    replace_all(&conn, 1, first);
+    // Eleven more runs, each with a bulky value of its own.
+    for run_id in 2..=12i64 {
+        conn.execute(
+            "INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,trigger_identity,state) VALUES(?1,1,1,?2,'running')",
+            params![run_id, format!("manual:{run_id}")],
+        )
+        .unwrap();
+        let mut values = BTreeMap::new();
+        values.insert(
+            "source.output".to_string(),
+            format!("report {run_id}").repeat(400),
+        );
+        replace_all(&conn, run_id, values);
+    }
+
+    // The statement trace counts what the connection actually runs.
+    let statements = Arc::new(AtomicUsize::new(0));
+    let counted = statements.clone();
+    conn.trace_v2(
+        TraceEventCodes::all(),
+        Some(move |event: TraceEvent<'_>| {
+            if matches!(event, TraceEvent::Stmt(..)) {
+                counted.fetch_add(1, Ordering::SeqCst);
+            }
+        }),
+    )
+    .unwrap();
+    let ids: Vec<i64> = (1..=12).collect();
+    // The strict read is the one the phone's run listing uses.
+    let logical = load_logical_for_runs(&conn, &ids).unwrap();
+
+    assert_eq!(logical.len(), 12);
+    assert!(
+        logical
+            .values()
+            .all(|context| context.get("source.output").is_some()),
+        "a logical batch read lost a run's bulky half"
+    );
+    // The run columns and the side table are read once each, whatever the
+    // number of runs. A per-run read would issue one statement per run.
+    assert!(
+        statements.load(Ordering::SeqCst) <= 4,
+        "the logical batch read issued {} statements for 12 runs",
+        statements.load(Ordering::SeqCst)
+    );
+}
+
+#[test]
 fn the_freshness_fence_reads_the_column_alone() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
