@@ -149,6 +149,12 @@ impl StoredContext {
     /// This is the one strict read of the decision-relevant half. A caller
     /// that reads a key through it never learns which half the key is in:
     /// the half a decision-relevant key belongs to is the seam's business.
+    ///
+    /// The limit of that claim, stated plainly: this reads the column alone.
+    /// A decision-relevant key whose value grew past the storage threshold
+    /// would live in the side table and read as absent here. The
+    /// decision-relevant values in use are short flags and numbers, so that
+    /// has not happened, but nothing enforces it.
     pub fn strict_of_column(column_json: &str) -> Result<Self, DbError> {
         Ok(Self {
             small: small_values(column_json)?
@@ -221,9 +227,14 @@ impl LogicalContext {
 
     fn from_parts(mut values: BTreeMap<String, String>, stored: &BTreeMap<String, String>) -> Self {
         // The fingerprint is a storage detail, not a value of the run's
-        // context.
+        // context. Both write paths drop it before the side table, so the
+        // bulky half cannot hold one; stripping it from both halves here
+        // makes that explicit instead of assumed.
         values.remove(DIGEST_KEY);
         for (key, value) in stored {
+            if key == DIGEST_KEY {
+                continue;
+            }
             values.entry(key.clone()).or_insert_with(|| value.clone());
         }
         // A lifecycle blocker is runtime state, not context: a logical read
@@ -251,12 +262,12 @@ impl LogicalContext {
         CircuitContext::from_values(self.values.clone())
     }
 }
+
+/// A logical context becomes a replacement through the same constructor every
+/// other replacement uses, so the reserved-key rule has one entry point.
 impl From<LogicalContext> for ContextReplacement {
     fn from(logical: LogicalContext) -> Self {
-        Self {
-            values: logical.values,
-            verbatim: None,
-        }
+        Self::with_values(logical.values)
     }
 }
 
