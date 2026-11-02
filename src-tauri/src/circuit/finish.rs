@@ -1,7 +1,7 @@
 //! Circuit-owned wrap-up template, captured when a run is created.
 //! Authored prompts choose publication behavior; issue-review defaults to a draft PR.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Built-in wrap-up template, used verbatim when the user hasn't customized
 /// `finish.md` (and seeded to disk so they can).
@@ -32,9 +32,12 @@ The implementation work for this task is considered complete. Wrap up the sessio
 Report exactly what passed and what you did. Do not stop while verification is red unless you are blocked on something only a human can resolve.
 "];
 
-/// Path of the user-customizable wrap-up template.
-fn finish_md_path() -> Option<PathBuf> {
-    let dir = crate::preferences::app_data_dir()?;
+/// Path of the user-customizable wrap-up template under an explicit profile
+/// directory.
+///
+/// The template lives next to `preferences.json`, so it belongs to the profile
+/// the store owns.
+fn finish_md_path_in(dir: &Path) -> PathBuf {
     let path = dir.join("circuits").join("finish.md");
     if !path.exists() {
         let legacy = dir.join("autopilot").join("finish.md");
@@ -58,16 +61,25 @@ fn finish_md_path() -> Option<PathBuf> {
             }
         }
     }
-    Some(path)
+    path
 }
 
 /// Load the wrap-up template: the user's `finish.md` if present, else the
 /// built-in default (which is also seeded to disk, best-effort, so the user
 /// discovers the customization point).
 pub fn load_template() -> String {
-    let Some(path) = finish_md_path() else {
-        return DEFAULT_FINISH_TEMPLATE.to_string();
-    };
+    match crate::preferences::ambient_store() {
+        Ok(store) => load_template_from(&store),
+        Err(_) => DEFAULT_FINISH_TEMPLATE.to_string(),
+    }
+}
+
+/// [`load_template`] against an explicit store.
+///
+/// The caller owns the store, so the template is the one in **that** profile
+/// directory rather than the ambient one (issue #1482).
+pub fn load_template_from(store: &crate::preferences::PreferencesStore) -> String {
+    let path = finish_md_path_in(store.profile_dir());
     match std::fs::read_to_string(&path) {
         Ok(content) if is_superseded_default(&content) => {
             if let Err(e) = std::fs::write(&path, DEFAULT_FINISH_TEMPLATE) {
@@ -136,21 +148,42 @@ pub(crate) fn render(template: &str, issue_number: Option<i64>, action_on_succes
 
 /// The full wrap-up prompt for a node: user template + policy substitution.
 pub fn finish_prompt(issue_number: Option<i64>, action_on_success: Option<&str>) -> String {
+    match crate::preferences::ambient_store() {
+        Ok(store) => finish_prompt_from(&store, issue_number, action_on_success),
+        Err(_) => render(
+            DEFAULT_FINISH_TEMPLATE,
+            issue_number,
+            action_on_success.unwrap_or("draft_pr"),
+        ),
+    }
+}
+
+/// [`finish_prompt`] against an explicit store.
+///
+/// The caller owns the store, so the template is the one in **that** profile
+/// directory rather than the ambient one (issue #1482).
+pub fn finish_prompt_from(
+    store: &crate::preferences::PreferencesStore,
+    issue_number: Option<i64>,
+    action_on_success: Option<&str>,
+) -> String {
     render(
-        &load_template(),
+        &load_template_from(store),
         issue_number,
         action_on_success.unwrap_or("draft_pr"),
     )
 }
 
 #[cfg(test)]
+// allow-test-in-production: this inline suite predates the sibling-test-file rule. Issue #1482
+// only moves the preferences fixture to its new module path; moving the suite is out of scope.
 mod tests {
     use super::*;
 
     #[test]
     fn custom_legacy_template_migrates_once_without_becoming_a_live_dependency() {
         let directory = tempfile::tempdir().unwrap();
-        crate::preferences::storage::init_for_tests(directory.path().to_path_buf());
+        let store = crate::preferences::PreferencesStore::new(directory.path().to_path_buf());
         let legacy = directory.path().join("autopilot");
         std::fs::create_dir_all(&legacy).unwrap();
         std::fs::write(
@@ -158,16 +191,22 @@ mod tests {
             "Custom Circuit wrap-up {{PR_STEP}}",
         )
         .unwrap();
-        assert_eq!(load_template(), "Custom Circuit wrap-up {{PR_STEP}}");
+        assert_eq!(
+            load_template_from(&store),
+            "Custom Circuit wrap-up {{PR_STEP}}"
+        );
         let current = directory.path().join("circuits/finish.md");
         assert_eq!(
             std::fs::read_to_string(&current).unwrap(),
             "Custom Circuit wrap-up {{PR_STEP}}"
         );
         std::fs::write(legacy.join("finish.md"), "Old setting edited later").unwrap();
-        assert_eq!(load_template(), "Custom Circuit wrap-up {{PR_STEP}}");
+        assert_eq!(
+            load_template_from(&store),
+            "Custom Circuit wrap-up {{PR_STEP}}"
+        );
         std::fs::write(&current, "New Circuit template").unwrap();
-        assert_eq!(load_template(), "New Circuit template");
+        assert_eq!(load_template_from(&store), "New Circuit template");
     }
 
     #[test]
@@ -187,13 +226,13 @@ mod tests {
     #[test]
     fn an_unmodified_seeded_copy_of_a_superseded_default_follows_the_new_default() {
         let directory = tempfile::tempdir().unwrap();
-        crate::preferences::storage::init_for_tests(directory.path().to_path_buf());
+        let store = crate::preferences::PreferencesStore::new(directory.path().to_path_buf());
         let current = directory.path().join("circuits/finish.md");
         std::fs::create_dir_all(current.parent().unwrap()).unwrap();
         let seeded_with_crlf = SUPERSEDED_DEFAULT_TEMPLATES[0].replace('\n', "\r\n");
         std::fs::write(&current, seeded_with_crlf).unwrap();
 
-        assert_eq!(load_template(), DEFAULT_FINISH_TEMPLATE);
+        assert_eq!(load_template_from(&store), DEFAULT_FINISH_TEMPLATE);
         assert_eq!(
             std::fs::read_to_string(&current).unwrap(),
             DEFAULT_FINISH_TEMPLATE
@@ -203,7 +242,7 @@ mod tests {
     #[test]
     fn an_edited_copy_of_a_superseded_default_is_kept() {
         let directory = tempfile::tempdir().unwrap();
-        crate::preferences::storage::init_for_tests(directory.path().to_path_buf());
+        let store = crate::preferences::PreferencesStore::new(directory.path().to_path_buf());
         let current = directory.path().join("circuits/finish.md");
         std::fs::create_dir_all(current.parent().unwrap()).unwrap();
         let edited = format!(
@@ -212,7 +251,7 @@ mod tests {
         );
         std::fs::write(&current, &edited).unwrap();
 
-        assert_eq!(load_template(), edited);
+        assert_eq!(load_template_from(&store), edited);
         assert_eq!(std::fs::read_to_string(&current).unwrap(), edited);
     }
 

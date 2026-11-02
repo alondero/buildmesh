@@ -74,8 +74,9 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
   // completion *report* its outcome instead of driving a form the user can no
   // longer see (and instead of silently registering a mesh or dropping an error).
   const stillMounted = useRef(true);
-  useEffect(() => () => {
-    stillMounted.current = false;
+  useEffect(() => {
+    stillMounted.current = true;
+    return () => { stillMounted.current = false; };
   }, []);
 
   const repoName = repoNameFromInput(repoInput);

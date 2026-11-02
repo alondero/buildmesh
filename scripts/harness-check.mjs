@@ -134,6 +134,7 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/http/routes/nodes_close_tests.rs': 'http::routes::nodes::close_tests',
   'src-tauri/src/preferences/launch_catalog_tests.rs': 'preferences::launch_catalog::tests',
   'src-tauri/src/preferences/launch_configurations_tests.rs': 'preferences::launch_configurations::tests',
+  'src-tauri/src/preferences/spawn_configurations_tests.rs': 'preferences::spawn_configurations::tests',
   'src-tauri/src/preferences/resolver/accounts_tests.rs': 'preferences::resolver::accounts::tests',
   'src-tauri/src/preferences/resolver/catalog_tests.rs': 'preferences::resolver::catalog::tests',
   'src-tauri/src/preferences/resolver/harness_tests.rs': 'preferences::resolver::harness::tests',
@@ -224,6 +225,11 @@ export const RUST_SIBLING_TESTS = {
   // `tests/result_handoff.rs`) the parent declares.
   'src-tauri/src/services/circuit_worker/readiness.rs': 'services::circuit_worker::tests',
   'src-tauri/src/services/github/pagination.rs': 'services::github::pagination_tests',
+  // The preferences production files carry no tests of their own: the suites
+  // the `preferences::tests` parent declares cover them.
+  'src-tauri/src/preferences/secrets.rs': 'preferences::tests::secrets_tests',
+  'src-tauri/src/preferences/storage.rs': 'preferences::tests::storage_tests',
+  'src-tauri/src/preferences/store.rs': 'preferences::tests::store_tests',
 };
 
 // Private implementations keep their contract tests at the owning facade.

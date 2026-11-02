@@ -120,7 +120,6 @@ fn issue_prompt_is_kept_for_interactive_harnesses_without_prefill() {
 fn new_node_handover_uses_its_saved_codex_launch_configuration() {
     let _db = crate::db::test_support::isolated();
     let root = tempfile::tempdir().unwrap();
-    crate::preferences::init_for_tests(root.path().to_path_buf());
     let mesh = crate::db::create_mesh("new handover", "C:/handover-fixture").unwrap();
     let node = crate::db::create_agent_node(crate::db::NewAgentNode {
         mesh_id: mesh.id,
@@ -206,14 +205,12 @@ fn new_node_handover_uses_its_saved_codex_launch_configuration() {
         .unwrap(),
         Some(text)
     );
-    crate::preferences::reset_for_tests();
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn new_node_handover_staging_failure_deletes_the_idle_node() {
     let db = crate::db::test_support::isolated();
     let root = tempfile::tempdir().unwrap();
-    crate::preferences::init_for_tests(root.path().to_path_buf());
     let mesh = crate::db::create_mesh("failed handover", "C:/failed-handover-fixture").unwrap();
     let created = crate::db::create_agent_node(crate::db::NewAgentNode {
         mesh_id: mesh.id,
@@ -260,14 +257,12 @@ async fn new_node_handover_staging_failure_deletes_the_idle_node() {
         crate::db::get_agent_node_by_id(node_id),
         Err(rusqlite::Error::QueryReturnedNoRows)
     ));
-    crate::preferences::reset_for_tests();
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn existing_node_handover_staging_failure_does_not_delete_the_node() {
     let db = crate::db::test_support::isolated();
     let root = tempfile::tempdir().unwrap();
-    crate::preferences::init_for_tests(root.path().to_path_buf());
     let mesh = crate::db::create_mesh("existing handover", "C:/existing-handover-fixture").unwrap();
     let node = crate::db::create_agent_node(crate::db::NewAgentNode {
         mesh_id: mesh.id,
@@ -317,14 +312,12 @@ async fn existing_node_handover_staging_failure_does_not_delete_the_node() {
         crate::db::get_agent_node_by_id(node_id).unwrap().id,
         node_id
     );
-    crate::preferences::reset_for_tests();
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn new_node_handover_reports_cleanup_failure_and_keeps_the_row() {
     let db = crate::db::test_support::isolated();
     let root = tempfile::tempdir().unwrap();
-    crate::preferences::init_for_tests(root.path().to_path_buf());
     let mesh = crate::db::create_mesh("cleanup failure", "C:/cleanup-failure-fixture").unwrap();
     let node = crate::db::create_agent_node(crate::db::NewAgentNode {
         mesh_id: mesh.id,
@@ -385,7 +378,6 @@ async fn new_node_handover_reports_cleanup_failure_and_keeps_the_row() {
         crate::db::get_agent_node_by_id(node_id).unwrap().id,
         node_id
     );
-    crate::preferences::reset_for_tests();
 }
 
 // -----------------------------------------------------------------------

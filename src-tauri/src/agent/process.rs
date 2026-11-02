@@ -637,6 +637,8 @@ pub async fn debug_crash_snapshot() -> CrashSnapshot {
 }
 
 #[cfg(test)]
+// allow-test-in-production: this inline handover-command suite predates the sibling-test-file
+// rule; relocating the pre-existing suite is out of scope for the issue #1482 migration.
 mod handover_command_tests {
     use super::*;
 
@@ -644,7 +646,6 @@ mod handover_command_tests {
     async fn existing_handover_validates_then_stages_and_discards_a_rejected_file() {
         let database = crate::db::test_support::isolated();
         let root = tempfile::tempdir().unwrap();
-        crate::preferences::init_for_tests(root.path().to_path_buf());
         let mesh =
             crate::db::create_mesh("existing handover", "C:/existing-handover-fixture").unwrap();
         let node = crate::db::create_agent_node(crate::db::NewAgentNode {
@@ -724,7 +725,6 @@ mod handover_command_tests {
             !files[0].exists(),
             "a rejected pointer must not leave its file"
         );
-        crate::preferences::reset_for_tests();
     }
 }
 

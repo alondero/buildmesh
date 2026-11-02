@@ -2,10 +2,42 @@
 use crate::{circuit::model::CircuitNodeKind, db::DbError};
 
 pub fn reconfigure_reviewers(node_ids: &[i64], selection: &str) -> Result<(), DbError> {
+    match crate::preferences::default_store() {
+        Some(store) => reconfigure_reviewers_from(&store, node_ids, selection),
+        // A build with **no** store installed (a test that never installed one)
+        // reads the code-defined defaults, which is what the per-test helpers
+        // around this one have always done (issue #1482).
+        None => reconfigure_reviewers_with_preferences(
+            node_ids,
+            selection,
+            &crate::preferences::AppPreferences::default(),
+        ),
+    }
+}
+
+/// [`reconfigure_reviewers`] against an explicit store.
+///
+/// The caller owns the store, so the launch configuration this reconfiguration
+/// resolves is the one the caller set up (issue #1482).
+pub fn reconfigure_reviewers_from(
+    store: &crate::preferences::PreferencesStore,
+    node_ids: &[i64],
+    selection: &str,
+) -> Result<(), DbError> {
     crate::circuit::compatibility::validate_reviewer_provider_id(selection)?;
-    let prefs = crate::preferences::load()?;
+    let prefs = store.load()?;
+    reconfigure_reviewers_with_preferences(node_ids, selection, &prefs)
+}
+
+/// The reconfiguration itself, with the preferences already resolved.
+fn reconfigure_reviewers_with_preferences(
+    node_ids: &[i64],
+    selection: &str,
+    prefs: &crate::preferences::AppPreferences,
+) -> Result<(), DbError> {
+    crate::circuit::compatibility::validate_reviewer_provider_id(selection)?;
     let plan =
-        crate::preferences::launch_configurations::resolve(&prefs, selection, &Default::default())?;
+        crate::preferences::launch_configurations::resolve(prefs, selection, &Default::default())?;
     let snapshot =
         serde_json::to_string(&crate::preferences::launch_configurations::snapshot(plan))?;
     let mut db = crate::db::write_conn();

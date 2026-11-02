@@ -127,9 +127,6 @@ export function CanvasSpawnMenu({ meshId }: CanvasSpawnMenuProps) {
         </h2>
         <ModalCloseButton onClose={close} />
       </div>
-      <p className="text-2xs text-text-muted mb-3">
-        Pick a harness to launch. Native CLIs run when the binary is on PATH; proxied providers use a keyed account.
-      </p>
       {noAgent && (
         <div
           data-testid="canvas-spawn-menu-empty-state"

@@ -4,7 +4,7 @@ import { InfoTip } from '../shared/InfoTip';
 interface SettingsRowProps {
   /** Setting name. Rendered as the row's label. */
   label: string;
-  /** Short one-line description shown under the label; full text goes in `details`. */
+  /** Contextual help when no detailed explanation is supplied. */
   summary?: string;
   /** Full explanation, revealed behind the ⓘ affordance. Omit for a self-evident row. */
   details?: ReactNode;
@@ -19,10 +19,7 @@ interface SettingsRowProps {
 }
 
 /**
- * One compact settings row: label (+ optional ⓘ help) and a one-line summary on
- * the left, control on the right. Replaces the old three-block pattern (label →
- * multi-line paragraph → control) that forced heavy scrolling in the Settings
- * modal — long help lives behind the InfoTip instead.
+ * A label and control, with optional contextual help behind the InfoTip.
  */
 export function SettingsRow({
   label,
@@ -43,9 +40,8 @@ export function SettingsRow({
         ) : (
           <span className="text-base font-medium text-text-secondary">{label}</span>
         )}
-        {details && <InfoTip label={label}>{details}</InfoTip>}
+        {(details || summary) && <InfoTip label={label}>{details ?? summary}</InfoTip>}
       </div>
-      {summary && <p className="mt-0.5 text-sm text-text-muted line-clamp-2">{summary}</p>}
     </div>
   );
 

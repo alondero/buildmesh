@@ -2,30 +2,34 @@ use super::*;
 
 #[test]
 fn cline_legacy_pairing_uses_cline_auth_environment() {
+    // The credential-store double is per-thread: reset it so this test's
+    // seeded key cannot reach another test on the same thread.
+    crate::preferences::secrets::test_support::reset();
     let temp = tempfile::tempdir().unwrap();
-    preferences::init_for_tests(temp.path().to_path_buf());
-    preferences::save(preferences::AppPreferences {
-        provider_accounts: vec![preferences::ProviderAccount {
-            id: "minimax".into(),
-            name: "MiniMax".into(),
-            enabled: true,
-            billing_mode: preferences::BillingMode::PayAsYouGo,
-            claude_compatible: true,
-            api_key: Some("test-key".into()),
-        }],
-        provider_pairings: vec![preferences::ProviderPairing {
-            harness_id: "claude".into(),
-            provider_id: "minimax".into(),
-            surface: preferences::ApiSurface::Anthropic,
-            base_url: Some("https://example.invalid/anthropic".into()),
-            model_tiers: preferences::ModelTiers {
-                default: Some("MiniMax-M3".into()),
-                ..Default::default()
-            },
-        }],
-        ..Default::default()
-    })
-    .unwrap();
+    let store = preferences::PreferencesStore::new(temp.path().to_path_buf());
+    store
+        .save(preferences::AppPreferences {
+            provider_accounts: vec![preferences::ProviderAccount {
+                id: "minimax".into(),
+                name: "MiniMax".into(),
+                enabled: true,
+                billing_mode: preferences::BillingMode::PayAsYouGo,
+                claude_compatible: true,
+                api_key: Some("test-key".into()),
+            }],
+            provider_pairings: vec![preferences::ProviderPairing {
+                harness_id: "claude".into(),
+                provider_id: "minimax".into(),
+                surface: preferences::ApiSurface::Anthropic,
+                base_url: Some("https://example.invalid/anthropic".into()),
+                model_tiers: preferences::ModelTiers {
+                    default: Some("MiniMax-M3".into()),
+                    ..Default::default()
+                },
+            }],
+            ..Default::default()
+        })
+        .unwrap();
 
     let resolved = crate::env::ResolvedPath {
         host_path: "C:/work".into(),
@@ -33,7 +37,9 @@ fn cline_legacy_pairing_uses_cline_auth_environment() {
         raw_path: "C:/work".into(),
         env_type: crate::models::EnvType::Windows,
     };
-    let routing = resolve_routing("cline:minimax", Provider::Cline, &resolved, None).unwrap();
+    let snapshot = preferences::resolver::snapshot::snapshot_or_default_from(&store);
+    let routing =
+        resolve_routing(&snapshot, "cline:minimax", Provider::Cline, &resolved, None).unwrap();
     let PreparedLaunchRouting::Environment { values: env, .. } = routing else {
         panic!("expected Cline environment routing");
     };
@@ -46,13 +52,16 @@ fn cline_legacy_pairing_uses_cline_auth_environment() {
     assert!(!env
         .iter()
         .any(|(key, value)| key == "ANTHROPIC_API_KEY" && value.is_empty()));
-    preferences::reset_for_tests();
+    crate::preferences::secrets::test_support::reset();
 }
 
 #[test]
 fn cline_launch_configuration_resolves_fallback_pairings_for_both_surfaces() {
+    // The credential-store double is per-thread: reset it so this test's
+    // seeded key cannot reach another test on the same thread.
+    crate::preferences::secrets::test_support::reset();
     let temp = tempfile::tempdir().unwrap();
-    preferences::init_for_tests(temp.path().to_path_buf());
+    let store = preferences::PreferencesStore::new(temp.path().to_path_buf());
     let resolved = crate::env::ResolvedPath {
         host_path: "C:/work".into(),
         spawn_path: "C:/work".into(),
@@ -106,7 +115,7 @@ fn cline_launch_configuration_resolves_fallback_pairings_for_both_surfaces() {
             }],
             ..Default::default()
         };
-        preferences::save(prefs.clone()).unwrap();
+        store.save(prefs.clone()).unwrap();
         let plan = preferences::launch_configurations::resolve(
             &prefs,
             "launch/cline:custom",
@@ -117,7 +126,7 @@ fn cline_launch_configuration_resolves_fallback_pairings_for_both_surfaces() {
             plan.route.as_ref().map(|route| route.surface),
             Some(surface)
         );
-        let routing = prepare_snapshot(&plan, &resolved).unwrap();
+        let routing = prepare_snapshot_from(&store, &plan, &resolved).unwrap();
         let PreparedLaunchRouting::Environment { values: env, .. } = routing else {
             panic!("expected Cline environment routing");
         };
@@ -131,15 +140,18 @@ fn cline_launch_configuration_resolves_fallback_pairings_for_both_surfaces() {
                 .map(|(_, value)| value.as_str()),
             Some("test-key")
         );
-        let resumed =
-            preferences::launch_configurations::resolve_snapshot(&plan, &Default::default())
-                .unwrap();
+        let resumed = preferences::launch_configurations::resolve_snapshot_from(
+            &store,
+            &plan,
+            &Default::default(),
+        )
+        .unwrap();
         assert_eq!(
             resumed.route.as_ref().map(|route| route.surface),
             Some(surface)
         );
     }
-    preferences::reset_for_tests();
+    crate::preferences::secrets::test_support::reset();
 }
 
 /// Picker-visible-but-spawn-fails regression: a paired Claude launch must
@@ -150,50 +162,54 @@ fn cline_launch_configuration_resolves_fallback_pairings_for_both_surfaces() {
 /// hermetic on machines with and without the CLI installed.
 #[test]
 fn prepare_threads_profile_executable_into_environment_routing() {
+    // The credential-store double is per-thread: reset it so this test's
+    // seeded key cannot reach another test on the same thread.
+    crate::preferences::secrets::test_support::reset();
     let temp = tempfile::tempdir().unwrap();
-    preferences::init_for_tests(temp.path().to_path_buf());
+    let store = preferences::PreferencesStore::new(temp.path().to_path_buf());
     let resolved_exe = PathBuf::from(if cfg!(windows) {
         "C:/Users/me/.local/bin/claude.exe"
     } else {
         "/home/me/.local/bin/claude"
     });
-    preferences::save(preferences::AppPreferences {
-        harness_profiles: vec![preferences::HarnessProfile {
-            id: "claude".into(),
-            name: "Claude Code".into(),
-            harness: "anthropic".into(),
-            runtime: None,
-            wsl_distro: None,
-            executable: Some(resolved_exe.clone()),
-        }],
-        provider_accounts: vec![preferences::ProviderAccount {
-            id: "minimax".into(),
-            name: "MiniMax".into(),
-            enabled: true,
-            billing_mode: preferences::BillingMode::PayAsYouGo,
-            claude_compatible: true,
-            api_key: Some("test-key".into()),
-        }],
-        provider_pairings: vec![preferences::ProviderPairing {
-            harness_id: "claude".into(),
-            provider_id: "minimax".into(),
-            surface: preferences::ApiSurface::Anthropic,
-            base_url: Some("https://example.invalid/anthropic".into()),
-            model_tiers: preferences::ModelTiers {
-                default: Some("MiniMax-M3".into()),
-                ..Default::default()
-            },
-        }],
-        ..Default::default()
-    })
-    .unwrap();
+    store
+        .save(preferences::AppPreferences {
+            harness_profiles: vec![preferences::HarnessProfile {
+                id: "claude".into(),
+                name: "Claude Code".into(),
+                harness: "anthropic".into(),
+                runtime: None,
+                wsl_distro: None,
+                executable: Some(resolved_exe.clone()),
+            }],
+            provider_accounts: vec![preferences::ProviderAccount {
+                id: "minimax".into(),
+                name: "MiniMax".into(),
+                enabled: true,
+                billing_mode: preferences::BillingMode::PayAsYouGo,
+                claude_compatible: true,
+                api_key: Some("test-key".into()),
+            }],
+            provider_pairings: vec![preferences::ProviderPairing {
+                harness_id: "claude".into(),
+                provider_id: "minimax".into(),
+                surface: preferences::ApiSurface::Anthropic,
+                base_url: Some("https://example.invalid/anthropic".into()),
+                model_tiers: preferences::ModelTiers {
+                    default: Some("MiniMax-M3".into()),
+                    ..Default::default()
+                },
+            }],
+            ..Default::default()
+        })
+        .unwrap();
     let resolved = crate::env::ResolvedPath {
         host_path: "C:/work".into(),
         spawn_path: "C:/work".into(),
         raw_path: "C:/work".into(),
         env_type: crate::models::EnvType::Windows,
     };
-    let routing = prepare("claude:minimax", Provider::Anthropic, &resolved).unwrap();
+    let routing = prepare_from(&store, "claude:minimax", Provider::Anthropic, &resolved).unwrap();
     let PreparedLaunchRouting::Environment {
         values: env,
         executable,
@@ -206,7 +222,7 @@ fn prepare_threads_profile_executable_into_environment_routing() {
         env.iter().any(|(key, _)| key == "ANTHROPIC_API_KEY"),
         "backend env must still flow alongside the executable"
     );
-    preferences::reset_for_tests();
+    crate::preferences::secrets::test_support::reset();
 }
 
 /// `recipe_binary_for` must name the same stem the spawn invokes, per
@@ -279,30 +295,46 @@ fn native(path: &str) -> PreparedLaunchRouting {
     }
 }
 
-/// Store `routing` at `generation`, going through `get` first exactly as
-/// `prepare` does — `put` only accepts the map's current generation, so a
+/// A distinct preference source, as a derived cache sees it.
+///
+/// The identity comes from a real store — it is what the cache keys on, so a
+/// test must not invent one. The directory is returned with it so the caller
+/// can keep it alive.
+fn source() -> (tempfile::TempDir, SourceIdentity) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::preferences::PreferencesStore::new(dir.path().to_path_buf());
+    (dir, store.source().clone())
+}
+
+/// Store `routing` at `revision`, going through `get` first exactly as
+/// `prepare` does — `put` only accepts the source's current revision, so a
 /// bare `put` would be dropped.
 fn seed(
     cache: &mut RoutingCache,
+    source: &SourceIdentity,
+    revision: u64,
     key: RoutingCacheKey,
-    generation: u64,
     routing: PreparedLaunchRouting,
 ) {
     assert!(
-        cache.get(&key, generation).is_none(),
+        cache.get(source, revision, &key).is_none(),
         "seed expects a cold key"
     );
-    cache.put(key, generation, routing);
+    cache.put(source, revision, key, routing);
 }
 
-/// A hit returns the stored value; a repeated read at the same generation
+/// A hit returns the stored value; a repeated read at the same revision
 /// keeps hitting (the memo's whole point).
 #[test]
-fn get_returns_the_value_stored_at_the_current_generation() {
+fn get_returns_the_value_stored_at_the_current_revision() {
+    let (_dir, source) = source();
     let mut cache = RoutingCache::default();
-    assert!(cache.get(&key("claude"), 7).is_none(), "cold cache misses");
-    cache.put(key("claude"), 7, native("/usr/bin/claude"));
-    match cache.get(&key("claude"), 7) {
+    assert!(
+        cache.get(&source, 7, &key("claude")).is_none(),
+        "cold cache misses"
+    );
+    cache.put(&source, 7, key("claude"), native("/usr/bin/claude"));
+    match cache.get(&source, 7, &key("claude")) {
         Some(PreparedLaunchRouting::Native { executable, .. }) => {
             assert_eq!(
                 executable.as_deref(),
@@ -313,43 +345,58 @@ fn get_returns_the_value_stored_at_the_current_generation() {
     }
 }
 
-/// A generation bump invalidates the map — the settings-change path.
+/// A revision bump invalidates the map — the settings-change path.
 #[test]
-fn a_generation_bump_invalidates_every_entry() {
+fn a_revision_bump_invalidates_every_entry() {
+    let (_dir, source) = source();
     let mut cache = RoutingCache::default();
-    seed(&mut cache, key("claude"), 7, native("/usr/bin/claude"));
+    seed(
+        &mut cache,
+        &source,
+        7,
+        key("claude"),
+        native("/usr/bin/claude"),
+    );
     assert!(
-        cache.get(&key("claude"), 8).is_none(),
-        "a bumped generation must drop entries computed before it"
+        cache.get(&source, 8, &key("claude")).is_none(),
+        "a bumped revision must drop entries computed before it"
     );
 }
 
-/// The write-side race guard: a slow spawn that sampled generation 7 must
+/// The write-side race guard: a slow spawn that sampled revision 7 must
 /// not be able to publish its result once the map has moved to 8. Without
 /// this `put` a rotated endpoint/key could become serveable state.
 #[test]
 fn put_drops_an_entry_computed_before_a_bump() {
+    let (_dir, source) = source();
     let mut cache = RoutingCache::default();
-    // The map was already advanced to generation 8 by another caller...
-    assert!(cache.get(&key("claude"), 8).is_none());
-    // ...then a slow spawn tries to insert its generation-7 result.
-    cache.put(key("claude"), 7, native("/usr/bin/claude"));
+    // The map was already advanced to revision 8 by another caller...
+    assert!(cache.get(&source, 8, &key("claude")).is_none());
+    // ...then a slow spawn tries to insert its revision-7 result.
+    cache.put(&source, 7, key("claude"), native("/usr/bin/claude"));
     assert!(
-        cache.get(&key("claude"), 8).is_none(),
-        "a put stamped with a stale generation must be dropped, not stored"
+        cache.get(&source, 8, &key("claude")).is_none(),
+        "a put stamped with a stale revision must be dropped, not stored"
     );
 }
 
-/// A caller holding an older generation must not evict the newer entries.
+/// A caller holding an older revision must not evict the newer entries.
 #[test]
 fn a_stale_reader_does_not_evict_newer_entries() {
+    let (_dir, source) = source();
     let mut cache = RoutingCache::default();
-    seed(&mut cache, key("claude"), 8, native("/usr/bin/claude"));
-    // A slow reader that sampled generation 7 must miss, not clear the map.
-    assert!(cache.get(&key("claude"), 7).is_none());
+    seed(
+        &mut cache,
+        &source,
+        8,
+        key("claude"),
+        native("/usr/bin/claude"),
+    );
+    // A slow reader that sampled revision 7 must miss, not clear the map.
+    assert!(cache.get(&source, 7, &key("claude")).is_none());
     assert!(
-        cache.get(&key("claude"), 8).is_some(),
-        "the generation-8 entry must survive a generation-7 reader"
+        cache.get(&source, 8, &key("claude")).is_some(),
+        "the revision-8 entry must survive a revision-7 reader"
     );
 }
 
@@ -357,16 +404,18 @@ fn a_stale_reader_does_not_evict_newer_entries() {
 /// not satisfy a Windows lookup of the same spawn option.
 #[test]
 fn the_runtime_is_part_of_the_fingerprint() {
+    let (_dir, source) = source();
     let mut cache = RoutingCache::default();
     seed(
         &mut cache,
-        ("claude".to_string(), "anthropic", "wsl"),
+        &source,
         1,
+        ("claude".to_string(), "anthropic", "wsl"),
         native("/home/u/bin/claude"),
     );
     assert!(
         cache
-            .get(&("claude".to_string(), "anthropic", "windows"), 1)
+            .get(&source, 1, &("claude".to_string(), "anthropic", "windows"))
             .is_none(),
         "a Windows lookup must not reuse the WSL entry"
     );
@@ -376,17 +425,191 @@ fn the_runtime_is_part_of_the_fingerprint() {
 /// string resolved under a different executor must not reuse the entry.
 #[test]
 fn the_provider_is_part_of_the_fingerprint() {
+    let (_dir, source) = source();
     let mut cache = RoutingCache::default();
     seed(
         &mut cache,
-        ("claude".to_string(), "anthropic", "windows"),
+        &source,
         1,
+        ("claude".to_string(), "anthropic", "windows"),
         native("/usr/bin/claude"),
     );
     assert!(
         cache
-            .get(&("claude".to_string(), "codex", "windows"), 1)
+            .get(&source, 1, &("claude".to_string(), "codex", "windows"))
             .is_none(),
         "a different harness must not reuse the entry"
     );
+}
+
+/// Two stores can hold the **same revision number** while carrying different
+/// preferences — revisions are per store, so they are not comparable across
+/// stores. The source identity is what keeps their entries apart
+/// (issue #1482).
+#[test]
+fn two_sources_at_the_same_revision_do_not_share_entries() {
+    let (_first_dir, first) = source();
+    let (_second_dir, second) = source();
+    let mut cache = RoutingCache::default();
+
+    seed(
+        &mut cache,
+        &first,
+        4,
+        key("claude"),
+        native("/first/claude"),
+    );
+    assert!(
+        cache.get(&second, 4, &key("claude")).is_none(),
+        "an entry computed against another profile must not be a hit"
+    );
+    assert!(
+        cache.get(&first, 4, &key("claude")).is_some(),
+        "the entry must still serve its own profile"
+    );
+}
+
+/// A revision bump in one profile must not disturb another profile's
+/// entries — the rotation is scoped to the source that moved.
+#[test]
+fn a_revision_bump_in_one_source_leaves_another_source_alone() {
+    let (_first_dir, first) = source();
+    let (_second_dir, second) = source();
+    let mut cache = RoutingCache::default();
+
+    seed(
+        &mut cache,
+        &first,
+        4,
+        key("claude"),
+        native("/first/claude"),
+    );
+    seed(
+        &mut cache,
+        &second,
+        4,
+        key("claude"),
+        native("/second/claude"),
+    );
+
+    // The first profile's preferences change.
+    assert!(cache.get(&first, 5, &key("claude")).is_none());
+
+    assert!(
+        cache.get(&second, 4, &key("claude")).is_some(),
+        "another profile's entry must survive this profile's revision bump"
+    );
+}
+
+/// The routing and the revision it is memoised under must describe the **same**
+/// preferences read (issue #1482).
+///
+/// The memo key names the revision the routing was computed from, so a write
+/// that lands after the snapshot was taken must not change what that snapshot
+/// derives: otherwise the routing would be published under a revision that
+/// does not describe it, and a caller holding that revision would be served a
+/// routing from a different read.
+#[test]
+fn a_routing_is_derived_from_the_snapshot_it_is_keyed_on() {
+    // The credential-store double is per-thread: reset it so this test's
+    // seeded key cannot reach another test on the same thread.
+    crate::preferences::secrets::test_support::reset();
+    let temp = tempfile::tempdir().unwrap();
+    let store = preferences::PreferencesStore::new(temp.path().to_path_buf());
+    let resolved = resolved_windows();
+    let token = |routing: PreparedLaunchRouting| {
+        let PreparedLaunchRouting::Environment { values: env, .. } = routing else {
+            panic!("expected Claude environment routing");
+        };
+        env.iter()
+            .find(|(key, _)| key == "ANTHROPIC_AUTH_TOKEN")
+            .map(|(_, value)| value.clone())
+    };
+
+    store.save(proxied_prefs("key-one")).unwrap();
+    // The read the memo key is built from.
+    let snapshot = preferences::resolver::snapshot::snapshot_or_default_from(&store);
+    // A write lands after that read.
+    store.save(proxied_prefs("key-two")).unwrap();
+
+    let routed = token(
+        prepare_from_snapshot(&snapshot, "claude:minimax", Provider::Anthropic, &resolved).unwrap(),
+    );
+    assert_eq!(
+        routed.as_deref(),
+        Some("key-one"),
+        "the routing must describe the snapshot it is keyed on"
+    );
+
+    // The later revision derives the later value: the two reads really differ.
+    let fresh = preferences::resolver::snapshot::snapshot_or_default_from(&store);
+    let routed = token(
+        prepare_from_snapshot(&fresh, "claude:minimax", Provider::Anthropic, &resolved).unwrap(),
+    );
+    assert_eq!(routed.as_deref(), Some("key-two"));
+    crate::preferences::secrets::test_support::reset();
+}
+
+/// The routing reads preferences **exactly once** (issue #1482).
+///
+/// The memo key names the revision the routing is derived from, so the key and
+/// the derivation must come from the same read. A second read could answer
+/// from a newer revision than the key names, and the routing would then be
+/// published under a revision that does not describe it.
+///
+/// The counter is per-thread, like the preferences cache itself, so a parallel
+/// test on another worker thread leaves this thread's count alone.
+#[test]
+fn a_routing_reads_preferences_exactly_once() {
+    crate::preferences::secrets::test_support::reset();
+    let temp = tempfile::tempdir().unwrap();
+    let store = preferences::PreferencesStore::new(temp.path().to_path_buf());
+    store.save(proxied_prefs("key-one")).unwrap();
+    let resolved = resolved_windows();
+
+    let before = crate::preferences::load_count();
+    let _routing =
+        prepare_from(&store, "claude:minimax", Provider::Anthropic, &resolved).expect("routing");
+    assert_eq!(
+        crate::preferences::load_count() - before,
+        1,
+        "the routing must read preferences exactly once — the memo key and the \
+         derived routing must describe the same read"
+    );
+    crate::preferences::secrets::test_support::reset();
+}
+
+/// A proxied provider with one credential, for the routing tests above.
+fn proxied_prefs(key: &str) -> preferences::AppPreferences {
+    preferences::AppPreferences {
+        provider_accounts: vec![preferences::ProviderAccount {
+            id: "minimax".into(),
+            name: "MiniMax".into(),
+            enabled: true,
+            billing_mode: preferences::BillingMode::PayAsYouGo,
+            claude_compatible: true,
+            api_key: Some(key.into()),
+        }],
+        provider_pairings: vec![preferences::ProviderPairing {
+            harness_id: "claude".into(),
+            provider_id: "minimax".into(),
+            surface: preferences::ApiSurface::Anthropic,
+            base_url: Some("https://example.invalid/anthropic".into()),
+            model_tiers: preferences::ModelTiers {
+                default: Some("MiniMax-M3".into()),
+                ..Default::default()
+            },
+        }],
+        ..Default::default()
+    }
+}
+
+/// The resolved path the routing tests spawn against.
+fn resolved_windows() -> crate::env::ResolvedPath {
+    crate::env::ResolvedPath {
+        host_path: "C:/work".into(),
+        spawn_path: "C:/work".into(),
+        raw_path: "C:/work".into(),
+        env_type: crate::models::EnvType::Windows,
+    }
 }

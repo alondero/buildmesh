@@ -397,7 +397,7 @@ content that overlaps it.
 The ViewModel owns foreground polling and its share of the event feed. The poll reads one
 snapshot (`/api/meshes`, `/api/nodes`, `/api/providers`) every 5s while
 foregrounded, so it hits the desktop's provider-menu route even when nothing
-changed; that route memoizes its derivation per preferences generation rather
+changed; that route memoizes its derivation per preferences revision rather
 than re-deriving per poll (see
 [providers.md](providers.md#the-spawn-menu-derivation-reads-one-preferences-snapshot-and-one-alias-table)).
 Refresh requests are coalesced and versioned so polling cannot starve slow

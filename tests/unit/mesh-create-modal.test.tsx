@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { StrictMode } from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { MeshCreateModal } from '../../src/components/Mesh/MeshCreateModal';
@@ -87,6 +88,23 @@ describe('MeshCreateModal', () => {
       path: '/repos/app',
       color: expect.any(String),
     });
+  });
+
+  it.each(['open', 'clone'])('completes %s after Strict Mode replays mount effects', async source => {
+    mockInvoke
+      .mockResolvedValueOnce({ path: '/repos', name: 'repos' })
+      .mockResolvedValueOnce(CLONED_MESH);
+    const onClose = vi.fn();
+    render(<StrictMode><MeshCreateModal onClose={onClose} /></StrictMode>);
+    if (source === 'clone') await fillCloneForm();
+    else {
+      fireEvent.click(screen.getByRole('button', { name: /choose folder/i }));
+      await screen.findByText('/repos');
+    }
+    fireEvent.click(screen.getByRole('button', { name: source === 'clone' ? /^clone mesh$/i : /^create mesh$/i }));
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+    expect(useMeshStore.getState().selectedMeshId).toBe(CLONED_MESH.id);
+    expect(useToastStore.getState().toasts).toHaveLength(0);
   });
 
   it('gates the Clone button on both a repo and a parent folder', () => {

@@ -343,7 +343,7 @@ describe('AgentNodeView grid controls', () => {
     render(<AgentNodeView />);
 
     expect(screen.queryByTestId('grid-output')).toBeNull();
-    expect(screen.getByText('Buildmesh')).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Add a repository' })).toBeTruthy();
     expect(screen.getByTestId('canvas-empty-create-mesh')).toBeTruthy();
 
     // Senior-review round 4: the New Mesh CTA must actually open

@@ -3,8 +3,7 @@
 use super::super::model::{
     ApiSurface, AppPreferences, ModelTiers, ProviderAccount, ProviderPairing, ProxiedProviderOrder,
 };
-use super::super::storage::{load, save};
-use super::accounts::provider_accounts;
+use super::accounts::{provider_accounts, provider_accounts_from};
 use super::catalog::{
     first_class_surfaces, harness_surface, keyed_first_class_template, provider_surfaces,
 };
@@ -29,6 +28,20 @@ pub fn provider_pairings() -> Vec<ProviderPairing> {
     super::snapshot::snapshot_or_default().pairings().to_vec()
 }
 
+/// [`provider_pairings`] against an explicit store.
+///
+/// The caller owns the store, so the list comes from *that* store's read
+/// rather than from the ambient one.
+#[cfg(test)]
+// allow-test-in-production: the store-scoped twin of `provider_pairings`, reached
+// from the sibling suites that own a store (issue #2450).
+pub fn provider_pairings_from(
+    store: &super::super::store::PreferencesStore,
+) -> Vec<ProviderPairing> {
+    super::snapshot::snapshot_or_default_from(store)
+        .pairings()
+        .to_vec()
+}
 // The stored per-harness **Proxied Provider** child order is read from the
 // preferences snapshot (`super::snapshot::PreferencesSnapshot::proxied_provider_order`)
 // — the Spawn Menu needs the order *and* the pairings it ranks, so one read
@@ -48,13 +61,18 @@ pub fn provider_pairings() -> Vec<ProviderPairing> {
 /// surface that wants "what's the order under harness X?" can reach for this
 /// without parsing the full vector.
 ///
+/// The proxied provider order for one harness, read from an explicit store.
+///
 /// No production surface asks the single-harness form yet, so it is compiled
 /// for tests alone (issue #2450).
 #[cfg(test)]
 // allow-test-in-production: a test-only lookup, compiled for the sibling suites alone
 // (issue #2450).
-pub fn proxied_order_for(harness_id: &str) -> Option<Vec<String>> {
-    super::snapshot::snapshot_or_default()
+pub fn proxied_order_for_from(
+    store: &super::super::store::PreferencesStore,
+    harness_id: &str,
+) -> Option<Vec<String>> {
+    super::snapshot::snapshot_or_default_from(store)
         .proxied_provider_order()
         .iter()
         .find(|o| o.harness_id == harness_id)
@@ -84,11 +102,29 @@ pub fn set_proxied_provider_order(
     harness_id: String,
     provider_ids: Vec<String>,
 ) -> Result<(), String> {
-    let mut prefs = load()?;
+    set_proxied_provider_order_in(
+        &super::super::store::ambient_store()?,
+        harness_id,
+        provider_ids,
+    )
+}
+
+/// [`set_proxied_provider_order`] against an explicit store.
+///
+/// The caller owns the store, so both the read and the write land in *that*
+/// store rather than in the ambient one.
+pub fn set_proxied_provider_order_in(
+    store: &super::super::store::PreferencesStore,
+    harness_id: String,
+    provider_ids: Vec<String>,
+) -> Result<(), String> {
+    let mut prefs = store.load()?;
     // Known = effective accounts ∪ keyed first-class catalog (ADR-0025: keyed
     // rows may not be materialised yet but are still attachable / orderable).
-    let mut known_ids: std::collections::HashSet<String> =
-        provider_accounts().into_iter().map(|a| a.id).collect();
+    let mut known_ids: std::collections::HashSet<String> = provider_accounts_from(store)
+        .into_iter()
+        .map(|a| a.id)
+        .collect();
     for a in super::catalog::keyed_first_class_catalog() {
         known_ids.insert(a.id);
     }
@@ -118,7 +154,7 @@ pub fn set_proxied_provider_order(
         }),
         None => { /* nothing to persist */ }
     }
-    save(prefs)
+    store.save(prefs)
 }
 
 /// Resolve the **stored** pairing for spawn / env (ADR-0025). Spawn is
@@ -138,17 +174,31 @@ pub(crate) fn resolve_pairing(
 pub fn resolve_stored_pairing_and_account(
     spawn_option_id: &str,
 ) -> Result<Option<(ProviderPairing, ProviderAccount)>, String> {
+    let snapshot = super::snapshot::snapshot_or_default();
+    resolve_stored_pairing_and_account_from_snapshot(&snapshot, spawn_option_id)
+}
+
+/// [`resolve_stored_pairing_and_account`] against an **already-loaded** snapshot.
+///
+/// The account and the pairing come from the snapshot the caller read, so a
+/// caller that memoises its result under that snapshot's revision cannot
+/// publish a pairing resolved from a different read (issue #1482).
+pub fn resolve_stored_pairing_and_account_from_snapshot(
+    snapshot: &super::snapshot::PreferencesSnapshot,
+    spawn_option_id: &str,
+) -> Result<Option<(ProviderPairing, ProviderAccount)>, String> {
     let id = crate::agent::provider::SpawnOptionId::from(spawn_option_id);
     let harness_id = id.harness_id();
     let Some(provider_id) = id.provider_id() else {
         return Ok(None);
     };
-    let accounts = provider_accounts();
-    let account = accounts
-        .into_iter()
+    let account = snapshot
+        .accounts
+        .iter()
         .find(|account| account.id == provider_id)
+        .cloned()
         .ok_or_else(|| format!("provider account '{provider_id}' is missing"))?;
-    let pairing = resolve_pairing(harness_id, &account, &provider_pairings())
+    let pairing = resolve_pairing(harness_id, &account, snapshot.pairings())
         .ok_or_else(|| format!("pairing '{harness_id}:{provider_id}' is missing"))?;
     Ok(Some((pairing, account)))
 }
@@ -231,6 +281,25 @@ pub fn compatible_providers_for_harness(harness_id: &str) -> Vec<ProviderAccount
     compatible_providers_for_harness_with(harness_id, &provider_accounts(), &provider_pairings())
 }
 
+/// [`compatible_providers_for_harness`] against an explicit store.
+///
+/// The caller owns the store, so the list is derived from *that* store's read
+/// rather than from the ambient one.
+#[cfg(test)]
+// allow-test-in-production: the store-scoped twin of
+// `compatible_providers_for_harness`, reached from the sibling suites that own a
+// store (issue #2450).
+pub fn compatible_providers_for_harness_from(
+    store: &super::super::store::PreferencesStore,
+    harness_id: &str,
+) -> Vec<ProviderAccount> {
+    compatible_providers_for_harness_with(
+        harness_id,
+        &provider_accounts_from(store),
+        &provider_pairings_from(store),
+    )
+}
+
 /// [`compatible_providers_for_harness`] over already-loaded accounts and stored
 /// pairings, so a caller covering many harnesses reads preferences once instead
 /// of once per harness (issue #1935 review). The compatibility rule is
@@ -277,7 +346,26 @@ fn compatible_providers_for_harness_with(
 /// harness that speaks no proxy surface is present with an empty list, which
 /// is the honest answer rather than a missing key.
 pub fn compatible_providers_by_harness() -> BTreeMap<String, Vec<ProviderAccount>> {
-    let prefs = match load() {
+    match super::super::store::ambient_store() {
+        Ok(store) => compatible_providers_by_harness_from(&store),
+        Err(e) => {
+            tracing::warn!(
+                "preferences::compatible_providers_by_harness load failed, using harness profiles only: {}",
+                e
+            );
+            BTreeMap::new()
+        }
+    }
+}
+
+/// [`compatible_providers_by_harness`] against an explicit store.
+///
+/// The caller owns the store, so the map is derived from *that* store's read
+/// rather than from the ambient one.
+pub fn compatible_providers_by_harness_from(
+    store: &super::super::store::PreferencesStore,
+) -> BTreeMap<String, Vec<ProviderAccount>> {
+    let prefs = match store.load() {
         Ok(prefs) => prefs,
         Err(e) => {
             tracing::warn!(
@@ -287,7 +375,7 @@ pub fn compatible_providers_by_harness() -> BTreeMap<String, Vec<ProviderAccount
             AppPreferences::default()
         }
     };
-    let mut harness_ids: Vec<String> = super::harness::harness_profiles()
+    let mut harness_ids: Vec<String> = super::harness::harness_profiles_from(store)
         .into_iter()
         .map(|p| p.id)
         .collect();
@@ -312,7 +400,7 @@ pub fn compatible_providers_by_harness() -> BTreeMap<String, Vec<ProviderAccount
     // One preferences read for the whole map: accounts and stored pairings are
     // read once here and borrowed per harness, rather than re-loaded and
     // re-cloned inside the loop (issue #1935 review).
-    let accounts = provider_accounts();
+    let accounts = provider_accounts_from(store);
     let stored = &prefs.provider_pairings;
     harness_ids
         .into_iter()

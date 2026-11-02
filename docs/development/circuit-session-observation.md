@@ -338,7 +338,13 @@ the harnesses that have nothing else.
 | Turn end | The lost-turn watchdog publishes Ready through the fenced `recover_ready` path once the owed file holds text, has been unchanged for `RESULT_SETTLE_MS` (5 s) and postdates the turn's lifecycle stamp | `result_handoff::finishes_turn`, `turn_classify::recover_result_turn` |
 | Report | A Ready agent whose harness has no readable report binds the result file as its report; the binding fingerprints the file and carries the session, incarnation and input fences | `readiness::prepare_result_handoff`, `with_result_file` |
 | Repair | A missing, blank or contract-violating file on a finished turn takes the ordinary bounded reminder path | Existing result-file repair |
-| Continuation | A file-only turn's revision is named by the file it owes, so classification and continuation delivery compare like with like | `result_handoff::current_turn_revision` |
+| Continuation | A file-only turn's revision is named by the file it owes, so classification and continuation delivery compare like with like | `result_handoff::current_turn_revision`, `result_handoff::current_turn_revision_from` |
+
+The classification and the freshness check read the **same profile**. The owed
+result file is found through the caller's store, so the revision the freshness
+check compares against is read from that store too. A revision taken from
+another profile finds no marker at all, and a fresh `Continue` is downgraded to
+`Working` — the circuit then does not recognise the continuation (issue #1482).
 
 The same recovery runs for a harness that does report its lifecycle, as a
 fallback when that signal was lost. There the file must also be backed by a

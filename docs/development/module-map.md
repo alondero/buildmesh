@@ -68,7 +68,7 @@ does.
 | `pty/` | PTY creation, lifecycle, registry, output sink. |
 | `http/` | Loopback/LAN server: `server.rs`, `router.rs`, `auth.rs`, `tls/`, `ws.rs`, and `routes/` per resource. Routes are the second command boundary. |
 | `env/` | Windows vs WSL detection, host-path conversion (`host_path.rs`), mesh row reads. |
-| `preferences/` | Persisted user settings, loaded off the async pool. |
+| `preferences/` | Persisted user settings, loaded off the async pool. `store.rs` owns one profile's state — the cached value, its revision, its write coordination and its source identity; `storage.rs` is the disk adapter it composes. |
 | `models/` | The shared DTOs. Split by domain (`mesh.rs`, `agent.rs`, `circuit.rs`, `git.rs`); `mod.rs` re-exports every type so `crate::models::…` paths stay stable. Wire types derive `TS` here and are generated, never hand-edited. |
 | `sandbox/` | OS process confinement for agent PTY nodes — `restricted_token.rs`, `appcontainer.rs`, `acl.rs`, `conpty.rs`, and its own `spawn.rs`. |
 | `session_naming/` | Backend-only node auto-naming from agent output (`engine.rs` observes output/turn boundaries, `words.rs`/`slug.rs` build the name, `repository.rs` persists it). PTY-side `session-id` capture does not belong here or in a caller. |

@@ -148,6 +148,57 @@ pub fn create_node_circuit_run(
     max_rounds: i32,
     reviewer_provider: Option<String>,
 ) -> Result<i64, DbError> {
+    match crate::preferences::default_store() {
+        Some(store) => create_node_circuit_run_from(
+            &store,
+            node_id,
+            selected_circuit_id,
+            max_rounds,
+            reviewer_provider,
+        ),
+        // A build with **no** store installed (a test that never installed
+        // one) reads the code-defined defaults, which is what the per-test
+        // helpers below have always done (issue #1482).
+        None => create_node_circuit_run_with_preferences(
+            node_id,
+            selected_circuit_id,
+            max_rounds,
+            reviewer_provider,
+            &crate::preferences::AppPreferences::default(),
+        ),
+    }
+}
+
+/// [`create_node_circuit_run`] against an explicit store.
+///
+/// The caller owns the store, so the preferences this run sees are the ones
+/// the caller set up — the reviewer provider it stored, the launch
+/// configurations it froze (issue #1482).
+pub fn create_node_circuit_run_from(
+    store: &crate::preferences::PreferencesStore,
+    node_id: i64,
+    selected_circuit_id: Option<i64>,
+    max_rounds: i32,
+    reviewer_provider: Option<String>,
+) -> Result<i64, DbError> {
+    let preferences = store.load()?;
+    create_node_circuit_run_with_preferences(
+        node_id,
+        selected_circuit_id,
+        max_rounds,
+        reviewer_provider,
+        &preferences,
+    )
+}
+
+/// The mint itself, with the preferences already resolved.
+fn create_node_circuit_run_with_preferences(
+    node_id: i64,
+    selected_circuit_id: Option<i64>,
+    max_rounds: i32,
+    reviewer_provider: Option<String>,
+    preferences: &crate::preferences::AppPreferences,
+) -> Result<i64, DbError> {
     // First-writer-wins dedupe (#1660) on the process-global reader so the
     // writer mutex is not held for a pure read.
     {
@@ -156,7 +207,6 @@ pub fn create_node_circuit_run(
             return Ok(existing);
         }
     }
-    let preferences = crate::preferences::load()?;
     // Mint (acquires the writer mutex).
     let mut db = crate::db::write_conn();
     create_node_circuit_run_with_recovery_locked(
@@ -164,7 +214,7 @@ pub fn create_node_circuit_run(
         node_id,
         selected_circuit_id,
         max_rounds,
-        (reviewer_provider, Some(&preferences)),
+        (reviewer_provider, Some(preferences)),
         None,
     )
 }
@@ -191,6 +241,33 @@ pub(crate) fn create_node_circuit_run_locked(
     reviewer_provider: Option<String>,
 ) -> Result<i64, DbError> {
     let preferences = crate::preferences::load().unwrap_or_default();
+    create_node_circuit_run_with_recovery_locked(
+        db,
+        node_id,
+        selected_circuit_id,
+        max_rounds,
+        (reviewer_provider, Some(&preferences)),
+        None,
+    )
+}
+
+/// [`create_node_circuit_run_locked`] against an explicit store.
+///
+/// The caller owns the store, so the preferences this run sees — the stored
+/// app-wide reviewer provider above all — are the ones the caller set up
+/// (issue #1482).
+#[cfg(test)]
+// allow-test-in-production: the store-scoped twin of `create_node_circuit_run_locked`,
+// reached from the sibling suite that owns a store.
+pub fn create_node_circuit_run_locked_from(
+    db: &mut Connection,
+    store: &crate::preferences::PreferencesStore,
+    node_id: i64,
+    selected_circuit_id: Option<i64>,
+    max_rounds: i32,
+    reviewer_provider: Option<String>,
+) -> Result<i64, DbError> {
+    let preferences = store.load()?;
     create_node_circuit_run_with_recovery_locked(
         db,
         node_id,
@@ -1124,7 +1201,53 @@ pub fn create_circuit_run(
     trigger_identity: &str,
     context_json: &str,
 ) -> SqlResult<i64> {
-    let preferences = crate::preferences::load().map_err(rusqlite::Error::InvalidParameterName)?;
+    match crate::preferences::default_store() {
+        Some(store) => {
+            create_circuit_run_from(&store, circuit_id, mesh_id, trigger_identity, context_json)
+        }
+        // A build with **no** store installed (a test that never installed one)
+        // reads the code-defined defaults (issue #1482).
+        None => create_circuit_run_with_preferences(
+            circuit_id,
+            mesh_id,
+            trigger_identity,
+            context_json,
+            &crate::preferences::AppPreferences::default(),
+        ),
+    }
+}
+
+/// [`create_circuit_run`] against an explicit store.
+///
+/// The caller owns the store, so the launch configurations this run freezes
+/// are the ones the caller set up (issue #1482).
+pub fn create_circuit_run_from(
+    store: &crate::preferences::PreferencesStore,
+    circuit_id: i64,
+    mesh_id: i64,
+    trigger_identity: &str,
+    context_json: &str,
+) -> SqlResult<i64> {
+    let preferences = store
+        .load()
+        .map_err(rusqlite::Error::InvalidParameterName)?;
+    create_circuit_run_with_preferences(
+        circuit_id,
+        mesh_id,
+        trigger_identity,
+        context_json,
+        &preferences,
+    )
+}
+
+/// The run itself, with the preferences already resolved.
+fn create_circuit_run_with_preferences(
+    circuit_id: i64,
+    mesh_id: i64,
+    trigger_identity: &str,
+    context_json: &str,
+    preferences: &crate::preferences::AppPreferences,
+) -> SqlResult<i64> {
     let mut db = crate::db::write_conn();
     create_circuit_run_prepared_locked(
         &mut db,
@@ -1132,7 +1255,7 @@ pub fn create_circuit_run(
         mesh_id,
         trigger_identity,
         context_json,
-        &preferences,
+        preferences,
     )
 }
 
