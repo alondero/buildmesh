@@ -1,3 +1,4 @@
+import { DestinationRow } from '../DestinationRow';
 import { PROBE_TAB_DEFINITIONS } from '../../lib/probeContext';
 import { useCallback, useRef, useState } from 'react';
 import { useClickOutside } from '../../hooks/useClickOutside';
@@ -12,7 +13,7 @@ import { dropdownId } from '../../lib/dropdownId';
 
 /**
  * Title-bar overflow for inspector tools without a dedicated title-bar button.
- * Shares the palette's tool order, labels, descriptions, and inspector icons.
+ * Shares the palette's tool order, labels, contextual help, and inspector icons.
  *
  * It is a disclosure dialog rather than an ARIA `menu` on purpose: the panel
  * holds plain buttons, so Tab order, Enter, and Escape all work without a
@@ -27,21 +28,6 @@ const OVERFLOW_ID = dropdownId('titlebar', 'tools-overflow');
 // joins the utility rows below when its pill is folded).
 const ENTRIES = TOOL_DISCOVERY_TILES.filter(entry => entry.tab !== 'usage' && entry.tab !== 'notifications');
 const USAGE_TILE = TOOL_DISCOVERY_TILES.find(entry => entry.tab === 'usage');
-
-const ROW_CLASS = 'flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-bg-overlay';
-
-/** One panel row: glyph, title, one-line description — the palette tile
-    shape the tool entries already use. */
-function RowText({ title, description, active = false }: { title: string; description: string; active?: boolean }) {
-  return (
-    <span className="min-w-0">
-      <span className={`block text-xs font-medium ${active ? 'text-accent-cyan' : 'text-text-primary'}`}>
-        {title}
-      </span>
-      <span className="block text-2xs text-text-muted break-words">{description}</span>
-    </span>
-  );
-}
 
 /** Lucide `ellipsis` — the conventional overflow affordance. */
 function MoreIcon({ className }: { className?: string }) {
@@ -62,8 +48,7 @@ function MoreIcon({ className }: { className?: string }) {
 /**
  * `includeUtilities` — below `UTILITIES_IN_BAR_MIN_WIDTH` the title bar folds
  * its Usage, Zoom, Settings and Mobile pills into this panel (#2421): progressive
- * disclosure that keeps each one's name and description, rather than the
- * icon-only row the bar degraded to before.
+ * disclosure that keeps each utility labelled and keyboard reachable.
  */
 export function TitleBarOverflow({ includeUtilities = false }: { includeUtilities?: boolean }) {
   const [open, setOpen] = useState(false);
@@ -116,19 +101,18 @@ export function TitleBarOverflow({ includeUtilities = false }: { includeUtilitie
         >
           {includeUtilities && (
             <>
-              <button
-                type="button"
+              <DestinationRow
                 onClick={() => {
                   openProbeTab('usage');
                   closeAndReturnFocus();
                 }}
                 aria-current={usageOpen ? 'true' : undefined}
                 data-testid="titlebar-overflow-usage"
-                className={ROW_CLASS}
-              >
-                <UsageIcon className="mt-0.5 h-4 w-4 shrink-0 text-text-muted" />
-                <RowText title={USAGE_TILE?.title ?? 'Usage'} description={USAGE_TILE?.description ?? ''} active={usageOpen} />
-              </button>
+                icon={UsageIcon}
+                label={USAGE_TILE?.title ?? 'Usage'}
+                description={USAGE_TILE?.description}
+                active={usageOpen}
+              />
               <div className="flex items-start gap-2 px-2 py-1.5" data-testid="titlebar-overflow-zoom">
                 <ZoomIcon className="mt-0.5 h-4 w-4 shrink-0 text-text-muted" />
                 <div className="min-w-0 flex-1">
@@ -138,8 +122,7 @@ export function TitleBarOverflow({ includeUtilities = false }: { includeUtilitie
               </div>
               {/* These rows open a modal that returns focus to the trigger on
                   close; see the comment on the Settings row. */}
-              <button
-                type="button"
+              <DestinationRow
                 onClick={() => {
                   // The shared Modal records focus at mount and restores it on
                   // close. Focus the trigger first, because the row is about to
@@ -149,24 +132,19 @@ export function TitleBarOverflow({ includeUtilities = false }: { includeUtilitie
                   setOpen(false);
                 }}
                 data-testid="titlebar-overflow-settings"
-                className={ROW_CLASS}
-              >
-                <SettingsIcon className="mt-0.5 h-4 w-4 shrink-0 text-text-muted" />
-                <RowText title="Settings" description="Buildmesh-wide defaults" />
-              </button>
-              <button
-                type="button"
+                icon={SettingsIcon}
+                label="Settings"
+              />
+              <DestinationRow
                 onClick={() => {
                   triggerRef.current?.focus();
                   useUIStore.getState().openRemoteAccess();
                   setOpen(false);
                 }}
                 data-testid="titlebar-overflow-remote-access"
-                className={ROW_CLASS}
-              >
-                <MobileIcon className="mt-0.5 h-4 w-4 shrink-0 text-text-muted" />
-                <RowText title="Mobile remote access" description="Connect your phone to this workspace" />
-              </button>
+                icon={MobileIcon}
+                label="Mobile remote access"
+              />
               <div className="mx-2 my-1 h-px bg-border-subtle" />
             </>
           )}
@@ -174,20 +152,19 @@ export function TitleBarOverflow({ includeUtilities = false }: { includeUtilitie
             const Icon = PROBE_TAB_DEFINITIONS[entry.tab].icon;
             const isActive = probeOpen && probeTab === entry.tab;
             return (
-              <button
+              <DestinationRow
                 key={entry.tab}
-                type="button"
                 onClick={() => {
                   openProbeTab(entry.tab);
                   closeAndReturnFocus();
                 }}
                 data-testid={`titlebar-overflow-${entry.tab}`}
                 aria-current={isActive ? 'true' : undefined}
-                className={ROW_CLASS}
-              >
-                <Icon className="mt-0.5 h-4 w-4 shrink-0 text-text-muted" />
-                <RowText title={entry.title} description={entry.description} active={isActive} />
-              </button>
+                icon={Icon}
+                label={entry.title}
+                description={entry.description}
+                active={isActive}
+              />
             );
           })}
         </div>

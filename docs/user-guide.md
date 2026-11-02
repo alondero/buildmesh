@@ -149,8 +149,12 @@ The first successful loop is: **install → configure → spawn → inspect → 
 Use **More** at the right of the title bar to open **Project Files**,
 **Agent Changes**, **Project Settings**, **Repository**, **GitHub Issues**,
 **Pull Requests**, **Circuits**, **Agent History**, or **Notes** in the inspector.
-The menu uses the same names, descriptions, and icons as the command palette.
-**Usage** has its own title-bar button, alongside **Settings** and **Mobile**.
+More and the command palette's empty search show compact rows with a name and
+icon. The highlighted row marks the current choice; hover a tool for optional
+help. In the palette, Up/Down move through the rows and wrap at either end;
+Enter opens the highlighted tool while typing stays in the search field.
+**Usage**, **Settings** and **Mobile** have title-bar buttons on wider windows
+and move into **More** when space is limited.
 
 Settings opens with focus on **General**. Use Up/Down to select a section
 (wrapping at either end), or Home/End to select the first/last section. Tab

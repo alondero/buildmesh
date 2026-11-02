@@ -103,9 +103,18 @@ Probe navigation title-bar-first — a command palette plus an on-demand
 inspector with no rail — but the lens contract itself is unchanged; see
 [`docs/adr/0030-titlebar-navigation-on-demand-inspector.md`](../adr/0030-titlebar-navigation-on-demand-inspector.md).
 ADR-0032 added a working-set tab strip *inside* the open inspector
-(`ProbeToolRail`, MRU-capped, ⊞ opens the ADR-0031 tool grid) for fast
+(`ProbeToolRail`, MRU-capped, ⊞ opens its grouped tool picker) for fast
 alternation; it renders only while the panel is open and adds no reopen
 affordance, so the closed-render discipline stands.
+
+The title bar's More disclosure and omnibar discovery share `DestinationRow`:
+a single-line name and icon, a selection fill and caret edge, and a minimum
+24px hit target. Supporting tool descriptions are optional tooltip and
+accessible-description text, sourced from the existing destination metadata.
+More keeps native button focus; omnibar Up/Down traverse a single column with
+wrap-around while focus stays in the search input. Left/Right keep input caret
+behavior. The Probe working-set picker retains its separate responsive grid
+and navigation model.
 
 Related Files/Changes and Issues/Pull Requests share a strip slot, with
 unchanged command IDs. The working-set reducer
