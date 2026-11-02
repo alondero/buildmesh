@@ -84,7 +84,7 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/services/transcript_reader/readers/opencode2_tests.rs': 'services::transcript_reader::readers::opencode2::tests',
   'src-tauri/src/git/trust_tests.rs': 'git::trust::tests',
   'src-tauri/src/db/circuit/review_configuration_tests.rs': 'db::circuit::review_configuration::tests',
-  'src-tauri/src/db/circuit/artifacts_tests.rs': 'db::circuit::artifacts::tests',
+  'src-tauri/src/db/circuit/context_store_tests.rs': 'db::circuit::context_store::tests',
   'src-tauri/src/agent/terminal_input.rs': 'agent::process::terminal_input',
   'src-tauri/src/agent/process_tests.rs': 'agent::process::tests',
   'src-tauri/src/agent/provider_menu_tests.rs': 'agent::provider_menu::tests',

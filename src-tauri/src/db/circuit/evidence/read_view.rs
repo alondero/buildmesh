@@ -44,7 +44,7 @@ pub(in crate::db::circuit) fn recovery_view(
         run_id: run.id,
         graph: run_graph(db, run.id)?,
         state: RunState::from_db_str(&run.state),
-        context: super::super::artifacts::load_context(db, run.id)?,
+        context: super::super::context_store::load_logical(db, run.id)?.runtime(),
         steps: steps
             .into_iter()
             .map(|step| StepView {
@@ -162,7 +162,7 @@ pub(super) fn evidence_view_unresolved(
     let mut coverage = Vec::new();
     {
         let graph = run_graph(db, run_id)?;
-        let context = super::super::artifacts::load_context(db, run_id)?;
+        let context = super::super::context_store::load_logical(db, run_id)?;
         let steps = crate::db::circuit::ledger::list_circuit_run_steps_inner(db, run_id)?;
         let view = recovery_view(db, &run)?;
         let continuation =

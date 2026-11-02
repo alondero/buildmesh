@@ -204,11 +204,11 @@ A revision identifying a change to the built-in Review Blueprint's behavior, suc
 _Avoid_: Graph schema version
 
 **Circuit Run Context**:
-The state one Circuit Run carries from advance to advance. It has two halves. The decision-relevant half — the flags the stepper reads to decide — stays in the run's `context_json` column and is rewritten on every advance. The bulky half — an agent's report, a step's evidence, a trigger body — lives in the run's **Circuit Run Artifact** rows and is written once, read when something needs it. A run's context is not a log: it is the current state, so a cleared value leaves no copy behind. Reading a context means reading both halves; the projections an operator sees put them back together, because the review report and the trigger body are part of what the person is shown.
+The state one Circuit Run carries from advance to advance. It is one logical thing, stored in two halves. The decision-relevant half — the flags the stepper reads to decide — stays in the run's `context_json` column and is rewritten on every advance. The bulky half — an agent's report, a step's evidence, a trigger body — lives in the run's **Circuit Run Artifact** rows and is written once, read when something needs it. A run's context is not a log: it is the current state, so a cleared value leaves no copy behind. Reading a context means reading both halves, and changing one means saying what changes: a value that is set, a value that is removed, or a scope that is cleared. The projections an operator sees put the halves back together, because the review report and the trigger body are part of what the person is shown.
 _Avoid_: transcript, event log
 
 **Circuit Run Artifact**:
-One bulky value of a Circuit Run's context, held apart from the run row so that rewriting the run's small state does not rewrite the value. An artifact is keyed by its run, the circuit node it belongs to and the attempt it belongs to; clearing a node's working state clears its artifacts with it. An artifact the run's context stops mentioning is unchanged, not gone.
+One bulky value of a Circuit Run's context, held apart from the run row so that rewriting the run's small state does not rewrite the value. An artifact is keyed by its run, the circuit node it belongs to and the attempt it belongs to; clearing a node's working state clears its artifacts with it. Which artifacts survive a change is the caller's explicit choice: a partial change leaves the ones it does not mention alone, a complete replacement drops them, and a removal or a scope reset clears them by name.
 _Avoid_: attachment, side-car file
 
 **Circuit Run History**:

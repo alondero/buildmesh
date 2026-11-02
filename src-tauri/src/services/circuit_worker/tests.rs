@@ -11,6 +11,7 @@ use super::spawn::*;
 use super::turn_classify::*;
 use super::*;
 use crate::agent::spawn::ExplicitSpawnOverrides;
+use crate::circuit::context::CircuitContext;
 use crate::circuit::evaluator;
 use crate::circuit::model::{CircuitNode, StepOutcome, CIRCUIT_GRAPH_VERSION};
 use crate::circuit::strategy::PassiveWatcher;

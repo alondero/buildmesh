@@ -868,4 +868,58 @@ mod tests {
         assert_eq!(read_node_position(&conn, keep), 0);
         assert_eq!(read_node_position(&conn, sentinel), 0);
     }
+
+    /// A launch-selection rename reaches a run's context, whatever shape that
+    /// context has (issue #2672).
+    ///
+    /// A run's context is stored in two halves now, so the rename goes
+    /// through the context seam. A historical payload that is not a flat map
+    /// has no logical context: the seam stores such a payload as it stands,
+    /// and the rename still has to land in it.
+    #[test]
+    fn a_launch_rename_reaches_a_run_context_of_either_shape() {
+        let _db = crate::db::test_support::isolated();
+        {
+            let db = crate::db::write_conn();
+            db.execute_batch(
+                "INSERT INTO meshes(id,name,path) VALUES(1,'launch','/launch');
+                 INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'review');",
+            )
+            .unwrap();
+            // A flat context: the shape every run the engine writes has.
+            db.execute(
+                "INSERT INTO autopilot_circuit_runs(circuit_id,mesh_id,trigger_identity,context_json)
+                 VALUES(1,1,'flat',?1)",
+                [r#"{"source.provider":"claude:minimax","prompt":"claude:minimax"}"#],
+            )
+            .unwrap();
+            // A historical payload that is not a flat map: the rename has to
+            // reach inside it.
+            db.execute(
+                "INSERT INTO autopilot_circuit_runs(circuit_id,mesh_id,trigger_identity,context_json)
+                 VALUES(1,1,'nested',?1)",
+                [r#"{"launch":{"provider":"claude:minimax"}}"#],
+            )
+            .unwrap();
+        }
+        let mappings = std::collections::HashMap::from([(
+            "claude:minimax".into(),
+            "launch/claude:minimax".into(),
+        )]);
+        crate::db::agent_node::migrate_launch_selections(&mappings).unwrap();
+
+        let db = crate::db::write_conn();
+        let contexts: Vec<String> = db
+            .prepare("SELECT context_json FROM autopilot_circuit_runs ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let flat: serde_json::Value = serde_json::from_str(&contexts[0]).unwrap();
+        assert_eq!(flat["source.provider"], "launch/claude:minimax");
+        assert_eq!(flat["prompt"], "claude:minimax");
+        let nested: serde_json::Value = serde_json::from_str(&contexts[1]).unwrap();
+        assert_eq!(nested["launch"]["provider"], "launch/claude:minimax");
+    }
 }

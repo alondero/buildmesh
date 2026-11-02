@@ -331,7 +331,7 @@ pub(crate) fn receive_native_hook_locked(
             run_id,
             state: RunState::from_db_str(&run.state),
             graph: run_graph(&tx, run_id)?,
-            context: super::super::artifacts::load_context(&tx, run_id)?,
+            context: super::super::context_store::load_logical(&tx, run_id)?.runtime(),
             steps: rows
                 .into_iter()
                 .map(|s| StepView {

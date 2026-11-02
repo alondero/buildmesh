@@ -6,6 +6,7 @@ use super::observation::{
 };
 use super::turn_classify::{ClassifiedTurn, MissingResult};
 use super::*;
+use crate::circuit::context::CircuitContext;
 use crate::circuit::evaluator::Classification;
 use crate::circuit::model::{
     CircuitEdge, CircuitNode, EdgeCondition, GithubActionKind, CIRCUIT_GRAPH_VERSION,

@@ -359,7 +359,7 @@ fn circuit_result_file_handoff_binds_the_report_that_is_classified() {
     let error = crate::db::circuit::evidence::commit_transition(
         run.run_id,
         Some("completed"),
-        &run.context.to_json().unwrap(),
+        &crate::db::circuit::context_store::ContextChange::from_context(&run.context),
         &[],
         crate::db::circuit::evidence::EvidenceWrite {
             input_guard: transition.input_guard.as_ref(),
@@ -515,7 +515,9 @@ fn circuit_result_file_report_retains_transcript_freshness_and_versions_result_e
     let error = crate::db::circuit::evidence::commit_transition(
         42,
         Some("completed"),
-        "{}",
+        &crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole("{}"),
+        ),
         &[],
         crate::db::circuit::evidence::EvidenceWrite {
             input_guard: Some(&ObservationInputFence {
@@ -639,7 +641,7 @@ fn circuit_result_file_handoff_binds_native_receipts_and_borrowed_owners() {
         let error = crate::db::circuit::evidence::commit_transition(
             run.run_id,
             Some("completed"),
-            &run.context.to_json().unwrap(),
+            &crate::db::circuit::context_store::ContextChange::from_context(&run.context),
             &[],
             crate::db::circuit::evidence::EvidenceWrite {
                 input_guard: transition.input_guard.as_ref(),
@@ -723,7 +725,7 @@ fn explicit_mcode_handoff_recovers_running_without_claiming_native_completion() 
             &mut db,
             42,
             Some("completed"),
-            &routed.context.to_json().unwrap(),
+            &crate::db::circuit::context_store::ContextChange::from_context(&routed.context),
             &[],
             crate::db::circuit::evidence::EvidenceWrite {
                 input_guard: transition.input_guard.as_ref(),
@@ -1231,7 +1233,9 @@ fn a_guarded_report_recovers_a_checkpoint_without_fabricating_ownership() {
     let error = crate::db::circuit::evidence::commit_transition(
         42,
         Some("completed"),
-        "{}",
+        &crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole("{}"),
+        ),
         &[],
         crate::db::circuit::evidence::EvidenceWrite {
             input_guard: transition.input_guard.as_ref(),

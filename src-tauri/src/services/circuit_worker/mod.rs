@@ -50,13 +50,14 @@ use once_cell::sync::Lazy;
 use tauri::{AppHandle, Emitter};
 
 use crate::circuit::capacity;
-use crate::circuit::context::CircuitContext;
 use crate::circuit::model::{CircuitGraph, CircuitNodeKind, StepOutcome as GraphStepOutcome};
 use crate::circuit::stepper::{
     advance, CircuitEvent, RunState, RunView, StepStatus, StepView, Transition,
 };
 mod admission;
 mod dispatch;
+#[cfg(test)]
+mod freshness_fence_tests;
 mod github;
 #[cfg(test)]
 mod github_recovery_tests;
@@ -544,12 +545,17 @@ fn run_pass(app: &AppHandle) {
                 // A review extension or an operator's recovery is explicit work
                 // on a run that already started, so a disabled circuit must not
                 // park it as if it were new background work.
-                CircuitContext::from_json(&active.run.context_json)
-                    .ok()
-                    .is_some_and(|context| {
-                        context.get("review.extended") == Some("1")
-                            || context.get("operator.recovered") == Some("1")
-                    }),
+                //
+                // The flags are decision-relevant values, so they are read
+                // through the stored context: the caller does not have to
+                // know which half of the storage holds them.
+                {
+                    let stored = db::circuit::context_store::StoredContext::of_column(
+                        &active.run.context_json,
+                    );
+                    stored.get("review.extended") == Some("1")
+                        || stored.get("operator.recovered") == Some("1")
+                },
             )
         {
             record_queue_wait(
@@ -656,6 +662,25 @@ fn corrupt_payload_step_op(node_id: &str, reason: &str) -> db::CircuitStepOp {
     }
 }
 
+/// The run's history revision, fenced on the context the caller holds.
+///
+/// The fence answers "is the run still what I saw?": the run's state and
+/// the context the caller's row carries must both still hold. The expected
+/// revision is minted from *that* row — the one the pass listed, or the one
+/// the failure path read — and never from a context read a moment earlier:
+/// comparing the stored context with itself would answer the question with
+/// the value it was given, and the fence would never fire.
+///
+/// A write that lands while the caller works — an operator's step recovery,
+/// a review extension, another writer — moves the stored context, so the
+/// fence fires and the caller acts on a fresh pass instead of a stale view.
+fn fenced_history_revision(
+    run: &crate::models::AutopilotCircuitRun,
+) -> Result<i64, rusqlite::Error> {
+    let expected = db::circuit::context_store::ContextRevision::of_column(&run.context_json);
+    db::circuit::evidence::observation_revision(run.id, &run.state, &expected)
+}
+
 fn drive_run(app: &AppHandle, active: &db::ActiveCircuitRun) -> Result<(), String> {
     // Undrivable-graph fail-closed: a corrupt `graph_json` previously
     // returned Err every 2s forever, holding the run's capacity slot with
@@ -690,7 +715,7 @@ fn drive_run(app: &AppHandle, active: &db::ActiveCircuitRun) -> Result<(), Strin
             return Ok(());
         }
     };
-    let mut context = match db::circuit::artifacts::load_run_context(active.run.id) {
+    let logical = match db::circuit::context_store::load_logical_run(active.run.id) {
         Ok(context) => context,
         Err(error) => {
             let reason = format!("circuit context is unreadable: {}", error);
@@ -713,8 +738,12 @@ fn drive_run(app: &AppHandle, active: &db::ActiveCircuitRun) -> Result<(), Strin
             return Ok(());
         }
     };
-    let revision =
-        db::circuit::evidence::observation_revision(&active.run).map_err(|e| e.to_string())?;
+    // The run's context must still be the one this pass read. The revision
+    // fingerprints the whole stored context, so a change to the
+    // decision-relevant half or to the bulky half both move it: an
+    // observation taken against a context that moved on is stale.
+    let revision = fenced_history_revision(&active.run).map_err(|e| e.to_string())?;
+    let mut context = logical.runtime();
     context.set("evidence.revision", revision.to_string());
     // Older runs (and the pre-seeding window) may lack `circuit.run_id`;
     // top it up on the first pass and persist through the normal commit.
@@ -1106,7 +1135,7 @@ fn fail_rejected_agent_status_effects(
     effects: &[crate::circuit::stepper::Effect],
     message: &str,
     mut persist: impl FnMut(
-        &str,
+        &db::circuit::context_store::ContextChange,
         &[db::CircuitStepOp],
         &crate::circuit::stepper::TransitionFence,
     ) -> Result<(), String>,
@@ -1115,7 +1144,9 @@ fn fail_rejected_agent_status_effects(
     if steps.is_empty() {
         return Err("SetNodeStatus rejection did not identify a failed effect step".into());
     }
-    let context = view.context.to_json().map_err(|error| error.to_string())?;
+    let context = db::circuit::context_store::ContextChange::from(
+        db::circuit::context_store::ContextMutation::from_context(&view.context),
+    );
     persist(&context, &steps, expected)?;
     view.state = RunState::Failed;
     for op in steps {
@@ -1197,7 +1228,7 @@ fn persist_transition_checked_with(
     commit: impl FnOnce(
         i64,
         Option<&str>,
-        &str,
+        &db::circuit::context_store::ContextChange,
         &[db::CircuitStepOp],
         db::circuit::evidence::EvidenceWrite<'_>,
     ) -> rusqlite::Result<i64>,
@@ -1275,10 +1306,13 @@ fn persist_transition_checked_with(
                 .clone()
                 .map(|expected| (expected, transition.effects.clone()))
         };
-        let context = view
-            .context
-            .to_json()
-            .map_err(|error| TransitionPersistFailure::Other(error.to_string()))?;
+        // The run's context is one logical thing. The change carries every
+        // value the run holds and names the keys the stepper removed, so
+        // the store clears a removed value from both halves of the storage
+        // — and leaves a value it was never told about alone.
+        let context = db::circuit::context_store::ContextChange::from(
+            db::circuit::context_store::ContextMutation::from_context(&view.context),
+        );
         let revision = commit(
             run_id,
             run_state,
@@ -1859,16 +1893,21 @@ fn apply_quiet_classifier_failures(app: &AppHandle, failures: Vec<QuietClassifie
             let Some(run) = db::get_circuit_run(failure.active.run.id).ok().flatten() else {
                 return;
             };
-            let (Ok(graph), Ok(mut context), Ok(steps)) = (
+            let (Ok(graph), Ok(logical), Ok(steps)) = (
                 CircuitGraph::from_json(&failure.active.circuit_graph_json),
-                db::circuit::artifacts::load_run_context(run.id),
+                db::circuit::context_store::load_logical_run(run.id),
                 load_steps(run.id),
             ) else {
                 return;
             };
-            let Ok(revision) = db::circuit::evidence::observation_revision(&run) else {
+            // The fence compares the stored context with the one the run row
+            // holds, so a write that lands between that read and this call
+            // makes it fire and the failure is not recorded against a stale
+            // view.
+            let Ok(revision) = fenced_history_revision(&run) else {
                 return;
             };
+            let mut context = logical.runtime();
             context.set("evidence.revision", revision.to_string());
             let mut view = RunView {
                 run_id: run.id,

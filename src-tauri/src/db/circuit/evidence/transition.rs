@@ -5,7 +5,7 @@ use super::*;
 pub fn commit_transition(
     run_id: i64,
     state: Option<&str>,
-    context: &str,
+    context: &crate::db::circuit::context_store::ContextChange,
     steps: &[crate::db::circuit::CircuitStepOp],
     evidence: EvidenceWrite<'_>,
 ) -> SqlResult<i64> {
@@ -84,7 +84,7 @@ pub(crate) fn commit_transition_locked(
     db: &mut Connection,
     run_id: i64,
     state: Option<&str>,
-    context: &str,
+    context: &crate::db::circuit::context_store::ContextChange,
     steps: &[crate::db::circuit::CircuitStepOp],
     evidence: EvidenceWrite<'_>,
 ) -> SqlResult<i64> {

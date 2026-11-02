@@ -30,7 +30,10 @@ fn reconfigure_locked(
             .ok_or_else(|| DbError::not_found("Review run disappeared"))?;
         let graph = super::evidence::run_graph(&tx, run_id)?;
         let steps = super::ledger::list_circuit_run_steps_inner(&tx, run_id)?;
-        let mut context = super::artifacts::load_context(&tx, run_id)?;
+        // The launch plan and the provider are the only values that change.
+        // The rest of the run's context is left alone, so an operator's
+        // edit never rewrites what the worker holds.
+        let mut mutation = super::context_store::ContextMutation::new();
         let mut changed = false;
         for gate in &graph.nodes {
             let CircuitNodeKind::ReviewVerdict {
@@ -42,7 +45,7 @@ fn reconfigure_locked(
             if steps.iter().any(|step| step.node_id == *target) {
                 return Err(DbError::conflict(format!("Node {node_id}'s reviewer already started. Start a fresh review to change its Launch Configuration.")));
             }
-            context.set(&format!("review.launch.{target}"), snapshot.to_owned());
+            mutation.put(format!("review.launch.{target}"), snapshot.to_owned());
             changed = true;
         }
         if !changed {
@@ -50,9 +53,9 @@ fn reconfigure_locked(
                 "Node {node_id}'s circuit has no reviewer"
             )));
         }
-        context.set("review.provider", selection);
-        let context_json = super::artifacts::write_context(&tx, run_id, &context.to_json()?)?;
-        tx.execute("UPDATE autopilot_circuit_runs SET context_json=?2, updated_at=datetime('now') WHERE id=?1", rusqlite::params![run_id, context_json])?;
+        mutation.put("review.provider", selection);
+        let applied = super::context_store::apply_mutation(&tx, run_id, &mutation)?;
+        tx.execute("UPDATE autopilot_circuit_runs SET context_json=?2, updated_at=datetime('now') WHERE id=?1", rusqlite::params![run_id, applied.column_json()])?;
         super::evidence::append_history(
             &tx,
             super::evidence::HistoryEvent {

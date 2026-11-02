@@ -198,9 +198,17 @@ tauri-plugin-updater = { version = "2", default-features = false, features = ["r
 tauri-plugin-process = "2"
 
 [dev-dependencies]
-# Empty — `tempfile` was promoted to a regular dependency for issue #713
-# (`mobileconfig::sign_mobileconfig`). Kept as a section header for
-# diff-hygiene against future `cargo add --dev` calls.
+# `rusqlite`'s `trace` feature counts the statements a connection actually
+# runs. Two tests in `db::circuit::context_store_tests.rs` use it to pin that
+# a batch read issues a bounded number of statements and that the freshness
+# fence reads the column alone. It is a test-only feature: a shipped binary
+# does not need it, so it stays out of the production dependency's features.
+# Cargo unifies the features of a package across the dependency kinds when
+# the dev-dependency is built, so the test build gets it and `cargo build`
+# does not.
+rusqlite = { version = "0.41", features = ["trace"] }
+# `tempfile` was promoted to a regular dependency for issue #713
+# (`mobileconfig::sign_mobileconfig`).
 
 [profile.release]
 strip = true

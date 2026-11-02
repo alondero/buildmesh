@@ -1,6 +1,7 @@
 //! Agent Node persistence, coordinator node digest rows, and the pending
 //! worktree-removal queue.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use rusqlite::{params, Connection};
@@ -32,28 +33,81 @@ fn migrate_launch_selections_inner(
             params![old, new],
         )?;
     }
-    for (select, update) in [
-        (
-            "SELECT id, graph_json FROM autopilot_circuits",
-            "UPDATE autopilot_circuits SET graph_json = ?2 WHERE id = ?1",
-        ),
-        (
-            "SELECT id, context_json FROM autopilot_circuit_runs",
-            "UPDATE autopilot_circuit_runs SET context_json = ?2 WHERE id = ?1",
-        ),
-    ] {
-        let rows = tx
-            .prepare(select)?
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
-            .collect::<SqlResult<Vec<_>>>()?;
-        for (id, raw) in rows {
-            let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else {
-                continue;
-            };
-            if migrate_launch_json(&mut value, mappings) {
-                tx.execute(update, params![id, value.to_string()])?;
+    // A circuit's graph is not a run context: the rename is a plain JSON
+    // rewrite of the row it lives in.
+    let graphs = tx
+        .prepare("SELECT id, graph_json FROM autopilot_circuits")?
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<SqlResult<Vec<_>>>()?;
+    for (id, raw) in graphs {
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        if migrate_launch_json(&mut value, mappings) {
+            tx.execute(
+                "UPDATE autopilot_circuits SET graph_json = ?2 WHERE id = ?1",
+                params![id, value.to_string()],
+            )?;
+        }
+    }
+    // A run's context is one logical thing: the store owns which half of it
+    // lands in the column and which half in the side table, so the rename
+    // goes through it and reaches both halves.
+    let runs = tx
+        .prepare("SELECT id, context_json FROM autopilot_circuit_runs")?
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<SqlResult<Vec<_>>>()?;
+    for (id, raw) in runs {
+        // The rewrite is the one the graph path uses, so a run's context is
+        // renamed the same way a circuit's graph is: nested objects and
+        // arrays included.
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        if !migrate_launch_json(&mut value, mappings) {
+            continue;
+        }
+        let Ok(original) = serde_json::from_str::<BTreeMap<String, String>>(&raw) else {
+            // A payload that is not a flat map has no logical context: the
+            // seam stores such a payload as it stands, so the rename lands
+            // in the column and the stored half is left alone.
+            let replacement =
+                crate::db::circuit::context_store::ContextReplacement::whole(value.to_string());
+            let applied =
+                crate::db::circuit::context_store::apply_replacement(&tx, id, &replacement)?;
+            tx.execute(
+                "UPDATE autopilot_circuit_runs SET context_json = ?2 WHERE id = ?1",
+                params![id, applied.column_json()],
+            )?;
+            continue;
+        };
+        let rewritten: BTreeMap<String, String> = serde_json::from_str(&value.to_string())
+            .expect("the rewrite keeps the payload's shape");
+        // The renamed values, as the column holds them: the provider a
+        // context names is a short value, so it lives there.
+        let mut renamed = BTreeMap::new();
+        for (key, next) in &rewritten {
+            if original.get(key) != Some(next) {
+                renamed.insert(key.clone(), next.clone());
             }
         }
+        if renamed.is_empty() {
+            continue;
+        }
+        // The run's whole context, both halves, with the renamed values on
+        // top.
+        let Ok(logical) = crate::db::circuit::context_store::load_logical(&tx, id) else {
+            continue;
+        };
+        let mut values = logical.values().clone();
+        values.extend(renamed);
+        let replacement =
+            crate::db::circuit::context_store::ContextReplacement::with_values(values);
+        let applied = crate::db::circuit::context_store::apply_replacement(&tx, id, &replacement)?;
+        tx.execute(
+            "UPDATE autopilot_circuit_runs SET context_json = ?2 WHERE id = ?1",
+            params![id, applied.column_json()],
+        )?;
     }
     tx.commit()
 }
@@ -1918,9 +1972,11 @@ pub(crate) fn recover_circuit_agent_turn_inner(
     if state != "running" {
         return Ok(false);
     }
-    // The bulky half of the context lives in the side table (issue #2601);
-    // the view needs the whole of it to judge the step's evidence.
-    let Ok(context) = crate::db::circuit::artifacts::load_context(conn, fence.run_id) else {
+    // The view needs the whole of the run's context to judge the step's
+    // evidence.
+    let Ok(context) = crate::db::circuit::context_store::load_logical(conn, fence.run_id)
+        .map(|context| context.runtime())
+    else {
         return Ok(false);
     };
     let mut statement = conn.prepare("SELECT node_id,status,attempt,agent_node_id FROM autopilot_circuit_run_steps WHERE run_id=?1")?;

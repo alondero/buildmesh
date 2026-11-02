@@ -79,7 +79,14 @@ fn set_context(conn: &mut Connection, run: i64, pairs: &[(&str, &str)]) {
     for (key, value) in pairs {
         context.set(key, *value);
     }
-    commit_circuit_advance_locked(conn, run, None, Some(&context.to_json().unwrap()), &[]).unwrap();
+    commit_circuit_advance_locked(
+        conn,
+        run,
+        None,
+        Some(&crate::db::circuit::context_store::ContextChange::from_context(&context)),
+        &[],
+    )
+    .unwrap();
 }
 
 fn only(conn: &Connection) -> NodeCircuitRun {

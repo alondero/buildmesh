@@ -309,13 +309,15 @@ pub(super) fn pin_graph(db: &Connection, run_id: i64) -> SqlResult<()> {
     if inserted == 0 {
         return Ok(());
     }
-    let (graph, context): (String, String) = db.query_row("SELECT s.graph_json,r.context_json FROM circuit_run_snapshots s JOIN autopilot_circuit_runs r ON r.id=s.run_id WHERE r.id=?1", [run_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
-    // The launch plans live in the bulky half of the run's context, so the pin
-    // reads both halves: a plan that only exists in the side table would pin
-    // no reviewer at all.
-    let stored = super::artifacts::load_values(db, run_id)?;
-    let context = super::artifacts::merge_values(&context, &stored);
-    let reviewers: Vec<serde_json::Value> = context.iter().filter_map(|(key, value)| {
+    let graph: String = db.query_row(
+        "SELECT s.graph_json FROM circuit_run_snapshots s WHERE s.run_id=?1",
+        [run_id],
+        |row| row.get(0),
+    )?;
+    // The launch plans live in the run's context, so the pin reads the whole
+    // context: a plan that is not in the column is still part of it.
+    let context = super::context_store::load_logical_best_effort(db, run_id)?;
+    let reviewers: Vec<serde_json::Value> = context.values().iter().filter_map(|(key, value)| {
         let node_id = key.strip_prefix("review.launch.")?;
         let plan: crate::preferences::spawn_configurations::SpawnConfiguration = serde_json::from_str(value).ok()?;
         // Explicit allowlist: launch arguments, environment, endpoints and prompts
@@ -497,14 +499,26 @@ pub(super) fn revision_moved(db: &Connection, run_id: i64, expected: i64) -> Sql
     )
 }
 
-pub fn observation_revision(run: &crate::models::AutopilotCircuitRun) -> SqlResult<i64> {
+/// The history revision of a run, when the run's stored context is still the
+/// one the caller loaded.
+///
+/// The caller's freshness token is the revision of the stored context it
+/// read. The revision fingerprints the whole stored context, so a change to
+/// the decision-relevant half or to the bulky half both move it: an
+/// observation taken against a context that moved on is stale.
+///
+/// A run that has moved to another state is stale in the same way: the
+/// caller's view of the run no longer holds.
+pub fn observation_revision(
+    run_id: i64,
+    state: &str,
+    expected: &super::context_store::ContextRevision,
+) -> SqlResult<i64> {
     let db = crate::db::read_conn()?;
-    db.query_row(
-        "SELECT (SELECT COALESCE(MAX(id),0) FROM circuit_run_history WHERE run_id=r.id)
-        FROM autopilot_circuit_runs r WHERE r.id=?1 AND r.context_json=?2 AND r.state=?3",
-        params![run.id, run.context_json, run.state],
-        |r| r.get(0),
-    )
+    // No rows, the way a moved context has always read: the caller treats
+    // it as a stale observation.
+    super::context_store::revision_if_unchanged(&db, run_id, state, expected)?
+        .ok_or(rusqlite::Error::QueryReturnedNoRows)
 }
 
 #[cfg(test)]

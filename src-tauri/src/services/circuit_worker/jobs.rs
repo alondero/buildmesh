@@ -303,7 +303,9 @@ impl RecoveryTarget {
                     run_id: run.id,
                     state: RunState::from_db_str(&run.state),
                     graph: super::CircuitGraph::from_json(&active.circuit_graph_json).ok()?,
-                    context: crate::db::circuit::artifacts::load_run_context(run.id).ok()?,
+                    context: crate::db::circuit::context_store::load_logical_run(run.id)
+                        .ok()?
+                        .runtime(),
                     steps: super::load_steps(self.run).ok()?,
                 })
             },
@@ -440,7 +442,7 @@ pub(super) fn verify(
     }
 }
 
-#[cfg(test)]
+#[cfg(test)] // allow-test-in-production: this inline suite predates the sibling-test-file rule; issue #2672 only changes how the recovery view reads the run's context, so moving the suite is out of scope.
 mod tests {
     use super::*;
     use std::sync::mpsc;
@@ -457,7 +459,7 @@ mod tests {
     }
 
     fn borrowed_recovery_view(run_id: i64) -> RunView {
-        let mut context = super::super::CircuitContext::new();
+        let mut context = crate::circuit::context::CircuitContext::new();
         context.set("source.agent_id", "77");
         RunView {
             run_id,

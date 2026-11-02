@@ -189,7 +189,7 @@ pub(crate) fn push_step_locked(
         &tx,
         run.id,
         None,
-        Some(&view.context.to_json()?),
+        Some(&crate::db::circuit::context_store::ContextChange::from_context(&view.context)),
         &[super::CircuitStepOp {
             node_id: step.node_id.clone(),
             status: "completed".into(),

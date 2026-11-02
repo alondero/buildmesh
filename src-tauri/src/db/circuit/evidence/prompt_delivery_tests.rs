@@ -384,7 +384,7 @@ fn manual_injection_keeps_the_turn_bound_across_its_successor_wait() {
             &db,
             1,
             None,
-            Some(&view.context.to_json().unwrap()),
+            Some(&crate::db::circuit::context_store::ContextChange::from_context(&view.context)),
             &ops,
         )
         .unwrap();

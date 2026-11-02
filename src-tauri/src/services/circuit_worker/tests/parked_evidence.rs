@@ -345,7 +345,7 @@ fn repeated_ticks_on_a_parked_gate_append_no_ledger_rows() {
             db,
             view.run_id,
             None,
-            &view.context.to_json().unwrap(),
+            &crate::db::circuit::context_store::ContextChange::from_context(&view.context),
             &ops,
             crate::db::circuit::evidence::EvidenceWrite {
                 classifications: &transition.classifications,
