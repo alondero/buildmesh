@@ -37,7 +37,7 @@ pub(crate) fn prepare(
     app_data_dir: Option<&Path>,
 ) -> Result<PreparedHandover, String> {
     if provider != Provider::Codex
-        || text.chars().count() <= crate::circuit::delivery::VISIBLE_PASTE_TEXT_LIMIT
+        || text.chars().count() <= crate::agent::prompt_delivery::VISIBLE_PASTE_TEXT_LIMIT
     {
         return Ok(PreparedHandover {
             prompt: text.to_string(),

@@ -37,6 +37,7 @@ pub(crate) mod managed_config;
 pub(crate) mod node_teardown;
 pub mod output;
 pub mod process;
+pub(crate) mod prompt_delivery;
 pub mod provider;
 pub mod provider_menu;
 pub mod sandbox;

@@ -76,6 +76,7 @@ export function frontendInScope(paths) {
 // `pathIncludeDrift` below, so a new `#[path]` fails the gate that runs on the
 // Rust diff itself, not only the one CI happens to run (review of PR #2232).
 export const RUST_PATH_INCLUDES = {
+  'src-tauri/src/circuit/evaluator_tests.rs': 'circuit::evaluator::tests',
   'src-tauri/src/db/circuit/recovery_tests.rs': 'db::circuit::recovery::tests',
   'src-tauri/src/db/circuit/review_rounds_tests.rs': 'db::circuit::review_rounds::tests',
   'src-tauri/src/agent/opencode_detection_tests.rs': 'agent::detection::opencode_detection_tests',
@@ -97,9 +98,13 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/agent/provider/adapters/mcode_tests.rs': 'agent::provider::adapters::mcode::tests',
   'src-tauri/src/agent/provider/adapters/opencode_tests.rs': 'agent::provider::adapters::opencode::child_session_tests',
   'src-tauri/src/agent/provider/adapters/perch_tests.rs': 'agent::provider::adapters::perch::tests',
-  'src-tauri/src/agent/spawn/startup_prompt_tests.rs': 'agent::spawn::startup_prompt::tests',
   'src-tauri/src/circuit/compatibility_tests.rs': 'circuit::compatibility::tests',
-  'src-tauri/src/circuit/delivery_tests.rs': 'circuit::delivery::tests',
+  'src-tauri/src/agent/prompt_delivery_tests.rs': 'agent::prompt_delivery::tests',
+  'src-tauri/src/agent/prompt_delivery/prefill_tests.rs': 'agent::prompt_delivery::prefill_tests',
+  'src-tauri/src/agent/prompt_delivery/operation_tests.rs': 'agent::prompt_delivery::operation_tests',
+  // The installed-harness smoke is opt-in; scoped checks also run executable
+  // operation coverage instead of selecting an ignored-only test module.
+  'src-tauri/src/agent/prompt_delivery/conpty_tests.rs': 'agent::prompt_delivery',
   'src-tauri/src/circuit/observation_tests.rs': 'circuit::observation::owned_work_tests',
   'src-tauri/src/circuit/vocabulary_tests.rs': 'circuit::vocabulary::tests',
   'src-tauri/src/commands/git_status_bench.rs': 'commands::git_tests',
@@ -235,6 +240,8 @@ export const RUST_SIBLING_TESTS = {
 // Private implementations keep their contract tests at the owning facade.
 // Map them explicitly so editing an extracted child still executes that suite.
 export const RUST_IMPLEMENTATION_TESTS = {
+  'src-tauri/src/agent/prompt_delivery/observation.rs': 'agent::prompt_delivery',
+  'src-tauri/src/agent/spawn/startup_prompt.rs': 'agent::prompt_delivery',
   'src-tauri/src/agent/provider/adapters/opencode2/config.rs': 'agent::provider::adapters::opencode2',
   'src-tauri/src/agent/process/input.rs': 'agent::process',
   'src-tauri/src/agent/process/registry.rs': 'agent::process',

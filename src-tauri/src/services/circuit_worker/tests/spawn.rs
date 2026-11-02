@@ -74,6 +74,31 @@ fn circuit_empty_first_turn_stays_fresh() {
     );
 }
 
+#[test]
+fn initial_delivery_sees_command_cancellation_before_durable_state_changes() {
+    let _db = db::test_support::isolated();
+    let mesh = db::create_mesh("prompt cancellation", ".").unwrap();
+    let graph = CircuitGraph::walking_skeleton("work");
+    let circuit = db::create_autopilot_circuit(
+        mesh.id,
+        "prompt cancellation",
+        "",
+        &graph.to_json().unwrap(),
+    )
+    .unwrap();
+    let run = db::create_circuit_run(circuit.id, mesh.id, "manual", "{}").unwrap();
+    db::set_circuit_run_state(run, "running").unwrap();
+    let cancellation = begin_circuit_effect_batch(run);
+    assert!(super::spawn::initial_delivery_current(run, &cancellation, None).unwrap());
+    mark_circuit_run_cancelled(run);
+    assert!(
+        run_accepts_effects(run).unwrap(),
+        "the command is still waiting for spawn quiescence"
+    );
+    assert!(!super::spawn::initial_delivery_current(run, &cancellation, None).unwrap());
+    finish_circuit_run_cancellation(run);
+}
+
 /// A node-authored `provider: Some("codex")` flows through into the
 /// row column AND into the resolved Provider the capability mask uses.
 /// Without this seam the worker would never honour a per-step

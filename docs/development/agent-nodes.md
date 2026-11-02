@@ -248,6 +248,52 @@ The `branch` field on `AgentNode` (see Rust doc comment at `src-tauri/src/models
 
 ## Agent Process Architecture
 
+### Automated prompt delivery (issue #2674)
+
+`agent::prompt_delivery::deliver` owns automated prompt readiness, guarded
+staging, paste settling and bounded Enter attempts. Callers supply prepared
+text, delivery mode, a process/input stamp and an explicit observation
+requirement. A caller can also supply its durable ownership check; delivery
+rechecks ownership before queue retries and Enter retries. Process replacement
+and human input supersede the request. A refused queue write can be retried;
+an uncertain staged prompt is never pasted again by this operation.
+
+The observable profiles below preserve the pre-refactor execution paths:
+
+| Caller / mode | Readiness and deadline | Submission and cancellation |
+|---|---|---|
+| Ordinary first turn without CLI prefill | Adapter ready marker plus 1.5s quiet; best effort at 45s | Timed 1s paste gap, one unobserved Enter; launch input stamp fences user input and process replacement |
+| Circuit first turn without CLI prefill | Adapter ready marker, 300s deadline; no best-effort fallback | Required adapter paste evidence and bounded acknowledgement; initial attempt fence plus process/input stamp |
+| Staged CLI prefill | Distinctive rendered head/tail marker plus 1.5s quiet, 300s deadline | No second paste; guarded Enter and bounded acknowledgement |
+| Auto-submitted CLI prompt | Launch owns submission | No additional Enter; launch is not observed acceptance |
+| Ordinary handover | Live process and available input ownership | Timed paste gap and one unobserved Enter; accepted file pointers retain their files if submission is uncertain |
+| Circuit later turn, continuation or nudge | Live process, caller's durable dispatch claim | Required adapter paste evidence and bounded acknowledgement; the worker maps the result into its checkpoint/effect journal |
+
+The result keeps progress (`NotStaged`, `TextStaged`, `EnterSent`,
+`EnterAcknowledged`, `AcceptanceObserved`, or `AutoSubmitted`) separate from why delivery stopped:
+superseded ownership, process exit, unverified evidence, or transport failure.
+An Enter write is not acceptance. `EnterAcknowledged` reports fresh PTY
+output, which can include a redraw; `AcceptanceObserved` requires Muse's
+matching session receipt. Circuit mapping preserves the existing required
+acknowledgement policy. Neither result proves turn completion or approval.
+Circuit callers retain canonical payloads and submission digests and own
+checkpoint progression. Ordinary callers own attention feedback.
+
+Each process owns a 16,000-byte bounded output observation. Its reader feeds
+that instance, so a retired reader cannot add output to a replacement's
+delivery proof. Readiness and submission do not consult Circuit evaluator
+membership. The evaluator keeps its separate classification tail and turn
+boundaries. [PTY input](terminals.md#pty-input) documents raw keystrokes and the
+canonical/transport/rendered text distinction.
+
+Scripted operation tests in `agent/prompt_delivery/operation_tests.rs` use a
+controlled clock and output/input events. Existing paste/count regression names
+moved from `circuit::delivery::tests` to `agent::prompt_delivery::tests`; prefill
+predicate tests moved to `agent::prompt_delivery::prefill_tests`. The broad
+`agent::` shard owns these tests, and `scripts/harness-check.mjs` maps their
+sibling files and private implementation to that owner. Mock output does not
+establish real ConPTY or harness acceptance.
+
 ### Provider-binary preflight (issue #823)
 `agent::spawn::preflight::ensure_spawn_binary` runs at the top of the launch phase, **before** the PTY opens, and resolves the executable the spawn is about to dispatch. A miss becomes a structured `provider-error` toast naming the harness and the remediation; the terminal is never opened, so a missing CLI no longer surfaces as `'claude' is not recognized` scrolled inside PTY output the user has to read to diagnose.
 

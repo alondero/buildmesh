@@ -7,7 +7,7 @@
 
 use tauri::{AppHandle, Emitter};
 
-use crate::circuit::delivery::PreparedPrompt;
+use crate::agent::prompt_delivery::PreparedPrompt;
 use crate::circuit::stepper::{CircuitEvent, Effect, EffectJournal, RunState, RunView};
 use crate::db;
 use crate::models::{AgentNode, EnvType, SessionStatus};
@@ -68,6 +68,7 @@ pub(super) trait EffectHost {
         &self,
         prepared: &PreparedPrompt,
         expected_input: Option<&str>,
+        still_current: &dyn Fn() -> Result<bool, String>,
     ) -> Result<bool, String>;
     fn agent_alive(&self, agent_id: i64) -> bool;
     fn millis_since_last_output(&self, agent_id: i64) -> Option<u128>;
@@ -133,13 +134,26 @@ impl EffectHost for AppEffectHost<'_> {
         &self,
         prepared: &PreparedPrompt,
         expected_input: Option<&str>,
+        still_current: &dyn Fn() -> Result<bool, String>,
     ) -> Result<bool, String> {
-        crate::circuit::delivery::write_prompt_to_pty_guarded(
+        let node = crate::db::get_agent_node_by_id(prepared.node_id())
+            .map_err(|error| error.to_string())?;
+        let provider = crate::preferences::resolve_harness_provider(&node.provider);
+        let outcome = crate::agent::prompt_delivery::deliver(
             &crate::agent::process::PROCESS_REGISTRY,
-            prepared,
-            self.app,
-            expected_input,
-        )
+            provider.adapter(),
+            crate::agent::prompt_delivery::DeliveryRequest {
+                prompt: prepared,
+                mode: crate::agent::prompt_delivery::DeliveryMode::LaterTurn,
+                observation: crate::agent::prompt_delivery::ObservationRequirement::Required,
+                expected_input,
+                still_current,
+            },
+        );
+        if outcome.stop == Some(crate::agent::prompt_delivery::DeliveryStop::Superseded) {
+            return Ok(false);
+        }
+        outcome.require_acknowledgement().map(|()| true)
     }
 
     fn agent_alive(&self, agent_id: i64) -> bool {
@@ -644,7 +658,12 @@ fn dispatch_effects_with(
                                 let input = host.input_stamp(target).ok_or(
                                     "Terminal input is already owned; prompt was not sent",
                                 )?;
-                                host.write_prompt(&prepared, Some(&input))
+                                host.write_prompt(&prepared, Some(&input), &|| {
+                                    if effect_batch.is_cancelled() {
+                                        return Ok(false);
+                                    }
+                                    super::run_accepts_effects(active.run.id)
+                                })
                             },
                             || {
                                 db::circuit::evidence::acknowledge_prompt_delivery(
@@ -809,7 +828,12 @@ fn dispatch_effects_with(
                 )
                 .map_err(|e| e.to_string())?;
                 view.context.set("evidence.revision", revision.to_string());
-                match host.write_prompt(&prepared, Some(&expected)) {
+                match host.write_prompt(&prepared, Some(&expected), &|| {
+                    if effect_batch.is_cancelled() {
+                        return Ok(false);
+                    }
+                    super::run_accepts_effects(active.run.id)
+                }) {
                     Ok(true) => {
                         let _ =
                             db::update_agent_node_status(*target_agent_id, SessionStatus::Running);
@@ -1016,7 +1040,12 @@ fn dispatch_effects_with(
                         continue;
                     }
                 }
-                match host.write_prompt(&prepared, Some(&expected)) {
+                match host.write_prompt(&prepared, Some(&expected), &|| {
+                    if effect_batch.is_cancelled() {
+                        return Ok(false);
+                    }
+                    super::run_accepts_effects(active.run.id)
+                }) {
                     Ok(true) => {
                         let _ =
                             db::update_agent_node_status(*target_agent_id, SessionStatus::Running);

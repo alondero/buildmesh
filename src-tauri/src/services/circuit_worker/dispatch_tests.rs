@@ -92,6 +92,7 @@ impl EffectHost for FakeHost {
         &self,
         prepared: &PreparedPrompt,
         expected_input: Option<&str>,
+        _still_current: &dyn Fn() -> Result<bool, String>,
     ) -> Result<bool, String> {
         self.note_external();
         self.prompts.borrow_mut().push(RecordedPrompt {
