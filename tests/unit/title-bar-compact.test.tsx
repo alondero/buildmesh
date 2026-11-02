@@ -270,6 +270,18 @@ describe('below 1440px: one labelled View selector', () => {
 });
 
 describe('folded utilities return focus to More when their modal closes (#2421 review)', () => {
+  it('names overflow destinations without permanent descriptions and keeps useful help', async () => {
+    await renderAt(900);
+    const panel = openMore();
+    expect(within(panel).getByRole('button', { name: 'Settings', exact: true }).textContent).toBe('Settings');
+    expect(within(panel).getByRole('button', { name: 'Mobile remote access', exact: true }).textContent).toBe('Mobile remote access');
+    const changes = within(panel).getByRole('button', { name: 'Agent Changes', exact: true });
+    expect(changes.textContent).toBe('Agent Changes');
+    expect(changes.getAttribute('aria-description')).toBe('Review what the focused agent changed');
+    expect(panel.textContent).not.toContain('Buildmesh-wide defaults');
+    expect(panel.textContent).not.toContain('Connect your phone to this workspace');
+  });
+
   it('records the More trigger as the focus target when Settings opens from the panel', async () => {
     await renderAt(1280);
     const more = screen.getByRole('button', { name: 'More tools' });
