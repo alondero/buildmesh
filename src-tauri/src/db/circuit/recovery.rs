@@ -1,11 +1,8 @@
 //! Review extensions borrow the retained implementation agent and reuse its
 //! Circuit Run. Earlier findings and replaced graph snapshots remain archived.
 
+use crate::circuit::model::{CircuitGraph, CircuitNodeKind};
 use crate::circuit::stepper::{resolve_target_agent, StepStatus, StepView};
-use crate::circuit::{
-    context::CircuitContext,
-    model::{CircuitGraph, CircuitNodeKind},
-};
 use crate::db::DbError;
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -99,9 +96,8 @@ fn retained_reviewer_inner(db: &Connection, run_id: i64) -> Result<Option<i64>, 
 
 fn is_review_extension(state: &str, context_json: &str) -> bool {
     matches!(state, "pending" | "running" | "paused" | "completed")
-        && CircuitContext::from_json(context_json)
-            .ok()
-            .is_some_and(|context| context.get("review.extended") == Some("1"))
+        && super::context_store::StoredContext::of_column(context_json).get("review.extended")
+            == Some("1")
 }
 
 pub fn existing_review_target(run_id: i64) -> Result<Option<i64>, DbError> {
@@ -178,7 +174,7 @@ pub(crate) fn review_recovery_inner(
             "Only failed reviews can be continued. Open the active run to resume or cancel it.",
         ));
     }
-    let context = super::artifacts::load_context(db, run_id)?;
+    let context = super::context_store::load_logical(db, run_id)?.runtime();
     let original = super::evidence::run_graph(db, run_id)?;
     let steps = super::ledger::list_circuit_run_steps_inner(db, run_id)?;
     let (source_id, local) = review_source_id(&run, &original, &steps)?;
@@ -445,7 +441,7 @@ pub(crate) fn extend_failed_review_locked(
     let next_attempt = last_attempt
         .checked_add(1)
         .ok_or_else(|| DbError::conflict("Review round limit reached."))?;
-    let context = CircuitContext::from_json(&run.context_json)?;
+    let context = super::context_store::StoredContext::strict_of_column(&run.context_json)?;
     let prior_limit = context
         .get("review.round_limit")
         .and_then(|value| value.parse::<i32>().ok())
@@ -489,7 +485,7 @@ pub(crate) fn extend_failed_review_locked(
         }
         let current = super::ledger::get_circuit_run_inner(&tx, root)?
             .ok_or_else(|| DbError::conflict("Review lineage is incomplete."))?;
-        let context = CircuitContext::from_json(&current.context_json)?;
+        let context = super::context_store::StoredContext::strict_of_column(&current.context_json)?;
         match context
             .get("recovery.from_run_id")
             .and_then(|id| id.parse::<i64>().ok())
@@ -505,20 +501,24 @@ pub(crate) fn extend_failed_review_locked(
         [root_run.circuit_id],
         |row| row.get(0),
     )?;
-    let mut context = super::artifacts::load_context_map(&tx, target)?;
-    context.retain(|key, _| {
-        !key.starts_with("node.") && !key.starts_with("evidence.") && key != "cleanup.pending"
-    });
-    context.insert("retry.attempt".into(), next_attempt.to_string());
-    context.insert("retry.max_retries".into(), next_limit.to_string());
-    context.insert("review.round_limit".into(), next_limit.to_string());
-    context.insert("review.extended".into(), "1".into());
+    // The extension keeps the run's trigger context but starts the
+    // reviewer's working state afresh: the node-scoped and evidence-scoped
+    // values go with it (issue #2601). The values the extension does keep —
+    // the source's report, the trigger body — stay.
+    let mut mutation = super::context_store::ContextMutation::new();
+    mutation.reset(super::context_store::ContextScope::segment("node"));
+    mutation.reset(super::context_store::ContextScope::segment("evidence"));
+    mutation.remove("cleanup.pending");
+    mutation.put("retry.attempt", next_attempt.to_string());
+    mutation.put("retry.max_retries", next_limit.to_string());
+    mutation.put("review.round_limit", next_limit.to_string());
+    mutation.put("review.extended", "1");
     if run.source_agent_node_id.is_none() {
-        context.insert("review.source_was_circuit_owned".into(), "1".into());
+        mutation.put("review.source_was_circuit_owned", "1");
     }
-    context.insert("circuit.id".into(), root_run.circuit_id.to_string());
-    context.insert("circuit.name".into(), circuit_name);
-    context.insert("source.agent_id".into(), recovery.source_id.to_string());
+    mutation.put("circuit.id", root_run.circuit_id.to_string());
+    mutation.put("circuit.name", circuit_name);
+    mutation.put("source.agent_id", recovery.source_id.to_string());
     let graph_json = recovery.graph.to_json()?;
     use sha2::Digest;
     let graph_sha256 = hex::encode(sha2::Sha256::digest(graph_json.as_bytes()));
@@ -567,18 +567,13 @@ pub(crate) fn extend_failed_review_locked(
         tx.execute("INSERT INTO autopilot_circuit_run_steps (run_id,node_id,status,attempt) VALUES (?1,'reviewer','pending_slot',?2)",
             params![target, next_attempt])?;
     }
-    // The extension keeps the run's trigger context but starts the reviewer's
-    // working state afresh, so the node-scoped bulky values go with it
-    // (issue #2601). The values the extension does keep — the source's report,
-    // the trigger body — stay in the side table and in the column.
-    super::artifacts::delete_values_with_prefix(&tx, target, "node")?;
-    super::artifacts::delete_values_with_prefix(&tx, target, "evidence")?;
-    let context_json =
-        super::artifacts::write_context(&tx, target, &serde_json::to_string(&context)?)?;
+    // The scoped resets clear the reviewer's working state in both halves
+    // of the storage: a leftover value would come back on the next read.
+    let applied = super::context_store::apply_mutation(&tx, target, &mutation)?;
     tx.execute("UPDATE autopilot_circuit_runs SET circuit_id=?2, source_agent_node_id=?3, state='pending',
         context_json=?4, queue_position=(SELECT COALESCE(MAX(queue_position),0)+1 FROM autopilot_circuit_runs WHERE mesh_id=?5),
         updated_at=datetime('now') WHERE id=?1 AND state='failed'",
-        params![target, root_run.circuit_id, recovery.source_id, context_json, run.mesh_id])
+        params![target, root_run.circuit_id, recovery.source_id, applied.column_json(), run.mesh_id])
         ?;
     super::evidence::append_history(&tx, super::evidence::HistoryEvent {
         run_id: target,

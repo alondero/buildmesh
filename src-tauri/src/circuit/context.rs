@@ -16,15 +16,35 @@
 //! templating is the hand-rolled placeholder substitution in
 //! `circuit::finish::render`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Namespaced template context for one run. A `BTreeMap<String, String>`
 /// with dotted keys is the whole model; builders below populate the
 /// namespaces so call sites never hand-assemble `"circuit.run_id"`.
-#[derive(Debug, Clone, Default, PartialEq)]
+///
+/// The context also remembers which keys it removed. A removal is a fact
+/// about the run's context, not only about this map: the value is gone from
+/// the map, and the persistence seam has to learn that too, or a value that
+/// lives in the bulky half of the storage comes back on the next read. The
+/// ledger is that intent — it is pure data, and it never reaches the
+/// rendered context.
+#[derive(Debug, Clone, Default)]
 pub struct CircuitContext {
     vars: BTreeMap<String, String>,
     runtime_lifecycle_blockers: BTreeMap<String, String>,
+    /// The keys this context removed, so the seam can apply the removal to
+    /// the storage half the map does not hold.
+    removed: BTreeSet<String>,
+}
+
+impl PartialEq for CircuitContext {
+    fn eq(&self, other: &Self) -> bool {
+        // The removal ledger is intent, not state. Two contexts hold the
+        // same values when their values match, whatever they removed along
+        // the way.
+        self.vars == other.vars
+            && self.runtime_lifecycle_blockers == other.runtime_lifecycle_blockers
+    }
 }
 
 /// The pull request a run was triggered by: the fields the `pr.*` namespace
@@ -48,6 +68,9 @@ impl CircuitContext {
     /// Set one dotted path.
     pub fn set(&mut self, path: &str, value: impl Into<String>) {
         self.vars.insert(path.to_string(), value.into());
+        // A value that is set again is present, not removed: the removal
+        // intent dies with the value.
+        self.removed.remove(path);
     }
 
     pub fn get(&self, path: &str) -> Option<&str> {
@@ -55,8 +78,26 @@ impl CircuitContext {
     }
 
     /// Drop one dotted path.
+    ///
+    /// The removal is recorded: the value is gone from this context, and the
+    /// persistence seam has to learn that as well, or a value the map does
+    /// not hold comes back on the next read.
     pub fn remove(&mut self, path: &str) {
         self.vars.remove(path);
+        self.removed.insert(path.to_string());
+    }
+
+    /// The values this context holds.
+    pub fn values(&self) -> &BTreeMap<String, String> {
+        &self.vars
+    }
+
+    /// The keys this context removed since it was loaded.
+    ///
+    /// A key that was removed and then set again is not in the ledger: it is
+    /// present.
+    pub fn removed(&self) -> impl Iterator<Item = &str> {
+        self.removed.iter().map(String::as_str)
     }
 
     /// Attach lifecycle evidence to this in-memory view. These projections
@@ -269,15 +310,27 @@ impl CircuitContext {
 
     /// Parse back from `context_json`.
     pub fn from_json(json: &str) -> Result<Self, String> {
-        let mut vars: BTreeMap<String, String> =
+        let vars: BTreeMap<String, String> =
             serde_json::from_str(json).map_err(|e| format!("invalid context_json: {}", e))?;
+        Ok(Self::from_values(vars))
+    }
+
+    /// Build a context from a map of values.
+    ///
+    /// The values are the run's context. A lifecycle blocker among them is
+    /// runtime state rather than context — it is a live veto projected onto
+    /// the run while an agent is blocked — so it is dropped here, the same
+    /// way [`CircuitContext::from_json`] drops it.
+    pub fn from_values(values: BTreeMap<String, String>) -> Self {
+        let mut vars = values;
         // Older builds could accidentally persist a recovery-view projection.
         // Drop it on load so a settled lifecycle report releases that veto.
         vars.retain(|key, _| !is_lifecycle_blocker_key(key));
-        Ok(Self {
+        Self {
             vars,
             runtime_lifecycle_blockers: BTreeMap::new(),
-        })
+            removed: BTreeSet::new(),
+        }
     }
 
     /// Resolve every `{{ path }}` placeholder in `template` against this

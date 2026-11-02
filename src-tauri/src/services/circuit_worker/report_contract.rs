@@ -156,9 +156,10 @@ pub(super) fn interpretation(
     result(view, node_id, output).unwrap_or(Some(Classification::Blocked))
 }
 
-#[cfg(test)]
+#[cfg(test)] // allow-test-in-production: this inline suite predates the sibling-test-file rule; issue #2672 only moves the context import into it, so moving the suite is out of scope.
 mod tests {
     use super::*;
+    use crate::circuit::context::CircuitContext;
 
     #[test]
     fn issue_handoffs_dispatch_and_interpret_without_inference() {

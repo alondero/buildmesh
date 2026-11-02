@@ -351,13 +351,12 @@ pub(crate) fn recover_failed_run_locked(
         .ok_or_else(|| DbError::not_found("The step is no longer in this blueprint."))?;
 
     // The failed step's own working state is cleared so it is judged afresh;
-    // every other step and every earlier history entry is kept. The bulky half
-    // of the context lives in the side table (issue #2601), so the read joins
-    // the two halves and the write splits them again.
-    let mut context = super::artifacts::load_context_map(&tx, run.id)?;
-    let own_prefix = format!("node.{}.", request.node_id);
-    context.retain(|key, _| !key.starts_with(&own_prefix));
-    context.insert("operator.recovered".into(), "1".into());
+    // every other step and every earlier history entry is kept. The reset is
+    // scoped to the node, so the step's small and bulky working state both
+    // go and its siblings stay.
+    let mut mutation = super::context_store::ContextMutation::new();
+    mutation.reset(super::context_store::ContextScope::node(&request.node_id));
+    mutation.put("operator.recovered", "1");
 
     match request.action {
         RecoveryAction::Retry => {
@@ -412,10 +411,7 @@ pub(crate) fn recover_failed_run_locked(
                  WHERE run_id = ?1 AND node_id = ?2",
                 params![run.id, request.node_id],
             )?;
-            context.insert(
-                format!("node.{}.status", request.node_id),
-                "completed".into(),
-            );
+            mutation.put(format!("node.{}.status", request.node_id), "completed");
             let detail = if reason.is_empty() {
                 "Operator recorded this step as completed.".to_string()
             } else {
@@ -448,19 +444,18 @@ pub(crate) fn recover_failed_run_locked(
             format!("{CIRCUIT_SWEEP_NOTE_PREFIX}%")
         ],
     )?;
-    // The cleared node's bulky values go with the column's copy of them: a
-    // leftover row would come back on the next read and the recovered step
-    // would judge the evidence it was asked to judge afresh.
-    super::artifacts::delete_node_values(&tx, run.id, &request.node_id)?;
-    let context_json =
-        super::artifacts::write_context(&tx, run.id, &serde_json::to_string(&context)?)?;
+    // The scoped reset clears the node's working state in both halves of
+    // the storage: a leftover value would come back on the next read and
+    // the recovered step would judge the evidence it was asked to judge
+    // afresh.
+    let applied = super::context_store::apply_mutation(&tx, run.id, &mutation)?;
     tx.execute(
         "UPDATE autopilot_circuit_runs
          SET state = 'pending', context_json = ?2, updated_at = datetime('now'),
              queue_position = (SELECT COALESCE(MAX(queue_position), 0) + 1
                                FROM autopilot_circuit_runs WHERE mesh_id = ?3)
          WHERE id = ?1 AND state = 'failed'",
-        params![run.id, context_json, run.mesh_id],
+        params![run.id, applied.column_json(), run.mesh_id],
     )?;
     Ok(tx.commit()?)
 }

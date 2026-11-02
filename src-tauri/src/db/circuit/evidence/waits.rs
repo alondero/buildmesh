@@ -72,20 +72,18 @@ pub(super) fn record_queue_wait_locked(
 }
 
 /// Record changes to the persisted evidence window alongside its projection.
+///
+/// The comparison is between the run's logical context before the change and
+/// the one after it, so a wait the store happens to keep in one half of the
+/// storage reads the same as a wait it keeps in the other.
 pub(in crate::db::circuit) fn record_wait_changes(
     db: &Connection,
     run_id: i64,
-    next_context: &str,
+    before: &super::super::context_store::LogicalContext,
+    after: &super::super::context_store::LogicalContext,
 ) -> SqlResult<()> {
-    let previous: String = db.query_row(
-        "SELECT context_json FROM autopilot_circuit_runs WHERE id=?1",
-        [run_id],
-        |row| row.get(0),
-    )?;
-    let previous: std::collections::BTreeMap<String, String> =
-        serde_json::from_str(&previous).unwrap_or_default();
-    let next: std::collections::BTreeMap<String, String> =
-        serde_json::from_str(next_context).unwrap_or_default();
+    let previous = before.values();
+    let next = after.values();
     let continuation_keys: std::collections::BTreeSet<&String> = previous
         .keys()
         .chain(next.keys())
@@ -245,8 +243,8 @@ pub(in crate::db::circuit) fn record_wait_changes(
         let project = |context: &std::collections::BTreeMap<String,String>| -> std::collections::BTreeMap<&str,Option<String>> {
             fields.iter().map(|field|(*field,context.get(&format!("{prefix}{field}")).cloned())).collect()
         };
-        let before = project(&previous);
-        let after = project(&next);
+        let before = project(previous);
+        let after = project(next);
         if before != after {
             // Identity survives a resolution: a cleared window writes an empty
             // attempt, so fall back to the prior window's attempt rather than

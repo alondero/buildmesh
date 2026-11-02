@@ -231,7 +231,9 @@ fn three_admitted_review_runs_of_one_circuit_all_start_their_first_step() {
             transition
                 .run_state_changed
                 .then_some(view.state.as_db_str()),
-            Some(&context),
+            Some(&crate::db::circuit::context_store::ContextChange::from(
+                crate::db::circuit::context_store::ContextReplacement::whole(&context),
+            )),
             &ops,
         )
         .unwrap();

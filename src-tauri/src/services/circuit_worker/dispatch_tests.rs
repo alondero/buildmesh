@@ -211,7 +211,7 @@ impl Scratch {
         db::circuit::evidence::commit_transition(
             run_id,
             Some("running"),
-            &context.to_json().unwrap(),
+            &crate::db::circuit::context_store::ContextChange::from_context(&context),
             &steps,
             EvidenceWrite {
                 intents,

@@ -1,7 +1,6 @@
 //! Live review allowance edits preserve every current step and the pinned graph.
 
 use crate::circuit::{
-    context::CircuitContext,
     model::{CircuitGraph, CircuitNodeKind},
     stepper::review_retry_gate,
 };
@@ -29,8 +28,16 @@ pub(crate) fn current_limit(
     }) else {
         return Ok(None);
     };
-    let context = CircuitContext::from_json(&run.context_json)
-        .map_err(rusqlite::Error::InvalidParameterName)?;
+    // The review budget is part of the decision-relevant half of the run's
+    // context, so this reads the stored view alone: the bulky half is not
+    // needed to answer the question, and the run row already holds the
+    // column, so nothing is asked of the database a second time.
+    //
+    // A payload that is not a flat map has no budget to read. The selector
+    // reports that rather than answering "no budget": a run whose context
+    // cannot be read must not look like a run that was never given one.
+    let context = super::context_store::StoredContext::strict_of_column(&run.context_json)
+        .map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
     if let Some(limit) = context
         .get("review.round_limit")
         .and_then(|value| value.parse::<i32>().ok())
@@ -76,9 +83,11 @@ pub fn set_review_round_limit(run_id: i64, max_rounds: i32) -> Result<String, Db
     {
         return Err(DbError::invalid("This run has no review retry loop."));
     }
-    let mut context = super::artifacts::load_context(&tx, run_id)?;
-    context.set("review.round_limit", limit.to_string());
-    context.set(
+    // The review budget is the only thing that changes: the rest of the
+    // run's context is left alone.
+    let mut mutation = super::context_store::ContextMutation::new();
+    mutation.put("review.round_limit", limit.to_string());
+    mutation.put(
         "retry.max_retries",
         if limit == 0 {
             "unlimited".into()
@@ -86,10 +95,10 @@ pub fn set_review_round_limit(run_id: i64, max_rounds: i32) -> Result<String, Db
             limit.to_string()
         },
     );
-    let context_json = super::artifacts::write_context(&tx, run_id, &context.to_json()?)?;
+    let applied = super::context_store::apply_mutation(&tx, run_id, &mutation)?;
     tx.execute(
         "UPDATE autopilot_circuit_runs SET context_json=?2, updated_at=datetime('now') WHERE id=?1",
-        params![run_id, context_json],
+        params![run_id, applied.column_json()],
     )?;
     // Advancing history invalidates any worker decision loaded before this edit.
     super::evidence::append_history(
