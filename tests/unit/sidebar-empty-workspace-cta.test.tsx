@@ -4,9 +4,8 @@
  * meshes yet" message, and the sticky footer "New mesh" button. A first-run
  * user saw both at once.
  *
- * The Sidebar now offers one mesh-creation CTA at a time: the inline
- * button while the workspace is empty, the persistent sticky footer once it
- * holds a mesh. The cases below pin that count in each state.
+ * First creation belongs to the canvas. The sidebar offers its persistent
+ * footer once the workspace holds a mesh.
  *
  * Mock shape follows `sidebar-mesh-bands.test.tsx`: the per-mesh
  * async hooks are pinned so no background fetch can move a row while the
@@ -43,8 +42,7 @@ const mesh = {
   sandbox: false,
 } as Mesh;
 
-/** Mesh-creation CTAs the Sidebar renders: the inline "+ New mesh" button
- *  and the sticky "New mesh" footer. */
+/** Mesh-creation CTAs rendered by the sidebar. */
 function meshCtas(): HTMLElement[] {
   return screen.queryAllByRole('button', { name: /new mesh/i });
 }
@@ -67,17 +65,12 @@ beforeEach(() => {
 afterEach(() => { cleanup(); });
 
 describe('Sidebar empty-workspace CTA (issue #2468)', () => {
-  it('shows one mesh-creation CTA on an empty workspace, and it opens the create modal', () => {
+  it('leaves first creation to the canvas on an empty workspace', () => {
     render(<Sidebar />);
 
-    // One CTA in the column — the inline one under the empty-state message.
-    const ctas = meshCtas();
-    expect(ctas).toHaveLength(1);
-    expect(ctas[0].textContent).toBe('+ New mesh');
-    expect(screen.getByText(/No meshes yet/)).toBeTruthy();
-
-    fireEvent.click(ctas[0]);
-    expect(useUIStore.getState().createMeshOpen).toBe(true);
+    expect(meshCtas()).toHaveLength(0);
+    expect(screen.queryByRole('separator', { name: 'Resize sidebar' })).toBeNull();
+    expect(screen.queryByText(/No meshes yet/)).toBeNull();
   });
 
   it('keeps the sticky footer CTA on a populated workspace', () => {
@@ -87,6 +80,7 @@ describe('Sidebar empty-workspace CTA (issue #2468)', () => {
     const ctas = meshCtas();
     expect(ctas).toHaveLength(1);
     expect(ctas[0].textContent).toBe('New mesh');
+    expect(screen.getByRole('separator', { name: 'Resize sidebar' })).toBeTruthy();
     // The empty-state message is gone with the mesh list.
     expect(screen.queryByText(/No meshes yet/)).toBeNull();
 
@@ -94,12 +88,11 @@ describe('Sidebar empty-workspace CTA (issue #2468)', () => {
     expect(useUIStore.getState().createMeshOpen).toBe(true);
   });
 
-  it('keeps one CTA when the first mesh arrives', () => {
+  it('adds the sidebar CTA when the first mesh arrives', () => {
     render(<Sidebar />);
-    expect(meshCtas()).toHaveLength(1);
+    expect(meshCtas()).toHaveLength(0);
 
-    // The first mesh swaps the inline CTA for the sticky footer: the count
-    // stays at one, and a CTA is still on screen.
+    // Subsequent creation belongs in the sidebar.
     act(() => {
       seedMeshes([mesh]);
     });

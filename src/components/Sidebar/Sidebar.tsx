@@ -134,13 +134,6 @@ export function Sidebar() {
   // `uiStore.createMeshOpen`), not here. The canvas empty state hits
   // the same action.
   const openCreateMesh = useUIStore((s) => s.openCreateMesh);
-  // Issue #2468 — the empty workspace renders its own "+ New mesh" CTA
-  // inline, directly under the "No meshes yet" message. The sticky
-  // footer rendered a second mesh-creation button in the same 256px
-  // column, so an empty workspace showed two CTAs in one place (issue
-  // #2468). The footer stands down while the inline CTA is showing, and
-  // returns once the workspace holds a mesh.
-  const inlineEmptyCtaVisible = meshes.length === 0;
   // Per-mesh "spawn in flight" set so the mesh row's `+ ▾` cluster shows
   // "Spawning…" and disables while `selectProviderForMesh` runs (an IPC
   // round-trip that includes worktree setup — seconds on a large repo).
@@ -320,6 +313,9 @@ export function Sidebar() {
     />
   );
 
+  // A new workspace has no list to navigate; keep first creation on the canvas.
+  if (meshes.length === 0) return null;
+
   return (
     <div className="relative flex h-full" style={{ width }}>
       <div
@@ -333,70 +329,41 @@ export function Sidebar() {
       />
 
       <div className="w-full bg-bg-surface border-r border-border-subtle flex flex-col h-full overflow-hidden">
-        {/* Meshes list — the Mesh Create modal itself is mounted at App.tsx
-            scope (driven by `uiStore.createMeshOpen`); the Sidebar's mesh
-            CTA (inline here when the workspace is empty, otherwise the
-            sticky footer) and the canvas empty state's "New mesh" CTA hit
-            the same `openCreateMesh` action. */}
+        {/* The canvas owns first creation; the sidebar owns subsequent additions. */}
         <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
           <div className="p-2">
-            {meshes.length === 0 ? (
-              <div className="flex flex-col items-center gap-3 px-2 py-8 text-center">
-                <p className="text-xs text-text-muted font-sans">
-                  No meshes yet. Add a repository to start orchestrating agents.
-                </p>
-                {/* Issue #2468 — this is the Sidebar's only mesh-creation CTA
-                    while the workspace is empty; the sticky footer stands
-                    down so the column never shows two of them. */}
-                <button
-                  type="button"
-                  onClick={openCreateMesh}
-                  className="px-3 py-1.5 text-xs font-medium text-accent-cyan bg-accent-cyan/10 hover:bg-accent-cyan/20 border border-accent-cyan/20 rounded-md transition-colors"
-                >
-                  + New mesh
-                </button>
-              </div>
-            ) : (
-              <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
-                <SortableContext items={sortableMeshIds} strategy={verticalListSortingStrategy}>
-                  {/* Issue #1939 — meshes with at least one open node form
-                      the top band; every other mesh follows below, dimmed,
-                      in manual drag order. The band carries no label: a
-                      mesh's position in the list is the affordance, so the
-                      list spends no vertical space on a heading that names
-                      what the ordering already shows. One scroll container
-                      throughout. */}
-                  {activeMeshes.length > 0
-                    ? (
-                      <>
-                        {activeMeshes.map(mesh => renderMeshRow(mesh, false))}
-                        {inactiveMeshes.map(mesh => renderMeshRow(mesh, true))}
-                      </>
-                    )
-                    : meshes.map(mesh => renderMeshRow(mesh, false))}
-                </SortableContext>
-              </DndContext>
-            )}
+            <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
+              <SortableContext items={sortableMeshIds} strategy={verticalListSortingStrategy}>
+                {/* Issue #1939 — meshes with at least one open node form
+                    the top band; every other mesh follows below, dimmed,
+                    in manual drag order. The band carries no label: a
+                    mesh's position in the list is the affordance, so the
+                    list spends no vertical space on a heading that names
+                    what the ordering already shows. One scroll container
+                    throughout. */}
+                {activeMeshes.length > 0
+                  ? (
+                    <>
+                      {activeMeshes.map(mesh => renderMeshRow(mesh, false))}
+                      {inactiveMeshes.map(mesh => renderMeshRow(mesh, true))}
+                    </>
+                  )
+                  : meshes.map(mesh => renderMeshRow(mesh, false))}
+              </SortableContext>
+            </DndContext>
           </div>
         </div>
 
-        {/* Add mesh — issue #2468. The empty workspace already shows a
-            "+ New mesh" button inline, right under the "No meshes yet"
-            message, so the sticky footer stands down there instead of
-            stacking a second mesh-creation CTA in the same column. The
-            footer returns as soon as the workspace holds a mesh. */}
-        {!inlineEmptyCtaVisible && (
-          <button
-            onClick={openCreateMesh}
-            className="w-full px-3 py-2.5 flex items-center justify-center gap-1.5 text-xs font-sans text-accent-cyan hover:text-accent-blue border-t border-dashed border-border-subtle hover:bg-bg-card/40 transition-colors"
-          >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="12" y1="5" x2="12" y2="19"/>
-              <line x1="5" y1="12" x2="19" y2="12"/>
-            </svg>
-            New mesh
-          </button>
-        )}
+        <button
+          onClick={openCreateMesh}
+          className="w-full px-3 py-2.5 flex items-center justify-center gap-1.5 text-xs font-sans text-accent-cyan hover:text-accent-blue border-t border-dashed border-border-subtle hover:bg-bg-card/40 transition-colors"
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"/>
+            <line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+          New mesh
+        </button>
       </div>
     </div>
   );
