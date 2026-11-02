@@ -22,9 +22,8 @@ use tauri::command;
 /// Compose the `ProviderInfo` (Spawn Option) row for a single harness profile on the
 /// current host platform. Pure (no disk / DB / globals) so unit tests can
 /// exercise the per-profile derivation — including the `resumable` flag —
-/// without touching the preferences module's `APP_DATA_DIR` / `CACHE`
-/// shared state (which is global per-process and would otherwise race
-/// against other tests).
+/// without reading any preferences state at all (the derivation reads the
+/// ambient store, which is a process-wide thing).
 ///
 /// Extracted from `available_providers` so the per-profile logic can be
 /// pinned without driving `harness_profiles()` (which reads from disk and
@@ -483,6 +482,16 @@ fn derived_menu_at(key: MenuKey, derive: impl FnOnce() -> Vec<ProviderInfo>) -> 
 /// stay off the async worker pool (issue #634).
 pub(crate) fn available_providers() -> Vec<ProviderInfo> {
     let snapshot = crate::preferences::snapshot_or_default();
+    derived_menu(snapshot, available_providers_with_preferences)
+}
+
+/// Explicit-store path — the caller owns the store.
+///
+/// A test constructs its own [`crate::preferences::PreferencesStore`] over a
+/// temporary directory and passes it here, so the preferences state this call
+/// sees is the one the caller set up (issue #1482).
+pub fn available_providers_from(store: &crate::preferences::PreferencesStore) -> Vec<ProviderInfo> {
+    let snapshot = crate::preferences::resolver::snapshot::snapshot_or_default_from(store);
     derived_menu(snapshot, available_providers_with_preferences)
 }
 
@@ -1067,6 +1076,23 @@ fn list_providers_blocking() -> Result<Vec<ProviderInfo>, String> {
     // IPC error this command documents; the memo then serves the rows a
     // derivation over that same snapshot would have produced.
     let snapshot = crate::preferences::load_snapshot()?;
+    Ok(derived_menu(snapshot, available_providers_with_preferences))
+}
+
+/// Explicit-store path — the caller owns the store.
+///
+/// A test constructs its own [`crate::preferences::PreferencesStore`] over a
+/// temporary directory and passes it here, so the preferences state this call
+/// sees is the one the caller set up (issue #1482). The read is the same one
+/// the command documents: an unreadable `preferences.json` still surfaces as
+/// the IPC error.
+#[cfg(test)]
+// allow-test-in-production: the store-scoped twin of the blocking command core, reached by the
+// sibling menu suite that owns a store (issue #1482).
+fn list_providers_blocking_from(
+    store: &crate::preferences::PreferencesStore,
+) -> Result<Vec<ProviderInfo>, String> {
+    let snapshot = crate::preferences::load_snapshot_from(store)?;
     Ok(derived_menu(snapshot, available_providers_with_preferences))
 }
 

@@ -541,7 +541,19 @@ where
 pub(crate) type NamingLaunch = crate::agent::background::BackgroundLaunch;
 
 pub(crate) fn naming_backend_env(provider: &str) -> Result<NamingLaunch, String> {
-    let prefs = crate::preferences::load()?;
+    let store = crate::preferences::ambient_store()?;
+    naming_backend_env_from(&store, provider)
+}
+
+/// [`naming_backend_env`] against an explicit store.
+///
+/// The caller owns the store, so the launch plan this resolves is the one the
+/// caller set up (issue #1482).
+pub(crate) fn naming_backend_env_from(
+    store: &crate::preferences::PreferencesStore,
+    provider: &str,
+) -> Result<NamingLaunch, String> {
+    let prefs = store.load()?;
     let plan =
         crate::preferences::launch_configurations::resolve(&prefs, provider, &Default::default())?;
     naming_backend_env_from_plan(plan, &prefs)

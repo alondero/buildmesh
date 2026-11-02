@@ -1,8 +1,13 @@
 //! Tests for the preferences snapshot — the one read a derivation consumes
 //! (issue #2532).
+//!
+//! Issue #1482: the suite constructs its own
+//! [`crate::preferences::store::PreferencesStore`] over a temporary directory
+//! (via the shared `with_store` fixture) and passes the handle into the code
+//! under test. No test swaps a process-wide current store.
 
 use super::*;
-use crate::preferences::tests::with_temp_dir;
+use crate::preferences::tests::with_store;
 
 /// The resolver accessors read through the snapshot, so the values they
 /// return and the snapshot's lists are the same values from the same read.
@@ -12,20 +17,20 @@ use crate::preferences::tests::with_temp_dir;
 /// derivation's snapshot.
 #[test]
 fn the_resolver_accessors_read_through_the_snapshot() {
-    with_temp_dir(|_| {
-        let snapshot = load_snapshot().expect("preferences read");
+    with_store(|store| {
+        let snapshot = load_snapshot_from(store).expect("preferences read");
         assert_eq!(
-            super::super::accounts::provider_accounts(),
+            super::super::accounts::provider_accounts_from(store),
             snapshot.accounts,
             "provider_accounts must be the snapshot's account list"
         );
         assert_eq!(
-            super::super::harness::harness_profiles(),
+            super::super::harness::harness_profiles_from(store),
             snapshot.harness_profiles,
             "harness_profiles must be the snapshot's profile list"
         );
         assert_eq!(
-            super::super::pairings::provider_pairings().as_slice(),
+            super::super::pairings::provider_pairings_from(store).as_slice(),
             snapshot.pairings(),
             "provider_pairings must be the snapshot's pairing list"
         );
@@ -37,9 +42,9 @@ fn the_resolver_accessors_read_through_the_snapshot() {
 /// another worker thread leaves this thread's count alone.
 #[test]
 fn the_snapshot_reads_preferences_exactly_once() {
-    with_temp_dir(|_| {
+    with_store(|store| {
         let before = crate::preferences::load_count();
-        let _snapshot = load_snapshot().expect("preferences read");
+        let _snapshot = load_snapshot_from(store).expect("preferences read");
         assert_eq!(
             crate::preferences::load_count() - before,
             1,

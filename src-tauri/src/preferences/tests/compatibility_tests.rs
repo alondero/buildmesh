@@ -1,13 +1,18 @@
 //! Tests for the compatibility layer — env translation and harness-default
 //! validation.
+//!
+//! Issue #1482: every test that touches preferences constructs its own
+//! [`super::super::store::PreferencesStore`] over a temporary directory (via
+//! the shared [`with_store`] fixture) and passes the handle into the code
+//! under test. No test swaps a process-wide current store.
 
 use super::super::compatibility::{
-    harness_default_for, normalize_harness_default, preflight_resolve_provider_env,
-    remove_harness_default, resolve_provider_env, upsert_harness_default, validate_harness_default,
+    harness_default_for, normalize_harness_default, preflight_resolve_provider_env_from,
+    remove_harness_default, resolve_provider_env_from, upsert_harness_default,
+    validate_harness_default,
 };
 use super::super::model::{HarnessConfigValue, ModelTiers, ProviderPairing};
-use super::super::store::{load, save};
-use super::with_temp_dir;
+use super::with_store;
 use crate::agent::provider::SpawnOptionId;
 use crate::preferences::ApiSurface;
 use crate::preferences::{AppPreferences, ProviderAccount};
@@ -16,13 +21,15 @@ use crate::preferences::{AppPreferences, ProviderAccount};
 fn preflight_pairing_env_passes_for_no_pairing() {
     // Re-implement the same pure logic via the public surface to keep
     // coverage parity with the original tests module.
-    let result = super::super::compatibility::preflight_resolve_provider_env("claude:minimax");
-    assert!(result.is_ok());
+    with_store(|store| {
+        let result = preflight_resolve_provider_env_from(store, "claude:minimax");
+        assert!(result.is_ok());
+    });
 }
 
 #[test]
 fn provider_account_env_injects_from_stored_claude_pairing() {
-    with_temp_dir(|_| {
+    with_store(|store| {
         let mut prefs = AppPreferences::default();
         prefs.provider_accounts.push(ProviderAccount {
             id: "minimax".to_string(),
@@ -39,8 +46,8 @@ fn provider_account_env_injects_from_stored_claude_pairing() {
             base_url: Some("https://api.minimax.io/anthropic".to_string()),
             model_tiers: ModelTiers::default(),
         });
-        save(prefs).unwrap();
-        let env = resolve_provider_env("minimax");
+        store.save(prefs).unwrap();
+        let env = resolve_provider_env_from(store, "minimax");
         let env_map: std::collections::HashMap<_, _> = env.into_iter().collect();
         assert_eq!(
             env_map.get("ANTHROPIC_AUTH_TOKEN").map(|s| s.as_str()),
@@ -55,7 +62,7 @@ fn provider_account_env_injects_from_stored_claude_pairing() {
 
 #[test]
 fn resolve_provider_env_reads_pairing_for_bare_id() {
-    with_temp_dir(|_| {
+    with_store(|store| {
         let mut prefs = AppPreferences::default();
         prefs.provider_accounts.push(ProviderAccount {
             id: "minimax".to_string(),
@@ -72,8 +79,8 @@ fn resolve_provider_env_reads_pairing_for_bare_id() {
             base_url: Some("https://api.minimax.io/anthropic".to_string()),
             model_tiers: ModelTiers::default(),
         });
-        save(prefs).unwrap();
-        let env = resolve_provider_env("minimax");
+        store.save(prefs).unwrap();
+        let env = resolve_provider_env_from(store, "minimax");
         assert!(
             env.iter()
                 .any(|(k, _)| k == "ANTHROPIC_BASE_URL" || k == "ANTHROPIC_AUTH_TOKEN"),
@@ -85,15 +92,15 @@ fn resolve_provider_env_reads_pairing_for_bare_id() {
 
 #[test]
 fn resolve_provider_env_empty_for_anthropic_default_and_unknown() {
-    with_temp_dir(|_| {
-        assert!(resolve_provider_env("anthropic").is_empty());
-        assert!(resolve_provider_env("totally-unknown").is_empty());
+    with_store(|store| {
+        assert!(resolve_provider_env_from(store, "anthropic").is_empty());
+        assert!(resolve_provider_env_from(store, "totally-unknown").is_empty());
     });
 }
 
 #[test]
 fn resolve_provider_env_proxies_minimax_via_codex_with_openai_vars() {
-    with_temp_dir(|_| {
+    with_store(|store| {
         let mut prefs = AppPreferences::default();
         prefs.provider_accounts.push(ProviderAccount {
             id: "minimax".to_string(),
@@ -110,8 +117,8 @@ fn resolve_provider_env_proxies_minimax_via_codex_with_openai_vars() {
             base_url: Some("https://api.minimax.io/v1".to_string()),
             model_tiers: ModelTiers::default(),
         });
-        save(prefs).unwrap();
-        let env = resolve_provider_env("codex:minimax");
+        store.save(prefs).unwrap();
+        let env = resolve_provider_env_from(store, "codex:minimax");
         let env_map: std::collections::HashMap<_, _> = env.into_iter().collect();
         assert_eq!(
             env_map.get("OPENAI_BASE_URL").map(|s| s.as_str()),
@@ -126,7 +133,7 @@ fn resolve_provider_env_proxies_minimax_via_codex_with_openai_vars() {
 
 #[test]
 fn resolve_provider_env_composite_without_stored_pairing_is_empty() {
-    with_temp_dir(|_| {
+    with_store(|store| {
         let mut prefs = AppPreferences::default();
         prefs.provider_accounts.push(ProviderAccount {
             id: "minimax".to_string(),
@@ -136,8 +143,8 @@ fn resolve_provider_env_composite_without_stored_pairing_is_empty() {
             claude_compatible: true,
             api_key: Some("sk-test".to_string()),
         });
-        save(prefs).unwrap();
-        let env = resolve_provider_env("codex:minimax");
+        store.save(prefs).unwrap();
+        let env = resolve_provider_env_from(store, "codex:minimax");
         assert!(
             env.is_empty(),
             "expected empty env for unstored pairing, got {:?}",
@@ -148,7 +155,7 @@ fn resolve_provider_env_composite_without_stored_pairing_is_empty() {
 
 #[test]
 fn resolve_provider_env_composite_uses_stored_pairing_tiers() {
-    with_temp_dir(|_| {
+    with_store(|store| {
         let mut prefs = AppPreferences::default();
         prefs.provider_accounts.push(ProviderAccount {
             id: "minimax".to_string(),
@@ -169,8 +176,8 @@ fn resolve_provider_env_composite_uses_stored_pairing_tiers() {
                 ..Default::default()
             },
         });
-        save(prefs).unwrap();
-        let env = resolve_provider_env("claude:minimax");
+        store.save(prefs).unwrap();
+        let env = resolve_provider_env_from(store, "claude:minimax");
         let env_map: std::collections::HashMap<_, _> = env.into_iter().collect();
         assert_eq!(
             env_map.get("ANTHROPIC_MODEL").map(|s| s.as_str()),
@@ -187,7 +194,7 @@ fn resolve_provider_env_composite_uses_stored_pairing_tiers() {
 
 #[test]
 fn preflight_pairing_env_fails_for_custom_endpoint_with_empty_default_tier() {
-    with_temp_dir(|_| {
+    with_store(|store| {
         let mut prefs = AppPreferences::default();
         prefs.provider_accounts.push(ProviderAccount {
             id: "openrouter".to_string(),
@@ -204,15 +211,15 @@ fn preflight_pairing_env_fails_for_custom_endpoint_with_empty_default_tier() {
             base_url: Some("https://openrouter.ai/api".to_string()),
             model_tiers: ModelTiers::default(),
         });
-        save(prefs).unwrap();
-        let err = preflight_resolve_provider_env("claude:openrouter").unwrap_err();
+        store.save(prefs).unwrap();
+        let err = preflight_resolve_provider_env_from(store, "claude:openrouter").unwrap_err();
         assert!(err.contains("Default model"));
     });
 }
 
 #[test]
 fn preflight_pairing_env_passes_for_custom_endpoint_with_default_tier_filled() {
-    with_temp_dir(|_| {
+    with_store(|store| {
         let mut prefs = AppPreferences::default();
         prefs.provider_accounts.push(ProviderAccount {
             id: "openrouter".to_string(),
@@ -232,8 +239,8 @@ fn preflight_pairing_env_passes_for_custom_endpoint_with_default_tier_filled() {
                 ..Default::default()
             },
         });
-        save(prefs).unwrap();
-        assert!(preflight_resolve_provider_env("claude:openrouter").is_ok());
+        store.save(prefs).unwrap();
+        assert!(preflight_resolve_provider_env_from(store, "claude:openrouter").is_ok());
     });
 }
 
@@ -324,7 +331,7 @@ fn remove_harness_default_is_idempotent() {
 
 #[test]
 fn upsert_harness_default_persists_then_round_trips() {
-    with_temp_dir(|_| {
+    with_store(|store| {
         let mut prefs = AppPreferences::default();
         upsert_harness_default(
             &mut prefs,
@@ -336,8 +343,8 @@ fn upsert_harness_default_persists_then_round_trips() {
             },
         )
         .unwrap();
-        save(prefs).unwrap();
-        let stored = load().unwrap();
+        store.save(prefs).unwrap();
+        let stored = store.load().unwrap();
         assert_eq!(
             stored
                 .harness_defaults
@@ -350,28 +357,26 @@ fn upsert_harness_default_persists_then_round_trips() {
 
 #[test]
 fn upsert_harness_default_removes_entry_when_all_fields_blank() {
-    with_temp_dir(|_| {
-        let mut prefs = AppPreferences::default();
-        prefs.harness_defaults.insert(
-            "claude".to_string(),
-            HarnessConfigValue {
-                model: Some("opus-4-1".to_string()),
-                effort: None,
-                permission_mode: None,
-            },
-        );
-        upsert_harness_default(
-            &mut prefs,
-            "claude",
-            HarnessConfigValue {
-                model: Some("   ".to_string()),
-                effort: None,
-                permission_mode: None,
-            },
-        )
-        .unwrap();
-        assert!(!prefs.harness_defaults.contains_key("claude"));
-    });
+    let mut prefs = AppPreferences::default();
+    prefs.harness_defaults.insert(
+        "claude".to_string(),
+        HarnessConfigValue {
+            model: Some("opus-4-1".to_string()),
+            effort: None,
+            permission_mode: None,
+        },
+    );
+    upsert_harness_default(
+        &mut prefs,
+        "claude",
+        HarnessConfigValue {
+            model: Some("   ".to_string()),
+            effort: None,
+            permission_mode: None,
+        },
+    )
+    .unwrap();
+    assert!(!prefs.harness_defaults.contains_key("claude"));
 }
 
 #[test]
@@ -518,7 +523,7 @@ fn upsert_harness_default_accepts_canonical_lowercase_via_capitalisation() {
 
 #[test]
 fn failed_upsert_harness_default_leaves_cache_unchanged() {
-    with_temp_dir(|_| {
+    with_store(|_| {
         let mut prefs = AppPreferences::default();
         prefs.harness_defaults.insert(
             "claude".to_string(),
@@ -551,13 +556,13 @@ fn failed_upsert_harness_default_leaves_cache_unchanged() {
 
 #[test]
 fn old_prefs_file_without_harness_defaults_loads_as_empty_map() {
-    with_temp_dir(|tmp| {
+    with_store(|store| {
         std::fs::write(
-            tmp.join("preferences.json"),
+            store.profile_dir().join("preferences.json"),
             r#"{"default_provider": null}"#,
         )
         .unwrap();
-        let loaded = load().unwrap();
+        let loaded = store.load().unwrap();
         assert!(loaded.harness_defaults.is_empty());
     });
 }

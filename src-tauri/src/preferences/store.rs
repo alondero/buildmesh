@@ -685,31 +685,18 @@ impl PreferencesStore {
 //
 // The free functions below are the compatibility surface the rest of the
 // codebase uses. Each delegates to the *ambient* store: the process-wide one
-// installed by [`init`] in production, the one a test fixture installed in a
-// test build.
+// installed by [`init`] in production. It is the *only* ambient store: there
+// is no test-only override, because issue #1482 requires a test to construct
+// and pass its own [`PreferencesStore`] handle rather than swap a
+// process-wide current store or use a thread-local override.
 //
-// Production installs exactly one store, at startup. A test installs its own
+// Production installs exactly one store, at startup. A test constructs its own
 // store over its own temporary directory — the *implementation* is identical
 // in both cases (same mutexes, same locks, same revision rules); only the
-// instance differs. Tests that own the state outright should construct a
-// [`PreferencesStore`] and pass the handle, rather than relying on the
-// ambient one.
+// instance differs.
 
 /// The process-wide store, installed during startup.
 static DEFAULT_STORE: Mutex<Option<PreferencesStore>> = Mutex::new(None);
-
-// The store a test fixture installed for the current thread.
-//
-// A *handle* to a real store — not a second implementation of one. The cache,
-// the write lock and the revision all live inside the store, so a test that
-// hands the handle to a worker shares the same state the parent sees.
-#[cfg(test)]
-// allow-test-in-production: the per-thread slot holds a handle to a real store, so the
-// state it selects is the production implementation rather than a second one.
-thread_local! {
-    static TEST_STORE: std::cell::RefCell<Option<PreferencesStore>> =
-        const { std::cell::RefCell::new(None) };
-}
 
 /// Install the process-wide store for `profile_dir`.
 ///
@@ -731,13 +718,10 @@ pub fn default_store() -> Option<PreferencesStore> {
 }
 
 /// The store the free functions resolve.
+///
+/// There is no test-only override: a test that owns its state constructs a
+/// [`PreferencesStore`] and passes the handle to the code under test.
 pub(crate) fn ambient_store() -> Result<PreferencesStore, String> {
-    #[cfg(test)]
-    // allow-test-in-production: the slot selects *which* store the façade reaches, not how
-    // the store synchronizes.
-    if let Some(store) = TEST_STORE.with(|slot| slot.borrow().clone()) {
-        return Ok(store);
-    }
     default_store().ok_or_else(|| "preferences module not initialized".to_string())
 }
 
@@ -745,12 +729,6 @@ pub(crate) fn ambient_store() -> Result<PreferencesStore, String> {
 /// files that live next to `preferences.json` (e.g. Autopilot's `finish.md`,
 /// issue #484). `None` before the store is installed.
 pub fn app_data_dir() -> Option<PathBuf> {
-    #[cfg(test)]
-    // allow-test-in-production: the slot selects *which* profile the façade reaches, not how
-    // the store synchronizes.
-    if let Some(store) = TEST_STORE.with(|slot| slot.borrow().clone()) {
-        return Some(store.profile_dir().to_path_buf());
-    }
     default_store().map(|store| store.profile_dir().to_path_buf())
 }
 
@@ -784,13 +762,6 @@ pub fn save(prefs: AppPreferences) -> Result<(), String> {
 /// Atomically mutate the latest cached preference value and persist it.
 pub fn update(mutator: impl FnOnce(&mut AppPreferences)) -> Result<AppPreferences, String> {
     ambient_store()?.update(mutator)
-}
-
-/// [`update`], with a mutator that may refuse the change.
-pub(crate) fn try_update(
-    mutator: impl FnOnce(&mut AppPreferences) -> Result<(), String>,
-) -> Result<AppPreferences, String> {
-    ambient_store()?.try_update(mutator)
 }
 
 /// Current health of the on-disk file, for the UI's recovery surface.
@@ -940,22 +911,6 @@ pub fn issue_spawn_prompt() -> Option<String> {
     }
 }
 
-/// Custom template for the initial prompt of agents spawned from the
-/// Probe's Pull Requests tab. Same `None`/blank/load-failure semantics
-/// as [`issue_spawn_prompt`].
-pub fn pr_spawn_prompt() -> Option<String> {
-    match ambient_store() {
-        Ok(store) => store.pr_spawn_prompt(),
-        Err(e) => {
-            tracing::warn!(
-                "preferences::pr_spawn_prompt load failed, falling back to default: {}",
-                e
-            );
-            None
-        }
-    }
-}
-
 /// One-shot normalization of legacy bare `default_provider` values to
 /// the post-#575 composite form (`minimax` → `claude:minimax`).
 ///
@@ -1013,33 +968,17 @@ fn normalize_legacy_default_provider(bare: &str) -> Option<&'static str> {
 // Test support
 // ---------------------------------------------------------------------------
 
-/// Install a store over `app_data_dir` for the current thread.
-///
-/// The store is a real [`PreferencesStore`] — the same implementation
-/// production uses — so the code under test runs against production's
-/// synchronization. Only the *instance* is test-scoped.
-#[cfg(test)]
-// allow-test-in-production: the fixture installs a real store for the current thread; the
-// suites that drive production code paths through the façade share it.
-pub(crate) fn init_for_tests(app_data_dir: PathBuf) {
-    let store = PreferencesStore::new(app_data_dir);
-    TEST_STORE.with(|slot| *slot.borrow_mut() = Some(store));
-}
-
-/// Drop the current thread's store.
-#[cfg(test)]
-// allow-test-in-production: the counterpart of `init_for_tests`, shared by the sibling suites.
-pub(crate) fn reset_for_tests() {
-    TEST_STORE.with(|slot| *slot.borrow_mut() = None);
-    super::secrets::test_support::reset();
-}
+// There is no test-only ambient store: a test constructs its own
+// [`PreferencesStore`] over a temporary directory and passes the handle to the
+// code under test (issue #1482). The only test-only state left here is the
+// load counter below, which is instrumentation and not storage semantics.
 
 // Counts `load` calls on this thread so a test can assert that a derivation
 // reads preferences once (issue #2532).
 //
-// Per-thread, like the test store itself: a parallel test on another worker
-// thread must not change this thread's count. The counter is instrumentation
-// only — the storage semantics it sits next to are the production ones.
+// Per-thread: a parallel test on another worker thread must not change this
+// thread's count. The counter is instrumentation only — the storage semantics
+// it sits next to are the production ones.
 #[cfg(test)]
 // allow-test-in-production: the per-thread load counter lets a sibling suite assert that a
 // derivation reads preferences once.

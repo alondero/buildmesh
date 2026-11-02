@@ -123,14 +123,26 @@ pub fn set_app_default_provider(provider: Option<String>) -> Result<(), String> 
 /// minting runs that park forever at the `verdict` gate.
 #[command]
 pub fn set_app_reviewer_provider(provider: Option<String>) -> Result<(), String> {
-    let mut prefs = preferences::load()?;
+    set_app_reviewer_provider_from(&preferences::ambient_store()?, provider)
+}
+
+/// [`set_app_reviewer_provider`] against an explicit store.
+///
+/// The caller owns the store, so the reviewer provider this writes is the one
+/// in *that* profile — and the value this reads back is the one it wrote
+/// (issue #1482).
+pub fn set_app_reviewer_provider_from(
+    store: &preferences::PreferencesStore,
+    provider: Option<String>,
+) -> Result<(), String> {
+    let mut prefs = store.load()?;
     prefs.reviewer_provider = provider
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     if let Some(ref value) = prefs.reviewer_provider {
         crate::circuit::compatibility::validate_reviewer_provider_id(value)?;
     }
-    preferences::save(prefs)
+    store.save(prefs)
 }
 
 /// Set the backend that summaries node PTY output into a slug (issue #824).
@@ -916,6 +928,29 @@ pub fn get_resolved_harness_view(
     harness_id: String,
     mesh_id: Option<i64>,
 ) -> Result<ResolvedHarnessView, String> {
+    let prefs = ambient_preferences()?;
+    resolved_harness_view_with(&prefs, harness_id, mesh_id)
+}
+
+/// The preferences this build reads.
+///
+/// Production always has the store installed at startup, so this is that
+/// store's value. A build with **no** store installed (a test that never
+/// installed one) reads the code-defined defaults — the same fallback the
+/// resolver's snapshot applies (issue #1482).
+fn ambient_preferences() -> Result<AppPreferences, String> {
+    match preferences::default_store() {
+        Some(store) => store.load(),
+        None => Ok(AppPreferences::default()),
+    }
+}
+
+/// The resolved view, with the preferences already read.
+fn resolved_harness_view_with(
+    prefs: &AppPreferences,
+    harness_id: String,
+    mesh_id: Option<i64>,
+) -> Result<ResolvedHarnessView, String> {
     let trimmed = harness_id.trim();
     if trimmed.is_empty() {
         return Err("harness_id must be a non-empty string".to_string());
@@ -923,7 +958,6 @@ pub fn get_resolved_harness_view(
     let harness_id = trimmed.to_string();
 
     // Application layer (always present, may be `EMPTY_DEFAULT`).
-    let prefs = preferences::load()?;
     let application_default = prefs
         .harness_defaults
         .get(&harness_id)
@@ -1127,13 +1161,10 @@ mod resolved_view_tests {
         // must NOT fabricate an executor from `Provider::from_db_str`'s
         // Anthropic default — the UI relies on these `None`s to render
         // "unknown harness" instead of pretending to have one.
-        let tmp = std::env::temp_dir().join(format!(
-            "buildmesh-resolved-view-unknown-{}-{}",
-            std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
-        ));
-        std::fs::create_dir_all(&tmp).expect("create temp dir");
-        crate::preferences::init_for_tests(tmp);
+        //
+        // No preferences store is needed: the view falls back to the
+        // code-defined defaults when none is installed, and this assertion
+        // does not depend on stored preferences (issue #1482).
         let view = get_resolved_harness_view("__definitely-not-a-real-id__".to_string(), None)
             .expect("IPC must succeed even for an unknown harness id");
         assert!(
@@ -1148,7 +1179,6 @@ mod resolved_view_tests {
             view.resolved_executor, None,
             "unknown harness id must not fabricate an executor (would mislead the UI)"
         );
-        crate::preferences::reset_for_tests();
     }
 
     #[test]
@@ -1175,16 +1205,9 @@ mod resolved_view_tests {
         // the executor + capability descriptors are what the UI consumes,
         // and both come from the pure resolver (no host I/O).
         //
-        // The preferences module must be initialised before any resolver
-        // call reads from disk — `init_for_tests` sets up a tempdir so the
-        // test never touches the user's real `preferences.json`.
-        let tmp = std::env::temp_dir().join(format!(
-            "buildmesh-resolved-view-test-{}-{}",
-            std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
-        ));
-        std::fs::create_dir_all(&tmp).expect("create temp dir");
-        crate::preferences::init_for_tests(tmp);
+        // No preferences store is needed: the view falls back to the
+        // code-defined defaults when none is installed, and this assertion
+        // does not depend on stored preferences (issue #1482).
         let view = get_resolved_harness_view("claude".to_string(), None)
             .expect("'claude' is a known built-in harness id");
         assert_eq!(view.harness_id, "claude");
@@ -1199,7 +1222,6 @@ mod resolved_view_tests {
             caps.supports_model_override,
             "anthropic harness must report model override support"
         );
-        crate::preferences::reset_for_tests();
     }
 
     /// Issue #1816: the app-wide Reviewer provider is the inherit-path
@@ -1209,40 +1231,36 @@ mod resolved_view_tests {
     /// stored value untouched); eligible ones persist; blank clears.
     #[test]
     fn app_reviewer_provider_rejects_harness_without_turn_signal() {
-        let tmp = std::env::temp_dir().join(format!(
-            "buildmesh-app-reviewer-test-{}-{}",
-            std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
-        ));
-        std::fs::create_dir_all(&tmp).expect("create temp dir");
-        crate::preferences::init_for_tests(tmp);
+        // The stored reviewer provider is content, so this test owns the
+        // store it writes: the value is read back from *that* profile
+        // (issue #1482).
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = crate::preferences::PreferencesStore::new(dir.path().to_path_buf());
         // Eligible harness persists.
-        set_app_reviewer_provider(Some("codex".to_string())).expect("codex can yield a turn");
-        assert_eq!(
-            crate::preferences::reviewer_provider().as_deref(),
-            Some("codex")
-        );
+        set_app_reviewer_provider_from(&store, Some("codex".to_string()))
+            .expect("codex can yield a turn");
+        assert_eq!(store.reviewer_provider().as_deref(), Some("codex"));
         // A harness with no lifecycle hands off through its result file.
-        set_app_reviewer_provider(Some("dsh:minimax".to_string()))
+        set_app_reviewer_provider_from(&store, Some("dsh:minimax".to_string()))
             .expect("dsh hands off through its result file");
-        set_app_reviewer_provider(Some("codex".to_string())).expect("codex can yield a turn");
+        set_app_reviewer_provider_from(&store, Some("codex".to_string()))
+            .expect("codex can yield a turn");
         // The plain shell is refused and the stored value is untouched.
         for picked in ["terminal", "TERMINAL"] {
-            let err = set_app_reviewer_provider(Some(picked.to_string())).unwrap_err();
+            let err = set_app_reviewer_provider_from(&store, Some(picked.to_string())).unwrap_err();
             assert!(
                 err.contains("reviewer provider"),
                 "{picked:?} must be refused, got {err:?}"
             );
         }
         assert_eq!(
-            crate::preferences::reviewer_provider().as_deref(),
+            store.reviewer_provider().as_deref(),
             Some("codex"),
             "refused writes must not clobber the stored value"
         );
         // Blank clears back to the source-agent fallback.
-        set_app_reviewer_provider(Some("   ".to_string())).expect("blank clears");
-        assert_eq!(crate::preferences::reviewer_provider(), None);
-        crate::preferences::reset_for_tests();
+        set_app_reviewer_provider_from(&store, Some("   ".to_string())).expect("blank clears");
+        assert_eq!(store.reviewer_provider(), None);
     }
 }
 

@@ -3,6 +3,7 @@
 use super::admission::observe_capacity;
 use super::turn_classify::ClassifiedTurn;
 use super::*;
+use crate::preferences::PreferencesStore;
 
 /// Resolve the agent node id the per-tick observer should check existence
 /// for. Returns the step's direct `agent_node_id` when set (the
@@ -158,7 +159,11 @@ pub(super) fn observe(
     active: &db::ActiveCircuitRun,
     view: &RunView,
 ) -> Vec<CircuitEvent> {
-    observe_with(view, &mut LiveObservations { app, active })
+    // The store installed at startup. Without one there is no profile to read
+    // the classifier provider or the owed result file from, which is the
+    // degradation the ambient path had before a profile was known.
+    let store = crate::preferences::ambient_store().ok();
+    observe_with(view, &mut LiveObservations { app, active, store })
 }
 
 pub(super) fn observe_with(view: &RunView, source: &mut impl Observations) -> Vec<CircuitEvent> {
@@ -644,6 +649,11 @@ pub(super) trait Observations {
 pub(super) struct LiveObservations<'a> {
     pub app: &'a AppHandle,
     pub active: &'a db::ActiveCircuitRun,
+    /// The profile this observation reads.
+    ///
+    /// `None` means no profile is known: the classifier read fails, which is
+    /// what the ambient path had before a profile was installed (issue #1482).
+    pub store: Option<PreferencesStore>,
 }
 
 impl Observations for LiveObservations<'_> {
@@ -701,7 +711,10 @@ impl Observations for LiveObservations<'_> {
     }
 
     fn classify(&mut self, view: &RunView, step: &StepView) -> Option<ClassifiedTurn> {
-        jobs::classify(self.active, view, step)
+        match &self.store {
+            Some(store) => jobs::classify_from(store, self.active, view, step),
+            None => jobs::classify(self.active, view, step),
+        }
     }
 
     fn verify(&mut self, view: &RunView, step: &StepView, command: &str) -> Option<bool> {

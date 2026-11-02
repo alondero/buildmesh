@@ -346,10 +346,46 @@ pub(super) fn classify(
     view: &RunView,
     step: &StepView,
 ) -> Option<ClassifiedTurn> {
+    match crate::preferences::ambient_store() {
+        Ok(store) => classify_from(&store, active, view, step),
+        // No profile is known: the classifier read fails, which is what the
+        // ambient path did before a profile was installed.
+        Err(_) => classify_with(None, active, view, step),
+    }
+}
+
+/// [`classify`] against an explicit store.
+///
+/// The caller owns the store, so the result file this turn owes and the
+/// classifier provider come from **that** profile rather than the ambient one
+/// (issue #1482). The handle is handed to the spawned job, so the worker
+/// thread reads the same profile the caller named.
+pub(super) fn classify_from(
+    store: &crate::preferences::PreferencesStore,
+    active: &db::ActiveCircuitRun,
+    view: &RunView,
+    step: &StepView,
+) -> Option<ClassifiedTurn> {
+    classify_with(Some(store), active, view, step)
+}
+
+/// The classification job itself, over an optional store.
+///
+/// `None` means no profile is known: the classifier read fails, which is what
+/// the ambient path did before a profile was installed.
+fn classify_with(
+    store: Option<&crate::preferences::PreferencesStore>,
+    active: &db::ActiveCircuitRun,
+    view: &RunView,
+    step: &StepView,
+) -> Option<ClassifiedTurn> {
     let key = key(view, step, false, String::new());
     let job_key = key.clone();
     let active = active.clone();
     let snapshot = view.clone();
+    // The job runs on a worker thread, so it owns the handle it reads
+    // through rather than borrowing the caller's.
+    let store = store.cloned();
     let agent = step
         .agent_node_id
         .or_else(|| view.resolve_target_agent(&step.node_id));
@@ -362,8 +398,15 @@ pub(super) fn classify(
                 return ResultValue::Classification(None, None);
             }
             let fence = agent.map(AgentFence::read);
-            let result =
-                super::turn_classify::classify_step_turn(&active, &snapshot, &job_key.step);
+            let result = match &store {
+                Some(store) => super::turn_classify::classify_step_turn_from(
+                    store,
+                    &active,
+                    &snapshot,
+                    &job_key.step,
+                ),
+                None => super::turn_classify::classify_step_turn(&active, &snapshot, &job_key.step),
+            };
             ResultValue::Classification(
                 result.filter(|_| !permit.is_cancelled()).map(Box::new),
                 fence,

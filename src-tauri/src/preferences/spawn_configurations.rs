@@ -127,11 +127,27 @@ pub fn resolve_saved(
     option: &str,
     id: Option<&str>,
 ) -> Result<Option<SpawnConfiguration>, SpawnConfigurationError> {
+    match super::store::ambient_store() {
+        Ok(store) => resolve_saved_from(&store, option, id),
+        Err(error) => Err(SpawnConfigurationError::Storage(error)),
+    }
+}
+
+/// Explicit-store path — the caller owns the store.
+///
+/// A test constructs its own [`super::store::PreferencesStore`] over a
+/// temporary directory and passes it here, so the preferences state this call
+/// sees is the one the caller set up (issue #1482).
+pub fn resolve_saved_from(
+    store: &super::store::PreferencesStore,
+    option: &str,
+    id: Option<&str>,
+) -> Result<Option<SpawnConfiguration>, SpawnConfigurationError> {
     let id = id.map(str::trim).filter(|id| !id.is_empty());
     if id.is_none() {
         return Ok(None);
     }
-    let prefs = super::load().map_err(SpawnConfigurationError::Storage)?;
+    let prefs = store.load().map_err(SpawnConfigurationError::Storage)?;
     resolve(&prefs, option, id).map_err(SpawnConfigurationError::Invalid)
 }
 
@@ -178,7 +194,22 @@ pub fn save_spawn_configuration(
 }
 
 pub fn save_value(value: SpawnConfiguration) -> Result<SpawnConfiguration, String> {
-    save_with_route(value, None)
+    match super::store::ambient_store() {
+        Ok(store) => save_value_from(&store, value),
+        Err(error) => Err(error),
+    }
+}
+
+/// Explicit-store path — the caller owns the store.
+///
+/// A test constructs its own [`super::store::PreferencesStore`] over a
+/// temporary directory and passes it here, so the preferences state this call
+/// sees is the one the caller set up (issue #1482).
+pub fn save_value_from(
+    store: &super::store::PreferencesStore,
+    value: SpawnConfiguration,
+) -> Result<SpawnConfiguration, String> {
+    save_with_route_from(store, value, None)
 }
 
 pub fn save_with_route(
@@ -193,7 +224,10 @@ pub fn save_with_route(
     // success travel — never names, ids, URLs, models, or keys.
     let persistence_started = std::time::Instant::now();
     let has_route = route.is_some();
-    let result = save_with_route_inner(value, route);
+    let result = match super::store::ambient_store() {
+        Ok(store) => save_with_route_from(&store, value, route),
+        Err(error) => Err(error),
+    };
     tracing::info!(
         has_route,
         success = result.is_ok(),
@@ -203,14 +237,28 @@ pub fn save_with_route(
     result
 }
 
+/// Explicit-store path — the caller owns the store.
+///
+/// A test constructs its own [`super::store::PreferencesStore`] over a
+/// temporary directory and passes it here, so the preferences state this call
+/// sees is the one the caller set up (issue #1482).
+pub fn save_with_route_from(
+    store: &super::store::PreferencesStore,
+    value: SpawnConfiguration,
+    route: Option<super::ProviderPairing>,
+) -> Result<SpawnConfiguration, String> {
+    save_with_route_inner(store, value, route)
+}
+
 fn save_with_route_inner(
+    store: &super::store::PreferencesStore,
     value: SpawnConfiguration,
     route: Option<super::ProviderPairing>,
 ) -> Result<SpawnConfiguration, String> {
     let mut value = validate(value)?;
     normalize_id(&mut value);
     value.resolved = None;
-    super::store::try_update(|prefs| {
+    store.try_update(|prefs| {
         prepare_route(prefs, &value, route.clone())?;
         value.generated = prefs
             .spawn_configurations
@@ -307,9 +355,25 @@ pub fn verify_draft(
     value: SpawnConfiguration,
     route: Option<super::ProviderPairing>,
 ) -> Result<super::PairingVerification, String> {
+    match super::store::ambient_store() {
+        Ok(store) => verify_draft_from(&store, value, route),
+        Err(error) => Err(error),
+    }
+}
+
+/// Explicit-store path — the caller owns the store.
+///
+/// A test constructs its own [`super::store::PreferencesStore`] over a
+/// temporary directory and passes it here, so the preferences state this call
+/// sees is the one the caller set up (issue #1482).
+pub fn verify_draft_from(
+    store: &super::store::PreferencesStore,
+    value: SpawnConfiguration,
+    route: Option<super::ProviderPairing>,
+) -> Result<super::PairingVerification, String> {
     let mut value = validate(value)?;
     normalize_id(&mut value);
-    let mut prefs = super::load()?;
+    let mut prefs = store.load()?;
     prepare_route(&mut prefs, &value, route)?;
     prefs.spawn_configurations.retain(|c| c.id != value.id);
     prefs.spawn_configurations.push(value.clone());
@@ -358,7 +422,19 @@ pub fn delete_spawn_configuration(app: tauri::AppHandle, id: String) -> Result<(
 }
 
 pub fn delete_value(id: &str) -> Result<(), String> {
-    super::update(|prefs| {
+    match super::store::ambient_store() {
+        Ok(store) => delete_value_from(&store, id),
+        Err(error) => Err(error),
+    }
+}
+
+/// Explicit-store path — the caller owns the store.
+///
+/// A test constructs its own [`super::store::PreferencesStore`] over a
+/// temporary directory and passes it here, so the preferences state this call
+/// sees is the one the caller set up (issue #1482).
+pub fn delete_value_from(store: &super::store::PreferencesStore, id: &str) -> Result<(), String> {
+    store.update(|prefs| {
         prefs.spawn_configurations.retain(|c| c.id != id);
         if !prefs
             .deleted_launch_configurations
@@ -372,161 +448,5 @@ pub fn delete_value(id: &str) -> Result<(), String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn configuration(option: &str) -> SpawnConfiguration {
-        SpawnConfiguration {
-            id: "sol".into(),
-            name: " Sol ".into(),
-            spawn_option_id: option.into(),
-            model: Some(" gpt-5.6-sol ".into()),
-            effort: None,
-            extra_args: None,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn mcode_configuration_rejects_shell_characters_and_accepts_variants() {
-        let mut value = configuration("mcode");
-        value.model = Some(" minimax/MiniMax-M3#variant ".into());
-        assert_eq!(
-            validate(value.clone()).unwrap().model.as_deref(),
-            Some("minimax/MiniMax-M3#variant")
-        );
-
-        value.model = Some("minimax/M3&echo x".into());
-        assert!(validate(value).unwrap_err().contains("model reference"));
-
-        let mut prefs = AppPreferences::default();
-        let valid = super::super::HarnessConfigValue {
-            model: Some(" minimax/MiniMax-M3#variant ".into()),
-            effort: None,
-            permission_mode: None,
-        };
-        super::super::upsert_harness_default(&mut prefs, "mcode", valid).unwrap();
-        let saved = prefs.clone();
-        let invalid = super::super::HarnessConfigValue {
-            model: Some("minimax/%PATH%".into()),
-            effort: None,
-            permission_mode: None,
-        };
-        assert!(
-            super::super::upsert_harness_default(&mut prefs, "mcode", invalid)
-                .unwrap_err()
-                .contains("model reference")
-        );
-        assert_eq!(prefs, saved);
-    }
-
-    #[test]
-    fn configuration_and_pairing_save_atomically_and_preserve_other_routes() {
-        let tmp = tempfile::tempdir().unwrap();
-        super::super::init_for_tests(tmp.path().into());
-        let mut prefs: AppPreferences = serde_json::from_value(serde_json::json!({
-            "provider_accounts":[{"id":"minimax","name":"MiniMax","enabled":true,"api_key":"test","billing_mode":"pay_as_you_go"}],
-            "detached_provider_routes":["claude:minimax", "codex:minimax"]
-        })).unwrap();
-        super::super::save(prefs.clone()).unwrap();
-        let endpoint = super::super::first_class_surfaces("minimax").remove(0);
-        let route = super::super::ProviderPairing {
-            harness_id: "claude".into(),
-            provider_id: "minimax".into(),
-            surface: endpoint.surface,
-            base_url: Some(endpoint.base_url),
-            model_tiers: endpoint.model_tiers,
-        };
-        let mut value = configuration("claude:minimax");
-        value.model = Some("MiniMax-M2.7-highspeed".into());
-        value.effort = Some("high".into());
-        assert!(save_with_route(value.clone(), Some(route.clone()))
-            .unwrap_err()
-            .contains("Effort"));
-        prefs = super::super::load().unwrap();
-        assert!(prefs.provider_pairings.is_empty());
-        assert!(prefs.spawn_configurations.is_empty());
-        value.effort = None;
-        let saved = save_with_route(value.clone(), Some(route.clone())).unwrap();
-        prefs = super::super::load().unwrap();
-        assert_eq!(prefs.provider_pairings, vec![route.clone()]);
-        assert_eq!(prefs.spawn_configurations, vec![saved]);
-        let mut changed = route;
-        changed.base_url = Some("https://other.example/v1".into());
-        assert!(save_with_route(value, Some(changed))
-            .unwrap_err()
-            .contains("changed"));
-        assert_eq!(super::super::load().unwrap(), prefs);
-        super::super::reset_for_tests();
-    }
-
-    #[test]
-    fn spawn_configurations_preserve_sparse_values_and_roundtrip_old_preferences() {
-        let mut prefs: AppPreferences = serde_json::from_str("{}").unwrap();
-        assert!(prefs.spawn_configurations.is_empty());
-        let mut value = configuration("codex");
-        value.effort = Some("  ".into());
-        value.extra_args = Some("  ".into());
-        let value = validate(value).unwrap();
-        assert_eq!(value.name, "Sol");
-        assert_eq!(value.model.as_deref(), Some("gpt-5.6-sol"));
-        assert_eq!(value.effort, None);
-        assert_eq!(value.extra_args, None);
-        prefs.spawn_configurations.push(value.clone());
-        let restored: AppPreferences =
-            serde_json::from_str(&serde_json::to_string(&prefs).unwrap()).unwrap();
-        assert_eq!(
-            resolve(&restored, "codex", Some("sol")).unwrap(),
-            Some(value)
-        );
-        assert_eq!(resolve(&restored, "codex", None).unwrap(), None);
-    }
-
-    #[test]
-    fn spawn_configurations_reject_unsupported_fields_and_effort_vocabulary() {
-        assert!(validate(configuration("terminal"))
-            .unwrap_err()
-            .contains("model"));
-        let mut value = configuration("codex");
-        value.effort = Some("not-an-effort".into());
-        assert!(validate(value).unwrap_err().contains("not allowed"));
-        let mut value = configuration("opencode");
-        value.effort = Some("high".into());
-        assert!(validate(value).unwrap_err().contains("does not support"));
-        let mut value = configuration("terminal");
-        value.model = None;
-        value.extra_args = Some("--model unsafe".into());
-        assert!(validate(value).unwrap_err().contains("extra arguments"));
-        let mut value = configuration("codex");
-        value.name = " ".into();
-        assert!(validate(value).is_err());
-    }
-
-    #[test]
-    fn save_spawn_configuration_replaces_whitespace_only_ids() {
-        let mut value = configuration("codex");
-        value.id = "   ".into();
-        normalize_id(&mut value);
-        assert!(!value.id.is_empty());
-        assert!(uuid::Uuid::parse_str(value.id.strip_prefix("launch/").unwrap()).is_ok());
-
-        value.id = " sol ".into();
-        normalize_id(&mut value);
-        assert_eq!(value.id, "sol");
-    }
-
-    #[test]
-    fn spawn_configurations_cannot_cross_pairings_or_silently_fall_back_when_deleted() {
-        let mut prefs = AppPreferences::default();
-        prefs
-            .spawn_configurations
-            .push(configuration("claude:openrouter"));
-        assert!(resolve(&prefs, "claude", Some("sol"))
-            .unwrap_err()
-            .contains("different"));
-        assert!(resolve(&prefs, "codex:openrouter", Some("sol")).is_err());
-        assert!(resolve(&prefs, "claude:openrouter", Some("missing"))
-            .unwrap_err()
-            .contains("no longer exists"));
-    }
-}
+#[path = "spawn_configurations_tests.rs"]
+mod tests;

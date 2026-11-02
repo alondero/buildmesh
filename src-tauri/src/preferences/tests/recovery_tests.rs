@@ -13,8 +13,8 @@
 //!
 //! The classification tests call [`classify`] directly — it is pure, so they
 //! need no filesystem, no temp dir, and no process-global state. The
-//! preservation tests drive the real [`load`] / [`save`] / [`update`] façade
-//! through [`with_temp_dir`], because the bug this issue is about lived in
+//! preservation tests drive the real store over a temporary directory
+//! through [`with_store`], because the bug this issue is about lived in
 //! the interaction between the cache and the disk, not in either alone.
 
 use super::super::model::AppPreferences;

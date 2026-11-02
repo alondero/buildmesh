@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use super::{AppPreferences, HarnessProfile, ProviderPairing};
+use super::{AppPreferences, HarnessProfile, ProviderAccount, ProviderPairing};
 use crate::agent::capabilities::{
     capabilities_for, resolve_agent_config, AgentConfigInputs, FieldInputs,
 };
@@ -531,8 +531,8 @@ pub(crate) fn retired_configuration_aliases(
 
 /// Resolve an identity at legacy adapter entrypoints without teaching the parser about storage.
 pub fn selection_option(selection: &str) -> Result<String, String> {
-    let prefs = match super::load() {
-        Ok(prefs) => prefs,
+    match super::store::ambient_store() {
+        Ok(store) => selection_option_from(&store, selection),
         Err(error) if error == "preferences module not initialized" => {
             // Legacy bare ids remain usable by pure/test callers before Tauri
             // startup wires the preference store. A Launch Configuration id,
@@ -543,10 +543,22 @@ pub fn selection_option(selection: &str) -> Result<String, String> {
                     "Launch Configuration no longer exists; select another configuration".into(),
                 );
             }
-            return Ok(selection.into());
+            Ok(selection.into())
         }
-        Err(error) => return Err(error),
-    };
+        Err(error) => Err(error),
+    }
+}
+
+/// Explicit-store path — the caller owns the store.
+///
+/// A test constructs its own [`super::store::PreferencesStore`] over a
+/// temporary directory and passes it here, so the preferences state this call
+/// sees is the one the caller set up (issue #1482).
+pub fn selection_option_from(
+    store: &super::store::PreferencesStore,
+    selection: &str,
+) -> Result<String, String> {
+    let prefs = store.load()?;
     if let Some(value) = prefs
         .spawn_configurations
         .iter()
@@ -580,9 +592,38 @@ pub fn resolve_snapshot(
     plan: &ResolvedLaunchPlan,
     overrides: &LaunchOverrides,
 ) -> Result<ResolvedLaunchPlan, String> {
+    match super::default_store() {
+        Some(store) => resolve_snapshot_from(&store, plan, overrides),
+        // No store is installed yet: the ambient read answers with the
+        // code-defined defaults, exactly as it did before.
+        None => resolve_snapshot_with(&super::provider_accounts(), plan, overrides),
+    }
+}
+
+/// Explicit-store path — the caller owns the store.
+///
+/// A test constructs its own [`super::store::PreferencesStore`] over a
+/// temporary directory and passes it here, so the preferences state this call
+/// sees is the one the caller set up (issue #1482).
+pub fn resolve_snapshot_from(
+    store: &super::store::PreferencesStore,
+    plan: &ResolvedLaunchPlan,
+    overrides: &LaunchOverrides,
+) -> Result<ResolvedLaunchPlan, String> {
+    let accounts = super::resolver::snapshot::snapshot_or_default_from(store).accounts;
+    resolve_snapshot_with(&accounts, plan, overrides)
+}
+
+/// The pure part of the snapshot resolution: the accounts the frozen plan is
+/// re-resolved against, read from the caller's account list.
+fn resolve_snapshot_with(
+    accounts: &[ProviderAccount],
+    plan: &ResolvedLaunchPlan,
+    overrides: &LaunchOverrides,
+) -> Result<ResolvedLaunchPlan, String> {
     let prefs = AppPreferences {
         harness_profiles: vec![plan.harness.clone()],
-        provider_accounts: super::provider_accounts(),
+        provider_accounts: accounts.to_vec(),
         provider_pairings: plan.route.iter().cloned().collect(),
         pairing_verifications: plan.verification.iter().cloned().collect(),
         spawn_configurations: vec![snapshot(plan.clone())],

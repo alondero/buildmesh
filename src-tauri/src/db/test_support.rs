@@ -14,10 +14,17 @@
 //! `MESH_CLONE_TEST_LOCK`, `PR_TEST_LOCK`, `CREATE_PR_DB_LOCK`).
 //!
 //! The seam is the same shape [`crate::preferences::storage`] already uses for
-//! its `APP_DATA_DIR` / `CACHE` statics (issue #1386): a `thread_local!` slot
-//! behind `cfg(test)`, production untouched. This module is `#[cfg(test)]` in
-//! its entirety, so a release build compiles the plain `OnceCell` path and
-//! `db::init` still opens exactly one database.
+//! its `APP_DATA_DIR` / `CACHE` statics (issue #1386): a per-install slot,
+//! production untouched. This module is `#[cfg(test)]` in its entirety, so a
+//! release build compiles the plain `OnceCell` path and `db::init` still opens
+//! exactly one database.
+//!
+//! # Preferences
+//!
+//! Each install also owns a [`crate::preferences::PreferencesStore`] over its
+//! own temporary profile directory. It is **not** installed anywhere ambient:
+//! a test reaches it through [`installed_store`] and passes the handle to the
+//! store-scoped entry points (issue #1482).
 //!
 //! Use it as the first statement of a test body:
 //!
@@ -97,12 +104,11 @@ struct Installed {
     /// the directory is left to the OS temp cleaner there — see
     /// [`scratch_dir`], which is deliberately not reclaimed by the next run.
     files: Arc<Vec<PathBuf>>,
-    /// This install's private preferences directory. `preferences::storage`
-    /// keeps `APP_DATA_DIR` / `CACHE` in per-thread slots, so without a fresh
-    /// directory per install a test would inherit whatever the previous test
-    /// on this recycled libtest worker thread left behind. Dropping this
-    /// `TempDir` removes the files.
-    prefs: Option<tempfile::TempDir>,
+    /// This install's private preferences state: the profile directory and
+    /// the store over it. Without a fresh directory per install a test would
+    /// inherit whatever the previous test on this recycled libtest worker
+    /// thread left behind. Dropping the `TempDir` removes the files.
+    prefs: Option<PreferencesFixture>,
     /// How many live guards point at this database on this thread. The
     /// outermost [`isolated`] call sets it to 1; a nested call inside a
     /// shared helper bumps it so the helper cannot replace the caller's rows.
@@ -294,31 +300,47 @@ fn database_files(db_path: &Path) -> Vec<PathBuf> {
     siblings
 }
 
-/// Node creation resolves a launch recipe from preferences, so a test that
-/// creates nodes still needs an app-data directory. Preferences already
-/// isolate `APP_DATA_DIR` per test thread (issue #1386), so each thread gets
-/// its own temp directory here, exactly as the old process-global helper gave
-/// each test binary one.
-/// Give this thread a private preferences directory and return it so the
-/// install can drop it.
+/// One install's private preferences state: the profile directory and the
+/// [`PreferencesStore`] over it.
 ///
-/// `preferences::storage` keeps `APP_DATA_DIR` / `CACHE` in per-thread slots,
-/// and libtest reuses worker threads. A directory created once per *thread* is
+/// The store is the *only* way a test reaches preferences state. There is no
+/// ambient store to swap and no thread-local override (issue #1482): a test
+/// that needs stored preferences takes this handle and passes it to the
+/// store-scoped entry points.
+struct PreferencesFixture {
+    /// The profile directory. Dropping it removes the files the store wrote.
+    /// Held, never read: the store owns the path, this owns the files.
+    _dir: tempfile::TempDir,
+    /// The handle over `_dir`.
+    store: crate::preferences::PreferencesStore,
+}
+
+/// Give this thread a private preferences store over a private directory.
+///
+/// libtest reuses worker threads, so a directory created once per *thread* is
 /// not enough: the next test to land here would inherit the previous one's
-/// files and in-memory cache. So the outermost install claims a fresh one —
-/// but only when the thread has none, because a test is allowed to install its
-/// own directory *before* calling `isolated()` (several do, to seed a specific
-/// preferences fixture) and that must not be silently replaced. What actually
-/// stops the bleed is [`crate::preferences::reset_for_tests`] on the outermost
-/// drop, which clears the slots before the next test sees them.
-fn install_preferences_dir() -> Option<tempfile::TempDir> {
-    if crate::preferences::app_data_dir().is_some() {
-        // The test owns this directory; do not adopt it as ours to delete.
-        return None;
-    }
+/// files. The outermost install therefore claims a fresh directory — and a
+/// fresh store over it — every time.
+///
+/// The store is **not** installed anywhere ambient. It belongs to this
+/// install, and [`installed_store`] is how a test reaches it.
+fn install_preferences_store() -> PreferencesFixture {
     let dir = tempfile::tempdir().expect("test preferences directory");
-    crate::preferences::init_for_tests(dir.path().to_path_buf());
-    Some(dir)
+    let store = crate::preferences::PreferencesStore::new(dir.path().to_path_buf());
+    PreferencesFixture { _dir: dir, store }
+}
+
+/// The preferences store this thread's isolated database owns.
+///
+/// `None` when the thread has not installed one. The handle is the only way a
+/// test reaches preferences state: there is no ambient store to swap and no
+/// thread-local override (issue #1482).
+pub fn installed_store() -> Option<crate::preferences::PreferencesStore> {
+    INSTALLED.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .and_then(|installed| installed.prefs.as_ref().map(|prefs| prefs.store.clone()))
+    })
 }
 
 /// Serialises the tests that have to use the process-global database.
@@ -422,7 +444,7 @@ fn install(db_path: PathBuf, files: Vec<PathBuf>) -> IsolatedDbGuard {
                 *slot.borrow_mut() = Some(Installed {
                     db,
                     files: Arc::clone(&handle.files),
-                    prefs: install_preferences_dir(),
+                    prefs: Some(install_preferences_store()),
                     depth: 1,
                     owner: true,
                     node_id_range,
@@ -480,7 +502,7 @@ pub fn adopt(handle: &IsolatedDbHandle) -> IsolatedDbGuard {
                     files: Arc::clone(&handle.files),
                     // The adopting thread has preferences slots of its own, and
                     // nothing seeded them.
-                    prefs: install_preferences_dir(),
+                    prefs: Some(install_preferences_store()),
                     depth: 1,
                     owner: false,
                     node_id_range: handle.node_id_range,
@@ -601,11 +623,10 @@ impl Drop for IsolatedDbGuard {
                         let _ = std::fs::remove_file(file);
                     }
                 }
-                // The preferences slots are per-thread, so leaving them set
-                // would hand this test's preferences to the next test that runs
-                // on this recycled worker thread. Dropping the `TempDir` here
-                // removes the files as well.
-                crate::preferences::reset_for_tests();
+                // The preferences store belongs to this install, so dropping it
+                // here hands this test's preferences to nobody: the next test
+                // on this recycled worker thread installs its own. Dropping
+                // the `TempDir` removes the files as well.
                 installed.prefs = None;
                 *slot = None;
             }
@@ -614,6 +635,8 @@ impl Drop for IsolatedDbGuard {
 }
 
 #[cfg(test)]
+// allow-test-in-production: this inline suite predates the sibling-test-file rule; the
+// issue #1482 migration edits it in place, and relocating the pre-existing suite is out of scope.
 mod tests {
     use super::*;
 
@@ -793,31 +816,37 @@ mod tests {
         let _adopted = adopt(&foreign);
     }
 
-    /// Preferences are per-thread slots and libtest reuses worker threads, so
-    /// an install that does not reset them hands the next test on that thread
-    /// the previous test's preferences. Pin both halves: the directory is
-    /// fresh per install, and the outermost drop leaves the thread clean.
+    /// Preferences belong to the install, not to a thread-local slot: libtest
+    /// reuses worker threads, so an install that left its preferences behind
+    /// would hand them to the next test on that thread. Pin both halves: the
+    /// store is fresh per install, and the outermost drop leaves the thread
+    /// with no store at all (issue #1482).
     #[test]
-    fn preferences_are_reset_for_the_next_test_on_the_thread() {
-        // libtest reuses worker threads, so pin the precondition: this test
-        // owns the thread's preferences slots from here on.
-        crate::preferences::reset_for_tests();
-
+    fn each_install_owns_its_own_preferences_store() {
         let first_dir;
         {
             let _db = isolated();
-            first_dir = crate::preferences::app_data_dir().unwrap();
+            let store = installed_store().expect("the install owns a store");
+            first_dir = store.profile_dir().to_path_buf();
             assert!(first_dir.exists(), "the install seeds a real directory");
+            // The store is reachable only through the install: nothing
+            // ambient was installed.
+            assert!(
+                crate::preferences::default_store().is_none(),
+                "an isolated install must not install an ambient preferences store"
+            );
         }
-        assert_eq!(
-            crate::preferences::app_data_dir(),
-            None,
-            "the outermost drop must clear the thread's preferences slot, or the \
-             next test on this recycled worker thread inherits them"
+        assert!(
+            installed_store().is_none(),
+            "the outermost drop must leave the thread without a store, or the \
+             next test on this recycled worker thread inherits it"
         );
 
         let _db = isolated();
-        let second_dir = crate::preferences::app_data_dir().unwrap();
+        let second_dir = installed_store()
+            .expect("the second install owns a store")
+            .profile_dir()
+            .to_path_buf();
         assert_ne!(
             first_dir, second_dir,
             "each install gets its own preferences directory"

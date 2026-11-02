@@ -277,6 +277,10 @@ fn grok_opted_in_adapter_recorded_digest_equals_submission_digest_of_written_tex
 #[test]
 fn grok_prompt_preparation_converts_newlines_on_continuation_and_nudge_shaped_text() {
     let _db = crate::db::test_support::isolated();
+    // The profile this test owns: the continuation marker it writes and the
+    // continuation it reads back live under it (issue #1482).
+    let profile = tempfile::tempdir().unwrap();
+    let store = crate::preferences::PreferencesStore::new(profile.path().to_path_buf());
     let path = std::env::temp_dir().join(format!("grok-cont-test-{}", std::process::id()));
     let path = path.to_string_lossy();
     let mesh = crate::db::create_mesh("grok cont mesh", &path).unwrap();
@@ -305,7 +309,8 @@ fn grok_prompt_preparation_converts_newlines_on_continuation_and_nudge_shaped_te
     evaluator::register(cont_id);
 
     let run_id = 42;
-    crate::circuit::handoff::set_agent_turn(
+    crate::circuit::handoff::set_agent_turn_from(
+        &store,
         run_id,
         cont_id,
         Some(&crate::circuit::handoff::HandoffTurn {
@@ -315,7 +320,8 @@ fn grok_prompt_preparation_converts_newlines_on_continuation_and_nudge_shaped_te
     );
 
     let raw_continuation = "first line\nsecond line\r\nthird line";
-    let cont_prompt = crate::circuit::handoff::prepare_continuation(
+    let cont_prompt = crate::circuit::handoff::prepare_continuation_from(
+        &store,
         run_id,
         cont_id,
         cont_node.env,
@@ -2392,7 +2398,7 @@ fn a_target_with_no_output_clock_submits_with_exactly_one_enter() {
 fn existing_codex_handover_stages_one_file_pointer_and_one_enter() {
     let _db = crate::db::test_support::isolated();
     let root = tempfile::tempdir().unwrap();
-    crate::preferences::init_for_tests(root.path().to_path_buf());
+    let store = crate::preferences::PreferencesStore::new(root.path().to_path_buf());
     let id = codex_worker_node("codex-file-handover");
     let node = crate::db::get_agent_node_by_id(id).unwrap();
     let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
@@ -2401,7 +2407,7 @@ fn existing_codex_handover_stages_one_file_pointer_and_one_enter() {
         &node,
         crate::models::Provider::Codex,
         &text,
-        Some(root.path()),
+        Some(store.profile_dir()),
     )
     .unwrap();
     let prepared = PreparedPrompt::prepare(id, prompt.prompt()).unwrap();
@@ -2425,7 +2431,6 @@ fn existing_codex_handover_stages_one_file_pointer_and_one_enter() {
     assert_eq!(files.len(), 1);
     assert_eq!(std::fs::read(&files[0]).unwrap(), text.as_bytes());
     registry.kill_session(id);
-    crate::preferences::reset_for_tests();
 }
 
 /// The ladder must survive for a buffered node — including one that has not

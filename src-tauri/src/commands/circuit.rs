@@ -93,10 +93,27 @@ pub async fn record_circuit_outcome(
     Ok(())
 }
 
+/// The retained payload of a prepared prompt, read against an explicit
+/// profile store.
+///
+/// The caller owns the store, so the payload read back is the one under
+/// **that** profile directory rather than the ambient one (issue #1482).
+pub(crate) fn circuit_prompt_payload_blocking_from(
+    store: &crate::preferences::PreferencesStore,
+    request: crate::db::circuit::evidence::prompt_delivery::CircuitPromptRequest,
+) -> Result<String, String> {
+    crate::services::circuit_prompt::payload_from(store, &request).map_err(String::from)
+}
+
 pub(crate) fn circuit_prompt_payload_blocking(
     request: crate::db::circuit::evidence::prompt_delivery::CircuitPromptRequest,
 ) -> Result<String, String> {
-    crate::services::circuit_prompt::payload(&request).map_err(String::from)
+    match crate::preferences::ambient_store() {
+        Ok(store) => circuit_prompt_payload_blocking_from(&store, request),
+        // No profile is known: the payload cannot be read, exactly as the
+        // ambient façade reported it before a profile was installed.
+        Err(_) => crate::services::circuit_prompt::payload(&request).map_err(String::from),
+    }
 }
 
 #[command]
@@ -897,6 +914,60 @@ pub(crate) fn trigger_circuit_from_node_now(
     max_rounds: i32,
     reviewer_provider: Option<String>,
 ) -> Result<i64, String> {
+    match crate::preferences::default_store() {
+        Some(store) => trigger_circuit_from_node_now_from(
+            &store,
+            app,
+            node_id,
+            circuit_id,
+            max_rounds,
+            reviewer_provider,
+        ),
+        // A build with **no** store installed (a test that never installed one)
+        // reads the code-defined defaults (issue #1482).
+        None => trigger_circuit_from_node_now_with(
+            None,
+            app,
+            node_id,
+            circuit_id,
+            max_rounds,
+            reviewer_provider,
+        ),
+    }
+}
+
+/// [`trigger_circuit_from_node_now`] against an explicit store.
+///
+/// The caller owns the store, so the reviewer provider and the launch
+/// configurations this run freezes are the ones the caller set up
+/// (issue #1482).
+pub(crate) fn trigger_circuit_from_node_now_from(
+    store: &crate::preferences::PreferencesStore,
+    app: Option<&AppHandle>,
+    node_id: i64,
+    circuit_id: Option<i64>,
+    max_rounds: i32,
+    reviewer_provider: Option<String>,
+) -> Result<i64, String> {
+    trigger_circuit_from_node_now_with(
+        Some(store),
+        app,
+        node_id,
+        circuit_id,
+        max_rounds,
+        reviewer_provider,
+    )
+}
+
+/// The trigger itself, over the store the caller resolved.
+fn trigger_circuit_from_node_now_with(
+    store: Option<&crate::preferences::PreferencesStore>,
+    app: Option<&AppHandle>,
+    node_id: i64,
+    circuit_id: Option<i64>,
+    max_rounds: i32,
+    reviewer_provider: Option<String>,
+) -> Result<i64, String> {
     if !(1..=10).contains(&max_rounds) {
         return Err("Review rounds must be between 1 and 10.".into());
     }
@@ -911,8 +982,18 @@ pub(crate) fn trigger_circuit_from_node_now(
     if crate::circuit::compatibility::reviewer_harness_reason(source.harness_id()).is_some() {
         return Err("This agent's harness has no turn-completion signal. Start the review from an agent with a supported turn hook, transcript watcher or result-file handoff.".into());
     }
-    let run_id =
-        crate::db::create_node_circuit_run(node_id, circuit_id, max_rounds, reviewer_provider)?;
+    let run_id = match store {
+        Some(store) => crate::db::create_node_circuit_run_from(
+            store,
+            node_id,
+            circuit_id,
+            max_rounds,
+            reviewer_provider,
+        )?,
+        None => {
+            crate::db::create_node_circuit_run(node_id, circuit_id, max_rounds, reviewer_provider)?
+        }
+    };
     crate::circuit::evaluator::register_circuit(node_id);
     let state = crate::db::get_circuit_run(run_id)
         .map_err(|e| e.to_string())?

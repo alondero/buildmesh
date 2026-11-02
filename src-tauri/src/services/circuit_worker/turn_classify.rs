@@ -163,6 +163,41 @@ pub(super) fn classify_step_turn(
     view: &RunView,
     node_id: &str,
 ) -> Option<ClassifiedTurn> {
+    match crate::preferences::ambient_store() {
+        Ok(store) => classify_step_turn_from(&store, active, view, node_id),
+        // No profile is known: the turn owes no result file and the classifier
+        // read fails, which is what the ambient path did before a profile was
+        // installed.
+        Err(_) => classify_step_turn_with(active, view, node_id, None),
+    }
+}
+
+/// [`classify_step_turn`] against an explicit store.
+///
+/// The caller owns the store, so the result file this turn owes and the
+/// classifier provider come from **that** profile rather than the ambient one
+/// (issue #1482).
+pub(super) fn classify_step_turn_from(
+    store: &crate::preferences::PreferencesStore,
+    active: &db::ActiveCircuitRun,
+    view: &RunView,
+    node_id: &str,
+) -> Option<ClassifiedTurn> {
+    classify_step_turn_with(active, view, node_id, Some(store))
+}
+
+/// The classification itself, over an optional store.
+///
+/// Without a store there is no profile to read the result marker or the
+/// classifier provider from, so the turn owes no result file and the
+/// classifier read fails — the same degradation the ambient path had before a
+/// profile was known.
+fn classify_step_turn_with(
+    active: &db::ActiveCircuitRun,
+    view: &RunView,
+    node_id: &str,
+    store: Option<&crate::preferences::PreferencesStore>,
+) -> Option<ClassifiedTurn> {
     use crate::circuit::evaluator;
     let step = view.step(node_id)?;
     let agent_node_id = step
@@ -197,7 +232,9 @@ pub(super) fn classify_step_turn(
     let lifecycle_blocker = db::agent_node::circuit_lifecycle_blocker(agent_node_id).unwrap_or(
         Some(crate::circuit::observation::CircuitObservationBlocker::LifecycleEvidenceUnavailable),
     );
-    let result_path = crate::circuit::handoff::expected_result(active.run.id, agent_node_id);
+    let result_path = store.and_then(|store| {
+        crate::circuit::handoff::expected_result_from(store, active.run.id, agent_node_id)
+    });
     let candidate = match readiness::prepare_with_lifecycle_veto(
         view,
         node_id,
@@ -322,7 +359,11 @@ pub(super) fn classify_step_turn(
     let classifier_error = std::cell::RefCell::new(None);
     let classify = |prompt: &str| {
         let result = (|| {
-            let preferences = crate::preferences::load()?;
+            let preferences = match store {
+                Some(store) => store.load()?,
+                // No profile is known: the ambient read reports why.
+                None => crate::preferences::load()?,
+            };
             let provider = classifier_provider(&preferences);
             let backend = crate::circuit::classifier::resolve(provider)
                 .map_err(|error| format!("{provider}: {error}"))?;
@@ -1654,9 +1695,15 @@ mod classifier_selection_tests {
         };
         assert_eq!(classifier_provider(&preferences), "claude");
         let directory = tempfile::tempdir().unwrap();
-        crate::preferences::init_for_tests(directory.path().to_path_buf());
-        crate::preferences::save(preferences.clone()).unwrap();
-        let backend = crate::session_naming::naming_backend_env(classifier_provider(&preferences));
+        let store = crate::preferences::PreferencesStore::new(directory.path().to_path_buf());
+        store.save(preferences.clone()).unwrap();
+        let stored = store.load().unwrap();
+        assert_eq!(stored.default_provider.as_deref(), Some("codex"));
+        assert_eq!(stored.naming_provider.as_deref(), Some("claude:minimax"));
+        let backend = crate::session_naming::naming_backend_env_from(
+            &store,
+            classifier_provider(&preferences),
+        );
         assert!(
             backend.is_ok(),
             "Codex spawn defaults must not disable the Circuit classifier"

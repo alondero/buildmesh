@@ -18,10 +18,7 @@
 use super::model::{
     ApiSurface, AppPreferences, HarnessConfigValue, ModelTiers, ProviderAccount, ProviderPairing,
 };
-use super::resolver::{
-    claude_harness_id, harness_capabilities_for, provider_accounts, provider_pairings,
-    resolve_harness_provider,
-};
+use super::resolver::{claude_harness_id, harness_capabilities_for, resolve_harness_provider};
 use crate::agent::capabilities::EffortControlKind;
 
 // ----- Harness default validation ----------------------------------------
@@ -254,7 +251,26 @@ fn fallback_surfaces(harness_id: &str) -> &'static [ApiSurface] {
 /// [`crate::agent::provider::AgentProvider::resets_backend_env`]), so empty
 /// means a clean slate, not a leaked override.
 pub fn resolve_provider_env(spawn_option_id: &str) -> Vec<(String, String)> {
-    resolve_provider_env_with(spawn_option_id, &provider_accounts(), &provider_pairings())
+    match super::default_store() {
+        Some(store) => resolve_provider_env_from(&store, spawn_option_id),
+        // No store is installed yet: there is no stored account and no stored
+        // pairing to resolve, so the answer is the empty env the spawn path
+        // expects — the same answer a failed read gives.
+        None => Vec::new(),
+    }
+}
+
+/// Explicit-store path — the caller owns the store.
+///
+/// A test constructs its own [`super::store::PreferencesStore`] over a
+/// temporary directory and passes it here, so the preferences state this call
+/// sees is the one the caller set up (issue #1482).
+pub fn resolve_provider_env_from(
+    store: &super::store::PreferencesStore,
+    spawn_option_id: &str,
+) -> Vec<(String, String)> {
+    let snapshot = super::resolver::snapshot::snapshot_or_default_from(store);
+    resolve_provider_env_with(spawn_option_id, &snapshot.accounts, snapshot.pairings())
 }
 
 /// Pure helper split out of [`resolve_provider_env`] so the consumer-aware
@@ -325,17 +341,43 @@ fn resolve_provider_env_with(
 /// UI can prompt the user to fill the `Default model` tier on the **Harnesses**
 /// page (ADR-0025).
 pub fn preflight_resolve_provider_env(spawn_option_id: &str) -> Result<(), String> {
+    match super::default_store() {
+        Some(store) => preflight_resolve_provider_env_from(&store, spawn_option_id),
+        // No store is installed yet: there is no stored account and no stored
+        // pairing to check, so the preflight passes.
+        None => Ok(()),
+    }
+}
+
+/// Explicit-store path — the caller owns the store.
+///
+/// A test constructs its own [`super::store::PreferencesStore`] over a
+/// temporary directory and passes it here, so the preferences state this call
+/// sees is the one the caller set up (issue #1482).
+pub fn preflight_resolve_provider_env_from(
+    store: &super::store::PreferencesStore,
+    spawn_option_id: &str,
+) -> Result<(), String> {
+    let snapshot = super::resolver::snapshot::snapshot_or_default_from(store);
+    preflight_resolve_provider_env_with(spawn_option_id, &snapshot.accounts, snapshot.pairings())
+}
+
+/// The pure part of the preflight: the resolved pairing and the account it
+/// belongs to, read from the caller's account and pairing lists.
+fn preflight_resolve_provider_env_with(
+    spawn_option_id: &str,
+    accounts: &[ProviderAccount],
+    pairings: &[ProviderPairing],
+) -> Result<(), String> {
     let id = crate::agent::provider::SpawnOptionId::from(spawn_option_id);
     let harness_id = id.harness_id();
     let provider_id = id.provider_id();
-    let accounts = provider_accounts();
-    let pairings = provider_pairings();
     let (pairing_opt, account_id) = match provider_id {
         Some(pid) => {
             let Some(account) = accounts.iter().find(|a| a.id == pid) else {
                 return Ok(());
             };
-            let pairing = resolve_pairing(harness_id, account, &pairings);
+            let pairing = resolve_pairing(harness_id, account, pairings);
             (pairing, account.id.clone())
         }
         None => {
@@ -343,7 +385,7 @@ pub fn preflight_resolve_provider_env(spawn_option_id: &str) -> Result<(), Strin
                 return Ok(());
             };
             let pairing =
-                stored_claude_anthropic_pairing(account, &pairings, &claude_harness_id()).cloned();
+                stored_claude_anthropic_pairing(account, pairings, &claude_harness_id()).cloned();
             (pairing, account.id.clone())
         }
     };

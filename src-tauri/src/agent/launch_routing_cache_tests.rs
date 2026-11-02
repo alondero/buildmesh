@@ -2,30 +2,34 @@ use super::*;
 
 #[test]
 fn cline_legacy_pairing_uses_cline_auth_environment() {
+    // The credential-store double is per-thread: reset it so this test's
+    // seeded key cannot reach another test on the same thread.
+    crate::preferences::secrets::test_support::reset();
     let temp = tempfile::tempdir().unwrap();
-    preferences::init_for_tests(temp.path().to_path_buf());
-    preferences::save(preferences::AppPreferences {
-        provider_accounts: vec![preferences::ProviderAccount {
-            id: "minimax".into(),
-            name: "MiniMax".into(),
-            enabled: true,
-            billing_mode: preferences::BillingMode::PayAsYouGo,
-            claude_compatible: true,
-            api_key: Some("test-key".into()),
-        }],
-        provider_pairings: vec![preferences::ProviderPairing {
-            harness_id: "claude".into(),
-            provider_id: "minimax".into(),
-            surface: preferences::ApiSurface::Anthropic,
-            base_url: Some("https://example.invalid/anthropic".into()),
-            model_tiers: preferences::ModelTiers {
-                default: Some("MiniMax-M3".into()),
-                ..Default::default()
-            },
-        }],
-        ..Default::default()
-    })
-    .unwrap();
+    let store = preferences::PreferencesStore::new(temp.path().to_path_buf());
+    store
+        .save(preferences::AppPreferences {
+            provider_accounts: vec![preferences::ProviderAccount {
+                id: "minimax".into(),
+                name: "MiniMax".into(),
+                enabled: true,
+                billing_mode: preferences::BillingMode::PayAsYouGo,
+                claude_compatible: true,
+                api_key: Some("test-key".into()),
+            }],
+            provider_pairings: vec![preferences::ProviderPairing {
+                harness_id: "claude".into(),
+                provider_id: "minimax".into(),
+                surface: preferences::ApiSurface::Anthropic,
+                base_url: Some("https://example.invalid/anthropic".into()),
+                model_tiers: preferences::ModelTiers {
+                    default: Some("MiniMax-M3".into()),
+                    ..Default::default()
+                },
+            }],
+            ..Default::default()
+        })
+        .unwrap();
 
     let resolved = crate::env::ResolvedPath {
         host_path: "C:/work".into(),
@@ -33,7 +37,14 @@ fn cline_legacy_pairing_uses_cline_auth_environment() {
         raw_path: "C:/work".into(),
         env_type: crate::models::EnvType::Windows,
     };
-    let routing = resolve_routing("cline:minimax", Provider::Cline, &resolved, None).unwrap();
+    let routing = resolve_routing(
+        PreferenceSource::Owned(&store),
+        "cline:minimax",
+        Provider::Cline,
+        &resolved,
+        None,
+    )
+    .unwrap();
     let PreparedLaunchRouting::Environment { values: env, .. } = routing else {
         panic!("expected Cline environment routing");
     };
@@ -46,13 +57,16 @@ fn cline_legacy_pairing_uses_cline_auth_environment() {
     assert!(!env
         .iter()
         .any(|(key, value)| key == "ANTHROPIC_API_KEY" && value.is_empty()));
-    preferences::reset_for_tests();
+    crate::preferences::secrets::test_support::reset();
 }
 
 #[test]
 fn cline_launch_configuration_resolves_fallback_pairings_for_both_surfaces() {
+    // The credential-store double is per-thread: reset it so this test's
+    // seeded key cannot reach another test on the same thread.
+    crate::preferences::secrets::test_support::reset();
     let temp = tempfile::tempdir().unwrap();
-    preferences::init_for_tests(temp.path().to_path_buf());
+    let store = preferences::PreferencesStore::new(temp.path().to_path_buf());
     let resolved = crate::env::ResolvedPath {
         host_path: "C:/work".into(),
         spawn_path: "C:/work".into(),
@@ -106,7 +120,7 @@ fn cline_launch_configuration_resolves_fallback_pairings_for_both_surfaces() {
             }],
             ..Default::default()
         };
-        preferences::save(prefs.clone()).unwrap();
+        store.save(prefs.clone()).unwrap();
         let plan = preferences::launch_configurations::resolve(
             &prefs,
             "launch/cline:custom",
@@ -117,7 +131,7 @@ fn cline_launch_configuration_resolves_fallback_pairings_for_both_surfaces() {
             plan.route.as_ref().map(|route| route.surface),
             Some(surface)
         );
-        let routing = prepare_snapshot(&plan, &resolved).unwrap();
+        let routing = prepare_snapshot_from(&store, &plan, &resolved).unwrap();
         let PreparedLaunchRouting::Environment { values: env, .. } = routing else {
             panic!("expected Cline environment routing");
         };
@@ -131,15 +145,18 @@ fn cline_launch_configuration_resolves_fallback_pairings_for_both_surfaces() {
                 .map(|(_, value)| value.as_str()),
             Some("test-key")
         );
-        let resumed =
-            preferences::launch_configurations::resolve_snapshot(&plan, &Default::default())
-                .unwrap();
+        let resumed = preferences::launch_configurations::resolve_snapshot_from(
+            &store,
+            &plan,
+            &Default::default(),
+        )
+        .unwrap();
         assert_eq!(
             resumed.route.as_ref().map(|route| route.surface),
             Some(surface)
         );
     }
-    preferences::reset_for_tests();
+    crate::preferences::secrets::test_support::reset();
 }
 
 /// Picker-visible-but-spawn-fails regression: a paired Claude launch must
@@ -150,50 +167,54 @@ fn cline_launch_configuration_resolves_fallback_pairings_for_both_surfaces() {
 /// hermetic on machines with and without the CLI installed.
 #[test]
 fn prepare_threads_profile_executable_into_environment_routing() {
+    // The credential-store double is per-thread: reset it so this test's
+    // seeded key cannot reach another test on the same thread.
+    crate::preferences::secrets::test_support::reset();
     let temp = tempfile::tempdir().unwrap();
-    preferences::init_for_tests(temp.path().to_path_buf());
+    let store = preferences::PreferencesStore::new(temp.path().to_path_buf());
     let resolved_exe = PathBuf::from(if cfg!(windows) {
         "C:/Users/me/.local/bin/claude.exe"
     } else {
         "/home/me/.local/bin/claude"
     });
-    preferences::save(preferences::AppPreferences {
-        harness_profiles: vec![preferences::HarnessProfile {
-            id: "claude".into(),
-            name: "Claude Code".into(),
-            harness: "anthropic".into(),
-            runtime: None,
-            wsl_distro: None,
-            executable: Some(resolved_exe.clone()),
-        }],
-        provider_accounts: vec![preferences::ProviderAccount {
-            id: "minimax".into(),
-            name: "MiniMax".into(),
-            enabled: true,
-            billing_mode: preferences::BillingMode::PayAsYouGo,
-            claude_compatible: true,
-            api_key: Some("test-key".into()),
-        }],
-        provider_pairings: vec![preferences::ProviderPairing {
-            harness_id: "claude".into(),
-            provider_id: "minimax".into(),
-            surface: preferences::ApiSurface::Anthropic,
-            base_url: Some("https://example.invalid/anthropic".into()),
-            model_tiers: preferences::ModelTiers {
-                default: Some("MiniMax-M3".into()),
-                ..Default::default()
-            },
-        }],
-        ..Default::default()
-    })
-    .unwrap();
+    store
+        .save(preferences::AppPreferences {
+            harness_profiles: vec![preferences::HarnessProfile {
+                id: "claude".into(),
+                name: "Claude Code".into(),
+                harness: "anthropic".into(),
+                runtime: None,
+                wsl_distro: None,
+                executable: Some(resolved_exe.clone()),
+            }],
+            provider_accounts: vec![preferences::ProviderAccount {
+                id: "minimax".into(),
+                name: "MiniMax".into(),
+                enabled: true,
+                billing_mode: preferences::BillingMode::PayAsYouGo,
+                claude_compatible: true,
+                api_key: Some("test-key".into()),
+            }],
+            provider_pairings: vec![preferences::ProviderPairing {
+                harness_id: "claude".into(),
+                provider_id: "minimax".into(),
+                surface: preferences::ApiSurface::Anthropic,
+                base_url: Some("https://example.invalid/anthropic".into()),
+                model_tiers: preferences::ModelTiers {
+                    default: Some("MiniMax-M3".into()),
+                    ..Default::default()
+                },
+            }],
+            ..Default::default()
+        })
+        .unwrap();
     let resolved = crate::env::ResolvedPath {
         host_path: "C:/work".into(),
         spawn_path: "C:/work".into(),
         raw_path: "C:/work".into(),
         env_type: crate::models::EnvType::Windows,
     };
-    let routing = prepare("claude:minimax", Provider::Anthropic, &resolved).unwrap();
+    let routing = prepare_from(&store, "claude:minimax", Provider::Anthropic, &resolved).unwrap();
     let PreparedLaunchRouting::Environment {
         values: env,
         executable,
@@ -206,7 +227,7 @@ fn prepare_threads_profile_executable_into_environment_routing() {
         env.iter().any(|(key, _)| key == "ANTHROPIC_API_KEY"),
         "backend env must still flow alongside the executable"
     );
-    preferences::reset_for_tests();
+    crate::preferences::secrets::test_support::reset();
 }
 
 /// `recipe_binary_for` must name the same stem the spawn invokes, per

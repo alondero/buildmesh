@@ -150,16 +150,16 @@ fn type_invalid_preferences_are_not_overwritten_by_a_read() {
 /// A deleted launch configuration is not a reviewer provider.
 ///
 /// This one drives a production code path (`circuit::compatibility`) that
-/// reads preferences through the free-function façade, so it uses the
-/// ambient store until that path is given an explicit handle.
+/// reads preferences, so it passes the store it owns into the store-scoped
+/// twin rather than relying on an ambient store.
 #[test]
 fn deleted_launch_configuration_is_not_accepted_as_reviewer_provider() {
-    // This one drives a production code path (`circuit::compatibility`)
-    // that reads preferences through the free-function façade, so it uses
-    // the ambient store until that path is given an explicit handle.
-    super::with_temp_dir(|_| {
-        let error = crate::circuit::compatibility::validate_reviewer_provider_id("launch/deleted")
-            .unwrap_err();
+    with_store(|store| {
+        let error = crate::circuit::compatibility::validate_reviewer_provider_id_from(
+            store,
+            "launch/deleted",
+        )
+        .unwrap_err();
         assert_eq!(
             error,
             "Launch Configuration no longer exists; select another configuration"

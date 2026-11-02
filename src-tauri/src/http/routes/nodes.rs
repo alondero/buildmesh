@@ -491,6 +491,8 @@ fn input_write_response(write: Result<crate::agent::process::InputOutcome, Strin
 }
 
 #[cfg(test)]
+// allow-test-in-production: this inline suite predates the sibling-test-file rule; the
+// issue #1482 migration edits it in place, and relocating the pre-existing suite is out of scope.
 mod tests {
     //! Issue #1377 — `POST /api/nodes/{id}/input` is the new triage-deck
     //! input endpoint. The handler must:
@@ -617,15 +619,17 @@ mod tests {
         // and the service must not turn a client error into a *committed*
         // outcome. The desktop half still runs on this thread.
         //
-        // The HTTP half cannot be driven from here: both the database and the
-        // preferences app-data dir are `thread_local!` under `cfg(test)`, and
-        // the route reaches them from `spawn_blocking`, where neither install
-        // is visible. The equivalent HTTP assertion therefore lives in
+        // The HTTP half cannot be driven from here: the database install is a
+        // `thread_local!` under `cfg(test)`, and the route reaches it from
+        // `spawn_blocking`, where the install is invisible. The equivalent
+        // HTTP assertion therefore lives in
         // `services::create_operation::tests`, which injects `InlineWork` and
         // runs the same code path on this thread.
         let _db = crate::db::test_support::shared_global_db();
-        let root = tempfile::tempdir().unwrap();
-        crate::preferences::init_for_tests(root.path().to_path_buf());
+        // The profile this test owns: the desktop create reads its saved
+        // configuration from it (issue #1482).
+        let profile = tempfile::tempdir().unwrap();
+        let store = crate::preferences::PreferencesStore::new(profile.path().to_path_buf());
         let mesh_id = crate::db::create_mesh(
             "prompt-gate",
             &format!("/tmp/buildmesh_prompt_gate_{}", std::process::id()),
@@ -633,7 +637,8 @@ mod tests {
         .unwrap()
         .id;
 
-        let desktop = crate::commands::agent_node::create_agent_node_blocking(
+        let desktop = crate::commands::agent_node::create_agent_node_blocking_from(
+            &store,
             mesh_id,
             "main",
             Some("terminal"),
@@ -697,8 +702,6 @@ mod tests {
     #[test]
     fn an_omitted_provider_resolves_the_mesh_default() {
         let _db = crate::db::test_support::isolated();
-        let root = tempfile::tempdir().unwrap();
-        crate::preferences::init_for_tests(root.path().to_path_buf());
         let path = |name: &str| format!("/tmp/buildmesh_default_{}_{name}", std::process::id());
         let plain = crate::db::create_mesh("plain", &path("plain")).unwrap();
         let pinned = crate::db::create_mesh("pinned", &path("pinned")).unwrap();

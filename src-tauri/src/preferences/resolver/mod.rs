@@ -83,7 +83,7 @@ pub use accounts::{minimax_api_key_resolved_from, provider_accounts_from};
 pub(crate) use pairings::effective_pairings;
 pub use pairings::{
     compatible_providers_by_harness, compatible_providers_for_harness, effective_provider_pairings,
-    pairing_for, provider_pairings, remove_provider_pairing, resolve_stored_pairing_and_account,
+    pairing_for, remove_provider_pairing, resolve_stored_pairing_and_account,
     set_proxied_provider_order, upsert_provider_pairing,
 };
 // The store-scoped twins are reached by the sibling suites that own a store

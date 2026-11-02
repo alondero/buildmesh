@@ -81,7 +81,17 @@ static SIGN_IN: Mutex<Option<SignInSession>> = Mutex::new(None);
 
 /// The default login plus every stored Codex login, with sign-in state.
 pub fn list_blocking() -> Result<Vec<HarnessLoginStatus>, String> {
-    let prefs = crate::preferences::load()?;
+    list_blocking_from(&crate::preferences::ambient_store()?)
+}
+
+/// [`list_blocking`] against an explicit store.
+///
+/// The caller owns the store, so the logins this lists are the ones in *that*
+/// profile (issue #1482).
+pub fn list_blocking_from(
+    store: &crate::preferences::PreferencesStore,
+) -> Result<Vec<HarnessLoginStatus>, String> {
+    let prefs = store.load()?;
     Ok(list_with(
         &prefs,
         &crate::env::codex_dir(),
@@ -196,8 +206,26 @@ pub(crate) fn add_in(
     default_home: &Path,
     label: &str,
 ) -> Result<HarnessLogin, String> {
+    add_in_from(
+        &crate::preferences::ambient_store()?,
+        user_home,
+        default_home,
+        label,
+    )
+}
+
+/// [`add_in`] against an explicit store.
+///
+/// The caller owns the store, so the login this adds is stored in *that*
+/// profile (issue #1482).
+pub(crate) fn add_in_from(
+    store: &crate::preferences::PreferencesStore,
+    user_home: &Path,
+    default_home: &Path,
+    label: &str,
+) -> Result<HarnessLogin, String> {
     let label = model::validate_label(label)?;
-    let prefs = crate::preferences::load()?;
+    let prefs = store.load()?;
     ensure_label_free(&prefs.harness_logins, None, &label)?;
     let id = model::unique_id_for(&label, &prefs.harness_logins);
     let login = HarnessLogin {
@@ -211,7 +239,7 @@ pub(crate) fn add_in(
     // Create the folder before the preference write, outside the preferences
     // lock: a login is only listed once its home exists.
     model::seed_home(Path::new(&login.home), Some(default_home))?;
-    crate::preferences::try_update(|prefs| {
+    store.try_update(|prefs| {
         ensure_label_free(&prefs.harness_logins, None, &label)?;
         if prefs
             .harness_logins
@@ -244,9 +272,21 @@ fn ensure_label_free(
 /// Rename a stored login. Its id and home are unchanged, so nodes that froze
 /// it keep resuming in the same home.
 pub fn rename_blocking(id: &str, label: &str) -> Result<HarnessLogin, String> {
+    rename_blocking_from(&crate::preferences::ambient_store()?, id, label)
+}
+
+/// [`rename_blocking`] against an explicit store.
+///
+/// The caller owns the store, so the login this renames is the one in *that*
+/// profile (issue #1482).
+pub fn rename_blocking_from(
+    store: &crate::preferences::PreferencesStore,
+    id: &str,
+    label: &str,
+) -> Result<HarnessLogin, String> {
     let label = model::validate_label(label)?;
     let mut renamed: Option<HarnessLogin> = None;
-    crate::preferences::try_update(|prefs| {
+    store.try_update(|prefs| {
         ensure_label_free(&prefs.harness_logins, Some(id), &label)?;
         let login = prefs
             .harness_logins
@@ -265,8 +305,19 @@ pub fn rename_blocking(id: &str, label: &str) -> Result<HarnessLogin, String> {
 /// they launch with the login picked in the spawn menu, and existing nodes
 /// keep their frozen home.
 pub fn remove_blocking(id: &str) -> Result<(), String> {
+    remove_blocking_from(&crate::preferences::ambient_store()?, id)
+}
+
+/// [`remove_blocking`] against an explicit store.
+///
+/// The caller owns the store, so the login this removes is the one in *that*
+/// profile (issue #1482).
+pub fn remove_blocking_from(
+    store: &crate::preferences::PreferencesStore,
+    id: &str,
+) -> Result<(), String> {
     cancel_sign_in_for(id);
-    crate::preferences::try_update(|prefs| {
+    store.try_update(|prefs| {
         let before = prefs.harness_logins.len();
         prefs.harness_logins.retain(|login| login.id != id);
         if prefs.harness_logins.len() == before {

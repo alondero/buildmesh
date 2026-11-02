@@ -180,6 +180,24 @@ pub(crate) async fn spawn_with_intent(
     app: &tauri::AppHandle,
     request: SpawnRequest,
 ) -> Result<SpawnOutcome, String> {
+    // The handover stages into the profile directory of the store installed at
+    // startup; the store-scoped twin below is the same path for a caller that
+    // owns its store (issue #1482).
+    let store = crate::preferences::default_store();
+    spawn_with_intent_from(store.as_ref(), app, request).await
+}
+
+/// Explicit-store path — the caller owns the store.
+///
+/// `store` is the preferences store whose profile directory the handover
+/// stages into. `None` is the "no store installed" case, which the ambient
+/// path reaches before startup finishes — the handover then reports that the
+/// app data directory is unavailable, exactly as it always has.
+pub(crate) async fn spawn_with_intent_from(
+    store: Option<&crate::preferences::PreferencesStore>,
+    app: &tauri::AppHandle,
+    request: SpawnRequest,
+) -> Result<SpawnOutcome, String> {
     let SpawnRequest {
         node_id,
         intent,
@@ -328,7 +346,7 @@ pub(crate) async fn spawn_with_intent(
     let prefill_result = if matches!(intent, SpawnIntent::Handover { .. }) {
         let prompt_node = node.clone();
         let prompt_intent = intent.clone();
-        let app_data_dir = crate::preferences::app_data_dir();
+        let app_data_dir = store.map(|store| store.profile_dir().to_path_buf());
         crate::commands::run_blocking("prepare_handover_prompt", move || {
             prepare_handover_prompt(
                 &prompt_node,

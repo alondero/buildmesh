@@ -6,10 +6,10 @@
 //! directory and passes the handle in; it never mutates an ambient global to
 //! achieve isolation.
 //!
-//! [`with_temp_dir`] remains for the suites that drive *production* code
-//! paths, which still read preferences through the free-function façade. The
-//! store it installs is the production implementation — the thread-local slot
-//! selects *which* store, not how it synchronizes.
+//! There is deliberately no "install a store for this thread" fixture: issue
+//! #1482 forbids a test-only ambient override, and a thread-local slot would
+//! not be inherited by a worker thread anyway. A test that needs a worker to
+//! see the same preferences clones the handle and passes it in.
 
 use super::store::PreferencesStore;
 use std::path::PathBuf;
@@ -53,25 +53,6 @@ pub(crate) fn with_store<F: FnOnce(&PreferencesStore)>(f: F) -> PathBuf {
     super::secrets::test_support::reset();
     f(&store);
     super::secrets::test_support::reset();
-    let _ = std::fs::remove_dir_all(&tmp);
-    tmp
-}
-
-/// Run `f` with the ambient store pointed at a fresh temporary directory.
-///
-/// The migration seam for the suites that drive production code paths, which
-/// read preferences through the free-function façade rather than through an
-/// explicit handle. The installed store is the production implementation —
-/// the thread-local slot selects *which* store, not how it synchronizes.
-pub(crate) fn with_temp_dir<F: FnOnce(&PathBuf)>(f: F) -> PathBuf {
-    let tmp = test_dir();
-    std::fs::create_dir_all(&tmp).unwrap();
-
-    super::store::init_for_tests(tmp.clone());
-
-    f(&tmp);
-
-    super::store::reset_for_tests();
     let _ = std::fs::remove_dir_all(&tmp);
     tmp
 }

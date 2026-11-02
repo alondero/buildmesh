@@ -912,13 +912,16 @@ it — not from a different code path.
 
 A test that owns its state constructs a store over a temporary directory and
 passes the handle in (`preferences::tests::with_store`). It never mutates an
-ambient global to achieve isolation. The free-function façade
-(`preferences::load`, `preferences::save`, …) remains for the production
-callers that have not yet been given an explicit handle; it delegates to the
-ambient store — the process-wide one installed at startup, or, in a test
-build, the one a fixture installed for the current thread. Either way the
-ambient store is a real `PreferencesStore`; the slot selects *which* store the
-façade reaches, not how that store synchronizes.
+ambient global to achieve isolation: there is **no test-only ambient store**.
+The free-function façade (`preferences::load`, `preferences::save`, …) remains
+for the production callers that have not yet been given an explicit handle; it
+delegates to the ambient store — the process-wide one installed at startup. In
+a test build no store is installed, so the façade reports that the module is
+not initialised rather than silently reading some other profile. A test that
+needs preferences state calls the store-scoped twin of the function it
+exercises (`*_from(store, …)`), and clones the handle into a worker thread when
+it spawns one — the handle shares the cache, the revision and the locks, so
+the worker reads the profile the parent wrote.
 
 ### The revision is per store
 
@@ -1034,4 +1037,4 @@ The derivation's single log line is `debug`, not `info`: it carries the same
 wall-clock and Codex-probe attribution fields it always has, for reading next to a
 slow save-refresh, without ranking a per-poll line above the attention and
 lifecycle lines it used to bury. Its test drives the derivation directly, because
-the memo turns a second `available_providers()` call in one generation into a hit.
+the memo turns a second `available_providers()` call in one key into a hit.

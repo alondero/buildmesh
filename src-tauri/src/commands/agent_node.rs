@@ -118,8 +118,16 @@ pub async fn create_agent_node(
     .await
 }
 
-#[cfg(test)] // allow-test-in-production: the prompt-gate test in http/routes/nodes.rs pins this desktop entry point.
-pub(crate) fn create_agent_node_blocking(
+/// The desktop create against an explicit store.
+///
+/// The caller owns the store, so the saved configuration this node launches
+/// with is the one the caller set up (issue #1482). The prompt-gate test in
+/// `http/routes/nodes.rs` pins this entry point.
+#[cfg(test)]
+// allow-test-in-production: the prompt-gate test in http/routes/nodes.rs pins this desktop entry
+// point against the store it owns.
+pub(crate) fn create_agent_node_blocking_from(
+    store: &crate::preferences::PreferencesStore,
     mesh_id: i64,
     branch: &str,
     provider: Option<&str>,
@@ -127,7 +135,8 @@ pub(crate) fn create_agent_node_blocking(
     configuration_id: Option<&str>,
     initial_prompt: Option<&str>,
 ) -> Result<AgentNode, String> {
-    create_agent_node_with_login_blocking(
+    create_agent_node_with_login_blocking_from(
+        store,
         mesh_id,
         branch,
         provider,
@@ -149,15 +158,46 @@ pub(crate) fn create_agent_node_with_login_blocking(
     initial_prompt: Option<&str>,
     login_id: Option<&str>,
 ) -> Result<AgentNode, String> {
+    let store = crate::preferences::ambient_store()?;
+    create_agent_node_with_login_blocking_from(
+        &store,
+        mesh_id,
+        branch,
+        provider,
+        use_worktree,
+        configuration_id,
+        initial_prompt,
+        login_id,
+    )
+}
+
+/// [`create_agent_node_with_login_blocking`] against an explicit store.
+///
+/// The caller owns the store, so the saved configuration and the Harness Login
+/// pick this node launches with are the ones the caller set up (issue #1482).
+// The spawn fields mirror the desktop command's own payload; bundling them
+// behind a struct would only move the same values somewhere else.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_agent_node_with_login_blocking_from(
+    store: &crate::preferences::PreferencesStore,
+    mesh_id: i64,
+    branch: &str,
+    provider: Option<&str>,
+    use_worktree: Option<bool>,
+    configuration_id: Option<&str>,
+    initial_prompt: Option<&str>,
+    login_id: Option<&str>,
+) -> Result<AgentNode, String> {
     let option = provider.unwrap_or("anthropic");
-    let configuration = crate::preferences::spawn_configurations::resolve_saved(
+    let configuration = crate::preferences::spawn_configurations::resolve_saved_from(
+        store,
         option,
         configuration_id.filter(|id| !id.trim().is_empty()),
     )
     .map_err(|error| error.to_string())?;
     let configuration = match login_id.map(str::trim).filter(|id| !id.is_empty()) {
         Some(login) => {
-            let prefs = crate::preferences::load()?;
+            let prefs = store.load()?;
             crate::preferences::spawn_configurations::with_login_pick(
                 &prefs,
                 option,
@@ -167,7 +207,8 @@ pub(crate) fn create_agent_node_with_login_blocking(
         }
         None => configuration,
     };
-    services::agent_node::create_blocking_configured(
+    services::agent_node::create_blocking_configured_from(
+        store,
         services::agent_node::NodeCreateParams {
             mesh_id,
             // The runner reads the path from the mesh row it looks up.

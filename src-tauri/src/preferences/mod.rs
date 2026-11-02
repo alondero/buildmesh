@@ -42,7 +42,7 @@ pub mod spawn_configurations;
 pub mod storage;
 pub mod store;
 
-// Per-feature test files. Shared fixtures (TEST_LOCK, with_temp_dir) live in
+// Per-feature test files. Shared fixtures (TEST_LOCK, with_store) live in
 // `tests::mod`.
 #[cfg(test)]
 mod tests;
@@ -66,21 +66,23 @@ pub use model::{
 // ----- Re-exports: store -------------------------------------------------
 //
 // The free-function façade delegates to the ambient store — the process-wide
-// one installed at startup, or the one a test fixture installed. The handle
-// itself is the seam a caller that owns its state should use instead.
+// one installed at startup. There is no test-only ambient override: a test
+// that owns its state constructs a [`store::PreferencesStore`] and passes the
+// handle to the code under test. The handle is the seam a caller that owns
+// its state should use instead.
 
+pub(crate) use store::ambient_store;
 pub(crate) use store::ensure_default_provider_normalized;
-pub(crate) use store::try_update;
+#[cfg(test)]
+// allow-test-in-production: the load counter lets a sibling suite assert that a derivation
+// reads preferences once.
+pub(crate) use store::load_count;
 pub use store::{
     app_data_dir, circuit_agent_pool_size, credential_profile, default_provider, default_store,
-    health, init, issue_spawn_prompt, load, naming_provider, pr_spawn_prompt,
-    preferences_directory, reset, restore_backup, reviewer_provider, save, update,
-    worktree_directory, PreferencesStore, SourceIdentity,
+    health, init, issue_spawn_prompt, load, naming_provider, preferences_directory, reset,
+    restore_backup, reviewer_provider, save, update, worktree_directory, PreferencesStore,
+    SourceIdentity,
 };
-#[cfg(test)]
-// allow-test-in-production: the per-thread preferences scratch dir and the load counter
-// are shared by the sibling suites.
-pub(crate) use store::{init_for_tests, load_count, reset_for_tests};
 
 // ----- Re-exports: recovery ----------------------------------------------
 
@@ -114,6 +116,9 @@ pub use resolver::{CapabilityMaskForResolver, HarnessConfigField, ResolvedCascad
 // storage types they used to sit here are reached through their own submodule
 // paths instead (`resolver::cascade::*`, `super::storage::*`).
 #[cfg(test)]
+// allow-test-in-production: the sibling suites reach these lookups through `preferences::*`.
+pub use resolver::is_claude_compatible_id;
+#[cfg(test)]
 // allow-test-in-production: the sibling suites reach the store-scoped lookup through
 // `preferences::*`.
 pub(crate) use resolver::proxied_order_for_from;
@@ -121,9 +126,6 @@ pub(crate) use resolver::proxied_order_for_from;
 // allow-test-in-production: the built-in account catalog is read by the catalog suites
 // through `preferences::*`.
 pub(crate) use resolver::BUILTIN_PROVIDER_ACCOUNTS;
-#[cfg(test)]
-// allow-test-in-production: the sibling suites reach these lookups through `preferences::*`.
-pub use resolver::{is_claude_compatible_id, provider_pairings};
 // The store-scoped twins of the resolver accessors: the sibling suites that
 // own a store reach them through `preferences::*` (issue #2450).
 #[cfg(test)]

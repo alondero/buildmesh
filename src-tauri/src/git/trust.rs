@@ -7,6 +7,11 @@ use std::time::{Duration, Instant};
 
 use git2::{Config, Error, ErrorClass, ErrorCode, Repository};
 
+#[cfg(test)]
+// allow-test-in-production: the store-scoped twin of `ensure_linked_worktree` names the
+// store type, and only the sibling suite that owns a store calls it.
+use crate::preferences::PreferencesStore;
+
 const TRUST_FILE: &str = "worktree-trust.gitconfig";
 const WRITE_WAIT: Duration = Duration::from_secs(3);
 
@@ -15,13 +20,25 @@ fn owner_error(message: impl AsRef<str>) -> Error {
 }
 
 fn store_path() -> Result<PathBuf, Error> {
-    crate::preferences::app_data_dir()
-        .map(|dir| dir.join(TRUST_FILE))
-        .ok_or_else(|| {
-            owner_error(
-                "Cannot record WSL worktree trust: Buildmesh profile directory is unavailable",
-            )
-        })
+    store_path_in(crate::preferences::app_data_dir().as_deref())
+}
+
+/// The trust file inside one profile directory.
+fn store_path_in(profile: Option<&Path>) -> Result<PathBuf, Error> {
+    profile.map(|dir| dir.join(TRUST_FILE)).ok_or_else(|| {
+        owner_error("Cannot record WSL worktree trust: Buildmesh profile directory is unavailable")
+    })
+}
+
+/// [`store_path`] against an explicit store.
+///
+/// The caller owns the store, so the trust file this names is the one beside
+/// *that* profile directory (issue #1482).
+#[cfg(test)]
+// allow-test-in-production: the store-scoped path helper is reached from the sibling suite
+// that owns a store.
+fn store_path_from(store: &PreferencesStore) -> Result<PathBuf, Error> {
+    store_path_in(Some(store.profile_dir()))
 }
 
 fn path_identity(path: &Path) -> Result<String, Error> {
@@ -118,6 +135,33 @@ fn record_grants(store: &Path, paths: &[String]) -> Result<(), Error> {
 /// Called only by Buildmesh worktree lifecycle operations, with their resolved
 /// candidate path. A user-trusted root never grants arbitrary neighboring repos.
 pub(super) fn ensure_linked_worktree(parent: &Repository, candidate: &Path) -> Result<(), Error> {
+    ensure_linked_worktree_with(parent, candidate, store_path)
+}
+
+/// [`ensure_linked_worktree`] against an explicit store.
+///
+/// The caller owns the store, so the grants this records land in *that*
+/// profile's trust file (issue #1482).
+#[cfg(test)]
+// allow-test-in-production: the store-scoped twin of `ensure_linked_worktree`, reached from
+// the sibling suite that owns a store.
+pub(super) fn ensure_linked_worktree_from(
+    store: &PreferencesStore,
+    parent: &Repository,
+    candidate: &Path,
+) -> Result<(), Error> {
+    ensure_linked_worktree_with(parent, candidate, || store_path_from(store))
+}
+
+/// The trust half.
+///
+/// The trust file is resolved only once the candidate really needs one, so a
+/// candidate that is not a WSL link never asks for a profile directory.
+fn ensure_linked_worktree_with(
+    parent: &Repository,
+    candidate: &Path,
+    resolve_store: impl FnOnce() -> Result<PathBuf, Error>,
+) -> Result<(), Error> {
     if !cfg!(windows) || crate::env::wsl_host_path_aliases(candidate).is_empty() {
         return Ok(());
     }
@@ -135,7 +179,7 @@ pub(super) fn ensure_linked_worktree(parent: &Repository, candidate: &Path) -> R
     let paths = crate::env::wsl_host_path_aliases(
         &std::fs::canonicalize(candidate).map_err(|e| Error::from_str(&e.to_string()))?,
     );
-    let store = store_path()?;
+    let store = resolve_store()?;
     record_grants(&store, &paths).map_err(|error| Error::new(error.code(), error.class(), format!(
         "Cannot record WSL worktree trust in {}: {error}. Check write access to the Buildmesh profile and Windows Git's global configuration, then retry", store.display()
     )))?;
@@ -147,6 +191,17 @@ pub(super) fn ensure_linked_worktree(parent: &Repository, candidate: &Path) -> R
 /// Revoke only Buildmesh-owned entries after successful move/removal. User
 /// safe.directory entries and grants in other profiles remain untouched.
 pub(super) fn forget_worktree(candidate: &Path) -> Result<(), Error> {
+    forget_worktree_with(candidate, store_path)
+}
+
+/// The revocation half.
+///
+/// The trust file is resolved only once a grant really has to be revoked, so a
+/// candidate that is not a WSL link never asks for a profile directory.
+fn forget_worktree_with(
+    candidate: &Path,
+    resolve_store: impl FnOnce() -> Result<PathBuf, Error>,
+) -> Result<(), Error> {
     if !cfg!(windows) {
         return Ok(());
     }
@@ -170,7 +225,7 @@ pub(super) fn forget_worktree(candidate: &Path) -> Result<(), Error> {
     if paths.is_empty() {
         return Ok(());
     }
-    let store = store_path()?;
+    let store = resolve_store()?;
     if !store.exists() {
         return Ok(());
     }

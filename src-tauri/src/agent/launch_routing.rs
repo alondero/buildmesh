@@ -399,13 +399,115 @@ pub struct CodexRouteIdentity<'a> {
     pub runtime_label: String,
 }
 
+/// Production path — the store installed at startup.
+///
+/// The preferences are read through the ambient façade, and the routing is
+/// derived from that store's state.
 pub fn prepare(
     spawn_option_id: &str,
     provider: Provider,
     resolved: &ResolvedPath,
 ) -> Result<PreparedLaunchRouting, String> {
-    // This guard reads only the runtime + process-static host probes, so it
-    // stays ahead of the cache (no preferences involved).
+    require_interoperable_wsl_host(resolved)?;
+    prepare_with_source(
+        PreferenceSource::Ambient,
+        spawn_option_id,
+        provider,
+        resolved,
+    )
+}
+
+/// Explicit-store path — the caller owns the store.
+///
+/// A test constructs its own [`preferences::PreferencesStore`] over a temporary
+/// directory and passes it here, so the preferences state this call sees is the
+/// one the caller set up (issue #1482).
+pub fn prepare_from(
+    store: &preferences::PreferencesStore,
+    spawn_option_id: &str,
+    provider: Provider,
+    resolved: &ResolvedPath,
+) -> Result<PreparedLaunchRouting, String> {
+    require_interoperable_wsl_host(resolved)?;
+    prepare_with_source(
+        PreferenceSource::Owned(store),
+        spawn_option_id,
+        provider,
+        resolved,
+    )
+}
+
+/// The preferences source a routing resolution reads from.
+///
+/// The ambient source is the store production installs at startup; the owned
+/// source is a store the caller owns (issue #1482). Each read goes through the
+/// preferences module's own façade or its store-scoped twin, so the rule is
+/// implemented once and the two paths cannot drift.
+#[derive(Clone, Copy)]
+enum PreferenceSource<'a> {
+    Ambient,
+    Owned(&'a preferences::PreferencesStore),
+}
+
+impl PreferenceSource<'_> {
+    /// The preferences snapshot this source resolves against.
+    fn snapshot(self) -> preferences::PreferencesSnapshot {
+        match self {
+            PreferenceSource::Ambient => preferences::snapshot_or_default(),
+            PreferenceSource::Owned(store) => {
+                preferences::resolver::snapshot::snapshot_or_default_from(store)
+            }
+        }
+    }
+
+    /// The spawn env for a Spawn Option.
+    fn provider_env(self, spawn_option_id: &str) -> Vec<(String, String)> {
+        match self {
+            PreferenceSource::Ambient => preferences::resolve_provider_env(spawn_option_id),
+            PreferenceSource::Owned(store) => {
+                preferences::compatibility::resolve_provider_env_from(store, spawn_option_id)
+            }
+        }
+    }
+
+    /// The preflight gate that refuses a custom endpoint without a primary
+    /// model.
+    fn preflight(self, spawn_option_id: &str) -> Result<(), String> {
+        match self {
+            PreferenceSource::Ambient => {
+                preferences::preflight_resolve_provider_env(spawn_option_id)
+            }
+            PreferenceSource::Owned(store) => {
+                preferences::compatibility::preflight_resolve_provider_env_from(
+                    store,
+                    spawn_option_id,
+                )
+            }
+        }
+    }
+
+    /// The stored pairing and the account it belongs to, if any.
+    fn stored_pairing_and_account(
+        self,
+        spawn_option_id: &str,
+    ) -> Result<Option<(preferences::ProviderPairing, preferences::ProviderAccount)>, String> {
+        match self {
+            PreferenceSource::Ambient => {
+                preferences::resolve_stored_pairing_and_account(spawn_option_id)
+            }
+            PreferenceSource::Owned(store) => {
+                resolve_stored_pairing_and_account_from(store, spawn_option_id)
+            }
+        }
+    }
+}
+
+/// The host guard both routing entry points share: a Windows harness needs an
+/// interoperable WSL host with `powershell.exe` on `PATH`.
+///
+/// It reads only the runtime + process-static host probes, so it stays ahead of
+/// the cache (no preferences involved).
+fn require_interoperable_wsl_host(resolved: &ResolvedPath) -> Result<(), String> {
     if resolved.env_type == crate::models::EnvType::WindowsInterop
         && (!crate::env::is_wsl_host() || crate::env::windows_home().is_none())
     {
@@ -414,22 +516,34 @@ pub fn prepare(
                 .into(),
         );
     }
+    Ok(())
+}
 
-    // One preferences read serves both the memo key and the profile lookup,
-    // so the routing is never derived from a different revision than the one
-    // it is keyed on (issue #1482). The source identity is part of the key:
-    // a revision alone is not comparable across stores.
-    //
-    // The trade: a hit now pays for one snapshot read, where the memo used to
-    // be consulted on a bare revision counter. That is the price of keying on
-    // the revision *and* the profile identity — the key and the data have to
-    // come from the same read, or a routing could be served under a key that
-    // describes a different revision than the one it was computed from.
-    let snapshot = preferences::snapshot_or_default();
-    let source = snapshot.source.clone();
+/// The body both routing entry points share.
+///
+/// One preferences read serves both the memo key and the profile lookup, so
+/// the routing is never derived from a different revision than the one it is
+/// keyed on (issue #1482). The source identity is part of the key: a revision
+/// alone is not comparable across stores.
+///
+/// The trade: a hit now pays for one snapshot read, where the memo used to
+/// be consulted on a bare revision counter. That is the price of keying on the
+/// revision *and* the profile identity — the key and the data have to come
+/// from the same read, or a routing could be served under a key that
+/// describes a different revision than the one it was computed from.
+fn prepare_with_source(
+    source: PreferenceSource<'_>,
+    spawn_option_id: &str,
+    provider: Provider,
+    resolved: &ResolvedPath,
+) -> Result<PreparedLaunchRouting, String> {
+    let snapshot = source.snapshot();
+    let source_identity = snapshot.source.clone();
     let revision = snapshot.revision;
     let cache_key = routing_cache_key(spawn_option_id, provider, resolved.env_type);
-    if let Some(cached) = with_routing_cache(|cache| cache.get(&source, revision, &cache_key)) {
+    if let Some(cached) =
+        with_routing_cache(|cache| cache.get(&source_identity, revision, &cache_key))
+    {
         return Ok(cached);
     }
 
@@ -463,7 +577,13 @@ pub fn prepare(
         resolved.env_type,
     );
 
-    let routing = resolve_routing(spawn_option_id, provider, resolved, executable_override)?;
+    let routing = resolve_routing(
+        source,
+        spawn_option_id,
+        provider,
+        resolved,
+        executable_override,
+    )?;
     // Only the value-only variants are memoised. `CodexProxy` carries a live
     // credential + verification and rewrites a profile file on every call; an
     // `Err` must be re-derived so its guard sees the current settings.
@@ -471,7 +591,9 @@ pub fn prepare(
         routing,
         PreparedLaunchRouting::Native { .. } | PreparedLaunchRouting::Environment { .. }
     ) {
-        with_routing_cache(|cache| cache.put(&source, revision, cache_key, routing.clone()));
+        with_routing_cache(|cache| {
+            cache.put(&source_identity, revision, cache_key, routing.clone())
+        });
     }
     Ok(routing)
 }
@@ -522,9 +644,11 @@ fn spawn_time_executable(
     })
 }
 
-/// The uncached body of [`prepare`] — resolved pairing → routing. Split out so
-/// [`prepare`] owns the memo while this keeps the resolution exact.
+/// The uncached body of [`prepare_with_source`] — resolved pairing → routing.
+/// Split out so [`prepare_with_source`] owns the memo while this keeps the
+/// resolution exact.
 fn resolve_routing(
+    source: PreferenceSource<'_>,
     spawn_option_id: &str,
     provider: Provider,
     resolved: &ResolvedPath,
@@ -536,8 +660,8 @@ fn resolve_routing(
     // exact pairing lookup below; otherwise a legacy `cline:<account>` launch
     // (and its snapshot resume) is rejected as "pairing no longer exists".
     if provider == Provider::Cline && spawn_option_id.contains(':') {
-        preferences::preflight_resolve_provider_env(spawn_option_id)?;
-        let env = preferences::resolve_provider_env(spawn_option_id);
+        source.preflight(spawn_option_id)?;
+        let env = source.provider_env(spawn_option_id);
         if env.is_empty() {
             return Err(format!(
                 "selected proxied pairing '{spawn_option_id}' no longer exists"
@@ -548,9 +672,7 @@ fn resolve_routing(
             executable: executable_override,
         });
     }
-    let Some((pairing, account)) =
-        preferences::resolve_stored_pairing_and_account(spawn_option_id)?
-    else {
+    let Some((pairing, account)) = source.stored_pairing_and_account(spawn_option_id)? else {
         if spawn_option_id.contains(':') {
             return Err(format!(
                 "selected proxied pairing '{spawn_option_id}' no longer exists"
@@ -562,10 +684,10 @@ fn resolve_routing(
         });
     };
 
-    preferences::preflight_resolve_provider_env(spawn_option_id)?;
+    source.preflight(spawn_option_id)?;
     if provider == Provider::Anthropic {
         return Ok(PreparedLaunchRouting::Environment {
-            values: preferences::resolve_provider_env(spawn_option_id),
+            values: source.provider_env(spawn_option_id),
             executable: executable_override,
         });
     }
@@ -579,18 +701,67 @@ fn resolve_routing(
     )
 }
 
+/// The store-scoped twin of [`preferences::resolve_stored_pairing_and_account`].
+///
+/// The preferences module owns this lookup and has not published a store-scoped
+/// twin of it yet, so the rule is resolved here against the caller's own
+/// store: the same account lookup, the same pairing resolution (delegated to
+/// the preferences module's own primitive), and the same error messages.
+fn resolve_stored_pairing_and_account_from(
+    store: &preferences::PreferencesStore,
+    spawn_option_id: &str,
+) -> Result<Option<(preferences::ProviderPairing, preferences::ProviderAccount)>, String> {
+    let snapshot = preferences::resolver::snapshot::snapshot_or_default_from(store);
+    let id = crate::agent::provider::SpawnOptionId::from(spawn_option_id);
+    let Some(provider_id) = id.provider_id() else {
+        return Ok(None);
+    };
+    let account = snapshot
+        .accounts
+        .iter()
+        .find(|account| account.id == provider_id)
+        .ok_or_else(|| format!("provider account '{provider_id}' is missing"))?;
+    let pairing = preferences::resolver::pairings::resolve_pairing(
+        id.harness_id(),
+        account,
+        snapshot.pairings(),
+    )
+    .ok_or_else(|| format!("pairing '{}:{}' is missing", id.harness_id(), provider_id))?;
+    Ok(Some((pairing, account.clone())))
+}
+
+/// Production path — the store installed at startup.
 pub fn prepare_snapshot(
     plan: &preferences::launch_configurations::ResolvedLaunchPlan,
     resolved: &ResolvedPath,
 ) -> Result<PreparedLaunchRouting, String> {
-    if resolved.env_type == crate::models::EnvType::WindowsInterop
-        && (!crate::env::is_wsl_host() || crate::env::windows_home().is_none())
-    {
-        return Err(
-            "Windows harnesses require an interoperable WSL host with powershell.exe on PATH."
-                .into(),
-        );
-    }
+    require_interoperable_wsl_host(resolved)?;
+    let snapshot = preferences::snapshot_or_default();
+    prepare_snapshot_from_snapshot(&snapshot, plan, resolved)
+}
+
+/// Explicit-store path — the caller owns the store.
+///
+/// A test constructs its own [`preferences::PreferencesStore`] over a temporary
+/// directory and passes it here, so the preferences state this call sees is the
+/// one the caller set up (issue #1482).
+pub fn prepare_snapshot_from(
+    store: &preferences::PreferencesStore,
+    plan: &preferences::launch_configurations::ResolvedLaunchPlan,
+    resolved: &ResolvedPath,
+) -> Result<PreparedLaunchRouting, String> {
+    require_interoperable_wsl_host(resolved)?;
+    let snapshot = preferences::resolver::snapshot::snapshot_or_default_from(store);
+    prepare_snapshot_from_snapshot(&snapshot, plan, resolved)
+}
+
+/// The body both snapshot entry points share — the frozen plan resolved
+/// against an already-loaded preferences snapshot.
+fn prepare_snapshot_from_snapshot(
+    snapshot: &preferences::PreferencesSnapshot,
+    plan: &preferences::launch_configurations::ResolvedLaunchPlan,
+    resolved: &ResolvedPath,
+) -> Result<PreparedLaunchRouting, String> {
     if let Some(distro) = &plan.harness.wsl_distro {
         if resolved.env_type == crate::models::EnvType::Wsl
             && crate::env::get_default_wsl_distro().as_deref() != Some(distro.as_str())
@@ -618,9 +789,11 @@ pub fn prepare_snapshot(
             harness_home,
         });
     };
-    let account = preferences::provider_accounts()
-        .into_iter()
-        .find(|a| a.id == route.provider_id)
+    let account = snapshot
+        .accounts
+        .iter()
+        .find(|account| account.id == route.provider_id)
+        .cloned()
         .ok_or_else(|| {
             format!(
                 "Provider account '{}' is missing; restore its credential to resume",
