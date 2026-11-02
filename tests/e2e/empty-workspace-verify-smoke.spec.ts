@@ -58,6 +58,9 @@ for (const width of [900, 1440]) {
       await expect(page.getByRole('tooltip')).toContainText('100%');
       await page.keyboard.press('Escape');
       await expect(page.getByRole('tooltip')).toBeHidden();
+      // InfoTip returns focus on the next frame; finish that handoff before
+      // asking another control to take focus.
+      await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
       await expect(help).toBeFocused();
       await expect(dialog).toBeVisible();
       const slider = dialog.getByRole('slider', { name: 'Interface text size' });
