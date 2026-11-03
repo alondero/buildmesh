@@ -245,21 +245,28 @@ describe('ProbeToolRail (ADR-0032)', () => {
     expect(screen.getByText('App-wide')).toBeTruthy();
   });
 
-  it('shares bare group headings and the Agent Changes copy with the palette', () => {
+  it('shares bare group headings and the Agent Changes help with the palette', () => {
     openPanel('files');
 
     fireEvent.click(screen.getByTestId('probe-rail-all-tools'));
 
-    // ADR-0031 scope-note refinement (2026-09-22): the menu shares tiles,
-    // labels, and descriptions with the palette — each group renders its bare
-    // heading plus its tiles, and the Agent Changes tile carries the focus
-    // exception the headings dropped.
+    // ADR-0031 scope-note refinement (2026-09-22): the menu shares tiles and
+    // labels with the palette — each group renders its bare heading plus its
+    // tiles, and the Agent Changes tile carries the focus exception the
+    // headings dropped.
     expect(screen.getByTestId('probe-tool-menu').textContent).toBe(
       TOOL_DISCOVERY_GROUPS.map(
-        (group) => group.title + group.tiles.map((t) => t.title + t.description).join(''),
+        (group) => group.title + group.tiles.map((t) => t.title).join(''),
       ).join(''),
     );
-    expect(screen.getByTestId('probe-tool-menu-review').textContent).toContain(
+    // PR #2686 — rows are a single line; the description is contextual help
+    // (hover tooltip plus accessible description), not permanent copy.
+    const review = screen.getByTestId('probe-tool-menu-review');
+    expect(review.textContent).toBe('Agent Changes');
+    expect(review.getAttribute('title')).toBe(
+      'Agent Changes: Review what the focused agent changed',
+    );
+    expect(review.getAttribute('aria-description')).toBe(
       'Review what the focused agent changed',
     );
   });
