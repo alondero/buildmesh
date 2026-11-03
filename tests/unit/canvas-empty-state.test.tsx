@@ -152,11 +152,28 @@ describe('classifyCanvasEmpty (issue #1536)', () => {
 
   it('returns filters-exclude-all when the scope holds nodes the filters hide', () => {
     // The classifier reads no narrowed count: the caller only classifies an
-    // EMPTY canvas, so "the scope holds nodes and none of them are on it"
-    // is the fallback, and this branch names it.
+    // EMPTY canvas, so "nothing in the scope is on it" is the fallback and
+    // this branch names it. The scope usually holds nodes the filters hide
+    // — but not always; see the Single case below.
     expect(
       branch(input({ totalNodeCount: 5, scopedCount: 5 })),
     ).toBe('filters-exclude-all');
+  });
+
+  it('reaches filters-exclude-all in Single when the scope has nothing left to show', () => {
+    // A soloed node deleted while its Mesh is empty, with a search active:
+    // `resolveSingleNode` finds nothing and refuses to broaden past the
+    // filter, so the canvas is empty while the scope holds no node at all.
+    // The branch is still the right one — the filters are what keep the
+    // scope empty — but it is reached with scopedCount === 0, so the
+    // classifier must not claim the scope holds nodes.
+    const single = input({
+      viewMode: 'single', lastNonSingleMode: 'mesh', selectedMeshId: 42,
+      scopedCount: 0, totalNodeCount: 3,
+    });
+    expect(single.scope.gridMode).toBe('mesh');
+    expect(single.scope.isMeshScoped).toBe(true);
+    expect(classifyCanvasEmpty(single).branch).toBe('filters-exclude-all');
   });
 
   // #2070 review — the classifier now reads the derived scope instead of

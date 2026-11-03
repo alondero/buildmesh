@@ -36,8 +36,12 @@ export function classifyCanvasEmpty(input: CanvasEmptyStateInput): CanvasEmptyDe
     return { branch: 'selected-empty', meshId: input.scope.mesh.id };
   }
   if (input.totalNodeCount === 0) return { branch: 'all-empty' };
-  // The scope holds nodes and the active filters hide all of them. The
-  // canvas is empty because of the filters, not because the scope is.
+  // Nothing in the scope survived the active filters. The scope usually
+  // holds nodes the filters hide, but not always: in Single, a soloed node
+  // deleted while its Mesh is empty and a search is active leaves the scope
+  // with no node to show at all, and this branch still answers "No nodes
+  // match" (pinned by the Single case in
+  // tests/unit/canvas-empty-state.test.tsx).
   return { branch: 'filters-exclude-all' };
 }
 
