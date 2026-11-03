@@ -1,7 +1,5 @@
 import { create } from 'zustand';
 import { useMeshStore } from './meshStore';
-import { addToast } from './toastStore';
-import { SCOPE_NOTICE_PROVIDER, searchEscapeNotice } from '../lib/scopeNotices';
 import { STATUS_CONFIG } from '../lib/status';
 import type { SessionStatus } from '../types/generated/SessionStatus';
 import type { ProbeTab } from '../lib/probeContext';
@@ -16,15 +14,8 @@ export type AppSettingsTab = 'general' | 'providers' | 'harnesses' | 'autopilot'
 
 export type { ProbeTab };
 
-// The five canvas View Modes (wayfinder #982 — tickets #983 state model,
-// #986 rendering). 'single' solos the active node (it subsumes the old
-// `maximizedNodeId`), 'mesh' scopes to the sidebar-selected mesh, 'pinned'
-// is a cross-mesh filter over `AgentNode.is_pinned`, 'all' shows every
-// node, and 'filtered' (the Search Nodes view, #1609) shows the cross-mesh
-// node set narrowed by the Grid Controls (search text + provider + status
-// filters). Kept as a string-literal union (not a generated wire enum)
-// because it's a pure UI concern — no backend serialises it.
-export type ViewMode = 'single' | 'mesh' | 'pinned' | 'all' | 'filtered';
+// Canvas modes: Single and three grid scopes. Search narrows the chosen grid.
+export type ViewMode = 'single' | 'mesh' | 'pinned' | 'all';
 
 // The Universal Command Omnibar's preselected palette mode (issue #1409 —
 // map #1371 Decision #2): 'files' is the default search (⌘/Ctrl+K),
@@ -39,7 +30,7 @@ export type OmnibarMode = 'files' | 'commands';
 export type NonSingleViewMode = Exclude<ViewMode, 'single'>;
 
 const VIEW_MODE_STORAGE_KEY = 'buildmesh.view-mode';
-const VIEW_MODES: readonly ViewMode[] = ['single', 'mesh', 'pinned', 'all', 'filtered'];
+const VIEW_MODES: readonly ViewMode[] = ['single', 'mesh', 'pinned', 'all'];
 
 // Boot value for `viewMode`: the persisted mode if it's present and valid,
 // else derived from the current mesh selection exactly as the pre-view-modes
@@ -51,6 +42,7 @@ const VIEW_MODES: readonly ViewMode[] = ['single', 'mesh', 'pinned', 'all', 'fil
 function loadViewMode(selectedMeshId: number | null): ViewMode {
   try {
     const stored = localStorage.getItem(VIEW_MODE_STORAGE_KEY);
+    if (stored === 'filtered') return 'all';
     if (stored !== null && (VIEW_MODES as readonly string[]).includes(stored)) {
       return stored as ViewMode;
     }
@@ -418,7 +410,7 @@ interface UIState extends GridControls {
   // invariant — `viewMode === 'all' ⟹ selectedMeshId === null` — by
   // clearing the mesh selection as part of the same transition. The
   // invariant is *unidirectional*: a null `selectedMeshId` is also
-  // valid in `pinned`, `filtered`, and `single` modes (those modes
+  // valid in `pinned` and `single` modes (those modes
   // deliberately never touch `selectedMeshId`).
   setViewMode: (mode: ViewMode) => void;
   // Leave 'single' for the grid mode it was entered from. No-op when the
@@ -475,22 +467,34 @@ interface UIState extends GridControls {
   openScopePickerRequest: number;
   requestOpenScopePicker: () => void;
 
-  // ---- Search entry point + scope notice (issue #2076) ----
-  // The one implementation of the "take me to the grid search" gesture,
-  // shared by the Filtered segment (`ViewModeSwitcher`) and the
-  // ⌘/Ctrl+F global shortcut (App.tsx `focus-grid-search`). Both used to
-  // spell out the same two calls; the notice only makes sense if there is
-  // exactly one of them, because "fires once per escape" is a property of
-  // the gesture rather than of each caller.
-  //
-  // The notice never gates the gesture: the mode flip and the focus request
-  // both run first and unconditionally, and the toast is fire-and-forget.
-  enterFilteredFromSearch: () => void;
+  // Search from Single returns to its remembered grid, then requests focus.
+  focusScopedSearch: () => void;
 }
 
 export const useUIStore = create<UIState>((set, get) => {
   const initialViewMode = loadViewMode(useMeshStore.getState().selectedMeshId);
   const initialGridControls = loadGridControls();
+  // Before scoped search, saved filters were dormant outside Filtered mode.
+  // That mode no longer exists, so a saved 'filtered' value is the legacy case
+  // this one-time migration reads.
+  // Preserve only filters that were actually active during the one-time migration.
+  try {
+    if (localStorage.getItem('buildmesh.scoped-search-migrated') !== '1') {
+      const oldMode = localStorage.getItem(VIEW_MODE_STORAGE_KEY);
+      if (oldMode !== 'filtered') {
+        initialGridControls.gridSearchQuery = '';
+        initialGridControls.gridProviderFilter = null;
+        initialGridControls.gridStatusFilter = null;
+        persistGridControls(initialGridControls);
+      } else {
+        persistViewMode('all');
+        useMeshStore.getState().selectMesh(null);
+      }
+      localStorage.setItem('buildmesh.scoped-search-migrated', '1');
+    }
+  } catch {
+    // Storage may be unavailable; the in-memory state remains usable.
+  }
   const initialProbeTab = restoredProbeSubview('files');
   return {
     probeOpen: false,
@@ -724,24 +728,9 @@ export const useUIStore = create<UIState>((set, get) => {
       set({ openScopePickerRequest: get().openScopePickerRequest + 1 });
     },
 
-    enterFilteredFromSearch: () => {
-      const { viewMode, lastNonSingleMode } = get();
-      // Read BEFORE the flip: after it, every scope is cross-Mesh and the
-      // escape would be invisible. `searchEscapeNotice` decides from the same
-      // scope predicate `deriveScope` answers with (#2071), so Single over a
-      // Mesh grid counts and a Filtered re-click does not.
-      const notice = searchEscapeNotice(
-        viewMode,
-        lastNonSingleMode,
-        useMeshStore.getState().selectedMeshId,
-      );
-      if (get().viewMode !== 'filtered') get().setViewMode('filtered');
-      // Re-arms on every press, including a re-click from Filtered: the
-      // user's intent is "get me to the search box" (#1609).
+    focusScopedSearch: () => {
+      if (get().viewMode === 'single') get().exitSingleMode();
       get().requestFocusGridSearch();
-      if (notice !== null) {
-        addToast(SCOPE_NOTICE_PROVIDER, notice, 'info');
-      }
     },
   };
 });

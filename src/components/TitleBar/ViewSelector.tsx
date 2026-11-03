@@ -34,8 +34,6 @@ import { CheckGlyph, ChevronGlyph, MeshPickerRows, useOpenOnPickerRequest, useSc
  *   - Mesh Grid with no Mesh selected asks for one (`enterMeshGrid` bumps
  *     `openScopePickerRequest`, #2076). This control is the picker at this
  *     tier, so the panel stays open on its Mesh list.
- *   - Filtered requests focus for the node search (#1609); the search input
- *     mounts in the same commit and takes it.
  */
 
 const PANEL_ID = dropdownId('titlebar', 'view-selector');
@@ -85,10 +83,6 @@ export function ViewSelector() {
     selectViewMode(mode);
     // A Mesh was requested: stay open on the Mesh list.
     if (useUIStore.getState().openScopePickerRequest !== pickerRequest) return;
-    if (mode === 'filtered') {
-      setOpen(false);
-      return;
-    }
     closeAndReturnFocus();
   };
 

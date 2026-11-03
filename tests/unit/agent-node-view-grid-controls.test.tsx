@@ -1,11 +1,10 @@
 ﻿/**
- * Grid Controls (wayfinder #988 / #996; Filtered view #1609) — the
+ * Grid Controls (wayfinder #988 / #996; scoped search #2683) — the
  * AgentNodeView must apply the uiStore controls to the node sequence it
  * hands to the grid, and manual drag-and-drop must disappear while a
- * non-custom sort is active. Since #1609 the search/filter narrowing is a
- * property of the dedicated Filtered view: the same store controls must
- * NOT narrow the other grids (a stale search never hides nodes behind the
- * user's back in Mesh/Pinned/All).
+ * non-custom sort is active. Since #2683 the search/filter narrowing is a
+ * property of the chosen scope: the same store controls narrow Mesh, Pinned
+ * and All Nodes without changing which scope is in view.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { act, fireEvent, render, screen } from '@testing-library/react';
@@ -125,34 +124,34 @@ beforeEach(() => {
 });
 
 describe('AgentNodeView grid controls', () => {
-  it('filters by the search query in the Filtered view', () => {
-    useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered', gridSearchQuery: 'runner' });
+  it('filters by the search query in the All view', () => {
+    useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all', gridSearchQuery: 'runner' });
 
     render(<AgentNodeView />);
 
     expect(renderedNodeIds()).toEqual([1]);
   });
 
-  it('filters by provider in the Filtered view', () => {
-    useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered', gridProviderFilter: 'anthropic' });
+  it('filters by provider in the All view', () => {
+    useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all', gridProviderFilter: 'anthropic' });
 
     render(<AgentNodeView />);
 
     expect(renderedNodeIds()).toEqual([1, 3, 4]);
   });
 
-  it('filters by status in the Filtered view', () => {
-    useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered', gridStatusFilter: 'idle' });
+  it('filters by status in the All view', () => {
+    useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all', gridStatusFilter: 'idle' });
 
     render(<AgentNodeView />);
 
     expect(renderedNodeIds()).toEqual([2, 4]);
   });
 
-  it('composes search, provider, and status filters before rendering the Filtered grid', () => {
+  it('composes search, provider, and status filters before rendering the grid', () => {
     useUIStore.setState({
-      viewMode: 'filtered',
-      lastNonSingleMode: 'filtered',
+      viewMode: 'all',
+      lastNonSingleMode: 'all',
       gridSearchQuery: 'a',
       gridProviderFilter: 'anthropic',
       gridStatusFilter: 'error',
@@ -163,17 +162,17 @@ describe('AgentNodeView grid controls', () => {
     expect(renderedNodeIds()).toEqual([3]);
   });
 
-  it('does NOT let a stale search narrow the All view (#1609)', () => {
-    // The controls are the Filtered view's property now — All renders its
-    // full scope even when the store still carries search text.
+  it('narrows the All view by search (#1609)', () => {
+    // The controls narrow whichever scope is in view: All renders only the
+    // nodes matching the search text, and the scope itself stays All.
     useUIStore.setState({ gridSearchQuery: 'runner' });
 
     render(<AgentNodeView />);
 
-    expect(renderedNodeIds()).toEqual([1, 2, 3, 4]);
+    expect(renderedNodeIds()).toEqual([1]);
   });
 
-  it('does NOT let stale filters narrow the Mesh view (#1609)', () => {
+  it('narrows the Mesh view by its filters (#1609)', () => {
     useAgentNodeStore.setState({
       nodesById: Object.fromEntries(NODES.map(n => [n.id, { ...n, mesh_id: 1 }])),
       nodeIds: NODES.map(n => n.id),
@@ -187,15 +186,15 @@ describe('AgentNodeView grid controls', () => {
 
     render(<AgentNodeView />);
 
-    expect(renderedNodeIds()).toEqual([1, 2, 3, 4]);
+    expect(renderedNodeIds()).toEqual([1]);
   });
 
   // Regression guards (#1609 review): the search text persists across mode
   // switches by design, so any control-dependent early return between
-  // scoping and sorting would run on EVERY non-Filtered render and silently
-  // serve store-insertion order instead of the configured sort.
+  // scoping and sorting would run on EVERY render and silently serve
+  // store-insertion order instead of the configured sort.
   it('sorts the All view while a stale search query is active (#1609)', () => {
-    useUIStore.setState({ gridSearchQuery: 'runner', gridSortBy: 'name', gridSortDirection: 'asc' });
+    useUIStore.setState({ gridSortBy: 'name', gridSortDirection: 'asc' });
 
     render(<AgentNodeView />);
 
@@ -211,7 +210,6 @@ describe('AgentNodeView grid controls', () => {
     useMeshStore.setState({ selectedMeshId: 1 });
     useUIStore.setState({
       viewMode: 'mesh',
-      gridSearchQuery: 'runner',
       gridSortBy: 'created',
       gridSortDirection: 'desc',
     });
@@ -232,7 +230,6 @@ describe('AgentNodeView grid controls', () => {
     useUIStore.setState({
       viewMode: 'pinned',
       lastNonSingleMode: 'pinned',
-      gridSearchQuery: 'runner',
       gridSortBy: 'name',
       gridSortDirection: 'asc',
     });
@@ -307,8 +304,8 @@ describe('AgentNodeView grid controls', () => {
       meshesById: new Map([[1, meshOnly]]),
     });
     useUIStore.setState({
-      viewMode: 'filtered',
-      lastNonSingleMode: 'filtered',
+      viewMode: 'all',
+      lastNonSingleMode: 'all',
       gridSearchQuery: 'no such node',
     });
 
@@ -441,7 +438,7 @@ describe('AgentNodeView grid controls', () => {
     expect(screen.getByTestId('grid-output').getAttribute('data-draggable')).toBe('false');
   });
 
-  it.each(['pinned', 'filtered'] as const)('groups a reviewer-only %s fallback when Single has no active node', (mode) => {
+  it.each(['pinned', 'all'] as const)('groups a reviewer-only %s fallback when Single has no active node', (mode) => {
     const implementation = makeNode({ id: 1, name: 'Implementation', is_pinned: false });
     const reviewer = makeNode({ id: 2, name: 'Reviewer', is_pinned: true });
     seedAgentNodes([implementation, reviewer], null);

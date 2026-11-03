@@ -2,7 +2,7 @@ import { useRef, useState } from 'react';
 import { useUIStore, type GridSortBy, type GridSortDirection } from '../../stores/uiStore';
 import { useAllAgentNodes } from '../../stores/agentNodeStore';
 import { STATUS_CONFIG } from '../../lib/status';
-import { matchesGridControls } from '../../lib/viewModes';
+import { useScope } from '../../hooks/useScope';
 import type { SessionStatus } from '../../types/generated/SessionStatus';
 import { useClickOutside } from '../../hooks/useClickOutside';
 
@@ -16,8 +16,9 @@ export function GridFilterPopover() {
   const [open, setOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
   useClickOutside(open ? 'grid-filters' : null, () => setOpen(false));
-  const controls = { gridSearchQuery: query, gridProviderFilter: provider, gridStatusFilter: status };
-  const count = nodes.filter(n => matchesGridControls(n, controls)).length;
+  const scope = useScope();
+  const count = scope.visibleNodeCount;
+  const scopedCount = scope.scopedNodeCount;
   const providers = [...new Set([...nodes.map(n => n.provider), ...(provider ? [provider] : [])])].sort();
   const activeCount = Number(Boolean(query.trim())) + Number(provider !== null) + Number(status !== null);
   const changed = activeCount > 0 || sort !== 'custom' || direction !== 'asc';
@@ -26,12 +27,12 @@ export function GridFilterPopover() {
   return (
     <div className="relative flex shrink-0 items-center gap-1" data-dropdown-for="grid-filters"
       onKeyDown={e => { if (open && e.key === 'Escape') { e.stopPropagation(); setOpen(false); trigger.current?.focus(); } }}>
-      <button ref={trigger} type="button" aria-label={`Filters and sort: ${count} of ${nodes.length} nodes, ${activeCount} active filters`}
+      <button ref={trigger} type="button" aria-label={`Filters and sort: ${count} of ${scopedCount} nodes, ${activeCount} active filters`}
         aria-expanded={open} aria-controls="grid-filter-panel" title="Filters and sort"
         onClick={() => setOpen(v => !v)}
         className="flex min-h-[24px] items-center gap-1 rounded-md px-1.5 text-xs text-text-secondary hover:bg-bg-card-hover">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M3 5h18M6 12h12M10 19h4" /></svg>
-        <span aria-live="polite">{count}/{nodes.length}</span>
+        <span aria-live="polite">{count}/{scopedCount}</span>
         {activeCount > 0 && <span className="text-accent-cyan">({activeCount})</span>}
       </button>
       {changed && <button type="button" aria-label="Clear all filters and sorting" title="Clear all"
@@ -39,7 +40,7 @@ export function GridFilterPopover() {
       {open && (
         <div id="grid-filter-panel" role="region" aria-label="Filters and sort"
           className="absolute left-0 top-full z-50 mt-2 w-72 max-w-[calc(100vw-16px)] space-y-3 rounded-md border border-border-default bg-bg-overlay p-3 text-xs shadow-lg">
-          <p className="text-text-secondary" role="status">{count} of {nodes.length} nodes</p>
+          <p className="text-text-secondary" role="status">{count} of {scopedCount} nodes</p>
           <label className="block text-text-secondary">Provider
             <select aria-label="Filter provider" value={provider ?? ''} className={fieldClass}
               onChange={e => actions.setGridProviderFilter(e.target.value || null)}>

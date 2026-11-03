@@ -97,7 +97,7 @@ describe('node activities', () => {
     state.activateNode(2, true, 'build');
     expect(useNodeActivityStore.getState().selections[3]).toEqual({ nodeId: 2, utility: true });
     expect(useAgentNodeStore.getState().activeNodeId).toBe(2);
-    expect(deriveVisibleNodes(scope('filtered', nodes, 1, 2, { ...controls, gridSearchQuery: 'Reviewer' }), nodes, { ...controls, gridSearchQuery: 'Reviewer' }, ownerships, state.groups).map(n => n.id)).toEqual([3]);
+    expect(deriveVisibleNodes(scope('all', nodes, 1, 2, { ...controls, gridSearchQuery: 'Reviewer' }), nodes, { ...controls, gridSearchQuery: 'Reviewer' }, ownerships, state.groups).map(n => n.id)).toEqual([3]);
     const pinnedNodes = nodes.map(n => ({ ...n, is_pinned: n.id === 2 }));
     expect(deriveVisibleNodes(scope('pinned', pinnedNodes, 1, 2, controls), pinnedNodes, controls, ownerships, state.groups).map(n => n.id)).toEqual([3]);
   });
@@ -233,7 +233,7 @@ describe('node activities', () => {
     const searching = { ...controls, gridSearchQuery: 'Reviewer' };
     expect(deriveVisibleNodes(scope('all', nodes, 1, 2, controls), nodes, controls, ownerships).map(n => n.id)).toEqual([1, 3]);
     expect(deriveVisibleNodes(scope('mesh', nodes, 1, 2, controls), nodes, controls, ownerships).map(n => n.id)).toEqual([1, 3]);
-    expect(deriveVisibleNodes(scope('filtered', nodes, 1, 2, searching), nodes, searching, ownerships).map(n => n.id)).toEqual([1]);
+    expect(deriveVisibleNodes(scope('all', nodes, 1, 2, searching), nodes, searching, ownerships).map(n => n.id)).toEqual([1]);
     expect(deriveVisibleNodes(scope('pinned', pinnedNodes, 1, 2, controls), pinnedNodes, controls, ownerships).map(n => n.id)).toEqual([1]);
   });
 

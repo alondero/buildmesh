@@ -118,7 +118,7 @@ describe('classifyCanvasEmpty (issue #1536)', () => {
     expect(branch(input({ meshCount: 0, totalNodeCount: 0 }))).toBe('no-meshes');
     expect(branch(input({ meshCount: 0, totalNodeCount: 2 }))).toBe('no-meshes');
     expect(branch(input({ viewMode: 'mesh', meshCount: 0 }))).toBe('no-meshes');
-    expect(branch(input({ viewMode: 'filtered', meshCount: 0 }))).toBe('no-meshes');
+    expect(branch(input({ viewMode: 'all', meshCount: 0 }))).toBe('no-meshes');
   });
 
   it('returns selected-empty only when viewMode=mesh AND scopedCount=0 AND selectedMeshId is set', () => {

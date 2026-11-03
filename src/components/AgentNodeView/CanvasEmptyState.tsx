@@ -31,7 +31,7 @@ export interface CanvasEmptyStateCallbacks {
 /** Scope owns identity; these counts distinguish missing work from hidden work. */
 export function classifyCanvasEmpty(input: CanvasEmptyStateInput): CanvasEmptyDecision {
   if (input.meshCount === 0) return { branch: 'no-meshes' };
-  if (input.scope.viewMode === 'pinned') return { branch: 'pinned-empty' };
+  if (input.scope.gridMode === 'pinned' && input.scopedCount === 0) return { branch: 'pinned-empty' };
   if (input.scope.viewMode === 'mesh' && !input.scope.isMeshScoped) return { branch: 'no-mesh-selected' };
   if (input.scope.viewMode === 'mesh' && input.scopedCount === 0 && input.scope.mesh !== null) {
     return { branch: 'selected-empty', meshId: input.scope.mesh.id };

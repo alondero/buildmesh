@@ -3,12 +3,18 @@
  * controls the bar renders, pinned through a stubbed `matchMedia` because the
  * tiers are chosen in JS (jsdom applies no media queries).
  *
- *   < 1440px     one labelled View selector (view + scope + Mesh picker);
+ *   < 1700px     one labelled View selector (view + scope + Mesh picker);
  *                Usage, Zoom, Settings and Mobile live in the More panel.
- *   1440–1699px  the five labelled segments and the Scope picker return;
- *                the utilities stay folded (the Filtered centre cell cannot
- *                afford their labels until 1700px).
- *   >= 1700px    the utilities are back in the bar as labelled pills.
+ *   >= 1700px    the four labelled segments and the Scope picker return, and
+ *                the utilities are back in the bar as labelled pills.
+ *   >= 2000px    the scope indicator shows its label, not just its glyph.
+ *
+ * The tiers are re-derived against the CENTRED header grid (#2683), whose
+ * side tracks are capped at half of what the command field leaves — so a
+ * width that fit the old content-sized grid no longer fits the capped one.
+ * They are derived from the WORST left cluster across both window chrome
+ * layouts, because the macOS traffic lights live in the left cluster and
+ * make it wider than the Windows one at every tier.
  *
  * The modals and window API are stubbed as in `title-bar.test.tsx`; this file
  * pins which surface owns each destination at each tier, and that every one
@@ -160,7 +166,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('below 1440px: one labelled View selector', () => {
+describe('below 1700px: one labelled View selector', () => {
   it('names the active view and its scope without hover, in place of the segments and scope icon', async () => {
     await renderAt(1280);
     act(() => { enterMesh(MESH_1.id); });
@@ -171,8 +177,8 @@ describe('below 1440px: one labelled View selector', () => {
     expect(selector().textContent).toContain('demo-1');
     expect(selector().getAttribute('aria-expanded')).toBe('false');
     expect(selector().getAttribute('aria-haspopup')).toBe('dialog');
-    // The five-segment group and the separate scope icon are gone, so no
-    // unlabelled glyph can read as a sixth view mode.
+    // The four-segment group and the separate scope icon are gone, so no
+    // unlabelled glyph can read as a fifth view mode.
     expect(screen.queryByRole('group', { name: /view mode/i })).toBeNull();
     expect(screen.queryByTestId('scope-indicator')).toBeNull();
   });
@@ -189,7 +195,7 @@ describe('below 1440px: one labelled View selector', () => {
     expect(selector().getAttribute('aria-expanded')).toBe('true');
     const views = within(panel).getByRole('group', { name: 'View' });
     const rows = within(views).getAllByRole('button');
-    expect(rows.map(row => row.textContent)).toEqual(['Single', 'Mesh Grid', 'Pinned', 'All Nodes', 'Filtered']);
+    expect(rows.map(row => row.textContent)).toEqual(['Single', 'Mesh Grid', 'Pinned', 'All Nodes']);
     expect(within(views).getByRole('button', { name: 'All Nodes' }).getAttribute('aria-pressed')).toBe('true');
     expect(within(views).getByRole('button', { name: 'Pinned' }).getAttribute('aria-pressed')).toBe('false');
     // Colour is never the only signal: the active row carries a check glyph
@@ -232,21 +238,6 @@ describe('below 1440px: one labelled View selector', () => {
     const meshes = within(panel).getByRole('group', { name: 'Mesh' });
     expect(within(meshes).getByRole('button', { name: 'demo-2' }).getAttribute('aria-current')).toBe('true');
     expect(within(meshes).getByRole('button', { name: 'demo-1' }).getAttribute('aria-current')).toBeNull();
-  });
-
-  it('hands focus to the node search when Filtered is chosen', async () => {
-    await renderAt(1280);
-    const panel = openSelector();
-    vi.useFakeTimers({ toFake: ['requestAnimationFrame'] });
-    try {
-      fireEvent.click(within(panel).getByRole('button', { name: 'Filtered' }));
-      act(() => { vi.advanceTimersToNextFrame(); });
-    } finally {
-      vi.useRealTimers();
-    }
-    expect(useUIStore.getState().viewMode).toBe('filtered');
-    expect(document.activeElement).toBe(screen.getByTestId('grid-search-input'));
-    expect(selector().textContent).toContain('Filtered');
   });
 
   it('closes on an outside click without taking focus back from what the user clicked (#2421 review)', async () => {
@@ -330,7 +321,7 @@ describe('crossing a tier remounts the picker without reopening it', () => {
 
   it('does not open the scope picker for a request made before it mounted', async () => {
     useUIStore.setState({ openScopePickerRequest: 3 });
-    await renderAt(1440);
+    await renderAt(1700);
     expect(screen.queryByTestId('scope-picker')).toBeNull();
     act(() => useUIStore.getState().requestOpenScopePicker());
     expect(screen.getByTestId('scope-picker')).toBeTruthy();
@@ -404,18 +395,20 @@ describe('utilities fold into More below 1700px', () => {
   });
 });
 
-describe('1440–1699px: labelled segments, utilities still folded', () => {
-  it('renders the five segments and the scope picker, with the utilities in More', async () => {
-    await renderAt(1440);
+describe('1700–1999px: labelled segments and labelled utility pills', () => {
+  it('renders the four segments, the scope picker and the utilities in the bar', async () => {
+    await renderAt(1700);
     expect(screen.getByRole('group', { name: /view mode/i })).toBeTruthy();
     expect(screen.getByTestId('scope-indicator')).toBeTruthy();
     expect(screen.queryByTestId('view-selector')).toBeNull();
-    expect(screen.queryByTestId('titlebar-usage')).toBeNull();
-    expect(within(openMore()).getByRole('button', { name: /Usage/ })).toBeTruthy();
+    expect(screen.getByTestId('titlebar-usage')).toBeTruthy();
+    // The utilities are back in the bar as labelled pills, so the More panel
+    // no longer carries them.
+    expect(within(openMore()).queryByRole('button', { name: /Usage/ })).toBeNull();
   });
 
-  it('marks the scope control as a dropdown so it cannot read as a sixth view mode', async () => {
-    await renderAt(1440);
+  it('marks the scope control as a dropdown so it cannot read as a fifth view mode', async () => {
+    await renderAt(1700);
     const scope = screen.getByTestId('scope-indicator');
     expect(scope.querySelector('[data-testid="scope-indicator-chevron"]')).toBeTruthy();
   });
@@ -423,7 +416,7 @@ describe('1440–1699px: labelled segments, utilities still folded', () => {
 
 describe('scope picker and tier edges (#2421 round 3)', () => {
   it('closes the scope picker on an outside click without taking focus back from what was clicked', async () => {
-    await renderAt(1440);
+    await renderAt(1700);
     fireEvent.click(screen.getByTestId('scope-indicator'));
     expect(screen.getByTestId('scope-picker')).toBeTruthy();
     vi.useFakeTimers({ toFake: ['requestAnimationFrame'] });
@@ -441,23 +434,23 @@ describe('scope picker and tier edges (#2421 round 3)', () => {
     }
   });
 
-  it('shows the compact View selector at 1439px and the labelled segments at 1440px', async () => {
-    await renderAt(1439);
+  it('shows the compact View selector at 1699px and the labelled segments at 1700px', async () => {
+    await renderAt(1699);
     expect(screen.getByTestId('view-selector')).toBeTruthy();
     expect(screen.queryByRole('group', { name: /view mode/i })).toBeNull();
     cleanup();
-    await renderAt(1440);
+    await renderAt(1700);
     expect(screen.getByRole('group', { name: /view mode/i })).toBeTruthy();
     expect(screen.queryByTestId('view-selector')).toBeNull();
   });
 
-  it('shows the short Filtered label in the bar so the command field keeps its room, with the full name in aria-label (#2421 round 4)', async () => {
-    useUIStore.setState({ viewMode: 'filtered' });
-    await renderAt(1920);
-    const scope = screen.getByTestId('scope-indicator');
-    const visible = scope.querySelector('span')?.textContent ?? '';
-    expect(visible).toMatch(/^all meshes · \d+ of \d+$/);
-    expect(scope.getAttribute('aria-label')).toMatch(/^Filtered across meshes · \d+ of \d+ nodes$/);
+  it('shows the scope label only from 2000px, keeping the glyph below it', async () => {
+    await renderAt(1999);
+    expect(screen.getByTestId('scope-indicator')).toBeTruthy();
+    expect(screen.queryByTestId('scope-label')).toBeNull();
+    cleanup();
+    await renderAt(2000);
+    expect(screen.getByTestId('scope-label')).toBeTruthy();
   });
 
   it('folds the utilities at 1699px and returns them at 1700px', async () => {
@@ -476,10 +469,10 @@ describe('a larger interface text size folds the tiers earlier', () => {
     await renderAt(1440);
     expect(screen.getByTestId('view-selector')).toBeTruthy();
     expect(screen.queryByRole('group', { name: /view mode/i })).toBeNull();
-    // The labelled segments' ~774px at 100% is ~1161px at 150%; the bar needs
-    // 2160px before it can show them again.
+    // The tiers scale with the type: the labelled tier's 1700px is 2550px at
+    // 150%, so the bar needs that before it can show the segments again.
     cleanup();
-    await renderAt(2160);
+    await renderAt(2550);
     expect(screen.getByRole('group', { name: /view mode/i })).toBeTruthy();
     expect(screen.queryByTestId('view-selector')).toBeNull();
   });

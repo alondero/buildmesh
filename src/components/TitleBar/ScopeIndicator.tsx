@@ -8,7 +8,10 @@ import { type DerivedScope } from '../../lib/viewModes';
 import { useScope } from '../../hooks/useScope';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
+import { useMinWidth } from '../../hooks/useMinWidth';
+import { useTextScale } from '../../hooks/useTextScale';
 import { dropdownId } from '../../lib/dropdownId';
+import { SCOPE_LABEL_MIN_WIDTH, tierWidthAtTextScale } from './titleBarTiers';
 
 /**
  * ScopeIndicator — the title-bar control that names the active scope and
@@ -68,57 +71,47 @@ import { dropdownId } from '../../lib/dropdownId';
  * ## Width ladder
  *
  * Since #2421 this control only mounts from `LABELLED_SWITCHER_MIN_WIDTH`
- * (1440px); narrower windows get the `ViewSelector`, which shows `detail` in
- * text. Its label span is bounded (`max-w-[16rem]`, `truncate`) and hidden
- * below 1700px — the same width `UTILITIES_IN_BAR_MIN_WIDTH` returns the
- * utility pills at. The measurements below, taken when the segments and
- * pills shared one 1440px label tier, are why that number is 1700.
+ * (1700px); narrower windows get the `ViewSelector`, which shows `detail` in
+ * text. Its label span is bounded (`max-w-[16rem]`, `truncate`) and mounts
+ * only from `SCOPE_LABEL_MIN_WIDTH` (2000px) — a JS tier like the others, so
+ * it follows the interface text size: the label is text, and a reader at 150%
+ * needs 150% of the track for it.
  *
- * Filtered is the worst case, and structurally so: it is the only mode whose
- * header grid is `grid-cols-[auto_minmax(0,1fr)_auto]`, so both flanking
- * tracks are content-sized `auto` and the centre absorbs whatever is left,
- * down to its own 16px padding floor. There the labelled indicator adds
- * 134.88px (32px glyph-only → 166.88px labelled) to a left track the switcher's
- * own labels have just grown from 518px to 726px. Measured against the real
- * window at the 13px root, that turns the Filtered search bar into an overlap
- * with the right cluster. With the switcher labels AND this label both
- * rendered:
+ * The header grid is the CENTRED one (`minmax(0,1fr) auto minmax(0,1fr)`),
+ * so the left track is CAPPED at half of what the command field leaves. This
+ * label therefore competes with the wordmark (108px), the switcher's four
+ * labelled segments (335px) and the grid search (178px, #2683) for that cap.
+ * Measured in the mock-IPC Chromium harness at the 13px root, at 100%
+ * interface text, on the WIDER of the two chrome layouts (macOS, whose
+ * traffic lights live in this same left cluster):
  *
- *   viewport   left track   centre track   overflow   collides
- *   1400px     862px        16px           114px      YES   (old shared tier)
- *   1500px     893px        70px           73px       YES
- *   1600px     893px        170px          0          no
- *   1700px     893px        270px          0          no
- *   1920px     893px        490px          0          no
+ *   viewport   left track   left content   scope label
+ *   1700px     712px        708px          glyph only
+ *   2000px     862px        858px          144px wide
  *
- * The 1400px row is the measurement that motivated the old tier and is no
- * longer reachable: the switcher's labels do not appear below 1440px. The
- * labelled collision window is therefore exactly 1440–1599px — the band where
- * the switcher's labels have just appeared AND this label's would too. At the
- * 1440px boundary, derived from that width's measured glyph-only state (left
- * 758px, centre 145px, min-content 145px), paying this label's 134.88px drops
- * the centre to ~10px against a 143px min-content — still a collision. Below
- * 1440 neither label has paid (518px left track); at 1600 and up the centre is
- * wide enough to absorb the cost. Without the indicator the centre at 1440
- * fits its 145px content exactly, so the indicator — not the left cell, whose
- * `scrollWidth` equals its `clientWidth` — is what breaks the tier.
+ * 2000px is the first width at which the scope name is shown as TEXT rather
+ * than a glyph. The label is bounded at `max-w-[16rem]` (208px), so a long
+ * Mesh name truncates with an ellipsis at EVERY width — the element is 144px
+ * wide at 2000px and only reaches its 208px cap by 2600px — while a short
+ * scope name ("All meshes · 3") fits whole. Below 2000px the control keeps
+ * its glyph; the shape still says which scope family is active, and the
+ * `aria-label` and `title` carry the full string either way.
  *
- * 1700px rather than 1600px because 1600px is the first width measured CLEAR,
- * not a comfortable one: the centre lands at 170px against a 130–143px
- * min-content (the "Search or open" field, 143px of it once the
- * `SEARCH_SHORTCUT_LABEL` kbd chip is visible at the labelled tier), so the
- * whole margin is ~27px — and part of that min-content is a runtime string this
- * control does not own. At 1700px the centre is 270px, a measured 127px of
- * slack. Between 1440px and 1700px the indicator stays glyph-only, which costs
- * the centre nothing. 1600px would also be defensible if the chip label were
- * fixed-width; it is not. Raising the switcher's labelled tier to 1440px only
- * WIDENED the band this control hides through, so its own tier needs no move —
- * it is the right number today and stays it.
+ * The count in the label is the NARROWED count — how many Agent Nodes the
+ * current filters leave visible — not the size of the scope. The scope's own
+ * size appears only as the denominator on the Filters control beside it
+ * ("3/12"; its panel spells it "3 of 12 nodes"); the bar's "All meshes · 3
+ * nodes" says "3 are visible".
  *
- * `aria-label` carries the same string as the visible label, so the
- * accessible name survives the collapse (and WCAG 2.5.3 Label in Name holds
- * for free), and `title` spells the long form — so the glyph-only band costs
- * no information, only a glance.
+ * `aria-label` carries the scope's long form and `title` spells it out
+ * further, so the glyph-only band costs no information, only a glance. The
+ * long form IS the visible label everywhere except cross-Mesh Pinned, which
+ * draws the short form ("all meshes · 3 nodes") and whose accessible name
+ * adds the mode word ("Pinned across meshes · 3 nodes"). For that one scope
+ * WCAG 2.5.3 Label in Name is NOT satisfied verbatim — the visible text is
+ * not contained in the accessible name — and the mode word the name adds is
+ * the one the highlighted switcher segment already shows, so the name still
+ * names the scope the user is looking at.
  */
 
 const PICKER_ID = dropdownId('titlebar', 'scope-picker');
@@ -155,9 +148,9 @@ function MeshGlyph({ className }: IconProps) {
   );
 }
 
-/** Lucide `layers` — the cross-Mesh glyph. One glyph for All / Pinned /
- *  Filtered: the shape is "many Meshes", and the label beside it names which
- *  View Mode produced the count. */
+/** Lucide `layers` — the cross-Mesh glyph. One glyph for All / Pinned: the
+ *  shape is "many Meshes", and the label beside it names which View Mode
+ *  produced the count. */
 function CrossMeshGlyph({ className }: IconProps) {
   return (
     <Svg className={className}>
@@ -197,8 +190,8 @@ function nodeCount(count: number): string {
 export interface ScopeLabel {
   /** The full label, and the accessible name, verbatim. */
   text: string;
-  /** The text the bar draws. Equal to `text` except for the cross-Mesh Filtered
-   *  and Pinned labels, which drop their mode word: the highlighted segment
+  /** The text the bar draws. Equal to `text` except for the cross-Mesh
+   *  Pinned label, which drops its mode word: the highlighted segment
    *  already names the mode, and the full form squeezed the command field at
    *  1700-1760px (#2421 round 4). */
   visible: string;
@@ -296,24 +289,15 @@ function fullScopeLabel(scope: DerivedScope, soloNode: AgentNode | null, meshes:
         Icon: CrossMeshGlyph,
         meshScoped: false,
       };
-    case 'filtered':
-      return {
-        // Both counts, so "the filters hid everything" reads differently from
-        // "nothing is in scope" (#1536) and from a broken render.
-        text: `Filtered across meshes · ${scope.visibleNodeCount} of ${nodeCount(scope.scopedNodeCount)}`,
-        detail: `all meshes · ${scope.visibleNodeCount} of ${scope.scopedNodeCount}`,
-        tooltip: `Filtered across every Mesh — ${scope.visibleNodeCount} of ${nodeCount(scope.scopedNodeCount)} match`,
-        Icon: CrossMeshGlyph,
-        meshScoped: false,
-      };
+
   }
 }
 
-/** The label the bar draws. Cross-Mesh Filtered and Pinned use the short form
+/** The label the bar draws. Cross-Mesh Pinned uses the short form
  *  (see `ScopeLabel.visible`); every other mode draws its full text. */
 function scopeLabel(scope: DerivedScope, soloNode: AgentNode | null, meshes: Mesh[]): ScopeLabel {
   const full = fullScopeLabel(scope, soloNode, meshes);
-  const crossMesh = scope.viewMode !== 'single' && !scope.isMeshScoped && (scope.gridMode === 'filtered' || scope.gridMode === 'pinned');
+  const crossMesh = scope.viewMode !== 'single' && !scope.isMeshScoped && scope.gridMode === 'pinned';
   return { ...full, visible: crossMesh ? full.detail : full.text };
 }
 
@@ -403,6 +387,11 @@ export function ScopeIndicator() {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const { text, visible, tooltip, Icon, meshScoped, meshes, selectedMeshId } = useScopeLabel();
+  // The label's own tier (see the width-ladder note above). It is a JS tier
+  // like the others, so it follows the interface text size: the label is
+  // text, and the track it needs grows with the text.
+  const textScale = useTextScale();
+  const labelVisible = useMinWidth(tierWidthAtTextScale(SCOPE_LABEL_MIN_WIDTH, textScale));
 
   // Dismissal is not a decision, so every route that closes the panel hands
   // the user back where they were instead of leaving focus on <body>: the
@@ -458,8 +447,9 @@ export function ScopeIndicator() {
         type="button"
         onClick={() => setOpen(value => !value)}
         data-testid="scope-indicator"
-        // The accessible name IS the visible label, so it survives the
-        // collapse and satisfies Label in Name at the same time.
+        // The accessible name is the scope's long form, so it survives the
+        // collapse. It is the visible label verbatim except in cross-Mesh
+        // Pinned, where it adds the mode word the switcher segment shows.
         aria-label={text}
         aria-expanded={open}
         aria-haspopup="dialog"
@@ -476,12 +466,11 @@ export function ScopeIndicator() {
       >
         <Icon className="h-4 w-4 shrink-0" />
         {/* Bounded first, collapsed second — and collapsed at a LATER tier
-            than the switcher's own (see the width-ladder note above): the
-            label costs 134.88px, which the Filtered centre cell cannot absorb
-            anywhere in the 1440–1599px labelled band. `max-[1700px]:hidden`
-            must stay a class literal so Tailwind v4's source scanner compiles
-            it. */}
-        <span className="min-w-0 max-w-[16rem] truncate max-[1700px]:hidden">{visible}</span>
+            than the switcher's own (see the width-ladder note above). The
+            tier is JS, not a CSS media class, so it moves with the
+            interface text size like the other tiers: the label's width is
+            text, and a 150% reader needs 150% of the track for it. */}
+        {labelVisible && <span data-testid="scope-label" className="min-w-0 max-w-[16rem] truncate">{visible}</span>}
         {/* The chevron is what tells this glyph apart from the Mesh Grid and
             Single segments it shares a shape with (#2421). */}
         <span aria-hidden className="flex shrink-0" data-testid="scope-indicator-chevron">

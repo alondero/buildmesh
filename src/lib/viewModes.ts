@@ -17,13 +17,7 @@ import type { GridControls, NonSingleViewMode, ViewMode } from '../stores/uiStor
  * specified"), so no pin-specific order exists here yet.
  */
 
-/** The Grid Controls fields the 'filtered' scope narrows by. The sort pair
- *  is deliberately excluded — 'filtered' reuses the existing grid sorters,
- *  it doesn't need to re-own them. `gridProviderFilter`/`gridStatusFilter`
- *  are PRE-EXISTING store fields (#998 era, no setter UI ships yet — see
- *  GridControls' header); #1609 carries them forward untouched rather than
- *  deleting a persisted public field, so the predicate is written once and
- *  lights up when #997 adds the popover. */
+/** Controls that narrow a scope; sorting is applied downstream. */
 export type FilterControls = Pick<GridControls, 'gridSearchQuery' | 'gridProviderFilter' | 'gridStatusFilter'>;
 
 // Neutral controls — the value `AgentNodeView` passes when it has no
@@ -35,7 +29,7 @@ const NO_FILTERS: FilterControls = {
   gridStatusFilter: null,
 };
 
-/** The shared 'filtered' visibility predicate: free-text name match plus
+/** The shared visibility predicate: free-text name match plus
  *  the provider/status dropdown filters. Exported so `gridFilterSort` and
  *  the traversal shortcut consume the same definition as the grid render —
  *  one predicate, three consumers (the repo's wayfinder #982 discipline). */
@@ -60,23 +54,11 @@ export function matchesGridControls(node: AgentNode, controls: FilterControls): 
  *   - 'pinned'   — every node with `is_pinned`, across all meshes. Pinned
  *                  never touches `selectedMeshId` (ticket #983).
  *   - 'all'      — every loaded node.
- *   - 'filtered' — every loaded node narrowed by the Grid Controls (#1609):
- *                  the free-text search plus the provider/status filters.
- *                  Cross-mesh like Pinned — the sidebar selection is
- *                  irrelevant to the scope. KNOWN CONSTRAINT (deliberate,
- *                  not an oversight): the search matches `node.name` only,
- *                  so "search inside one mesh" is NOT expressible — this
- *                  mode cannot combine a mesh scope with a query. That
- *                  would need a scope combinator or a mesh axis on the
- *                  controls, which wayfinder #982 leaves "Not yet
- *                  specified"; Ctrl+F from a mesh therefore lands in the
- *                  global pool (App.tsx `focus-grid-search`).
  */
 export function scopeNodesForMode(
   mode: NonSingleViewMode,
   agentNodes: readonly AgentNode[],
   selectedMeshId: number | null,
-  controls: FilterControls = NO_FILTERS,
 ): readonly AgentNode[] {
   switch (mode) {
     case 'pinned':
@@ -85,8 +67,6 @@ export function scopeNodesForMode(
       // Returned as-is: it is the shared derived array, so callers must treat
       // the result as readonly too. Filtering cases return a fresh array.
       return agentNodes;
-    case 'filtered':
-      return agentNodes.filter(n => matchesGridControls(n, controls));
     case 'mesh':
       return selectedMeshId === null ? [] : agentNodes.filter(n => n.mesh_id === selectedMeshId);
   }
@@ -105,12 +85,13 @@ export interface ScopeMesh {
  *
  * Single reports the grid scope it was entered from, so a solo out of a Mesh
  * grid is Mesh-anchored too — the SCOPE decides, not the View Mode label.
- * Exported because more than one surface asks this exact question and must
- * not answer it separately: `deriveScope` (which every scope consumer reads),
- * the scope-change notice, and any future predicate. `scopeNotices` used to
- * restate these three inputs and call `deriveScope` with a fabricated empty
- * node list to read this one boolean — correct only for as long as nothing
- * here consulted the node list.
+ * Exported so the rule has exactly one definition: `deriveScope` (which
+ * every scope consumer reads) answers with it, `tests/unit/view-modes.test.ts`
+ * pins that the two cannot drift apart, and any future predicate reads it
+ * rather than restating it. `scopeNotices` used to restate these three
+ * inputs and call `deriveScope` with a fabricated empty node list to read
+ * this one boolean — correct only for as long as nothing here consulted the
+ * node list.
  */
 export function isMeshScopedView(
   viewMode: ViewMode,
@@ -126,7 +107,7 @@ export function isMeshScopedView(
  * resolver is the consumer today (#2070 named it one of the four readers of
  * the scope).
  *
- * This is deliberately NOT the grid scope (`mesh` above). Pinned, Filtered and
+ * This is deliberately NOT the grid scope (`mesh` above). Pinned and
  * All have no grid Mesh by construction, yet a Mesh-lens destination still
  * acts on a Mesh, and #2073 deleted the pins that could hold one the user had
  * not chosen. So the rule is: an explicitly selected Mesh wins, and the
@@ -170,7 +151,7 @@ export interface DerivedScope {
    *  while Single is soloing a node, `viewMode` otherwise. */
   gridMode: NonSingleViewMode;
   /** The Mesh the scope is anchored to, or null when the View Mode is
-   *  cross-Mesh ('all', 'pinned', 'filtered') or when Mesh Grid has no
+   *  cross-Mesh ('all', 'pinned') or when Mesh Grid has no
    *  selection. */
   mesh: ScopeMesh | null;
   /** `mesh !== null` — whether the scope is Mesh-scoped at all. */
@@ -209,12 +190,8 @@ export function deriveScope(input: ScopeInput): DerivedScope {
   const scopedNodes = scopeNodesForMode(gridMode, agentNodes, selectedMeshId);
   // The scope above is deliberately un-narrowed, so the empty state can
   // tell "nothing is in scope" from "the filters excluded everything".
-  // Only 'filtered' narrows, and it narrows through the same shared
-  // predicate the grid and traversal use (#1609) — which is also what
-  // keeps a stale search from narrowing Mesh/Pinned/All.
-  const visibleNodes = gridMode === 'filtered'
-    ? scopedNodes.filter(n => matchesGridControls(n, input.controls ?? NO_FILTERS))
-    : scopedNodes;
+  // Narrow only after deriving the chosen scope.
+  const visibleNodes = scopedNodes.filter(n => matchesGridControls(n, input.controls ?? NO_FILTERS));
   const meshScoped = isMeshScopedView(viewMode, lastNonSingleMode, selectedMeshId);
   const meshId = meshScoped ? selectedMeshId : null;
   const focusedMeshId = agentNodes.find(n => n.id === activeNodeId)?.mesh_id ?? null;
@@ -238,10 +215,8 @@ export function deriveScope(input: ScopeInput): DerivedScope {
  * cross-mesh by nature, like Pinned. With no active node (deleted while
  * soloed, or a boot straight into 'single'), "current scope" means the grid
  * `single` was entered from (`lastNonSingleMode` — the Escape target), then
- * any node at all, then null (the caller renders the empty state). When the
- * remembered scope is 'filtered' the controls narrow the fallback the same
- * way they narrow the grid, so an active node deleted out from under a solo
- * view falls back to another matching node rather than an unfiltered one.
+ * any node at all only when no filters are active. An active filter with
+ * no matching node returns null so the fallback cannot broaden a search.
  */
 export function resolveSingleNode(
   agentNodes: readonly AgentNode[],
@@ -252,9 +227,10 @@ export function resolveSingleNode(
 ): AgentNode | null {
   const active = agentNodes.find(n => n.id === activeNodeId);
   if (active) return active;
-  return (
-    scopeNodesForMode(lastNonSingleMode, agentNodes, selectedMeshId, controls)[0]
-    ?? agentNodes[0]
-    ?? null
-  );
+  const match = scopeNodesForMode(lastNonSingleMode, agentNodes, selectedMeshId)
+    .find(n => matchesGridControls(n, controls));
+  if (match) return match;
+  const hasFilters = controls.gridSearchQuery.trim() !== ''
+    || controls.gridProviderFilter !== null || controls.gridStatusFilter !== null;
+  return hasFilters ? null : agentNodes[0] ?? null;
 }
