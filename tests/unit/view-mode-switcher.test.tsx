@@ -175,9 +175,10 @@ describe('ViewModeSwitcher (wayfinder #982 / #983 / #986)', () => {
       fireEvent.click(screen.getByRole('button', { name: /pinned/i }));
       // Neither fixture node is pinned: an honest 0, which is what tells an
       // empty scope apart from a broken render. The name carries the visible
-      // short form first, then the mode word (WCAG 2.5.3 Label in Name).
+      // short form first — count included — then the mode word, which
+      // repeats no count of its own (WCAG 2.5.3 Label in Name).
       expect(screen.getByTestId('scope-indicator').getAttribute('aria-label')).toBe(
-        'all meshes · 0 nodes (Pinned across meshes · 0 nodes)',
+        'all meshes · 0 nodes (Pinned across meshes)',
       );
     });
 

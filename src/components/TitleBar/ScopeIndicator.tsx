@@ -108,11 +108,12 @@ import { SCOPE_LABEL_MIN_WIDTH, tierWidthAtTextScale } from './titleBarTiers';
  * glance. WCAG 2.5.3 Label in Name holds in every scope: the accessible name
  * CONTAINS the visible text verbatim, so voice dictation ("click all meshes")
  * finds the control. Cross-Mesh Pinned draws the short form ("all meshes · 3
- * nodes") and names itself with the long form ("Pinned across meshes · 3
- * nodes"), so its name carries both — the visible text first, and the mode
- * word after it, because the mode word is the one the highlighted switcher
- * segment shows and the name still has to name the scope the user is looking
- * at.
+ * nodes") and names itself with the mode word ("Pinned across meshes"), so
+ * its name carries both — the visible text first, count included, and the
+ * mode word after it. The mode word is the one the highlighted switcher
+ * segment shows, so the name still has to name the scope the user is looking
+ * at; it carries no count of its own, because the visible text has just
+ * announced it.
  */
 
 const PICKER_ID = dropdownId('titlebar', 'scope-picker');
@@ -189,12 +190,16 @@ function nodeCount(count: number): string {
 }
 
 export interface ScopeLabel {
-  /** The full label, and the accessible name, verbatim. */
+  /** The label the control names itself with: the full label in every scope
+   *  but cross-Mesh Pinned, whose name is the mode word alone. There the
+   *  drawn label already carries the count, so repeating it in the
+   *  accessible name would announce the count twice. */
   text: string;
   /** The text the bar draws. Equal to `text` except for the cross-Mesh
-   *  Pinned label, which drops its mode word: the highlighted segment
-   *  already names the mode, and the full form squeezed the command field at
-   *  1700-1760px (#2421 round 4). */
+   *  Pinned label, whose drawn form is the scope half ("all meshes · 3
+   *  nodes") and whose mode word moves into the accessible name instead:
+   *  the highlighted segment already names the mode, and the full form
+   *  squeezed the command field at 1700-1760px (#2421 round 4). */
   visible: string;
   /** The scope half of the compact `ViewSelector` label (#2421), which names
    *  the View Mode itself, so this part omits it: a Mesh, a node, or
@@ -284,7 +289,11 @@ function fullScopeLabel(scope: DerivedScope, soloNode: AgentNode | null, meshes:
       };
     case 'pinned':
       return {
-        text: `Pinned across meshes · ${count}`,
+        // The mode word alone, without the count. The drawn label carries
+        // the count and the accessible name spells the mode out in
+        // parentheses — repeating the count there would have a screen reader
+        // announce it twice.
+        text: 'Pinned across meshes',
         detail: `all meshes · ${count}`,
         tooltip: `Pinned across every Mesh — ${count}`,
         Icon: CrossMeshGlyph,
@@ -450,11 +459,12 @@ export function ScopeIndicator() {
         // The accessible name carries the VISIBLE label first, so WCAG 2.5.3
         // Label in Name holds in every scope and voice dictation ("click all
         // meshes") finds the control. Cross-Mesh Pinned draws the short form
-        // ("all meshes · 3 nodes") and names itself with the long form
-        // ("Pinned across meshes · 3 nodes"), so its name carries both: the
-        // visible text, then the mode word the switcher segment shows. The
-        // name is independent of the rendered text, so it survives the
-        // collapse to the glyph.
+        // ("all meshes · 3 nodes") and names itself with the mode word
+        // ("Pinned across meshes"), so its name carries both: the visible
+        // text, count included, then the mode word the switcher segment
+        // shows. The mode word repeats no count — the visible text has just
+        // announced it. The name is independent of the rendered text, so it
+        // survives the collapse to the glyph.
         aria-label={visible === text ? text : `${visible} (${text})`}
         aria-expanded={open}
         aria-haspopup="dialog"

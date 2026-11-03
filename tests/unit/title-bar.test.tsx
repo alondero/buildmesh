@@ -681,12 +681,15 @@ describe('TitleBar (bespoke window chrome)', () => {
 
     it.each([
       ['all', null, '', 'All meshes · 3 nodes', 'All meshes · 3 nodes'],
+      // Pinned draws the short form (#2421 round 4: the highlighted switcher
+      // segment names the mode) and names itself with the visible text plus
+      // the mode word.
       [
         'pinned',
         1,
         '',
-        'Pinned across meshes · 1 node',
-        'all meshes · 1 node (Pinned across meshes · 1 node)',
+        'all meshes · 1 node',
+        'all meshes · 1 node (Pinned across meshes)',
       ],
     ] as [ViewMode, number | null, string, string, string][])(
       'renders the honest cross-Mesh label and count in the %s view (%#)',
@@ -697,11 +700,7 @@ describe('TitleBar (bespoke window chrome)', () => {
         });
         await renderTitleBar();
         const trigger = screen.getByTestId('scope-indicator');
-        // The visible text is the short form for Pinned (#2421 round 4: the
-        // highlighted switcher segment names the mode); every other scope
-        // draws the same string it names.
-        const shortLabel = viewMode === 'pinned' ? label.replace(/^Pinned across meshes/, 'all meshes') : label;
-        expect(trigger.textContent).toBe(shortLabel);
+        expect(trigger.textContent).toBe(label);
         // The accessible name carries the visible text and, for Pinned, the
         // mode word after it.
         expect(trigger.getAttribute('aria-label')).toBe(accessibleName);
@@ -721,6 +720,22 @@ describe('TitleBar (bespoke window chrome)', () => {
         expect(trigger.textContent).not.toContain('demo-1');
       },
     );
+
+    it('announces the cross-Mesh Pinned count once, not twice', async () => {
+      act(() => {
+        useUIStore.setState({ viewMode: 'pinned', lastNonSingleMode: 'pinned' });
+      });
+      await renderTitleBar();
+      const trigger = screen.getByTestId('scope-indicator');
+      const name = trigger.getAttribute('aria-label') ?? '';
+      // The drawn label carries the count and the mode word that follows it
+      // names the scope WITHOUT repeating that count: a screen reader
+      // announces "1 node" once, not twice.
+      expect(name).toBe('all meshes · 1 node (Pinned across meshes)');
+      expect(name.match(/1 node/g)).toHaveLength(1);
+      // WCAG 2.5.3 still holds — the name contains the drawn label verbatim.
+      expect(name).toContain(trigger.textContent ?? '');
+    });
 
     it('reports an empty narrowed All scope', async () => {
       act(() => useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all', gridSearchQuery: 'no-such-node' }));
