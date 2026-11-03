@@ -130,9 +130,12 @@ function NavigationControls() {
         title="Search or open… (command palette)"
         // 260px, growing toward the 640px wide-screen target only out of
         // width the side tracks do not need: in the centred grid each side
-        // track gets half of what this field leaves, and the widest left
-        // cluster (the labelled segments, a scope label at its 16rem cap and
-        // the grid search) measured 905px, so 1820px is twice that (#2421,
+        // track gets half of what this field leaves, so the track is
+        // `(viewport - 16 - field) / 2`. The widest left cluster (the
+        // labelled segments, a scope label at its 16rem cap and the grid
+        // search) measured 898px on macOS — the wider of the two chrome
+        // layouts, because its traffic lights live in the left cluster — so
+        // the pinned track is 902px and 1820px is `2 * 902 + 16` (#2421,
         // re-derived for #2683's grid search). max-w-full lets the grid
         // search and the native caption controls claim their required space
         // first.
@@ -144,13 +147,11 @@ function NavigationControls() {
             conditional still keeps an empty <kbd> chip from appearing if
             the catalog row were ever renamed. The chip is the FIRST thing
             to disappear when narrowing, at the labelled-switcher tier
-            (1540px, #2081 review — measured clean in both header grids).
-            Its own `max-[1539px]` class hides it below 1539px (Tailwind's
+            (1700px, #2081 review — measured clean in both header grids).
+            Its own `max-[1699px]` class hides it below 1699px (Tailwind's
             max-[N] is exclusive), and it also yields when the field is narrow;
             user-facing affordances outlast the decorative keyboard hint.
-            The chip contributes ~13px of the centre's 143px min-content
-            in the labelled tier, which is part of why that tier starts at
-            1540. The class string MUST stay a literal so Tailwind v4's
+            The class string MUST stay a literal so Tailwind v4's
             source scanner picks it up — a template literal would defeat
             JIT detection and the rule would never compile. #2421: the
             field is also a size container. The label, icon and chip need
@@ -159,7 +160,7 @@ function NavigationControls() {
             earlier 240px threshold compared against the field's outer width
             and hid the chip at every 1540-1819px window (#2421 review). */}
         {SEARCH_SHORTCUT_LABEL !== '' && (
-          <kbd className="shrink-0 rounded-md border border-border-default bg-bg-card px-1.5 py-0.5 font-mono text-sm text-text-muted max-[1539px]:hidden @max-[216px]:hidden">
+          <kbd className="shrink-0 rounded-md border border-border-default bg-bg-card px-1.5 py-0.5 font-mono text-sm text-text-muted max-[1699px]:hidden @max-[216px]:hidden">
             {SEARCH_SHORTCUT_LABEL}
           </kbd>
         )}
@@ -468,9 +469,9 @@ export function TitleBar() {
 
   return (
     <>
-      {/* The centred grid — `minmax(0,1fr) auto minmax(0,1fr)` from 1200px up —
+      {/* The centred grid — `minmax(0,1fr) auto minmax(0,1fr)` from 1300px up —
           gives both side tracks half of what the command field leaves, so the
-          field lands on the window's centre line (issue #1375). Below 1200px
+          field lands on the window's centre line (issue #1375). Below 1300px
           the field yields to the side clusters: the tracks are content-sized
           there, so the field sits right of centre.
 
@@ -479,16 +480,16 @@ export function TitleBar() {
           makes that work — the cluster shrinks instead of running under the
           field — but the cluster's MINIMUM width grows with the interface text
           size, and the capped track has to hold that minimum. Measured in the
-          real window across 900–2560px at 100% and 150% text: the left
-          cluster's floor is 424px at 150% (the grid search at its `min-w-24`
-          floor, the ViewSelector at its label's floor), so the capped track
-          only holds it from 1124px up. 1200px is the round width above that
-          and the point at which the measurement is clean at EVERY text size:
-          from there up the field is centred (0px off) and no header cell
-          overflows. */}
+          real window across both window chrome layouts (on macOS the traffic
+          lights live in the LEFT cluster, so that cluster is the wider one and
+          the ladder has to hold it) at 100% and 150% text: 1300px is the
+          round width at which the capped track holds the cluster at EVERY
+          text size — 512px of track against 508px of cluster, the grid search
+          at its `min-w-24` floor at 150%. From there up the field is centred
+          (0px off) and no header cell overflows. */}
       <header
         data-tauri-drag-region
-        className="grid h-14 shrink-0 grid-cols-[auto_minmax(0,1fr)_auto] items-stretch bg-bg-surface border-b border-border-subtle select-none min-[1200px]:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]"
+        className="grid h-14 shrink-0 grid-cols-[auto_minmax(0,1fr)_auto] items-stretch bg-bg-surface border-b border-border-subtle select-none min-[1300px]:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]"
       >
         {/* Left cell — clusters hug the start edge. */}
         <div data-tauri-drag-region className="flex min-w-0 items-center pl-3 pr-2">

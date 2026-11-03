@@ -339,7 +339,7 @@ describe('TitleBar (bespoke window chrome)', () => {
     });
   });
 
-  describe('navigation cluster (issue #1375; Filtered search #1609)', () => {
+  describe('navigation cluster (issue #1375; grid search #1609)', () => {
     it('the labelled search field opens the command palette in files mode', async () => {
       await renderTitleBar();
       expect(useUIStore.getState().omnibarOpen).toBe(false);
@@ -477,21 +477,22 @@ describe('TitleBar (bespoke window chrome)', () => {
       }
       const switcherGroup = screen.getByRole('group', { name: /view mode/i });
       expect(switcherGroup.querySelector('span')?.className ?? '').not.toContain('hidden');
-      // The kbd chip still hides FIRST when narrowing at 1539px — user-facing
-      // affordances outlast the decorative keyboard hint. Class literals are
-      // the contract — they MUST stay as literal strings (not template
-      // literals) so Tailwind v4's source scanner compiles them.
+      // The kbd chip still hides FIRST when narrowing, at the
+      // labelled-switcher tier (1699px) — user-facing affordances outlast the
+      // decorative keyboard hint. Class literals are the contract — they MUST
+      // stay as literal strings (not template literals) so Tailwind v4's
+      // source scanner compiles them.
       const chip = container.querySelector('kbd');
-      expect(chip?.className).toContain('max-[1539px]:hidden');
+      expect(chip?.className).toContain('max-[1699px]:hidden');
       // #2421 — and it also yields to the field's OWN width: at 1700px
-      // Filtered with a status filter the field is ~158px, where the chip
+      // the All Nodes scope with a status filter has the field at ~158px, where the chip
       // left the label as "S." beside a full "Ctrl+Shift+K". The field is a
       // size container; the label, icon and chip need about 208px of content
       // width, so below 216px the chip goes and the label keeps the room.
       expect(screen.getByTestId('titlebar-command-search').className).toContain('@container');
       expect(chip?.className).toContain('@max-[216px]:hidden');
       // The scope indicator is deliberately NOT on this tier. Its label
-      // collapses LATER — at `SCOPE_LABEL_MIN_WIDTH` (1900px, pinned per tier
+      // collapses LATER — at `SCOPE_LABEL_MIN_WIDTH` (2000px, pinned per tier
       // in `title-bar-compact.test.tsx`): #2683's grid search took the track
       // the label needed, so the label now collapses by NOT MOUNTING its span
       // and the control falls back to its glyph. Asserted here as the
@@ -503,9 +504,12 @@ describe('TitleBar (bespoke window chrome)', () => {
       // Responsive palette width (PR #1623 review; fluid since #2421): the
       // field is 260px (20rem at the 13px root) on narrow windows and grows
       // toward its VS Code-parity 640px only out of the width the centred
-      // grid's side tracks do not need — `100vw - 1820px`, twice the widest
-      // measured left cluster (905px: the labelled segments, a scope label at
-      // its 16rem cap, the grid search and the wordmark). The old fixed 640px
+      // grid's side tracks do not need — `100vw - 1820px`, which is
+      // `2 * 902 + 16`: the pinned side track is 902px and the widest measured
+      // left cluster is 898px (the labelled segments, a scope label at its
+      // 16rem cap, the grid search and the wordmark — measured on macOS,
+      // whose traffic lights live in that cluster and make it the wider of
+      // the two chrome layouts). The old fixed 640px
       // step at 1786px squeezed that cluster to 573px and truncated the scope
       // label to "All m…" at 1920px. Pin the literal so a rebase back to a
       // fixed step fails.
@@ -554,7 +558,7 @@ describe('TitleBar (bespoke window chrome)', () => {
       expect(screen.getByTestId('grid-controls')).toBeTruthy();
     });
 
-    it('mounts the Search Nodes bar beside the switcher only in the Filtered view (#1609)', async () => {
+    it('mounts the Search Nodes bar beside the switcher in every view but Single (#1609, #2683)', async () => {
       await renderTitleBar();
       act(() => {
         useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all' });
@@ -569,10 +573,10 @@ describe('TitleBar (bespoke window chrome)', () => {
       expect(cell.contains(paletteField)).toBe(false);
     });
 
-    it('clears the search input on view switches away from Filtered without wiping the stored query', async () => {
+    it('keeps the search input across view switches without wiping the stored query', async () => {
       // The query persists in the store/localStorage (#988 contract), so
-      // re-entering Filtered restores the previous search. Only the input
-      // unmounts — the store value is never reset by a mode change.
+      // returning to the scope restores the previous search. The store value
+      // is never reset by a mode change.
       await renderTitleBar();
       act(() => {
         useUIStore.setState({ viewMode: 'all', gridSearchQuery: 'alpha' });
@@ -629,14 +633,14 @@ describe('TitleBar (bespoke window chrome)', () => {
       seedAgentNodes([NODE, NODE_OTHER_MESH, NODE_SAME_MESH]);
     });
 
-    it('mounts in the left cell between the switcher and the Filtered search bar', async () => {
+    it('mounts in the left cell between the switcher and the grid search bar', async () => {
       act(() => {
         useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all' });
       });
       await renderTitleBar();
       const cell = screen.getByTestId('scope-indicator').closest('[data-tauri-drag-region]')!;
-      // Same toolbar cluster as the switcher, and ahead of the Filtered
-      // view's own search bar — one left cluster, one degradation curve.
+      // Same toolbar cluster as the switcher, and ahead of the grid
+      // search bar — one left cluster, one degradation curve.
       expect(cell.contains(screen.getByRole('group', { name: /view mode/i }))).toBe(true);
       const children = Array.from(cell.children);
       const switcherIndex = children.indexOf(screen.getByRole('group', { name: /view mode/i }));
@@ -722,13 +726,13 @@ describe('TitleBar (bespoke window chrome)', () => {
       const label = screen.getByTestId('scope-indicator').querySelector('[data-testid="scope-label"]');
       const className = label?.className ?? '';
       // Truncate BEFORE the collapse: a bounded, ellipsised label at every
-      // width. The collapse tier sits ABOVE the switcher segments' 1540px tier
+      // width. The collapse tier sits ABOVE the switcher segments' 1700px tier
       // and the utility pills' 1700px tier, and it is a JS tier like them
-      // (`SCOPE_LABEL_MIN_WIDTH`, 1900px) so the label's own width — which is
+      // (`SCOPE_LABEL_MIN_WIDTH`, 2000px) so the label's own width — which is
       // text — follows the interface text size. Measured against the real
       // window: the centred grid caps the left track at half of what the
       // command field leaves, and that track has to carry the wordmark, the
-      // labelled segments, the grid search (#2683) and this label. 1900px is
+      // labelled segments, the grid search (#2683) and this label. 2000px is
       // the first width at which the label fits whole; below it the control
       // keeps its glyph, which says more than a clipped "All mes…".
       expect(className).toContain('truncate');

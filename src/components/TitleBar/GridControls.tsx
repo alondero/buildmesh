@@ -125,8 +125,11 @@ export function GridControls({ hidden = false }: { hidden?: boolean }) {
   return (
     <div
       // `ml-1` lives here (not on a wrapper in TitleBar) so the gap to the
-      // switcher's last segment exists only while the bar is mounted — an
-      // unmounted mode must not leave an empty margin behind (#1609 review).
+      // switcher's last segment sits with the control it belongs to. A View
+      // Mode that has no search HIDES this cluster (the `hidden` prop,
+      // #2683) rather than unmounting it, so the `hidden` class is what takes
+      // the margin off the bar with it — an empty gap must never be left
+      // behind (#1609 review).
       className={hidden ? 'hidden' : 'ml-1 flex min-w-0 items-center gap-1'}
       hidden={hidden}
       data-testid="grid-controls"

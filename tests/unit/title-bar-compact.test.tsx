@@ -3,16 +3,18 @@
  * controls the bar renders, pinned through a stubbed `matchMedia` because the
  * tiers are chosen in JS (jsdom applies no media queries).
  *
- *   < 1540px     one labelled View selector (view + scope + Mesh picker);
+ *   < 1700px     one labelled View selector (view + scope + Mesh picker);
  *                Usage, Zoom, Settings and Mobile live in the More panel.
- *   1540–1699px  the four labelled segments and the Scope picker return;
- *                the utilities stay folded until 1700px.
- *   >= 1700px    the utilities are back in the bar as labelled pills.
- *   >= 1900px    the scope indicator shows its label, not just its glyph.
+ *   >= 1700px    the four labelled segments and the Scope picker return, and
+ *                the utilities are back in the bar as labelled pills.
+ *   >= 2000px    the scope indicator shows its label, not just its glyph.
  *
  * The tiers are re-derived against the CENTRED header grid (#2683), whose
  * side tracks are capped at half of what the command field leaves — so a
  * width that fit the old content-sized grid no longer fits the capped one.
+ * They are derived from the WORST left cluster across both window chrome
+ * layouts, because the macOS traffic lights live in the left cluster and
+ * make it wider than the Windows one at every tier.
  *
  * The modals and window API are stubbed as in `title-bar.test.tsx`; this file
  * pins which surface owns each destination at each tier, and that every one
@@ -164,7 +166,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('below 1540px: one labelled View selector', () => {
+describe('below 1700px: one labelled View selector', () => {
   it('names the active view and its scope without hover, in place of the segments and scope icon', async () => {
     await renderAt(1280);
     act(() => { enterMesh(MESH_1.id); });
@@ -319,7 +321,7 @@ describe('crossing a tier remounts the picker without reopening it', () => {
 
   it('does not open the scope picker for a request made before it mounted', async () => {
     useUIStore.setState({ openScopePickerRequest: 3 });
-    await renderAt(1540);
+    await renderAt(1700);
     expect(screen.queryByTestId('scope-picker')).toBeNull();
     act(() => useUIStore.getState().requestOpenScopePicker());
     expect(screen.getByTestId('scope-picker')).toBeTruthy();
@@ -393,18 +395,20 @@ describe('utilities fold into More below 1700px', () => {
   });
 });
 
-describe('1540–1699px: labelled segments, utilities still folded', () => {
-  it('renders the four segments and the scope picker, with the utilities in More', async () => {
-    await renderAt(1540);
+describe('1700–1999px: labelled segments and labelled utility pills', () => {
+  it('renders the four segments, the scope picker and the utilities in the bar', async () => {
+    await renderAt(1700);
     expect(screen.getByRole('group', { name: /view mode/i })).toBeTruthy();
     expect(screen.getByTestId('scope-indicator')).toBeTruthy();
     expect(screen.queryByTestId('view-selector')).toBeNull();
-    expect(screen.queryByTestId('titlebar-usage')).toBeNull();
-    expect(within(openMore()).getByRole('button', { name: /Usage/ })).toBeTruthy();
+    expect(screen.getByTestId('titlebar-usage')).toBeTruthy();
+    // The utilities are back in the bar as labelled pills, so the More panel
+    // no longer carries them.
+    expect(within(openMore()).queryByRole('button', { name: /Usage/ })).toBeNull();
   });
 
   it('marks the scope control as a dropdown so it cannot read as a fifth view mode', async () => {
-    await renderAt(1540);
+    await renderAt(1700);
     const scope = screen.getByTestId('scope-indicator');
     expect(scope.querySelector('[data-testid="scope-indicator-chevron"]')).toBeTruthy();
   });
@@ -412,7 +416,7 @@ describe('1540–1699px: labelled segments, utilities still folded', () => {
 
 describe('scope picker and tier edges (#2421 round 3)', () => {
   it('closes the scope picker on an outside click without taking focus back from what was clicked', async () => {
-    await renderAt(1540);
+    await renderAt(1700);
     fireEvent.click(screen.getByTestId('scope-indicator'));
     expect(screen.getByTestId('scope-picker')).toBeTruthy();
     vi.useFakeTimers({ toFake: ['requestAnimationFrame'] });
@@ -430,22 +434,22 @@ describe('scope picker and tier edges (#2421 round 3)', () => {
     }
   });
 
-  it('shows the compact View selector at 1539px and the labelled segments at 1540px', async () => {
-    await renderAt(1539);
+  it('shows the compact View selector at 1699px and the labelled segments at 1700px', async () => {
+    await renderAt(1699);
     expect(screen.getByTestId('view-selector')).toBeTruthy();
     expect(screen.queryByRole('group', { name: /view mode/i })).toBeNull();
     cleanup();
-    await renderAt(1540);
+    await renderAt(1700);
     expect(screen.getByRole('group', { name: /view mode/i })).toBeTruthy();
     expect(screen.queryByTestId('view-selector')).toBeNull();
   });
 
-  it('shows the scope label only from 1900px, keeping the glyph below it', async () => {
-    await renderAt(1899);
+  it('shows the scope label only from 2000px, keeping the glyph below it', async () => {
+    await renderAt(1999);
     expect(screen.getByTestId('scope-indicator')).toBeTruthy();
     expect(screen.queryByTestId('scope-label')).toBeNull();
     cleanup();
-    await renderAt(1900);
+    await renderAt(2000);
     expect(screen.getByTestId('scope-label')).toBeTruthy();
   });
 
@@ -465,10 +469,10 @@ describe('a larger interface text size folds the tiers earlier', () => {
     await renderAt(1440);
     expect(screen.getByTestId('view-selector')).toBeTruthy();
     expect(screen.queryByRole('group', { name: /view mode/i })).toBeNull();
-    // The tiers scale with the type: the labelled tier's 1540px is 2310px at
+    // The tiers scale with the type: the labelled tier's 1700px is 2550px at
     // 150%, so the bar needs that before it can show the segments again.
     cleanup();
-    await renderAt(2310);
+    await renderAt(2550);
     expect(screen.getByRole('group', { name: /view mode/i })).toBeTruthy();
     expect(screen.queryByTestId('view-selector')).toBeNull();
   });

@@ -71,9 +71,9 @@ import { SCOPE_LABEL_MIN_WIDTH, tierWidthAtTextScale } from './titleBarTiers';
  * ## Width ladder
  *
  * Since #2421 this control only mounts from `LABELLED_SWITCHER_MIN_WIDTH`
- * (1540px); narrower windows get the `ViewSelector`, which shows `detail` in
+ * (1700px); narrower windows get the `ViewSelector`, which shows `detail` in
  * text. Its label span is bounded (`max-w-[16rem]`, `truncate`) and mounts
- * only from `SCOPE_LABEL_MIN_WIDTH` (1900px) — a JS tier like the others, so
+ * only from `SCOPE_LABEL_MIN_WIDTH` (2000px) — a JS tier like the others, so
  * it follows the interface text size: the label is text, and a reader at 150%
  * needs 150% of the track for it.
  *
@@ -81,15 +81,17 @@ import { SCOPE_LABEL_MIN_WIDTH, tierWidthAtTextScale } from './titleBarTiers';
  * so the left track is CAPPED at half of what the command field leaves. This
  * label therefore competes with the wordmark (108px), the switcher's four
  * labelled segments (335px) and the grid search (178px, #2683) for that cap.
- * Measured in the real window at the 13px root, at 100% interface text:
+ * Measured in the real window at the 13px root, at 100% interface text, on
+ * the WIDER of the two chrome layouts (macOS, whose traffic lights live in
+ * this same left cluster):
  *
  *   viewport   left track   left content   scope label
- *   1700px     712px        712px          glyph only
- *   1900px     812px        812px          108px of text, unclipped
+ *   1700px     712px        708px          glyph only
+ *   2000px     862px        858px          144px of text, unclipped
  *
- * 1900px is the first width at which the label fits WHOLE: the track has to
- * carry the wordmark, the segments, the grid search and the label's own 108px
- * of text plus its gap. Below it the control keeps its glyph — the shape
+ * 2000px is the first width at which the label fits WHOLE: the track has to
+ * carry the wordmark, the segments, the grid search and the label's own text
+ * plus its gap. Below it the control keeps its glyph — the shape
  * still says which scope family is active, the `aria-label` and `title` still
  * carry the full string, and nothing is clipped mid-word. A truncated label
  * ("All mes…") would say less than a glyph does.

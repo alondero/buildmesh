@@ -460,6 +460,15 @@ export const SHORTCUT_ACTIONS: readonly ShortcutActionSpec[] = [
   {
     // Focus search within the current scope; Single first returns to its grid.
     // The request counter lets GridControls focus after it mounts.
+    //
+    // Ordering is guaranteed by React, not by defensive no-ops: leaving Single
+    // and bumping the counter happen in one synchronous run, so React
+    // re-renders ONCE (18 batching) with both values — the grid search's
+    // input ref is already attached (the control HIDES in Single rather than
+    // unmounting, #2683), and GridControls' `useLayoutEffect` runs after the
+    // DOM mutation but before paint, reading the already-bumped counter. No
+    // press can be dropped, and there is no "input not mounted yet" state to
+    // defend against.
     action: 'focus-grid-search',
     // `buildFocusGridSearchBinding` returns a whole binding object because it
     // predates the table (issue #998); the table only needs the accelerator.
