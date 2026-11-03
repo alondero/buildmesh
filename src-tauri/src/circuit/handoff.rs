@@ -4,7 +4,7 @@
 //! only a short pointer is pasted. The files are also durable per-run evidence
 //! (issue #2134).
 
-use super::delivery::VISIBLE_PASTE_TEXT_LIMIT;
+use crate::agent::prompt_delivery::VISIBLE_PASTE_TEXT_LIMIT;
 use crate::models::EnvType;
 use std::path::{Path, PathBuf};
 

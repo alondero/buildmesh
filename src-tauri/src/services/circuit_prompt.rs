@@ -1,6 +1,7 @@
 //! Retain exactly what delivery prepared, and expose it only for its current
 //! unverified checkpoint. Filesystem work stays outside database connections.
-use crate::circuit::{delivery::PreparedPrompt, handoff};
+use crate::agent::prompt_delivery::PreparedPrompt;
+use crate::circuit::handoff;
 use crate::db::{
     circuit::evidence::{
         prompt_delivery::{self, CircuitPromptRequest, PayloadIdentity},

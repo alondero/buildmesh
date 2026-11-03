@@ -90,6 +90,7 @@ Read the child that owns the operation before changing the facade.
 | Entrypoint | Implementation ownership |
 |---|---|
 | `services/agent_node.rs` | `agent_node/create.rs`: fresh/pending creation and launch snapshots; `discovery.rs`: import and resumable harness provenance; `lifecycle.rs`: close/delete/regenerate; `cleanup.rs`: durable removal queue, retry, and operator recovery. |
+| `agent/prompt_delivery.rs` | Readiness, guarded paste, settling and bounded Enter with explicit observation requirements; per-process bounded output lives in `agent/prompt_delivery/observation.rs`. Circuit callers retain payloads and own progression. |
 | `agent/process.rs` | Process handle and constructor; `process/input.rs`: incarnation stamps and bounded replay; `registry.rs`: registry claims and teardown; `commands.rs`: live input, interrupt, kill, and handover orchestration. Spawn arrangement remains in `agent/spawn/`. |
 | `agent/provider/adapters/codex.rs` | `AgentProvider` implementation; `codex/hooks.rs`: callbacks/config retirement; `install_cache.rs`: single-flight cache; `install_probe.rs`: bounded runtime probes; `profiles.rs`: proxy profiles; `runtime_files.rs`: native/WSL file access; `trust.rs`: project trust edits. |
 | `commands/pr.rs` | IPC DTOs and command/offload adapters; `services/github/feeds.rs`: feed queries and mergeability batching; `pr_workflow.rs`: source validation, create/open/merge workflows; `repository.rs`: GitHub origin identity. All reuse `github/prs.rs` and its `GitHubClient`; there is no second HTTP client. |
@@ -130,7 +131,6 @@ makes a move behaviour-preserving.
 | `circuit/model.rs` | 1,840 | The graph AST and its validation and serialisation. |
 | `commands/diff.rs` | 1,837 | The per-file diff view: hunk building and syntax highlighting. The git2 side lives in `git/diff.rs` and `git/state.rs`. |
 | `commands/build_run.rs` | 1,733 | Build and run command orchestration. |
-| `circuit/delivery.rs` | 940 | Delivering a step's prompt to a live agent. |
 
 The counts are measured, not estimated. Re-measure before quoting one: the
 numbers move as files are split, and a stale figure is worse than none.
