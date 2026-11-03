@@ -363,22 +363,29 @@ describe('search within the chosen scope (#2683)', () => {
 });
 
 /**
- * The `visibleNodes` doc comment must not promise an array identity that
- * `deriveScope` does not deliver.
+ * `visibleNodes` is a fresh array in every scope, and the doc comment on
+ * `DerivedScope.visibleNodes` says so.
  *
- * The comment used to say the 'all' view mode "hands back the shared derived
- * node array unchanged". `scopeNodesForMode('all')` does return the shared
- * array, but `deriveScope` narrows every scope with `filter`, so
- * `visibleNodes` is a fresh array in every mode. A comment that promises
- * identity sends the next caller to reach for `===` or to use the array as a
- * memo key against a guarantee the code does not keep.
+ * The comment used to claim the opposite: that the 'all' view mode "hands
+ * back the shared derived node array unchanged". `scopeNodesForMode('all')`
+ * does return the shared array, but `deriveScope` narrows every scope with
+ * `filter`, so `visibleNodes` is a fresh array in every mode. A comment that
+ * promises identity sends the next caller to reach for `===` or to use the
+ * array as a memo key against a guarantee the code does not keep.
  *
- * The guard reads the comment out of the source and compares the promise with
- * what the code does: if the comment claims identity, the implementation has
- * to deliver it. Rewording the comment and restoring the identity both
- * satisfy it — only a comment and a code that disagree fail.
+ * These assertions pin the behaviour the comment states, not the words the
+ * comment uses. An earlier version searched the comment for the words
+ * "unchanged" or "shared" and asserted against the result of that search: a
+ * comment that made the same false promise in other words left the search
+ * false, so the assertion compared `true` with itself and the guard passed.
+ * Asserting that the array is not the caller's own cannot be fooled by
+ * wording — if the implementation ever hands the input array back, these
+ * assertions fail and the comment has to be re-read alongside them.
+ *
+ * The comment is checked for presence only. Nothing here can read whether
+ * its wording is true; what keeps it true is the behaviour asserted below.
  */
-describe('DerivedScope.visibleNodes documentation', () => {
+describe('DerivedScope.visibleNodes is a fresh copy', () => {
   const SOURCE = readFileSync(resolve(__dirname, '../../src/lib/viewModes.ts'), 'utf8');
 
   /** The doc comment the source carries for one interface member. */
@@ -393,18 +400,29 @@ describe('DerivedScope.visibleNodes documentation', () => {
     return SOURCE.slice(start + 3, end);
   }
 
-  it('claims no array identity the implementation does not deliver', () => {
-    const doc = docCommentFor('visibleNodes');
-    const claimsIdentity = /\b(unchanged|shared)\b/i.test(doc);
-    const delivered = deriveScope({
-      viewMode: 'all', lastNonSingleMode: 'all', agentNodes: NODES,
-      selectedMeshId: null, activeNodeId: null,
-    }).visibleNodes === NODES;
-    expect(
-      claimsIdentity ? delivered : true,
-      claimsIdentity
-        ? 'The visibleNodes doc comment promises the shared array is handed back unchanged, but deriveScope returns a freshly filtered array. Reword the comment, or skip the filter when no filter controls are active.'
-        : '',
-    ).toBe(true);
+  it('keeps the promise documented', () => {
+    expect(docCommentFor('visibleNodes')).not.toBe('');
+  });
+
+  it.each([
+    ['all', 'all', null],
+    ['pinned', 'pinned', null],
+    ['mesh', 'mesh', 10],
+    ['single', 'all', null],
+  ] as const)('hands back a fresh array in the %s scope, never the caller\'s own',
+    (viewMode, lastNonSingleMode, selectedMeshId) => {
+      const scope = deriveScope({
+        viewMode, lastNonSingleMode, agentNodes: NODES,
+        selectedMeshId, activeNodeId: null,
+      });
+      expect(scope.visibleNodes).not.toBe(NODES);
+    });
+
+  it('does not keep the same array across calls', () => {
+    const input = {
+      viewMode: 'all' as const, lastNonSingleMode: 'all' as const,
+      agentNodes: NODES, selectedMeshId: null, activeNodeId: null,
+    };
+    expect(deriveScope(input).visibleNodes).not.toBe(deriveScope(input).visibleNodes);
   });
 });
