@@ -404,9 +404,6 @@ pub(crate) async fn spawn_with_intent_from(
         db::clear_cli_session_id(node_id).map_err(|e| e.to_string())?;
     }
 
-    if typed_prompt.is_some() {
-        super::startup_prompt::arm(node_id);
-    }
     let result = spawn_agent_inner(
         app,
         &claim,
@@ -468,7 +465,6 @@ pub(crate) async fn spawn_with_intent_from(
             Ok(SpawnOutcome::Started(refreshed))
         }
         Err(error) => {
-            super::startup_prompt::disarm(node_id);
             report_spawn_failure(app, node_id, is_resume_intent, &error);
             Err(error)
         }

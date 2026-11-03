@@ -22,6 +22,16 @@ pub(crate) enum InputUnavailable {
 }
 
 impl InputStamp {
+    pub(super) const INITIAL_VERSION: u64 = 0;
+
+    /// Fence a startup prompt against any input accepted since process launch.
+    pub(crate) fn at_process_start(generation: u64) -> Self {
+        Self {
+            generation,
+            version: Self::INITIAL_VERSION,
+        }
+    }
+
     pub(crate) fn encode(self) -> String {
         format!("{}:{}", self.generation, self.version)
     }

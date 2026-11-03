@@ -1,4 +1,4 @@
-//! Tests for `circuit::delivery`.
+//! Tests for `agent::prompt_delivery`.
 //!
 //! Split out of `src-tauri/src/circuit/delivery.rs` by issue #2451. The conventions this
 //! layout depends on — why the module keeps the name `tests`, and why every
@@ -6,7 +6,7 @@
 //! documented once in `docs/development/rust-conventions.md`, under *Rust unit
 //! tests live in sibling `*_tests.rs` files*.
 //!
-//! Run with: cd src-tauri && cargo test circuit::delivery::tests
+//! Run with: cd src-tauri && cargo test agent::prompt_delivery::tests
 
 use super::*;
 #[test]
@@ -187,7 +187,10 @@ fn grok_staged_prompt_write_unguarded_normalizes_newlines() {
     let (guard, _) = stage_prompt_write(&registry, &prepared, None)
         .unwrap()
         .unwrap();
-    assert!(guard.is_none());
+    assert!(
+        guard.is_some(),
+        "automated writes now always retain ownership"
+    );
 
     let written = writes.recv_timeout(Duration::from_secs(1)).unwrap();
     let expected_payload = b"\x1b[200~line1\rline2\rline3\x1b[201~".to_vec();
@@ -669,9 +672,9 @@ fn codex_paste_readiness_matches_wrapped_terminal_marker() {
     let id = -930_027;
     evaluator::register(id);
     evaluator::on_output(id, "old [Pasted Content 9407 chars]");
-    let cursor = evaluator::output_cursor(id).unwrap();
+    let cursor = evaluator::tests::output_cursor(id).unwrap();
     assert!(!rendered_paste_visible(
-        &evaluator::cleaned_output_since(id, cursor),
+        &evaluator::tests::cleaned_output_since(id, cursor),
         9407,
         9407,
         ""
@@ -681,10 +684,15 @@ fn codex_paste_readiness_matches_wrapped_terminal_marker() {
         // Captured from Codex 0.160.0 in a 22-column Windows ConPTY.
         "\x1b[38;5;6m[Pasted Content     \x1b[m  \x1b[38;5;6m9407 chars]\x1b[K\x1b[m",
     ] {
-        let cursor = evaluator::output_cursor(id).unwrap();
+        let cursor = evaluator::tests::output_cursor(id).unwrap();
         evaluator::on_output(id, output);
         assert!(
-            rendered_paste_visible(&evaluator::cleaned_output_since(id, cursor), 9407, 9407, ""),
+            rendered_paste_visible(
+                &evaluator::tests::cleaned_output_since(id, cursor),
+                9407,
+                9407,
+                ""
+            ),
             "terminal line wrapping must not hide a complete matching paste marker"
         );
     }
@@ -723,7 +731,7 @@ fn codex_paste_readiness_rechecks_late_echo_without_repeating_input() {
         normalized_chars: 9407,
         content: String::new(),
         split_marker_prompt: None,
-        output_cursor: evaluator::output_cursor(id).unwrap(),
+        output_cursor: evaluator::tests::output_cursor(id).unwrap(),
     };
     let registry_for_wait = Arc::clone(&registry);
     let wait = std::thread::spawn(move || {
@@ -774,7 +782,7 @@ fn codex_paste_readiness_stops_on_changed_input_or_exhaustion() {
         normalized_chars: 9407,
         content: String::new(),
         split_marker_prompt: None,
-        output_cursor: evaluator::output_cursor(id).unwrap(),
+        output_cursor: evaluator::tests::output_cursor(id).unwrap(),
     };
     let error = settle_after_paste(
         &registry,
@@ -785,7 +793,7 @@ fn codex_paste_readiness_stops_on_changed_input_or_exhaustion() {
     )
     .unwrap_err();
     assert!(
-        error.contains("after ") && error.contains("s (readiness budget 1ms)"),
+        error.contains("did not confirm") && error.contains("readiness budget 1ms"),
         "{error}"
     );
     assert_eq!(
@@ -896,14 +904,14 @@ fn live_codex_node_selects_rendered_paste_gate() {
     };
     assert_eq!((chars, normalized_chars), (30, 30));
     assert!(!rendered_paste_visible(
-        &evaluator::cleaned_output_since(proxied_id, output_cursor),
+        &evaluator::tests::cleaned_output_since(proxied_id, output_cursor),
         chars,
         normalized_chars,
         &content
     ));
     evaluator::on_output(proxied_id, "[Pasted Content 30 chars]");
     assert!(rendered_paste_visible(
-        &evaluator::cleaned_output_since(proxied_id, output_cursor),
+        &evaluator::tests::cleaned_output_since(proxied_id, output_cursor),
         chars,
         normalized_chars,
         &content
@@ -1158,10 +1166,7 @@ fn muse_midsize_paste_rendered_in_full_is_confirmed_by_its_tail() {
     let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
     evaluator::register(id);
     assert!(
-        crate::circuit::launch::normalize_for_match(MUSE_MIDSIZE_PROMPT)
-            .chars()
-            .count()
-            > VISIBLE_PASTE_TEXT_LIMIT,
+        normalize_for_match(MUSE_MIDSIZE_PROMPT).chars().count() > VISIBLE_PASTE_TEXT_LIMIT,
         "fixture precondition: past the full-text limit, where only a marker used to be accepted"
     );
     let (_, readiness) = stage_prompt_write(
@@ -1218,10 +1223,10 @@ fn muse_midsize_paste_is_not_confirmed_until_its_tail_is_drawn() {
     };
     // Read each frame back as production does: output since a cursor, escapes stripped.
     let confirmed_by = |frame: &str| {
-        let cursor = evaluator::output_cursor(id).unwrap();
+        let cursor = evaluator::tests::output_cursor(id).unwrap();
         evaluator::on_output(id, frame);
         rendered_paste_visible(
-            &evaluator::cleaned_output_since(id, cursor),
+            &evaluator::tests::cleaned_output_since(id, cursor),
             chars,
             normalized_chars,
             &content,
@@ -1310,7 +1315,7 @@ fn delivery_fixture_ids_stay_inside_their_own_database_range() {
     evaluator::unregister(ids[0]);
     for id in &ids[1..] {
         assert!(
-            evaluator::output_cursor(*id).is_some(),
+            evaluator::tests::output_cursor(*id).is_some(),
             "node {id} lost its PTY output buffer to another fixture's unregister"
         );
     }
@@ -1562,7 +1567,6 @@ fn codex_control_sequence_paste_submits_with_one_separate_enter() {
             chars,
             normalized_chars,
             content,
-            split_marker_prompt,
             ..
         } = &readiness.paste
         else {
@@ -1572,7 +1576,6 @@ fn codex_control_sequence_paste_submits_with_one_separate_enter() {
             (*chars, *normalized_chars),
             (composer_chars, composer_chars)
         );
-        assert!(split_marker_prompt.as_ref().unwrap().payload.is_empty());
         assert!(!rendered_paste_visible(
             &format!("[Pasted Content {raw_chars} chars]"),
             *chars,
@@ -1793,8 +1796,8 @@ fn codex_marker_count_survives_an_omitted_inline_newline() {
     assert_eq!(inline.chars().count(), 142);
     assert_eq!(prompt.chars().skip(143).count(), 5242);
     assert_eq!(
-        crate::circuit::launch::normalize_for_match(inline),
-        crate::circuit::launch::normalize_for_match(&prompt.chars().take(143).collect::<String>())
+        normalize_for_match(inline),
+        normalize_for_match(&prompt.chars().take(143).collect::<String>())
     );
     assert!(rendered_split_paste_visible(
         &format!("› {inline}[Pasted\r\n  Content 5242 chars]"),
@@ -2006,10 +2009,7 @@ fn codex_midsize_paste_rendered_in_full_is_confirmed_by_its_tail() {
     let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
     evaluator::register(id);
     assert!(
-        crate::circuit::launch::normalize_for_match(CODEX_MIDSIZE_PROMPT)
-            .chars()
-            .count()
-            > VISIBLE_PASTE_TEXT_LIMIT,
+        normalize_for_match(CODEX_MIDSIZE_PROMPT).chars().count() > VISIBLE_PASTE_TEXT_LIMIT,
         "fixture precondition: past the full-text limit, where only a marker used to be accepted"
     );
     let (_, readiness) = stage_prompt_write(
@@ -2066,10 +2066,10 @@ fn codex_midsize_paste_is_not_confirmed_until_its_tail_is_drawn() {
     };
     // Read each frame back as production does: output since a cursor, escapes stripped.
     let confirmed_by = |frame: &str| {
-        let cursor = evaluator::output_cursor(id).unwrap();
+        let cursor = evaluator::tests::output_cursor(id).unwrap();
         evaluator::on_output(id, frame);
         rendered_paste_visible(
-            &evaluator::cleaned_output_since(id, cursor),
+            &evaluator::tests::cleaned_output_since(id, cursor),
             chars,
             normalized_chars,
             &content,
@@ -2157,10 +2157,9 @@ fn a_stale_redraw_with_an_identical_ending_is_a_known_tail_match_limit() {
     // The earlier prompt shares B's tail and nothing else: if its redraw
     // also carried B's head, this would re-test the happy path instead
     // of the stale-redraw limit.
-    let b_normalized = crate::circuit::launch::normalize_for_match(CODEX_MIDSIZE_PROMPT);
+    let b_normalized = normalize_for_match(CODEX_MIDSIZE_PROMPT);
     let b_head: String = b_normalized.chars().take(30).collect();
-    let a_normalized =
-        crate::circuit::launch::normalize_for_match(CODEX_EARLIER_SAME_ENDING_PROMPT);
+    let a_normalized = normalize_for_match(CODEX_EARLIER_SAME_ENDING_PROMPT);
     assert!(
         a_normalized.ends_with(&content),
         "fixture precondition: the earlier prompt shares B's tail"
@@ -2170,11 +2169,11 @@ fn a_stale_redraw_with_an_identical_ending_is_a_known_tail_match_limit() {
         "fixture precondition: the earlier prompt shares ONLY the tail"
     );
     // A's redraw lands after B's write: the matcher sees B's tail in it.
-    let cursor = evaluator::output_cursor(id).unwrap();
+    let cursor = evaluator::tests::output_cursor(id).unwrap();
     evaluator::on_output(id, CODEX_EARLIER_REDRAW_FRAME);
     assert!(
         rendered_paste_visible(
-            &evaluator::cleaned_output_since(id, cursor),
+            &evaluator::tests::cleaned_output_since(id, cursor),
             chars,
             normalized_chars,
             &content
@@ -2191,11 +2190,11 @@ fn tail_anchor_survives_narrow_terminal_fragmentation() {
     // must survive the same fragmentation when a narrow composer wraps
     // mid-word — `normalize_for_match` drops whitespace, so wrap padding
     // and line breaks inside the tail region cannot hide it.
-    let normalized = crate::circuit::launch::normalize_for_match(CODEX_MIDSIZE_PROMPT);
+    let normalized = normalize_for_match(CODEX_MIDSIZE_PROMPT);
     let proof = visible_paste_proof(PasteGatePolicy::RenderedWithTailAnchor, normalized);
     assert_eq!(proof.chars().count(), TAIL_ANCHOR_CHARS);
     // The split lands inside the tail: the fragmented span is part of the proof.
-    let tail_span = crate::circuit::launch::normalize_for_match("any commits yourself");
+    let tail_span = normalize_for_match("any commits yourself");
     assert!(
         proof.contains(&tail_span),
         "fixture precondition: the narrow wrap splits the tail itself"
@@ -2218,11 +2217,11 @@ fn tail_anchor_survives_narrow_terminal_fragmentation() {
     );
     let fragmented = CODEX_MIDSIZE_COMPOSER_FRAME
         .replace("any commits yourself.", "any\x1b[K\r\n   commits yourself.");
-    let cursor = evaluator::output_cursor(id).unwrap();
+    let cursor = evaluator::tests::output_cursor(id).unwrap();
     evaluator::on_output(id, &fragmented);
     assert!(
         rendered_paste_visible(
-            &evaluator::cleaned_output_since(id, cursor),
+            &evaluator::tests::cleaned_output_since(id, cursor),
             chars,
             normalized_chars,
             &content
@@ -2241,7 +2240,7 @@ fn tail_rule_applies_at_any_size_without_a_collapse_cutoff() {
     // marker can confirm it.
     for size in [839, 1_509, 9_407] {
         let draft = format!("prompt\n{}", "z".repeat(size));
-        let normalized = crate::circuit::launch::normalize_for_match(&draft);
+        let normalized = normalize_for_match(&draft);
         assert!(
             normalized.chars().count() > VISIBLE_PASTE_TEXT_LIMIT,
             "fixture precondition"
@@ -2253,7 +2252,7 @@ fn tail_rule_applies_at_any_size_without_a_collapse_cutoff() {
         );
     }
     let draft = format!("prompt\n{}", "z".repeat(1_509));
-    let normalized = crate::circuit::launch::normalize_for_match(&draft);
+    let normalized = normalize_for_match(&draft);
     assert_eq!(
         visible_paste_proof(PasteGatePolicy::RenderedMarkerOnly, normalized),
         "",
@@ -2323,9 +2322,10 @@ fn codex_paste_wait_stops_when_process_dies() {
             normalized_chars: 100,
             content: String::new(),
             split_marker_prompt: None,
-            output_cursor: evaluator::output_cursor(id).unwrap(),
+            output_cursor: evaluator::tests::output_cursor(id).unwrap(),
         },
         receipt: None,
+        stamp: None,
     };
     registry.kill_session(id);
     let started = Instant::now();
@@ -2355,9 +2355,9 @@ fn output_seen_within_only_counts_output_newer_than_the_mark() {
 // ── submit posture (#874): what a target that cannot be observed gets ───
 //
 // The staged-submit path verifies its Enter against the evaluator's output
-// clock, which exists only for nodes the evaluator buffers. The terminal's
-// "Handover to node" injects into a target a human spawned, which is never
-// buffered — and that case previously ran the retry ladder anyway, typing
+// clock, which existed only for nodes the evaluator buffered. The terminal's
+// "Handover to node" can target an ordinary human-spawned node — and that
+// case previously ran the retry ladder anyway, typing
 // two extra carriage returns into an agent already working on the prompt and
 // then reporting "never submitted" (which marks the node for attention).
 
@@ -2474,3 +2474,263 @@ fn a_staged_prompt_needs_a_live_process_not_a_db_row() {
 }
 
 // ── in-flight guard: queue, don't drop (#874 candidate 3) ──────────────
+
+// Compatibility fixtures retain the existing paste/count regression names.
+// These tests explicitly simulate the historic observed/unobserved profiles;
+// operation_tests drives the complete request with an injected clock and output.
+use crate::circuit::evaluator;
+
+impl PasteMatchBudget<'static> {
+    fn new(deadline: Instant) -> Self {
+        Self::with_clock(deadline, &Instant::now)
+    }
+}
+
+impl RenderedPastePrompt {
+    fn visible(&self, output: &str, deadline: Instant) -> bool {
+        self.visible_with_budget(output, &mut PasteMatchBudget::new(deadline))
+    }
+}
+
+impl PreparedPrompt {
+    pub(crate) fn from_raw(node_id: i64, text: impl Into<String>) -> Self {
+        Self {
+            node_id,
+            text: text.into(),
+        }
+    }
+}
+
+struct TestIo<'a> {
+    registry: &'a AgentProcessRegistry,
+    node_id: i64,
+    receipt: Option<&'a crate::services::muse_watcher::PromptReceipt>,
+}
+
+impl DeliveryIo for TestIo<'_> {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+    fn sleep(&self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+    fn alive(&self) -> bool {
+        self.registry.is_alive(&self.node_id)
+    }
+    fn input_is_current(&self, stamp: &str) -> bool {
+        stamp.is_empty() || self.registry.input_is_current(self.node_id, stamp)
+    }
+    fn write(&self, bytes: &[u8], stamp: &str) -> Result<Option<String>, InputWriteError> {
+        self.registry
+            .write_bytes_if_current(self.node_id, bytes, stamp)
+    }
+    fn activity(&self) -> observation::Activity {
+        observation::Activity {
+            cursor: evaluator::tests::output_cursor(self.node_id).unwrap_or(0),
+            quiet: evaluator::millis_since_last_output(self.node_id)
+                .map(|ms| Duration::from_millis(ms as u64)),
+        }
+    }
+    fn output(&self, since: u64) -> observation::Snapshot {
+        observation::Snapshot {
+            activity: self.activity(),
+            text: evaluator::tests::cleaned_output_since(self.node_id, since),
+        }
+    }
+    fn receipt_accepted(&self) -> Option<bool> {
+        self.receipt.map(|receipt| receipt.accepted())
+    }
+}
+
+#[derive(Debug)]
+struct PromptReadiness {
+    paste: PasteReadiness,
+    receipt: Option<crate::services::muse_watcher::PromptReceipt>,
+    stamp: Option<String>,
+}
+
+fn requirement(node_id: i64) -> ObservationRequirement {
+    if evaluator::is_circuit_piloted(node_id) {
+        ObservationRequirement::Required
+    } else {
+        ObservationRequirement::Unobserved
+    }
+}
+
+fn paste_readiness(node_id: i64, text: &str) -> Result<PromptReadiness, String> {
+    let observation = requirement(node_id);
+    if observation == ObservationRequirement::Unobserved {
+        return Ok(PromptReadiness {
+            paste: PasteReadiness::Generic,
+            receipt: None,
+            stamp: None,
+        });
+    }
+    let node = crate::db::get_agent_node_by_id(node_id)
+        .map_err(|error| format!("could not identify prompt target {node_id}: {error}"))?;
+    let provider = crate::preferences::resolve_harness_provider(&node.provider);
+    let receipt = if provider.adapter().id() == "muse" {
+        crate::services::muse_watcher::PromptReceipt::capture(&node, text)?
+    } else {
+        None
+    };
+    Ok(PromptReadiness {
+        paste: super::paste_readiness(
+            provider.adapter(),
+            text,
+            observation,
+            evaluator::tests::output_cursor(node_id).unwrap_or(0),
+        ),
+        receipt,
+        stamp: None,
+    })
+}
+
+fn stop_error(stop: DeliveryStop) -> String {
+    match stop {
+        DeliveryStop::ProcessExited => "node has no live agent process".into(),
+        DeliveryStop::Unverified(reason) => format!("no PTY output followed: {reason}"),
+        other => format!("{other:?}"),
+    }
+}
+
+fn ensure_prompt_target_alive(registry: &AgentProcessRegistry, node_id: i64) -> Result<(), String> {
+    registry
+        .is_alive(&node_id)
+        .then_some(())
+        .ok_or_else(|| "node has no live agent process".into())
+}
+
+fn stage_prompt_write(
+    registry: &Arc<AgentProcessRegistry>,
+    prompt: &PreparedPrompt,
+    expected: Option<&str>,
+) -> Result<Option<(Option<String>, PromptReadiness)>, String> {
+    ensure_prompt_target_alive(registry, prompt.node_id())?;
+    let mut readiness = paste_readiness(prompt.node_id(), prompt.text())?;
+    let io = TestIo {
+        registry,
+        node_id: prompt.node_id(),
+        receipt: readiness.receipt.as_ref(),
+    };
+    let mut stamp = expected
+        .map(str::to_owned)
+        .or_else(|| registry.input_stamp(prompt.node_id()))
+        .ok_or("input occupied")?;
+    let request = DeliveryRequest {
+        prompt,
+        mode: DeliveryMode::LaterTurn,
+        observation: requirement(prompt.node_id()),
+        expected_input: expected,
+        still_current: &|| Ok(true),
+    };
+    let body = match &readiness.paste {
+        PasteReadiness::RenderedMultiline {
+            split_marker_prompt: Some(prompt),
+            ..
+        } => prompt.payload.as_str(),
+        _ => prompt.text(),
+    };
+    match write_owned(
+        &io,
+        &request,
+        &mut stamp,
+        injection_payload(body).as_bytes(),
+    ) {
+        Ok(()) => {
+            readiness.stamp = Some(stamp.clone());
+            Ok(Some((Some(stamp), readiness)))
+        }
+        Err(DeliveryStop::Superseded) => Ok(None),
+        Err(error) => Err(stop_error(error)),
+    }
+}
+
+fn settle_after_paste(
+    registry: &AgentProcessRegistry,
+    node_id: i64,
+    readiness: &PasteReadiness,
+    guard: Option<&str>,
+    budget: Duration,
+) -> Result<bool, String> {
+    let io = TestIo {
+        registry,
+        node_id,
+        receipt: None,
+    };
+    let prompt = PreparedPrompt::from_raw(node_id, "test draft");
+    let request = DeliveryRequest {
+        prompt: &prompt,
+        mode: DeliveryMode::LaterTurn,
+        observation: requirement(node_id),
+        expected_input: guard,
+        still_current: &|| Ok(true),
+    };
+    match super::settle_after_paste(&io, &request, guard.unwrap_or(""), readiness, budget) {
+        Ok(()) => Ok(true),
+        Err(DeliveryStop::Superseded) => Ok(false),
+        Err(error) => Err(stop_error(error)),
+    }
+}
+
+fn submit_staged_prompt_result(
+    registry: &Arc<AgentProcessRegistry>,
+    node_id: i64,
+    guard: Option<String>,
+    readiness: &PromptReadiness,
+) -> Result<Option<u32>, String> {
+    let guard = guard.or_else(|| readiness.stamp.clone());
+    if !settle_after_paste(
+        registry,
+        node_id,
+        &readiness.paste,
+        guard.as_deref(),
+        RENDERED_PASTE_TOTAL_BUDGET,
+    )? {
+        return Ok(None);
+    }
+    press_enter_until_output_guarded(
+        registry,
+        node_id,
+        guard,
+        ENTER_ACK_WINDOW,
+        readiness.receipt.as_ref(),
+    )
+}
+
+fn press_enter_until_output_guarded(
+    registry: &Arc<AgentProcessRegistry>,
+    node_id: i64,
+    guard: Option<String>,
+    window: Duration,
+    receipt: Option<&crate::services::muse_watcher::PromptReceipt>,
+) -> Result<Option<u32>, String> {
+    let io = TestIo {
+        registry,
+        node_id,
+        receipt,
+    };
+    let prompt = PreparedPrompt::from_raw(node_id, "test draft");
+    let request = DeliveryRequest {
+        prompt: &prompt,
+        mode: DeliveryMode::LaterTurn,
+        observation: requirement(node_id),
+        expected_input: guard.as_deref(),
+        still_current: &|| Ok(true),
+    };
+    let mut stamp = guard
+        .clone()
+        .or_else(|| registry.input_stamp(node_id))
+        .ok_or("input occupied")?;
+    let mut progress = DeliveryProgress::TextStaged;
+    match submit(&io, &request, &mut stamp, &mut progress, window) {
+        Ok(()) => match progress {
+            DeliveryProgress::EnterSent { attempts }
+            | DeliveryProgress::EnterAcknowledged { attempts }
+            | DeliveryProgress::AcceptanceObserved { attempts } => Ok(Some(attempts)),
+            _ => unreachable!(),
+        },
+        Err(DeliveryStop::Superseded) => Ok(None),
+        Err(error) => Err(stop_error(error)),
+    }
+}

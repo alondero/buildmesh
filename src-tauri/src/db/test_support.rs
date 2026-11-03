@@ -177,6 +177,21 @@ pub fn installed_node_id_range() -> Option<(i64, i64)> {
     INSTALLED.with(|slot| slot.borrow().as_ref().map(|i| i.node_id_range))
 }
 
+/// Seed a fresh fixture before its first run when it exercises process-wide run
+/// state. Nested fixture builders retain the sequence. Separate databases would
+/// otherwise reuse run id 1 and share cancellation markers across effect batches.
+pub fn seed_unique_circuit_run_ids() {
+    let (first, _) = installed_node_id_range().expect("an isolated database is installed");
+    crate::db::write_conn()
+        .execute(
+            "INSERT INTO sqlite_sequence (name, seq)
+             SELECT 'autopilot_circuit_runs', ?1
+             WHERE NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name='autopilot_circuit_runs')",
+            [first],
+        )
+        .unwrap();
+}
+
 /// A movable name for this thread's installed database, if it has one.
 ///
 /// Unlike [`claim_depth`] this does **not** take a depth reference, so the

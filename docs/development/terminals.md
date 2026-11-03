@@ -82,7 +82,7 @@ host with a Windows node. WSL and mobile/remote paste must send their own text,
 since they do not share the desktop clipboard. Programmatic `term.paste(text)`
 retains its existing semantics.
 
-Backend prompt injection (`circuit::delivery::PreparedPrompt`, used by
+Backend prompt injection (`agent::prompt_delivery::PreparedPrompt`, used by
 "Handover to node" and by Circuit prompt dispatches including turns, continuations,
 and nudges) cannot use the clipboard, so it fixes the paste body instead. The
 coordinator's `AgentDriver::send_prompt` is single-line by contract and bypasses
@@ -93,7 +93,12 @@ A harness whose adapter returns true from `paste_requires_cr_newlines` (Grok and
 Codex) gets CR line endings inside the bracketed paste, which is what xterm.js sends
 for a manual paste. Other harnesses keep their line endings as given, but any prompt
 containing CR or LF is treated as multiline: bracketed by `injection_payload` and
-subject to non-generic rendered-paste gates (such as Codex and Muse). See the
+subject to the adapter's rendered-paste gate (such as Codex and Muse) when
+the caller explicitly requires observation. Ordinary prompts retain their
+timed settling and single unobserved Enter. Raw `write_to_agent` stays on its
+direct bounded queue path; it never enters readiness/submission coordination.
+See [automated prompt delivery](agent-nodes.md#automated-prompt-delivery-issue-2674)
+for delivery modes and typed outcomes. See the
 [Grok paste investigation](../learning/grok-terminal-paste.md) for runtime evidence.
 
 A harness with its own paste gate may need two texts rather than one. Codex's
