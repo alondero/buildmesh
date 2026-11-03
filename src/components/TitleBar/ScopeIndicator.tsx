@@ -100,13 +100,17 @@ import { SCOPE_LABEL_MIN_WIDTH, tierWidthAtTextScale } from './titleBarTiers';
  * The count in the label is the NARROWED count — how many Agent Nodes the
  * current filters leave visible — not the size of the scope. The scope's own
  * size appears only as the denominator on the Filters control beside it
- * ("3/12"; its panel spells it "3 of 12 nodes"); the bar's "All meshes · 3"
- * says "3 are visible".
+ * ("3/12"; its panel spells it "3 of 12 nodes"); the bar's "All meshes · 3
+ * nodes" says "3 are visible".
  *
- * `aria-label` carries the same string as the visible label, so the
- * accessible name survives the collapse (and WCAG 2.5.3 Label in Name holds
- * for free), and `title` spells the long form — so the glyph-only band costs
- * no information, only a glance.
+ * `aria-label` carries the scope's long form and `title` spells it out
+ * further, so the glyph-only band costs no information, only a glance. The
+ * long form IS the visible label everywhere except cross-Mesh Pinned, which
+ * draws the short form ("all meshes · 3 nodes") and whose accessible name
+ * adds the mode word ("Pinned across meshes · 3 nodes") — so for that one
+ * scope the name is not the visible label verbatim (WCAG 2.5.3 Label in
+ * Name), and the mode word it carries is the one the highlighted switcher
+ * segment already shows.
  */
 
 const PICKER_ID = dropdownId('titlebar', 'scope-picker');
@@ -442,8 +446,9 @@ export function ScopeIndicator() {
         type="button"
         onClick={() => setOpen(value => !value)}
         data-testid="scope-indicator"
-        // The accessible name IS the visible label, so it survives the
-        // collapse and satisfies Label in Name at the same time.
+        // The accessible name is the scope's long form, so it survives the
+        // collapse. It is the visible label verbatim except in cross-Mesh
+        // Pinned, where it adds the mode word the switcher segment shows.
         aria-label={text}
         aria-expanded={open}
         aria-haspopup="dialog"

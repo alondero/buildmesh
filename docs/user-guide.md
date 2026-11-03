@@ -238,10 +238,12 @@ in-memory: closing the app ends the task, and only one task can run at once.
 
 The control left of the view modes always names what the canvas is showing.
 When a single Mesh is in scope it reads that Mesh's name; otherwise it reads
-the view and the node count, such as **All meshes · 3 nodes** or **Pinned
+the scope and the node count, such as **All meshes · 3 nodes**, or **all
+meshes · 3 nodes** in Pinned — there the highlighted view-mode segment is what
+names Pinned, and the control's accessible name spells it out as **Pinned
 across meshes · 3 nodes**. In **Single** it names the Agent Node you are
 soloing and its Mesh. On narrow windows the name collapses to an icon;
-hovering shows the same wording in full.
+hovering shows the scope in full.
 
 Choose **All Nodes** to leave Mesh scope. It is the only route out, and it
 clears the Mesh selection.
