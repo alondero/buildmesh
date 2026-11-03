@@ -109,14 +109,15 @@ ADR-0032 added a working-set tab strip *inside* the open inspector
 alternation; it renders only while the panel is open and adds no reopen
 affordance, so the closed-render discipline stands.
 
-The title bar's More disclosure and omnibar discovery share `DestinationRow`:
-a single-line name and icon, a selection fill and caret edge, and a minimum
-24px hit target. Supporting tool descriptions are optional tooltip and
-accessible-description text, sourced from the existing destination metadata.
-More keeps native button focus; omnibar Up/Down traverse a single column with
-wrap-around while focus stays in the search input. Left/Right keep input caret
-behavior. The Probe working-set picker retains its separate responsive grid
-and navigation model.
+The title bar's More disclosure, omnibar discovery, and the inspector's
+All tools picker share `DestinationRow`: a single-line name and icon, a
+selection fill and caret edge, and a minimum 24px hit target. Supporting tool
+descriptions are optional tooltip and accessible-description text, sourced
+from the existing destination metadata. More keeps native button focus;
+omnibar Up/Down traverse a single column with wrap-around while focus stays
+in the search input. Left/Right keep input caret behavior. The All tools
+picker keeps its separate responsive grid (two columns, one when narrow) and
+arrow-key model.
 
 Related Files/Changes and Issues/Pull Requests share a strip slot, with
 unchanged command IDs. The working-set reducer
