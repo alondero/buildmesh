@@ -55,7 +55,7 @@ import { UsageIcon } from '../Probe/probeIcons';
  * shortcuts already drive.
  *
  * Issue #2421 replaced the shared label ladder (every label dropping to a
- * glyph below 1440px) with width tiers that mount different controls — see
+ * glyph below 1540px) with width tiers that mount different controls — see
  * `titleBarTiers.ts`. Narrow windows get one labelled `ViewSelector` and fold
  * the four utilities into More; search, Notifications and More stay in the
  * bar at every width.
@@ -131,11 +131,12 @@ function NavigationControls() {
         // 260px, growing toward the 640px wide-screen target only out of
         // width the side tracks do not need: in the centred grid each side
         // track gets half of what this field leaves, and the widest left
-        // cluster (labelled segments plus a scope label at its 10rem cap)
-        // measured 727px, so 1460px is twice that (#2421). max-w-full lets
-        // Grid search and the native caption controls claim their
-        // required space first.
-        className="@container flex h-10 w-[clamp(20rem,calc(100vw_-_1460px),640px)] min-w-0 max-w-full items-center gap-2 rounded-md border border-border-default bg-bg-base px-3 text-sm text-text-muted transition-colors hover:border-accent-cyan/50 hover:text-text-primary"
+        // cluster (the labelled segments, a scope label at its 16rem cap and
+        // the grid search) measured 905px, so 1820px is twice that (#2421,
+        // re-derived for #2683's grid search). max-w-full lets the grid
+        // search and the native caption controls claim their required space
+        // first.
+        className="@container flex h-10 w-[clamp(20rem,calc(100vw_-_1820px),640px)] min-w-0 max-w-full items-center gap-2 rounded-md border border-border-default bg-bg-base px-3 text-sm text-text-muted transition-colors hover:border-accent-cyan/50 hover:text-text-primary"
       >
         <SearchIcon className="h-4 w-4 shrink-0" />
         <span className="min-w-0 flex-1 truncate text-left">Search or open…</span>
@@ -143,22 +144,22 @@ function NavigationControls() {
             conditional still keeps an empty <kbd> chip from appearing if
             the catalog row were ever renamed. The chip is the FIRST thing
             to disappear when narrowing, at the labelled-switcher tier
-            (1440px, #2081 review — measured clean in both header grids).
-            Its own `max-[1439px]` class hides it below 1439px (Tailwind's
+            (1540px, #2081 review — measured clean in both header grids).
+            Its own `max-[1539px]` class hides it below 1539px (Tailwind's
             max-[N] is exclusive), and it also yields when the field is narrow;
             user-facing affordances outlast the decorative keyboard hint.
             The chip contributes ~13px of the centre's 143px min-content
             in the labelled tier, which is part of why that tier starts at
-            1440. The class string MUST stay a literal so Tailwind v4's
+            1540. The class string MUST stay a literal so Tailwind v4's
             source scanner picks it up — a template literal would defeat
             JIT detection and the rule would never compile. #2421: the
             field is also a size container. The label, icon and chip need
             about 208px of content width (icon 16 + gap 8 + label 85 + gap 8
             + chip 91), so the chip yields below 216px of content width. The
             earlier 240px threshold compared against the field's outer width
-            and hid the chip at every 1440-1719px window (#2421 review). */}
+            and hid the chip at every 1540-1819px window (#2421 review). */}
         {SEARCH_SHORTCUT_LABEL !== '' && (
-          <kbd className="shrink-0 rounded-md border border-border-default bg-bg-card px-1.5 py-0.5 font-mono text-sm text-text-muted max-[1439px]:hidden @max-[216px]:hidden">
+          <kbd className="shrink-0 rounded-md border border-border-default bg-bg-card px-1.5 py-0.5 font-mono text-sm text-text-muted max-[1539px]:hidden @max-[216px]:hidden">
             {SEARCH_SHORTCUT_LABEL}
           </kbd>
         )}
@@ -467,10 +468,27 @@ export function TitleBar() {
 
   return (
     <>
-      {/* Budget the scope and window controls before the command field. */}
+      {/* The centred grid — `minmax(0,1fr) auto minmax(0,1fr)` from 1200px up —
+          gives both side tracks half of what the command field leaves, so the
+          field lands on the window's centre line (issue #1375). Below 1200px
+          the field yields to the side clusters: the tracks are content-sized
+          there, so the field sits right of centre.
+
+          The side tracks are CAPPED, and #2683 widened the left cluster (the
+          grid search joined it in every mode except Single). The cap is what
+          makes that work — the cluster shrinks instead of running under the
+          field — but the cluster's MINIMUM width grows with the interface text
+          size, and the capped track has to hold that minimum. Measured in the
+          real window across 900–2560px at 100% and 150% text: the left
+          cluster's floor is 424px at 150% (the grid search at its `min-w-24`
+          floor, the ViewSelector at its label's floor), so the capped track
+          only holds it from 1124px up. 1200px is the round width above that
+          and the point at which the measurement is clean at EVERY text size:
+          from there up the field is centred (0px off) and no header cell
+          overflows. */}
       <header
         data-tauri-drag-region
-        className="grid h-14 shrink-0 grid-cols-[auto_minmax(0,1fr)_auto] items-stretch bg-bg-surface border-b border-border-subtle select-none"
+        className="grid h-14 shrink-0 grid-cols-[auto_minmax(0,1fr)_auto] items-stretch bg-bg-surface border-b border-border-subtle select-none min-[1200px]:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]"
       >
         {/* Left cell — clusters hug the start edge. */}
         <div data-tauri-drag-region className="flex min-w-0 items-center pl-3 pr-2">

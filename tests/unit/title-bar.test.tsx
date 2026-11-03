@@ -477,12 +477,12 @@ describe('TitleBar (bespoke window chrome)', () => {
       }
       const switcherGroup = screen.getByRole('group', { name: /view mode/i });
       expect(switcherGroup.querySelector('span')?.className ?? '').not.toContain('hidden');
-      // The kbd chip still hides FIRST when narrowing at 1439px — user-facing
+      // The kbd chip still hides FIRST when narrowing at 1539px — user-facing
       // affordances outlast the decorative keyboard hint. Class literals are
       // the contract — they MUST stay as literal strings (not template
       // literals) so Tailwind v4's source scanner compiles them.
       const chip = container.querySelector('kbd');
-      expect(chip?.className).toContain('max-[1439px]:hidden');
+      expect(chip?.className).toContain('max-[1539px]:hidden');
       // #2421 — and it also yields to the field's OWN width: at 1700px
       // Filtered with a status filter the field is ~158px, where the chip
       // left the label as "S." beside a full "Ctrl+Shift+K". The field is a
@@ -491,24 +491,26 @@ describe('TitleBar (bespoke window chrome)', () => {
       expect(screen.getByTestId('titlebar-command-search').className).toContain('@container');
       expect(chip?.className).toContain('@max-[216px]:hidden');
       // The scope indicator is deliberately NOT on this tier. Its label
-      // collapses LATER (`max-[1700px]:hidden`, pinned in the #2074 block
-      // below): with the switcher's labels at 1440px, the Filtered centre cell
-      // still cannot afford the 134.88px a labelled indicator adds between
-      // 1440 and 1600px (1600px is the first width measured clear, 1700px
-      // the first comfortable one). Asserted here as the inversion, so a
-      // future "one ladder for the whole bar" refactor cannot silently rejoin it.
-      const scopeLabel = screen.getByTestId('scope-indicator').querySelector('span');
-      expect(scopeLabel?.className).toContain('max-[1700px]:hidden');
-      expect(scopeLabel?.className).not.toContain('max-[1439px]:hidden');
+      // collapses LATER — at `SCOPE_LABEL_MIN_WIDTH` (1900px, pinned per tier
+      // in `title-bar-compact.test.tsx`): #2683's grid search took the track
+      // the label needed, so the label now collapses by NOT MOUNTING its span
+      // and the control falls back to its glyph. Asserted here as the
+      // inversion, so a future "one ladder for the whole bar" refactor cannot
+      // silently rejoin it.
+      const scopeLabel = screen.getByTestId('scope-indicator').querySelector('[data-testid="scope-label"]');
+      expect(scopeLabel?.className).toContain('max-w-[16rem]');
+      expect(scopeLabel?.className).toContain('truncate');
       // Responsive palette width (PR #1623 review; fluid since #2421): the
       // field is 260px (20rem at the 13px root) on narrow windows and grows
       // toward its VS Code-parity 640px only out of the width the centred
-      // grid's side tracks do not need — `100vw - 1460px`, twice the widest
-      // measured left cluster. The old fixed 640px step at 1786px squeezed
-      // that cluster to 573px and truncated the scope label to "All m…"
-      // at 1920px. Pin the literal so a rebase back to a fixed step fails.
+      // grid's side tracks do not need — `100vw - 1820px`, twice the widest
+      // measured left cluster (905px: the labelled segments, a scope label at
+      // its 16rem cap, the grid search and the wordmark). The old fixed 640px
+      // step at 1786px squeezed that cluster to 573px and truncated the scope
+      // label to "All m…" at 1920px. Pin the literal so a rebase back to a
+      // fixed step fails.
       const searchButton = screen.getByTestId('titlebar-command-search');
-      expect(searchButton.className).toContain('w-[clamp(20rem,calc(100vw_-_1460px),640px)]');
+      expect(searchButton.className).toContain('w-[clamp(20rem,calc(100vw_-_1820px),640px)]');
       expect(searchButton.className).not.toContain('min-[1786px]:w-[640px]');
       // Flex floor: the palette field's wrapper must never collapse below
       // its yield-first floor.
@@ -717,24 +719,21 @@ describe('TitleBar (bespoke window chrome)', () => {
         enterMesh(1);
       });
       await renderTitleBar();
-      const label = screen.getByTestId('scope-indicator').querySelector('span');
+      const label = screen.getByTestId('scope-indicator').querySelector('[data-testid="scope-label"]');
       const className = label?.className ?? '';
       // Truncate BEFORE the collapse: a bounded, ellipsised label at every
-      // width. But the collapse tier sits ABOVE the switcher segments' and the
-      // utility pills' 1440px tier. Measured against the real window in the
-      // Filtered view — the only mode whose header grid is
-      // `auto_minmax(0,1fr)_auto`, so the centre absorbs the overflow down to
-      // its own 16px padding floor — a labelled indicator costs the left
-      // track 134.88px. With the switcher's labels at 1440px the labelled tier
-      // occupies 1440–1599px, where the centre measured 170px at 1600px
-      // (first clear) and 270px at 1700px (first comfortable) against a
-      // 130–143px min-content. 1600px is the first width measured CLEAR, not
-      // a comfortable one, so the label waits for 1700px.
+      // width. The collapse tier sits ABOVE the switcher segments' 1540px tier
+      // and the utility pills' 1700px tier, and it is a JS tier like them
+      // (`SCOPE_LABEL_MIN_WIDTH`, 1900px) so the label's own width — which is
+      // text — follows the interface text size. Measured against the real
+      // window: the centred grid caps the left track at half of what the
+      // command field leaves, and that track has to carry the wordmark, the
+      // labelled segments, the grid search (#2683) and this label. 1900px is
+      // the first width at which the label fits whole; below it the control
+      // keeps its glyph, which says more than a clipped "All mes…".
       expect(className).toContain('truncate');
       expect(className).toContain('max-w-[16rem]');
       // 16rem (208px) fits the longest wide label (~194px); 10rem clipped it by ~64px (#2421 round 4).
-      expect(className).toContain('max-[1700px]:hidden');
-      expect(className).not.toContain('max-[1439px]:hidden');
       // The accessible name is the label string, so it survives the collapse.
       expect(screen.getByTestId('scope-indicator').getAttribute('aria-label')).toBe('demo-1');
     });
