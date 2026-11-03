@@ -4,9 +4,8 @@ import { EmptyStateActions } from './EmptyStateActions';
 export interface CanvasEmptyStateInput {
   meshCount: number;
   totalNodeCount: number;
-  /** Counts before and after the active grid filters. */
+  /** How many nodes the scope holds before the active grid filters narrow it. */
   scopedCount: number;
-  filteredCount: number;
   scope: DerivedScope;
   harnessReady: boolean;
 }
@@ -37,7 +36,8 @@ export function classifyCanvasEmpty(input: CanvasEmptyStateInput): CanvasEmptyDe
     return { branch: 'selected-empty', meshId: input.scope.mesh.id };
   }
   if (input.totalNodeCount === 0) return { branch: 'all-empty' };
-  if (input.filteredCount === 0) return { branch: 'filters-exclude-all' };
+  // The scope holds nodes and the active filters hide all of them. The
+  // canvas is empty because of the filters, not because the scope is.
   return { branch: 'filters-exclude-all' };
 }
 

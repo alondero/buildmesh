@@ -44,7 +44,7 @@ beforeEach(() => {
 });
 
 /** Overrides the caller states the way the stores hold them — the View Mode
- *  and the sidebar selection — plus the two counts the empty state measures.
+ *  and the sidebar selection — plus the counts the empty state measures.
  *  `scope` is DERIVED here from the first two (#2070 review), so a test can
  *  never hand the classifier a View Mode and a Mesh identity that the
  *  derivation would not produce. */
@@ -52,7 +52,6 @@ interface InputOverrides {
   meshCount?: number;
   totalNodeCount?: number;
   scopedCount?: number;
-  filteredCount?: number;
   viewMode?: ViewMode;
   lastNonSingleMode?: NonSingleViewMode;
   selectedMeshId?: number | null;
@@ -64,7 +63,6 @@ function input(overrides: InputOverrides = {}): CanvasEmptyStateInput {
     meshCount = 1,
     totalNodeCount = 0,
     scopedCount = 0,
-    filteredCount = 0,
     viewMode = 'all',
     lastNonSingleMode = viewMode === 'single' ? 'mesh' : viewMode,
     selectedMeshId = null,
@@ -74,7 +72,6 @@ function input(overrides: InputOverrides = {}): CanvasEmptyStateInput {
     meshCount,
     totalNodeCount,
     scopedCount,
-    filteredCount,
     harnessReady,
     // The classifier reads the Mesh identity from the derived scope, never
     // from `viewMode`/`selectedMeshId` re-tested here (#2071's one
@@ -153,9 +150,12 @@ describe('classifyCanvasEmpty (issue #1536)', () => {
     expect(branch(input({ meshCount: 2, totalNodeCount: 0 }))).toBe('all-empty');
   });
 
-  it('returns filters-exclude-all when scoped nodes exist but none survive the filter', () => {
+  it('returns filters-exclude-all when the scope holds nodes the filters hide', () => {
+    // The classifier reads no narrowed count: the caller only classifies an
+    // EMPTY canvas, so "the scope holds nodes and none of them are on it"
+    // is the fallback, and this branch names it.
     expect(
-      branch(input({ totalNodeCount: 5, scopedCount: 5, filteredCount: 0 })),
+      branch(input({ totalNodeCount: 5, scopedCount: 5 })),
     ).toBe('filters-exclude-all');
   });
 
@@ -221,7 +221,7 @@ describe('CanvasEmptyState (issue #1536)', () => {
     const cbs = { ...noopCallbacks, onViewAll: vi.fn() };
     render(
       <CanvasEmptyState
-        input={input({ meshCount: 2, totalNodeCount: 3, scopedCount: 0, filteredCount: 0, viewMode: 'mesh', selectedMeshId: null })}
+        input={input({ meshCount: 2, totalNodeCount: 3, scopedCount: 0, viewMode: 'mesh', selectedMeshId: null })}
         callbacks={cbs}
       />,
     );
@@ -237,7 +237,7 @@ describe('CanvasEmptyState (issue #1536)', () => {
     const cbs = { ...noopCallbacks, onClearFilters: vi.fn() };
     render(
       <CanvasEmptyState
-        input={input({ meshCount: 2, totalNodeCount: 5, scopedCount: 5, filteredCount: 0 })}
+        input={input({ meshCount: 2, totalNodeCount: 5, scopedCount: 5 })}
         callbacks={cbs}
       />,
     );
