@@ -25,30 +25,66 @@
  *   2080..2460         field grows          track = 902px (pinned)
  *   >= 2460            field 640px          track = (viewport - 656) / 2
  *
+ * The track grows with the viewport until 2080px, where it reaches 902px;
+ * from there the field takes over the extra width, so the track stays pinned
+ * at 902px until the field hits its 640px cap at 2460px, past which the track
+ * grows again.
+ *
  * #2683 put the grid search in the left cluster for every View Mode (it used
  * to mount only in Filtered, whose header grid was content-sized and
  * therefore never capped). That widened the cluster, so every number below
  * is re-derived against the capped grid.
  *
- * The ladder is derived from the WORST left cluster across BOTH window chrome
- * layouts. On macOS the traffic lights live in the LEFT cluster (64px of
- * them), so that cluster is wider than the Windows one at every composition —
- * a ladder measured on Windows alone overflows on macOS. Measured in the real
- * window, worst chrome, 100% text:
+ * ## What was measured, and where
+ *
+ * The figures come from a browser sweep in the mock-IPC Chromium harness —
+ * NOT a real macOS window. The "macOS chrome" is this app's own traffic-light
+ * React components in a Chromium page with `navigator.platform` overridden;
+ * there is no WebKit, no macOS build and no native caption geometry in it.
+ * The widths and the flex arithmetic are therefore Chromium's, and a native
+ * macOS build has never been measured.
+ *
+ * ## The two chrome layouts
+ *
+ * On macOS the traffic lights live in the LEFT cluster (64px of them), so
+ * that cluster is wider than the Windows one at every composition — a ladder
+ * measured on Windows alone overflows on macOS. The RIGHT cluster is the
+ * other way round: the caption buttons render only on Windows, so Windows is
+ * the wider one there.
+ *
+ * The left cluster's NATURAL width — what it needs when nothing squeezes it,
+ * with a deliberately long Mesh name so the scope label sits at its cap — is
+ * 902px on Windows and 966px on macOS at 100% text. The 64px between them is
+ * the macOS traffic lights, the only macOS-only element in this cluster:
+ * three 12px circles, two 8px gaps and 12px of padding (the spacing steps
+ * App.css pins in px, so they do not move with the root font). The track is
+ * capped, so the cluster is squeezed to fit it rather than running under the
+ * field, and the squeeze is what the measurements below record. macOS, 100%
+ * text, the wider left cluster:
  *
  *   viewport  composition               track   cluster   overflow
  *   1300px    the centred grid starts   512px   508px     0
  *   1700px    the labelled switcher     712px   708px     0
  *   2000px    the scope label           862px   858px     0
- *   2310px    the field reaches its     902px   898px     0
+ *   2310px    the pinned band           902px   898px     0
+ *   2460px    the field reaches its     902px   898px     0
  *              640px cap, so the track
- *              stops growing
+ *              starts growing again
  *
  * Each row is a composition step, and the fit is only ever tightest AT a step:
  * the cluster's content is a step function of the width (a component mounts at
- * a tier) while the track grows smoothly. The field's 1820px reservation is
- * the same arithmetic seen from the other side — the pinned track is
- * `(1820 - 16) / 2 = 902px`, which is what the widest macOS cluster needs.
+ * a tier) while the track grows smoothly.
+ *
+ * The reservation is 1820px = `2 * 902 + 16`, sized for the WINDOWS natural
+ * width; a 902px track carries 898px of cluster, so even Windows gives a
+ * little up in the pinned band — 2px of the scope label (208px -> 206px) and
+ * 2px of the grid search (130px -> 128px). macOS gives up 68px: 40px of the
+ * scope label (208px -> 168px) and 28px of the grid search (130px -> 102px),
+ * so nothing overflows and the label truncates. Sizing the track to the
+ * macOS natural width instead (1948px = `2 * 966 + 16`) would cost the
+ * command field 128px of width across the whole band and push its 640px cap
+ * from 2460px to 2588px — a worse trade, because the extra 40px of scope
+ * label is text that truncates on a long name anyway.
  *
  * The ladder's tiers are JS tiers, so they move with the interface text size.
  * At 150% the same two steps land at 2550px and 3000px, where the tracks are

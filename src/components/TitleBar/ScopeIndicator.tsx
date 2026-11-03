@@ -81,20 +81,26 @@ import { SCOPE_LABEL_MIN_WIDTH, tierWidthAtTextScale } from './titleBarTiers';
  * so the left track is CAPPED at half of what the command field leaves. This
  * label therefore competes with the wordmark (108px), the switcher's four
  * labelled segments (335px) and the grid search (178px, #2683) for that cap.
- * Measured in the real window at the 13px root, at 100% interface text, on
- * the WIDER of the two chrome layouts (macOS, whose traffic lights live in
- * this same left cluster):
+ * Measured in the mock-IPC Chromium harness at the 13px root, at 100%
+ * interface text, on the WIDER of the two chrome layouts (macOS, whose
+ * traffic lights live in this same left cluster):
  *
  *   viewport   left track   left content   scope label
  *   1700px     712px        708px          glyph only
- *   2000px     862px        858px          144px of text, unclipped
+ *   2000px     862px        858px          144px wide
  *
- * 2000px is the first width at which the label fits WHOLE: the track has to
- * carry the wordmark, the segments, the grid search and the label's own text
- * plus its gap. Below it the control keeps its glyph — the shape
- * still says which scope family is active, the `aria-label` and `title` still
- * carry the full string, and nothing is clipped mid-word. A truncated label
- * ("All mes…") would say less than a glyph does.
+ * 2000px is the first width at which the scope name is shown as TEXT rather
+ * than a glyph. The label is bounded at `max-w-[16rem]` (208px), so a long
+ * Mesh name truncates with an ellipsis at EVERY width — the element is 144px
+ * wide at 2000px and only reaches its 208px cap by 2600px — while a short
+ * scope name ("All meshes · 3") fits whole. Below 2000px the control keeps
+ * its glyph; the shape still says which scope family is active, and the
+ * `aria-label` and `title` carry the full string either way.
+ *
+ * The count in the label is the NARROWED count — how many Agent Nodes the
+ * current filters leave visible — not the size of the scope. The scope's own
+ * size is in the filter popover, which shows "3/12"; the bar's "All meshes ·
+ * 3" says "3 are visible".
  *
  * `aria-label` carries the same string as the visible label, so the
  * accessible name survives the collapse (and WCAG 2.5.3 Label in Name holds

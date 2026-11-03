@@ -34,7 +34,6 @@ import { CheckGlyph, ChevronGlyph, MeshPickerRows, useOpenOnPickerRequest, useSc
  *   - Mesh Grid with no Mesh selected asks for one (`enterMeshGrid` bumps
  *     `openScopePickerRequest`, #2076). This control is the picker at this
  *     tier, so the panel stays open on its Mesh list.
-
  */
 
 const PANEL_ID = dropdownId('titlebar', 'view-selector');

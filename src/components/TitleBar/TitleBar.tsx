@@ -55,10 +55,10 @@ import { UsageIcon } from '../Probe/probeIcons';
  * shortcuts already drive.
  *
  * Issue #2421 replaced the shared label ladder (every label dropping to a
- * glyph below 1540px) with width tiers that mount different controls — see
- * `titleBarTiers.ts`. Narrow windows get one labelled `ViewSelector` and fold
- * the four utilities into More; search, Notifications and More stay in the
- * bar at every width.
+ * glyph at one width) with width tiers that mount different controls — see
+ * `titleBarTiers.ts` for the current thresholds. Narrow windows get one
+ * labelled `ViewSelector` and fold the four utilities into More; search,
+ * Notifications and More stay in the bar at every width.
  */
 
 // `SHORTCUT_CATALOG` is a static module constant; resolving the
@@ -131,14 +131,16 @@ function NavigationControls() {
         // 260px, growing toward the 640px wide-screen target only out of
         // width the side tracks do not need: in the centred grid each side
         // track gets half of what this field leaves, so the track is
-        // `(viewport - 16 - field) / 2`. The widest left cluster (the
-        // labelled segments, a scope label at its 16rem cap and the grid
-        // search) measured 898px on macOS — the wider of the two chrome
-        // layouts, because its traffic lights live in the left cluster — so
-        // the pinned track is 902px and 1820px is `2 * 902 + 16` (#2421,
-        // re-derived for #2683's grid search). max-w-full lets the grid
-        // search and the native caption controls claim their required space
-        // first.
+        // `(viewport - 16 - field) / 2`. The 1820px reservation pins that
+        // track at 902px (`2 * 902 + 16`) across the band where the field
+        // grows. 902px is the left cluster's natural width on the WINDOWS
+        // chrome at 100% text; on macOS the cluster is 64px wider (its
+        // traffic lights live in the left cluster) and the capped track
+        // squeezes 68px out of it — 40px of scope label and 28px of grid
+        // search — rather than letting the cluster run under the field
+        // (#2421, re-derived for #2683's grid search). max-w-full lets the
+        // grid search and the native caption controls claim their required
+        // space first.
         className="@container flex h-10 w-[clamp(20rem,calc(100vw_-_1820px),640px)] min-w-0 max-w-full items-center gap-2 rounded-md border border-border-default bg-bg-base px-3 text-sm text-text-muted transition-colors hover:border-accent-cyan/50 hover:text-text-primary"
       >
         <SearchIcon className="h-4 w-4 shrink-0" />
@@ -157,8 +159,9 @@ function NavigationControls() {
             field is also a size container. The label, icon and chip need
             about 208px of content width (icon 16 + gap 8 + label 85 + gap 8
             + chip 91), so the chip yields below 216px of content width. The
-            earlier 240px threshold compared against the field's outer width
-            and hid the chip at every 1540-1819px window (#2421 review). */}
+            earlier 240px threshold compared against the field's OUTER width
+            rather than its content width, so it hid the chip while the field
+            still had room for it (#2421 review). */}
         {SEARCH_SHORTCUT_LABEL !== '' && (
           <kbd className="shrink-0 rounded-md border border-border-default bg-bg-card px-1.5 py-0.5 font-mono text-sm text-text-muted max-[1699px]:hidden @max-[216px]:hidden">
             {SEARCH_SHORTCUT_LABEL}
@@ -480,13 +483,13 @@ export function TitleBar() {
           makes that work — the cluster shrinks instead of running under the
           field — but the cluster's MINIMUM width grows with the interface text
           size, and the capped track has to hold that minimum. Measured in the
-          real window across both window chrome layouts (on macOS the traffic
-          lights live in the LEFT cluster, so that cluster is the wider one and
-          the ladder has to hold it) at 100% and 150% text: 1300px is the
-          round width at which the capped track holds the cluster at EVERY
-          text size — 512px of track against 508px of cluster, the grid search
-          at its `min-w-24` floor at 150%. From there up the field is centred
-          (0px off) and no header cell overflows. */}
+          mock-IPC Chromium harness across both window chrome layouts (on
+          macOS the traffic lights live in the LEFT cluster, so that cluster is
+          the wider one and the ladder has to hold it) at 100% and 150% text:
+          1300px is the round width at which the capped track holds the
+          cluster at BOTH text sizes — 512px of track against 508px of
+          cluster, the grid search at its `min-w-24` floor at 150%. From there
+          up the field is centred (0px off) and no header cell overflows. */}
       <header
         data-tauri-drag-region
         className="grid h-14 shrink-0 grid-cols-[auto_minmax(0,1fr)_auto] items-stretch bg-bg-surface border-b border-border-subtle select-none min-[1300px]:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]"

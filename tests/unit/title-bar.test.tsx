@@ -692,19 +692,19 @@ describe('TitleBar (bespoke window chrome)', () => {
         await renderTitleBar();
         const trigger = screen.getByTestId('scope-indicator');
         // The accessible name is the full label. The visible text is the same
-        // string, except that Pinned and Filtered draw the short form without
-        // their mode word (#2421 round 4): the highlighted segment names the mode.
+        // string, except that Pinned draws the short form without its mode
+        // word (#2421 round 4): the highlighted segment names the mode.
         expect(trigger.getAttribute('aria-label')).toBe(label);
         const shortLabel = viewMode === 'pinned' ? label.replace(/^Pinned across meshes/, 'all meshes') : label;
         expect(trigger.textContent).toBe(shortLabel);
-        // A cross-Mesh mode must never name a Mesh — pinned and filtered
-        // legitimately keep a sidebar selection, and that Mesh is NOT the
-        // scope the grid is showing.
+        // A cross-Mesh mode must never name a Mesh — pinned legitimately keeps
+        // a sidebar selection, and that Mesh is NOT the scope the grid is
+        // showing.
         expect(trigger.textContent).not.toContain('demo-1');
       },
     );
 
-    it('reports an empty filtered All scope', async () => {
+    it('reports an empty narrowed All scope', async () => {
       act(() => useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all', gridSearchQuery: 'no-such-node' }));
       await renderTitleBar();
       expect(screen.getByTestId('scope-indicator').getAttribute('aria-label')).toBe('All meshes \u00b7 0 nodes');

@@ -143,7 +143,7 @@ describe('useScope (issue #2529)', () => {
     expect(empty.result.current.currentNode).toBeNull();
   });
 
-  it('narrows Filtered scope, and the Single fallback, with the grid controls', () => {
+  it('narrows the scope with a search query, and the Single fallback with it', () => {
     useUIStore.setState({
       viewMode: 'all',
       lastNonSingleMode: 'all',

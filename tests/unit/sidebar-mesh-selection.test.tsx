@@ -133,10 +133,10 @@ describe('Sidebar Mesh selection gesture (issue #2072)', () => {
     expect(useUIStore.getState().viewMode).toBe('mesh');
   });
 
-  // Pinned and Filtered keep the Mesh highlighted — the sidebar shows the
-  // Mesh the user would come back to — so clicking it must return the
-  // canvas to that Mesh's grid. Single is included deliberately: Single is
-  // explicit focus on one Agent Node, not a Mesh scope.
+  // Pinned keeps the Mesh highlighted — the sidebar shows the Mesh the user
+  // would come back to — so clicking it must return the canvas to that
+  // Mesh's grid. Single is included deliberately: Single is explicit focus on
+  // one Agent Node, not a Mesh scope.
   it.each(['pinned', 'single'] as const)(
     're-clicking the highlighted Mesh from %s returns the canvas to its Mesh Grid',
     async (mode) => {
