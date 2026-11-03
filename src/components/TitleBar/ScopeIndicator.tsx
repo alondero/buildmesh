@@ -99,8 +99,9 @@ import { SCOPE_LABEL_MIN_WIDTH, tierWidthAtTextScale } from './titleBarTiers';
  *
  * The count in the label is the NARROWED count — how many Agent Nodes the
  * current filters leave visible — not the size of the scope. The scope's own
- * size is in the filter popover, which shows "3/12"; the bar's "All meshes ·
- * 3" says "3 are visible".
+ * size appears only as the denominator on the Filters control beside it
+ * ("3/12"; its panel spells it "3 of 12 nodes"); the bar's "All meshes · 3"
+ * says "3 are visible".
  *
  * `aria-label` carries the same string as the visible label, so the
  * accessible name survives the collapse (and WCAG 2.5.3 Label in Name holds
