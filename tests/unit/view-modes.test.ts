@@ -6,6 +6,8 @@
  * contracts here are the seam that ticket builds on.
  */
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
   deriveScope,
   isMeshScopedView,
@@ -357,5 +359,52 @@ describe('search within the chosen scope (#2683)', () => {
       controls: { gridSearchQuery: query, gridProviderFilter: null, gridStatusFilter: null },
     });
     expect(result.visibleNodes.map(node => node.id)).toEqual(expected);
+  });
+});
+
+/**
+ * The `visibleNodes` doc comment must not promise an array identity that
+ * `deriveScope` does not deliver.
+ *
+ * The comment used to say the 'all' view mode "hands back the shared derived
+ * node array unchanged". `scopeNodesForMode('all')` does return the shared
+ * array, but `deriveScope` narrows every scope with `filter`, so
+ * `visibleNodes` is a fresh array in every mode. A comment that promises
+ * identity sends the next caller to reach for `===` or to use the array as a
+ * memo key against a guarantee the code does not keep.
+ *
+ * The guard reads the comment out of the source and compares the promise with
+ * what the code does: if the comment claims identity, the implementation has
+ * to deliver it. Rewording the comment and restoring the identity both
+ * satisfy it — only a comment and a code that disagree fail.
+ */
+describe('DerivedScope.visibleNodes documentation', () => {
+  const SOURCE = readFileSync(resolve(__dirname, '../../src/lib/viewModes.ts'), 'utf8');
+
+  /** The doc comment the source carries for one interface member. */
+  function docCommentFor(member: string): string {
+    const at = SOURCE.indexOf(`${member}:`);
+    expect(at, `${member} is missing from src/lib/viewModes.ts`).toBeGreaterThan(-1);
+    const start = SOURCE.lastIndexOf('/**', at);
+    const end = SOURCE.indexOf('*/', start);
+    expect(start, `${member} carries no doc comment`).toBeGreaterThan(-1);
+    expect(end, `${member} carries no doc comment`).toBeLessThan(at);
+    expect(SOURCE.slice(end + 2, at).trim(), `${member} carries no doc comment`).toBe('');
+    return SOURCE.slice(start + 3, end);
+  }
+
+  it('claims no array identity the implementation does not deliver', () => {
+    const doc = docCommentFor('visibleNodes');
+    const claimsIdentity = /\b(unchanged|shared)\b/i.test(doc);
+    const delivered = deriveScope({
+      viewMode: 'all', lastNonSingleMode: 'all', agentNodes: NODES,
+      selectedMeshId: null, activeNodeId: null,
+    }).visibleNodes === NODES;
+    expect(
+      claimsIdentity ? delivered : true,
+      claimsIdentity
+        ? 'The visibleNodes doc comment promises the shared array is handed back unchanged, but deriveScope returns a freshly filtered array. Reword the comment, or skip the filter when no filter controls are active.'
+        : '',
+    ).toBe(true);
   });
 });

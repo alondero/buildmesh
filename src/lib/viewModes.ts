@@ -158,7 +158,9 @@ export interface DerivedScope {
   isMeshScoped: boolean;
   /** The ordered nodes the scope shows right now (grouping into Node
    *  Activity cards and the Grid sorters happen downstream). Readonly: the
-   *  `all` view mode hands back the shared derived node array unchanged. */
+   *  array is a fresh copy — `deriveScope` narrows every scope with
+   *  `filter`, so it is never the store's own node array, and callers must
+   *  not rely on `visibleNodes` keeping its identity across calls. */
   visibleNodes: readonly AgentNode[];
   /** `visibleNodes.length`, for surfaces that render the number. */
   visibleNodeCount: number;
