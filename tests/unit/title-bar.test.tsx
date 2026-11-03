@@ -404,8 +404,8 @@ describe('TitleBar (bespoke window chrome)', () => {
         for (const button of buttons) {
           expect(button.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true');
         }
-        expect(panel.textContent).toContain('Review what the focused agent changed');
-        expect(panel.textContent).toContain('Check health, recover, and clean up branches');
+        expect(within(panel).getByRole('button', { name: 'Agent Changes', exact: true }).getAttribute('aria-description')).toBe('Review what the focused agent changed');
+        expect(within(panel).getByRole('button', { name: 'Repository', exact: true }).getAttribute('aria-description')).toBe('Check health, recover, and clean up branches');
         expect(within(panel).queryByText('Usage')).toBeNull();
         expect(within(panel).queryByText('Notifications')).toBeNull();
         expect(screen.getByRole('button', { name: 'Open Usage' })).toBeTruthy();
