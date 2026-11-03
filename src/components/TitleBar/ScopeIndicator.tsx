@@ -95,7 +95,11 @@ import { SCOPE_LABEL_MIN_WIDTH, tierWidthAtTextScale } from './titleBarTiers';
  * wide at 2000px and only reaches its 208px cap by 2600px — while a short
  * scope name ("All meshes · 3") fits whole. Below 2000px the control keeps
  * its glyph; the shape still says which scope family is active, and the
- * `aria-label` and `title` carry the full string either way.
+ * `aria-label` and `title` name the scope either way. Neither is one fixed
+ * "full string": the accessible name carries the visible label plus the mode
+ * word where the two differ — cross-Mesh Pinned's is "all meshes · 3 nodes
+ * (Pinned across meshes)" — and the tooltip spells the scope out in its own
+ * longer wording ("Pinned across every Mesh — 3 nodes").
  *
  * The count in the label is the NARROWED count — how many Agent Nodes the
  * current filters leave visible — not the size of the scope. The scope's own
