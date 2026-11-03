@@ -41,7 +41,8 @@ export function classifyCanvasEmpty(input: CanvasEmptyStateInput): CanvasEmptyDe
   // deleted while its Mesh is empty and a search is active leaves the scope
   // with no node to show at all, and this branch still answers "No nodes
   // match" (pinned by the Single case in
-  // tests/unit/canvas-empty-state.test.tsx).
+  // tests/unit/canvas-empty-state.test.tsx, which proves that state is
+  // reachable rather than only describing it).
   return { branch: 'filters-exclude-all' };
 }
 

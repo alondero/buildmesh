@@ -28,8 +28,9 @@ import {
   type CanvasEmptyStateCallbacks,
   type CanvasEmptyStateInput,
 } from '../../src/components/AgentNodeView/CanvasEmptyState';
-import { deriveScope } from '../../src/lib/viewModes';
+import { deriveScope, resolveSingleNode } from '../../src/lib/viewModes';
 import type { NonSingleViewMode, ViewMode } from '../../src/stores/uiStore';
+import type { AgentNode } from '../../src/types/generated/AgentNode';
 
 const noopCallbacks: CanvasEmptyStateCallbacks = {
   onCreateMesh: vi.fn(),
@@ -42,6 +43,36 @@ const noopCallbacks: CanvasEmptyStateCallbacks = {
 beforeEach(() => {
   vi.clearAllMocks();
 });
+
+/** A node in some Mesh. The fields the scope derivation and the grid
+ *  filters read are the ones that matter here — `mesh_id`, `name`,
+ *  `provider`, `status` — so the rest are the generated type's defaults. */
+function nodeInMesh(meshId: number, overrides: Partial<AgentNode> = {}): AgentNode {
+  return {
+    id: 1,
+    mesh_id: meshId,
+    name: 'agent-1',
+    path: '/repo/agent-1',
+    branch: 'main',
+    env: 'wsl',
+    provider: 'claude',
+    status: 'running',
+    cli_session_id: null,
+    worktree_name: null,
+    use_worktree: false,
+    is_pinned: false,
+    source_issue: null,
+    source_pr: null,
+    head_repo_owner: null,
+    head_repo_clone_url: null,
+    source_pr_pinned_sha: null,
+    signal_health: null,
+    position: 0,
+    created_at: '2026-07-16T00:00:00Z',
+    worktree_path: null,
+    ...overrides,
+  };
+}
 
 /** Overrides the caller states the way the stores hold them — the View Mode
  *  and the sidebar selection — plus the counts the empty state measures.
@@ -56,35 +87,44 @@ interface InputOverrides {
   lastNonSingleMode?: NonSingleViewMode;
   selectedMeshId?: number | null;
   harnessReady?: boolean;
+  /** The store's node list, which the scope is derived from. Empty by
+   *  default, which is the same scope every Mesh-scoped case here needs. */
+  agentNodes?: AgentNode[];
+  /** The focused node's id — STALE when that node has been deleted. */
+  activeNodeId?: number | null;
 }
 
 function input(overrides: InputOverrides = {}): CanvasEmptyStateInput {
   const {
     meshCount = 1,
     totalNodeCount = 0,
-    scopedCount = 0,
     viewMode = 'all',
     lastNonSingleMode = viewMode === 'single' ? 'mesh' : viewMode,
     selectedMeshId = null,
     harnessReady = true,
+    agentNodes = [],
+    activeNodeId = null,
   } = overrides;
+  // The classifier reads the Mesh identity from the derived scope, never
+  // from `viewMode`/`selectedMeshId` re-tested here (#2071's one
+  // derivation).
+  const scope = deriveScope({
+    viewMode,
+    lastNonSingleMode,
+    agentNodes,
+    selectedMeshId,
+    activeNodeId,
+  });
   return {
     meshCount,
     totalNodeCount,
-    scopedCount,
+    // The count the empty state measures is the scope's own count — the
+    // container takes it from the derived scope — so it is derived here too
+    // and a test can never hand the classifier a count its scope does not
+    // have.
+    scopedCount: overrides.scopedCount ?? scope.scopedNodeCount,
     harnessReady,
-    // The classifier reads the Mesh identity from the derived scope, never
-    // from `viewMode`/`selectedMeshId` re-tested here (#2071's one
-    // derivation). The node list is empty because the counts above are this
-    // component's own measurement — the scope's identity does not depend on
-    // them.
-    scope: deriveScope({
-      viewMode,
-      lastNonSingleMode,
-      agentNodes: [],
-      selectedMeshId,
-      activeNodeId: null,
-    }),
+    scope,
   };
 }
 
@@ -167,12 +207,40 @@ describe('classifyCanvasEmpty (issue #1536)', () => {
     // The branch is still the right one — the filters are what keep the
     // scope empty — but it is reached with scopedCount === 0, so the
     // classifier must not claim the scope holds nodes.
+    //
+    // The reachability is asserted, not just described. The store below
+    // holds three nodes, every one of them in another Mesh: the soloed
+    // node is gone, so its id resolves to nothing, and Mesh 42 holds no
+    // node either. The active search is therefore the ONLY thing that
+    // empties the scope — a fallback that broadened past the filter would
+    // have a node to return, and the assertion below rules that out.
+    const store = [
+      nodeInMesh(7, { id: 1, position: 0, name: 'alpha' }),
+      nodeInMesh(7, { id: 2, position: 1, name: 'beta' }),
+      nodeInMesh(9, { id: 3, position: 0, name: 'gamma' }),
+    ];
+    const searchActive = {
+      gridSearchQuery: 'no-such-node',
+      gridProviderFilter: null,
+      gridStatusFilter: null,
+    };
+    // The soloed node was deleted: its id no longer resolves.
+    expect(resolveSingleNode(store, 999, 'mesh', 42, searchActive)).toBeNull();
+    // Without the search the fallback still finds a node to solo, so this
+    // state is filter-dependent and not merely "Mesh 42 is empty".
+    expect(resolveSingleNode(store, 999, 'mesh', 42)).toBe(store[0]);
+
     const single = input({
       viewMode: 'single', lastNonSingleMode: 'mesh', selectedMeshId: 42,
-      scopedCount: 0, totalNodeCount: 3,
+      agentNodes: store, activeNodeId: 999,
+      meshCount: 3, totalNodeCount: store.length,
     });
     expect(single.scope.gridMode).toBe('mesh');
     expect(single.scope.isMeshScoped).toBe(true);
+    // The scope holds no node at all, and the count the classifier is given
+    // is that scope's own count rather than a number written by hand.
+    expect(single.scope.scopedNodeCount).toBe(0);
+    expect(single.scopedCount).toBe(0);
     expect(classifyCanvasEmpty(single).branch).toBe('filters-exclude-all');
   });
 
