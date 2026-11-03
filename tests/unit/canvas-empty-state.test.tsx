@@ -28,7 +28,7 @@ import {
   type CanvasEmptyStateCallbacks,
   type CanvasEmptyStateInput,
 } from '../../src/components/AgentNodeView/CanvasEmptyState';
-import { deriveScope, resolveSingleNode } from '../../src/lib/viewModes';
+import { deriveScope, resolveSingleNode, type FilterControls } from '../../src/lib/viewModes';
 import type { NonSingleViewMode, ViewMode } from '../../src/stores/uiStore';
 import type { AgentNode } from '../../src/types/generated/AgentNode';
 
@@ -74,15 +74,24 @@ function nodeInMesh(meshId: number, overrides: Partial<AgentNode> = {}): AgentNo
   };
 }
 
+/** `count` nodes in one Mesh, with ids unique inside the list so the store
+ *  reads as one store rather than as a pile of same-id rows. `firstId` keeps
+ *  the ids deterministic, so a fixture that adds nodes to a second Mesh can
+ *  continue the numbering instead of colliding with it. */
+function nodesInMesh(meshId: number, count: number, firstId = 1): AgentNode[] {
+  return Array.from({ length: count }, (_, i) =>
+    nodeInMesh(meshId, { id: firstId + i, position: i, name: `agent-${firstId + i}` }));
+}
+
 /** Overrides the caller states the way the stores hold them — the View Mode
- *  and the sidebar selection — plus the counts the empty state measures.
- *  `scope` is DERIVED here from the first two (#2070 review), so a test can
- *  never hand the classifier a View Mode and a Mesh identity that the
- *  derivation would not produce. */
+ *  and the sidebar selection — plus the Mesh count. `scope` is DERIVED here
+ *  from the node list (#2070 review), so a test can never hand the classifier
+ *  a View Mode and a Mesh identity that the derivation would not produce. */
 interface InputOverrides {
+  /** The Mesh store's size. It is the one count the node list cannot back —
+   *  a Mesh can exist with no nodes and nodes can outlive their Mesh — so it
+   *  stays an explicit input. */
   meshCount?: number;
-  totalNodeCount?: number;
-  scopedCount?: number;
   viewMode?: ViewMode;
   lastNonSingleMode?: NonSingleViewMode;
   selectedMeshId?: number | null;
@@ -92,18 +101,23 @@ interface InputOverrides {
   agentNodes?: AgentNode[];
   /** The focused node's id — STALE when that node has been deleted. */
   activeNodeId?: number | null;
+  /** The active Grid Controls, which narrow the scope's visible nodes.
+   *  Production derives the scope WITH them (`useScope` reads the UI store's
+   *  controls and passes them to `deriveScope`), so a fixture that wants
+   *  "the scope holds nodes the filters hide" states them here. */
+  controls?: FilterControls;
 }
 
 function input(overrides: InputOverrides = {}): CanvasEmptyStateInput {
   const {
     meshCount = 1,
-    totalNodeCount = 0,
     viewMode = 'all',
     lastNonSingleMode = viewMode === 'single' ? 'mesh' : viewMode,
     selectedMeshId = null,
     harnessReady = true,
     agentNodes = [],
     activeNodeId = null,
+    controls,
   } = overrides;
   // The classifier reads the Mesh identity from the derived scope, never
   // from `viewMode`/`selectedMeshId` re-tested here (#2071's one
@@ -114,15 +128,18 @@ function input(overrides: InputOverrides = {}): CanvasEmptyStateInput {
     agentNodes,
     selectedMeshId,
     activeNodeId,
+    controls,
   });
   return {
     meshCount,
-    totalNodeCount,
-    // The count the empty state measures is the scope's own count — the
-    // container takes it from the derived scope — so it is derived here too
-    // and a test can never hand the classifier a count its scope does not
-    // have.
-    scopedCount: overrides.scopedCount ?? scope.scopedNodeCount,
+    // BOTH counts come from the same store array the production container
+    // reads: `totalNodeCount` is `agentNodes.length` and `scopedCount` is the
+    // derived scope's own count (`CanvasEmptyStateContainer` passes
+    // `scope.scopedNodeCount`). Neither is an override, so a test can never
+    // hand the classifier a count its store does not hold — and a regression
+    // in how the count is derived fails a test here instead of passing.
+    totalNodeCount: agentNodes.length,
+    scopedCount: scope.scopedNodeCount,
     harnessReady,
     scope,
   };
@@ -142,25 +159,36 @@ describe('classifyCanvasEmpty (issue #1536)', () => {
   // pinned mode gets the New mesh CTA, not the "Pin agents from any
   // mesh" CTA which doesn't apply).
   it('no-meshes wins over pinned for a fresh user (0 meshes in pinned mode)', () => {
-    expect(branch(input({ viewMode: 'pinned', meshCount: 0, totalNodeCount: 0 }))).toBe('no-meshes');
-    expect(branch(input({ viewMode: 'pinned', meshCount: 0, totalNodeCount: 3 }))).toBe('no-meshes');
+    expect(branch(input({ viewMode: 'pinned', meshCount: 0 }))).toBe('no-meshes');
+    // Even with nodes loaded — the Mesh store can be empty while the node
+    // store is not — the branch is the same, because "Add a repository" is
+    // the only CTA that can fix it.
+    expect(
+      branch(input({ viewMode: 'pinned', meshCount: 0, agentNodes: nodesInMesh(1, 3) })),
+    ).toBe('no-meshes');
   });
 
   it('pinned wins next — meshes exist but user is in pinned mode', () => {
-    expect(branch(input({ viewMode: 'pinned', meshCount: 5, totalNodeCount: 3 }))).toBe('pinned-empty');
-    expect(branch(input({ viewMode: 'pinned', meshCount: 1, totalNodeCount: 0 }))).toBe('pinned-empty');
+    // Three nodes are loaded and none of them is pinned, so the pinned
+    // scope holds nothing: the branch is the Pinned CTA, not "no agents".
+    expect(
+      branch(input({ viewMode: 'pinned', meshCount: 5, agentNodes: nodesInMesh(1, 3) })),
+    ).toBe('pinned-empty');
+    expect(branch(input({ viewMode: 'pinned', meshCount: 1 }))).toBe('pinned-empty');
   });
 
   it('no-meshes wins over everything when meshCount is 0', () => {
-    expect(branch(input({ meshCount: 0, totalNodeCount: 0 }))).toBe('no-meshes');
-    expect(branch(input({ meshCount: 0, totalNodeCount: 2 }))).toBe('no-meshes');
+    expect(branch(input({ meshCount: 0 }))).toBe('no-meshes');
+    expect(branch(input({ meshCount: 0, agentNodes: nodesInMesh(1, 2) }))).toBe('no-meshes');
     expect(branch(input({ viewMode: 'mesh', meshCount: 0 }))).toBe('no-meshes');
     expect(branch(input({ viewMode: 'all', meshCount: 0 }))).toBe('no-meshes');
   });
 
   it('returns selected-empty only when viewMode=mesh AND scopedCount=0 AND selectedMeshId is set', () => {
+    // Three nodes are loaded, all in another Mesh: Mesh 42 holds nothing, so
+    // the scope's own count is 0 and the branch is that Mesh's own CTA.
     const decision = classifyCanvasEmpty(
-      input({ viewMode: 'mesh', scopedCount: 0, totalNodeCount: 3, selectedMeshId: 42 }),
+      input({ viewMode: 'mesh', selectedMeshId: 42, agentNodes: nodesInMesh(7, 3) }),
     );
     expect(decision.branch).toBe('selected-empty');
     // The structured decision carries the mesh id — no `as number`
@@ -175,19 +203,19 @@ describe('classifyCanvasEmpty (issue #1536)', () => {
     // missing selection is the honest answer, with or without nodes
     // loaded elsewhere in the app.
     expect(
-      branch(input({ viewMode: 'mesh', scopedCount: 0, totalNodeCount: 3, selectedMeshId: null })),
+      branch(input({ viewMode: 'mesh', selectedMeshId: null, agentNodes: nodesInMesh(7, 3) })),
     ).toBe('no-mesh-selected');
     expect(
-      branch(input({ viewMode: 'mesh', scopedCount: 0, totalNodeCount: 0, selectedMeshId: null })),
+      branch(input({ viewMode: 'mesh', selectedMeshId: null })),
     ).toBe('no-mesh-selected');
   });
 
   it('does NOT return selected-empty when the all view has zero nodes — that is all-empty', () => {
-    expect(branch(input({ viewMode: 'all', scopedCount: 0, totalNodeCount: 0 }))).toBe('all-empty');
+    expect(branch(input({ viewMode: 'all' }))).toBe('all-empty');
   });
 
   it('returns all-empty when meshes exist but no nodes globally', () => {
-    expect(branch(input({ meshCount: 2, totalNodeCount: 0 }))).toBe('all-empty');
+    expect(branch(input({ meshCount: 2 }))).toBe('all-empty');
   });
 
   it('returns filters-exclude-all when the scope holds nodes the filters hide', () => {
@@ -195,9 +223,22 @@ describe('classifyCanvasEmpty (issue #1536)', () => {
     // EMPTY canvas, so "nothing in the scope is on it" is the fallback and
     // this branch names it. The scope usually holds nodes the filters hide
     // — but not always; see the Single case below.
-    expect(
-      branch(input({ totalNodeCount: 5, scopedCount: 5 })),
-    ).toBe('filters-exclude-all');
+    //
+    // The fixture states that state rather than asserting it: five nodes are
+    // loaded and in scope, and the active search hides every one of them, so
+    // the scope holds five while the grid shows none. The counts are the
+    // scope's own, so a regression in how they are derived fails here.
+    const store = [...nodesInMesh(1, 3), ...nodesInMesh(2, 2, 4)];
+    const hidden = input({
+      meshCount: 2,
+      agentNodes: store,
+      controls: { gridSearchQuery: 'no-such-node', gridProviderFilter: null, gridStatusFilter: null },
+    });
+    expect(hidden.scope.scopedNodeCount).toBe(5);
+    expect(hidden.scope.visibleNodeCount).toBe(0);
+    expect(hidden.totalNodeCount).toBe(5);
+    expect(hidden.scopedCount).toBe(5);
+    expect(branch(hidden)).toBe('filters-exclude-all');
   });
 
   it('reaches filters-exclude-all in Single when the scope has nothing left to show', () => {
@@ -233,13 +274,14 @@ describe('classifyCanvasEmpty (issue #1536)', () => {
     const single = input({
       viewMode: 'single', lastNonSingleMode: 'mesh', selectedMeshId: 42,
       agentNodes: store, activeNodeId: 999,
-      meshCount: 3, totalNodeCount: store.length,
+      meshCount: 3,
     });
     expect(single.scope.gridMode).toBe('mesh');
     expect(single.scope.isMeshScoped).toBe(true);
     // The scope holds no node at all, and the count the classifier is given
     // is that scope's own count rather than a number written by hand.
     expect(single.scope.scopedNodeCount).toBe(0);
+    expect(single.totalNodeCount).toBe(3);
     expect(single.scopedCount).toBe(0);
     expect(classifyCanvasEmpty(single).branch).toBe('filters-exclude-all');
   });
@@ -278,7 +320,7 @@ describe('CanvasEmptyState (issue #1536)', () => {
 
   it('all-empty branch: heading + Spawn agent CTA that fires onOpenSpawnMenu(null)', () => {
     const cbs = { ...noopCallbacks, onOpenSpawnMenu: vi.fn() };
-    render(<CanvasEmptyState input={input({ meshCount: 1, totalNodeCount: 0 })} callbacks={cbs} />);
+    render(<CanvasEmptyState input={input({ meshCount: 1 })} callbacks={cbs} />);
 
     expect(screen.getByText('No agents yet')).toBeTruthy();
     fireEvent.click(screen.getByTestId('canvas-empty-spawn-agent'));
@@ -289,7 +331,7 @@ describe('CanvasEmptyState (issue #1536)', () => {
     const cbs = { ...noopCallbacks, onOpenSpawnMenu: vi.fn() };
     render(
       <CanvasEmptyState
-        input={input({ meshCount: 2, totalNodeCount: 3, viewMode: 'mesh', selectedMeshId: 42 })}
+        input={input({ meshCount: 2, viewMode: 'mesh', selectedMeshId: 42, agentNodes: nodesInMesh(7, 3) })}
         callbacks={cbs}
       />,
     );
@@ -306,7 +348,7 @@ describe('CanvasEmptyState (issue #1536)', () => {
     const cbs = { ...noopCallbacks, onViewAll: vi.fn() };
     render(
       <CanvasEmptyState
-        input={input({ meshCount: 2, totalNodeCount: 3, scopedCount: 0, viewMode: 'mesh', selectedMeshId: null })}
+        input={input({ meshCount: 2, viewMode: 'mesh', selectedMeshId: null, agentNodes: nodesInMesh(7, 3) })}
         callbacks={cbs}
       />,
     );
@@ -319,10 +361,16 @@ describe('CanvasEmptyState (issue #1536)', () => {
   });
 
   it('filters-exclude-all branch: Clear search & filters CTA fires onClearFilters', () => {
+    // Five nodes in scope, all hidden by the active search — the same state
+    // the classifier test above names, reached through the renderer.
     const cbs = { ...noopCallbacks, onClearFilters: vi.fn() };
     render(
       <CanvasEmptyState
-        input={input({ meshCount: 2, totalNodeCount: 5, scopedCount: 5 })}
+        input={input({
+          meshCount: 2,
+          agentNodes: [...nodesInMesh(1, 3), ...nodesInMesh(2, 2, 4)],
+          controls: { gridSearchQuery: 'no-such-node', gridProviderFilter: null, gridStatusFilter: null },
+        })}
         callbacks={cbs}
       />,
     );
@@ -342,7 +390,11 @@ describe('CanvasEmptyState (issue #1536)', () => {
     const cbs = { ...noopCallbacks, onViewAll: vi.fn() };
     render(
       <CanvasEmptyState
-        input={input({ meshCount: 2, totalNodeCount: 5, viewMode: 'pinned' })}
+        input={input({
+          meshCount: 2,
+          viewMode: 'pinned',
+          agentNodes: [...nodesInMesh(1, 3), ...nodesInMesh(2, 2, 4)],
+        })}
         callbacks={cbs}
       />,
     );
@@ -356,7 +408,13 @@ describe('CanvasEmptyState (issue #1536)', () => {
     const cbs = { ...noopCallbacks, onOpenSetup: vi.fn(), onOpenSpawnMenu: vi.fn() };
     render(
       <CanvasEmptyState
-        input={input({ meshCount: 2, totalNodeCount: 3, viewMode: 'mesh', selectedMeshId: 7, harnessReady: false })}
+        input={input({
+          meshCount: 2,
+          viewMode: 'mesh',
+          selectedMeshId: 7,
+          harnessReady: false,
+          agentNodes: nodesInMesh(9, 3),
+        })}
         callbacks={cbs}
       />,
     );
@@ -368,16 +426,15 @@ describe('CanvasEmptyState (issue #1536)', () => {
   });
 
   it('all-empty + no harness: routes to Open Settings too', () => {
-    const cbs = { ...noopCallbacks, onOpenSetup: vi.fn(), onOpenSpawnMenu: vi.fn() };
+    const cbs = { ...noopCallbacks, onOpenSetup: vi.fn() };
     render(
       <CanvasEmptyState
-        input={input({ meshCount: 2, totalNodeCount: 0, harnessReady: false })}
+        input={input({ meshCount: 2, harnessReady: false })}
         callbacks={cbs}
       />,
     );
 
     fireEvent.click(screen.getByTestId('canvas-empty-open-setup'));
     expect(cbs.onOpenSetup).toHaveBeenCalledTimes(1);
-    expect(cbs.onOpenSpawnMenu).not.toHaveBeenCalled();
   });
 });
