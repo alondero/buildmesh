@@ -60,9 +60,9 @@ export function runOmnibarCommand(id: string, ctx: OmnibarActionContext): boolea
       return true;
     case 'view-single':
     case 'view-pinned':
-    // #1609 — Filtered has no sidebar round-trip; the plain setViewMode path
-    // is the whole gesture (the click-to-focus-search behaviour is the
-    // switcher's, not the palette's).
+    // #1609 — no view-mode command needs a sidebar round-trip: each one is
+    // the plain setViewMode path, and the "jump to the search box" gesture
+    // belongs to the focus-grid-search shortcut, not the palette.
     // `view-all` falls through here too — setViewMode('all') enforces the
     // All Nodes invariant (issue #1002), so the omnibar doesn't need its
     // own special case.

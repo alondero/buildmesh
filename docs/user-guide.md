@@ -238,10 +238,10 @@ in-memory: closing the app ends the task, and only one task can run at once.
 
 The control left of the view modes always names what the canvas is showing.
 When a single Mesh is in scope it reads that Mesh's name; otherwise it reads
-the view and the node count, such as **Pinned across meshes · 3 nodes** or
-**Filtered across meshes · 2 of 5 nodes**. In **Single** it names the Agent
-Node you are soloing and its Mesh. On narrow windows the name collapses to an
-icon; hovering shows the same wording in full.
+the view and the node count, such as **All meshes · 3 nodes** or **Pinned
+across meshes · 3 nodes**. In **Single** it names the Agent Node you are
+soloing and its Mesh. On narrow windows the name collapses to an icon;
+hovering shows the same wording in full.
 
 Choose **All Nodes** to leave Mesh scope. It is the only route out, and it
 clears the Mesh selection.
@@ -260,10 +260,8 @@ choose, and the picker opens with focus inside it so you can tab straight to
 the list. `Ctrl+Alt+G` (`Cmd+Alt+G` on macOS) rotates through the view modes
 and asks the same way.
 
-Two scope changes announce themselves. A search that leaves a single Mesh
-tells you the results span every Mesh, because the search matches Agent Node
-names rather than one Mesh. Deleting the Mesh you are looking at tells you the
-canvas moved to **All Nodes**. Both are reminders only — the view still
+One scope change announces itself. Deleting the Mesh you are looking at tells
+you the canvas moved to **All Nodes**. It is a reminder only — the view still
 changes.
 
 ## Find agents that need attention
@@ -281,11 +279,12 @@ panel. Its **Lifecycle** view lists agents from every repository; in the
 agent's terminal, and offers **Retry** for a failed or lost one and **Resume**
 for a paused one.
 
-In **Filtered** view, use the header's **Filters** button for provider, status,
-sort and direction. The count shows matching nodes out of all loaded nodes.
-Remove an active chip or use **Clear all** to clear search and filters and
-restore the default sort. Your choices survive a restart, including a filter
-with no matches.
+Beside the search field, the sliders button opens **Filters and sort** for
+provider, status, sort and direction. It is available in **Mesh Grid**,
+**Pinned** and **All Nodes**, and hidden in **Single**. The count shows
+matching nodes out of the nodes in scope. Remove an active chip or use
+**Clear all** to clear search and filters and restore the default sort. Your
+choices survive a restart, including a filter with no matches.
 
 ## Configure Autopilot Circuits
 

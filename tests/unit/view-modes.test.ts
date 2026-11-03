@@ -137,9 +137,9 @@ describe('deriveScope (#2071)', () => {
     expect(meshScope.mesh).toEqual({ id: 20, name: 'beta' });
     expect(meshScope.isMeshScoped).toBe(true);
 
-    // 'pinned' and 'filtered' are cross-Mesh by design (#983/#1609) and
-    // 'all' clears the selection — so a sidebar selection never turns
-    // one of them into a Mesh scope, even with the Mesh still selected.
+    // 'pinned' is cross-Mesh by design (#983) and 'all' clears the
+    // selection — so a sidebar selection never turns one of them into a
+    // Mesh scope, even with the Mesh still selected.
     for (const viewMode of ['all', 'pinned'] as const) {
       const crossMesh = scope({ viewMode, selectedMeshId: 20 });
       expect(crossMesh.mesh).toBeNull();
@@ -155,8 +155,8 @@ describe('deriveScope (#2071)', () => {
     expect(filtered.scopedNodeCount).toBe(4);
     expect(filtered.visibleNodeCount).toBe(1);
 
-    // A stale search must not narrow a Mesh-scoped view (#1609) — the
-    // scope and the visible set stay the full Mesh.
+    // The controls narrow the scope they are applied to: the Mesh still
+    // holds two nodes before the search, and none of them match it.
     const meshScope = scope({
       viewMode: 'mesh',
       selectedMeshId: 20,
@@ -253,11 +253,11 @@ describe('resolveSingleNode (wayfinder #982)', () => {
     expect(resolveSingleNode([b1], 999, 'mesh', 10, controls)).toBeNull();
   });
 
-  it('narrows the Filtered fallback by the Grid Controls (#1609)', () => {
-    // Entered Single from Filtered with a search active, then the active
-    // node vanished (deleted while soloed): the fallback must come from
-    // the matching set, not the unfiltered store — the user would
-    // otherwise land on a node the Filtered grid never showed.
+  it('narrows the Single fallback by the Grid Controls (#1609)', () => {
+    // Entered Single with a search active, then the active node vanished
+    // (deleted while soloed): the fallback must come from the matching
+    // set, not the unfiltered store — the user would otherwise land on a
+    // node the narrowed grid never showed.
     const controls = { gridSearchQuery: 'a', gridProviderFilter: null, gridStatusFilter: null };
     expect(resolveSingleNode(NODES, 999, 'all', null, controls)).toBe(a1);
     const tight = { gridSearchQuery: 'b', gridProviderFilter: null, gridStatusFilter: null };
@@ -313,15 +313,14 @@ describe('isMeshScopedView', () => {
 });
 
 describe('selectionMeshId', () => {
-  // This is a DESTINATION's subject, not the canvas scope: Pinned, Filtered
-  // and All have no grid Mesh by construction, yet a Mesh-lens Probe
-  // destination still acts on one. #2073 deleted the pins that could hold a
+  // This is a DESTINATION's subject, not the canvas scope: Pinned and All
+  // have no grid Mesh by construction, yet a Mesh-lens Probe destination
+  // still acts on one. #2073 deleted the pins that could hold a
   // Mesh the user had not chosen, so the rule is "the chosen Mesh, else the
   // focused node's Mesh" - never a Mesh the user did not choose (#2071).
   it.each([
     ['all', 10],
     ['pinned', 10],
-    ['filtered', 10],
     ['mesh', 10],
   ] as const)('keeps an explicitly selected Mesh authoritative in %s', (viewMode, expected) => {
     expect(selectionMeshId(viewMode, 10, 20)).toBe(expected);
@@ -331,7 +330,7 @@ describe('selectionMeshId', () => {
     expect(selectionMeshId('single', 10, 20)).toBe(20);
   });
 
-  it.each(['mesh', 'pinned', 'filtered', 'all'] as const)(
+  it.each(['mesh', 'pinned', 'all'] as const)(
     "stands the focused node's Mesh in for %s when nothing is selected",
     (viewMode) => {
       expect(selectionMeshId(viewMode, null, 20)).toBe(20);
@@ -339,7 +338,7 @@ describe('selectionMeshId', () => {
   );
 
   it('is null when there is neither a selection nor a focused node', () => {
-    for (const viewMode of ['all', 'pinned', 'filtered', 'mesh', 'single'] as const) {
+    for (const viewMode of ['all', 'pinned', 'mesh', 'single'] as const) {
       expect(selectionMeshId(viewMode, null, null)).toBeNull();
     }
   });

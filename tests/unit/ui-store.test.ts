@@ -3,7 +3,6 @@ import { useUIStore, type DiffContext } from '../../src/stores/uiStore';
 import { enterMesh } from '../../src/lib/navigation';
 import { useMeshStore } from '../../src/stores/meshStore';
 import { useToastStore } from '../../src/stores/toastStore';
-import { SCOPE_NOTICE_PROVIDER } from '../../src/lib/scopeNotices';
 
 // A representative single-file diff context (issue #379). The overlay needs
 // the path + root to fetch, the node/mesh to label and auto-close, and the
@@ -91,7 +90,7 @@ describe('useUIStore', () => {
       // === null` — is enforced at the transition so every caller
       // (switcher, Pinned empty state, omnibar, keyboard cycle) gets it
       // for free. The reverse is NOT true: a null selectedMeshId is
-      // also valid in `pinned`, `filtered`, and `single` modes.
+      // also valid in `pinned` and `single` modes.
       it('repairs an All Nodes selection on a same-mode request', () => {
         useMeshStore.setState({ selectedMeshId: 7 });
         useUIStore.setState({ viewMode: 'all' });
@@ -108,9 +107,9 @@ describe('useUIStore', () => {
       });
 
       it('does not touch selectedMeshId for non-All transitions', () => {
-        // The invariant is forward-only — a switch to Pinned/Filtered/
-        // Mesh/Single must leave selectedMeshId alone so the sidebar
-        // highlight and the canvas stay coupled.
+        // The invariant is forward-only — a switch to Pinned/Mesh/Single
+        // must leave selectedMeshId alone so the sidebar highlight and the
+        // canvas stay coupled.
         enterMesh(7);
         useUIStore.setState({ viewMode: 'all' });
         useUIStore.getState().setViewMode('pinned');
@@ -123,7 +122,7 @@ describe('useUIStore', () => {
         // they switched — otherwise a caller that skips `setViewMode` would
         // leave All Nodes paired with a highlighted Mesh. Driven through the
         // setter, not through the sidebar, because the invariant lives here.
-        for (const mode of ['mesh', 'pinned', 'filtered', 'single'] as const) {
+        for (const mode of ['mesh', 'pinned', 'single'] as const) {
           useMeshStore.setState({ selectedMeshId: 7 });
           useUIStore.getState().setViewMode(mode);
           expect(useMeshStore.getState().selectedMeshId).toBe(7);
@@ -603,8 +602,7 @@ describe('useUIStore', () => {
   // #2076 — "scope changes announce themselves". Two channels live here:
   // the open request the Mesh Grid segment sends to the title bar's scope
   // picker, and `focusScopedSearch`, the one shared implementation of
-  // the "jump to the search box" gesture that both the switcher segment and
-  // the ⌘/Ctrl+F shortcut already had duplicated.
+  // the "jump to the search box" gesture the ⌘/Ctrl+F shortcut now owns.
   describe('scope-change notices (#2076)', () => {
     beforeEach(() => {
       localStorage.removeItem('buildmesh.view-mode');
@@ -691,7 +689,7 @@ describe('useUIStore', () => {
       expect(useUIStore.getState().viewMode).toBe('mesh');
     });
 
-    it.each(['pinned', 'filtered', 'single'] as const)(
+    it.each(['pinned', 'single'] as const)(
       'returns the canvas to that Mesh Grid when the already-selected Mesh is chosen from %s',
       (mode) => {
         useMeshStore.setState({ selectedMeshId: 7 });

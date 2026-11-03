@@ -54,13 +54,11 @@ export function matchesGridControls(node: AgentNode, controls: FilterControls): 
  *   - 'pinned'   — every node with `is_pinned`, across all meshes. Pinned
  *                  never touches `selectedMeshId` (ticket #983).
  *   - 'all'      — every loaded node.
-
  */
 export function scopeNodesForMode(
   mode: NonSingleViewMode,
   agentNodes: readonly AgentNode[],
   selectedMeshId: number | null,
-  _controls: FilterControls = NO_FILTERS,
 ): readonly AgentNode[] {
   switch (mode) {
     case 'pinned':
@@ -87,12 +85,13 @@ export interface ScopeMesh {
  *
  * Single reports the grid scope it was entered from, so a solo out of a Mesh
  * grid is Mesh-anchored too — the SCOPE decides, not the View Mode label.
- * Exported because more than one surface asks this exact question and must
- * not answer it separately: `deriveScope` (which every scope consumer reads),
- * the scope-change notice, and any future predicate. `scopeNotices` used to
- * restate these three inputs and call `deriveScope` with a fabricated empty
- * node list to read this one boolean — correct only for as long as nothing
- * here consulted the node list.
+ * Exported so the rule has exactly one definition: `deriveScope` (which
+ * every scope consumer reads) answers with it, `tests/unit/view-modes.test.ts`
+ * pins that the two cannot drift apart, and any future predicate reads it
+ * rather than restating it. `scopeNotices` used to restate these three
+ * inputs and call `deriveScope` with a fabricated empty node list to read
+ * this one boolean — correct only for as long as nothing here consulted the
+ * node list.
  */
 export function isMeshScopedView(
   viewMode: ViewMode,

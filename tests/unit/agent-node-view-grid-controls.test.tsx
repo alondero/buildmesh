@@ -1,11 +1,10 @@
 ﻿/**
- * Grid Controls (wayfinder #988 / #996; Filtered view #1609) — the
+ * Grid Controls (wayfinder #988 / #996; scoped search #2683) — the
  * AgentNodeView must apply the uiStore controls to the node sequence it
  * hands to the grid, and manual drag-and-drop must disappear while a
- * non-custom sort is active. Since #1609 the search/filter narrowing is a
- * property of the dedicated Filtered view: the same store controls must
- * NOT narrow the other grids (a stale search never hides nodes behind the
- * user's back in Mesh/Pinned/All).
+ * non-custom sort is active. Since #2683 the search/filter narrowing is a
+ * property of the chosen scope: the same store controls narrow Mesh, Pinned
+ * and All Nodes without changing which scope is in view.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { act, fireEvent, render, screen } from '@testing-library/react';
@@ -125,7 +124,7 @@ beforeEach(() => {
 });
 
 describe('AgentNodeView grid controls', () => {
-  it('filters by the search query in the Filtered view', () => {
+  it('filters by the search query in the All view', () => {
     useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all', gridSearchQuery: 'runner' });
 
     render(<AgentNodeView />);
@@ -133,7 +132,7 @@ describe('AgentNodeView grid controls', () => {
     expect(renderedNodeIds()).toEqual([1]);
   });
 
-  it('filters by provider in the Filtered view', () => {
+  it('filters by provider in the All view', () => {
     useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all', gridProviderFilter: 'anthropic' });
 
     render(<AgentNodeView />);
@@ -141,7 +140,7 @@ describe('AgentNodeView grid controls', () => {
     expect(renderedNodeIds()).toEqual([1, 3, 4]);
   });
 
-  it('filters by status in the Filtered view', () => {
+  it('filters by status in the All view', () => {
     useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all', gridStatusFilter: 'idle' });
 
     render(<AgentNodeView />);
@@ -149,7 +148,7 @@ describe('AgentNodeView grid controls', () => {
     expect(renderedNodeIds()).toEqual([2, 4]);
   });
 
-  it('composes search, provider, and status filters before rendering the Filtered grid', () => {
+  it('composes search, provider, and status filters before rendering the grid', () => {
     useUIStore.setState({
       viewMode: 'all',
       lastNonSingleMode: 'all',
@@ -164,8 +163,8 @@ describe('AgentNodeView grid controls', () => {
   });
 
   it('narrows the All view by search (#1609)', () => {
-    // The controls are the Filtered view's property now — All renders its
-    // full scope even when the store still carries search text.
+    // The controls narrow whichever scope is in view: All renders only the
+    // nodes matching the search text, and the scope itself stays All.
     useUIStore.setState({ gridSearchQuery: 'runner' });
 
     render(<AgentNodeView />);
@@ -192,8 +191,8 @@ describe('AgentNodeView grid controls', () => {
 
   // Regression guards (#1609 review): the search text persists across mode
   // switches by design, so any control-dependent early return between
-  // scoping and sorting would run on EVERY non-Filtered render and silently
-  // serve store-insertion order instead of the configured sort.
+  // scoping and sorting would run on EVERY render and silently serve
+  // store-insertion order instead of the configured sort.
   it('sorts the All view while a stale search query is active (#1609)', () => {
     useUIStore.setState({ gridSortBy: 'name', gridSortDirection: 'asc' });
 

@@ -1,14 +1,13 @@
 ﻿/**
- * ViewModeSwitcher (wayfinder #982 / #983 / #986; Filtered #1609; Mesh Grid
- * fallback deleted by #2071) — the five-segment control in the canvas header
+ * ViewModeSwitcher (wayfinder #982 / #983 / #986; Mesh Grid fallback deleted
+ * by #2071) — the four-segment control in the canvas header
  * that drives uiStore.viewMode. Pins the segment rendering, ARIA semantics,
  * and the deliberate sidebar-sync round-trips (All clears the selection the
  * same way the sidebar re-click-deselect does). Since #2071 the Mesh Grid
  * segment only sets the mode — it never picks a Mesh for the user, so the
  * segment lands in the Mesh Grid's "no Mesh selected" empty state when
- * nothing is selected. The Filtered segment additionally arms the
- * focus-grid-search request so the first click lands the user in the
- * search box.
+ * nothing is selected. No segment focuses the search box: that request
+ * belongs to the ⌘/Ctrl+F shortcut (`focusScopedSearch`, #998).
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { act, fireEvent, render, screen } from '@testing-library/react';
@@ -177,8 +176,6 @@ describe('ViewModeSwitcher (wayfinder #982 / #983 / #986)', () => {
       // Neither fixture node is pinned: an honest 0, which is what tells an
       // empty scope apart from a broken render.
       expect(screen.getByTestId('scope-indicator').getAttribute('aria-label')).toBe('Pinned across meshes · 0 nodes');
-
-
     });
 
     it('names the Mesh Grid scope only once a Mesh is selected — the segment still picks nothing', () => {
@@ -204,9 +201,8 @@ describe('ViewModeSwitcher (wayfinder #982 / #983 / #986)', () => {
   });
 
   // #2076 — "scope changes announce themselves". The switcher is the
-  // producer for both notices: it asks the title-bar indicator to open its
-  // picker rather than choosing a Mesh for the user, and it announces a
-  // search that leaves a Mesh scope.
+  // producer for the picker request: it asks the title-bar indicator to open
+  // its picker rather than choosing a Mesh for the user.
   describe('scope notices (#2076)', () => {
     /** The switcher and the indicator, as they sit in the title bar. */
     function renderToolbar() {
@@ -259,8 +255,8 @@ describe('ViewModeSwitcher (wayfinder #982 / #983 / #986)', () => {
 
       it('re-opens the picker when the Mesh Grid segment is clicked again', () => {
         // Clicking a segment you're already on means "give me the thing
-        // that segment owns" — the same re-arm discipline the Filtered
-        // segment follows with its focus request.
+        // that segment owns" — so a second press re-arms the request, the
+        // same discipline the grid search focus follows.
         renderToolbar();
         fireEvent.click(screen.getByRole('button', { name: /mesh grid/i }));
         expect(picker()).toBeTruthy();
@@ -273,7 +269,5 @@ describe('ViewModeSwitcher (wayfinder #982 / #983 / #986)', () => {
         expect(useUIStore.getState().openScopePickerRequest).toBe(2);
       });
     });
-
-
   });
 });

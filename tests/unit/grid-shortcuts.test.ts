@@ -114,7 +114,7 @@ describe('cycleGridMode (#987 Ctrl+Alt+G / Cmd+Alt+G view-mode cycle)', () => {
     seedAgentNodes([]);
   });
 
-  it('advances Mesh → Pinned → All → Filtered → Mesh in switcher order', () => {
+  it('advances Mesh → Pinned → All → Mesh in switcher order', () => {
     cycleGridMode();
     expect(useUIStore.getState().viewMode).toBe('pinned');
     cycleGridMode();
@@ -149,7 +149,7 @@ describe('cycleGridMode (#987 Ctrl+Alt+G / Cmd+Alt+G view-mode cycle)', () => {
     useMeshStore.setState({ selectedMeshId: 3 });
     useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all' });
 
-    cycleGridMode(); // filtered → mesh
+    cycleGridMode(); // all → mesh
 
     expect(useUIStore.getState().viewMode).toBe('mesh');
     expect(useUIStore.getState().openScopePickerRequest).toBe(0);

@@ -131,7 +131,7 @@ function ResizablePanes({ nodes, activityMembersByRoot, draggable = true }: Resi
 }
 
 // The legacy `NoNodesSplash` ("Add Mesh" splash), `gridEmptyState` mode
-// dispatcher (issues #986 / #1609), `FilteredEmptyState` (#1609), and
+// dispatcher (issues #986 / #1609), `FilteredEmptyState` (the #1609 Filtered mode's empty state, now the `filters-exclude-all` branch), and
 // standalone `PinnedEmptyState` (wayfinder #982) were all removed in
 // issue #1536 and replaced by the context-aware `CanvasEmptyState`'s
 // five branches. The dedicated `tests/unit/pinned-empty-state.test.tsx`

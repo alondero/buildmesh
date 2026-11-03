@@ -475,6 +475,8 @@ export const useUIStore = create<UIState>((set, get) => {
   const initialViewMode = loadViewMode(useMeshStore.getState().selectedMeshId);
   const initialGridControls = loadGridControls();
   // Before scoped search, saved filters were dormant outside Filtered mode.
+  // That mode no longer exists, so a saved 'filtered' value is the legacy case
+  // this one-time migration reads.
   // Preserve only filters that were actually active during the one-time migration.
   try {
     if (localStorage.getItem('buildmesh.scoped-search-migrated') !== '1') {
