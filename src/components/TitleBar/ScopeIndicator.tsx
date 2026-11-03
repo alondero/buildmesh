@@ -107,10 +107,11 @@ import { SCOPE_LABEL_MIN_WIDTH, tierWidthAtTextScale } from './titleBarTiers';
  * further, so the glyph-only band costs no information, only a glance. The
  * long form IS the visible label everywhere except cross-Mesh Pinned, which
  * draws the short form ("all meshes · 3 nodes") and whose accessible name
- * adds the mode word ("Pinned across meshes · 3 nodes") — so for that one
- * scope the name is not the visible label verbatim (WCAG 2.5.3 Label in
- * Name), and the mode word it carries is the one the highlighted switcher
- * segment already shows.
+ * adds the mode word ("Pinned across meshes · 3 nodes"). For that one scope
+ * WCAG 2.5.3 Label in Name is NOT satisfied verbatim — the visible text is
+ * not contained in the accessible name — and the mode word the name adds is
+ * the one the highlighted switcher segment already shows, so the name still
+ * names the scope the user is looking at.
  */
 
 const PICKER_ID = dropdownId('titlebar', 'scope-picker');
