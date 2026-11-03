@@ -326,6 +326,33 @@ describe('AgentNodeView grid controls', () => {
     expect(useUIStore.getState().gridStatusFilter).toBeNull();
   });
 
+  // The count the empty state reads is the scope's count BEFORE the filters
+  // narrow it — the container passes `scope.scopedNodeCount`, not the visible
+  // count. This case separates the two: four pinned nodes are in scope and the
+  // active search hides every one of them, so the scope holds 4 while the
+  // grid shows none. If the count were the visible one (0), the classifier
+  // would answer "No pinned nodes" — claiming that nothing is pinned, which
+  // is false. The unit test on the classifier cannot see this wiring, so it
+  // is pinned here, through the real stores and the real container.
+  it('counts the scope before the filters narrow it — pinned nodes hidden by a search still count', () => {
+    const meshOnly = { id: 1, name: 'Repo', path: '/r' } as Mesh;
+    useMeshStore.setState({
+      meshes: [meshOnly],
+      meshesById: new Map([[1, meshOnly]]),
+    });
+    seedAgentNodes(NODES.map(n => ({ ...n, is_pinned: true })));
+    useUIStore.setState({
+      viewMode: 'pinned',
+      lastNonSingleMode: 'pinned',
+      gridSearchQuery: 'no such node',
+    });
+
+    render(<AgentNodeView />);
+
+    expect(screen.getByText('No nodes match')).toBeTruthy();
+    expect(screen.queryByText('No pinned nodes')).toBeNull();
+  });
+
   // Issue #1536 — pre-#1536 the test below pinned the misleading
   // "ALL empty of nodes → Buildmesh splash with Add Mesh" behavior.
   // Post-#1536 the same input (no nodes anywhere, no meshes) must

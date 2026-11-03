@@ -84,7 +84,6 @@ export function CanvasEmptyStateContainer({
       meshCount: meshesCount,
       totalNodeCount: agentNodes.length,
       scopedCount: scope.scopedNodeCount,
-      filteredCount: scope.visibleNodeCount,
       scope,
       harnessReady,
     }),

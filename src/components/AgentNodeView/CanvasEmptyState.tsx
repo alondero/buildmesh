@@ -4,9 +4,8 @@ import { EmptyStateActions } from './EmptyStateActions';
 export interface CanvasEmptyStateInput {
   meshCount: number;
   totalNodeCount: number;
-  /** Counts before and after the active grid filters. */
+  /** How many nodes the scope holds before the active grid filters narrow it. */
   scopedCount: number;
-  filteredCount: number;
   scope: DerivedScope;
   harnessReady: boolean;
 }
@@ -37,7 +36,13 @@ export function classifyCanvasEmpty(input: CanvasEmptyStateInput): CanvasEmptyDe
     return { branch: 'selected-empty', meshId: input.scope.mesh.id };
   }
   if (input.totalNodeCount === 0) return { branch: 'all-empty' };
-  if (input.filteredCount === 0) return { branch: 'filters-exclude-all' };
+  // Nothing in the scope survived the active filters. The scope usually
+  // holds nodes the filters hide, but not always: in Single, a soloed node
+  // deleted while its Mesh is empty and a search is active leaves the scope
+  // with no node to show at all, and this branch still answers "No nodes
+  // match" (pinned by the Single case in
+  // tests/unit/canvas-empty-state.test.tsx, which proves that state is
+  // reachable rather than only describing it).
   return { branch: 'filters-exclude-all' };
 }
 

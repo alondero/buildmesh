@@ -95,7 +95,11 @@ import { SCOPE_LABEL_MIN_WIDTH, tierWidthAtTextScale } from './titleBarTiers';
  * wide at 2000px and only reaches its 208px cap by 2600px — while a short
  * scope name ("All meshes · 3") fits whole. Below 2000px the control keeps
  * its glyph; the shape still says which scope family is active, and the
- * `aria-label` and `title` carry the full string either way.
+ * `aria-label` and `title` name the scope either way. Neither is one fixed
+ * "full string": the accessible name carries the visible label plus the mode
+ * word where the two differ — cross-Mesh Pinned's is "all meshes · 3 nodes
+ * (Pinned across meshes)" — and the tooltip spells the scope out in its own
+ * longer wording ("Pinned across every Mesh — 3 nodes").
  *
  * The count in the label is the NARROWED count — how many Agent Nodes the
  * current filters leave visible — not the size of the scope. The scope's own
@@ -103,15 +107,17 @@ import { SCOPE_LABEL_MIN_WIDTH, tierWidthAtTextScale } from './titleBarTiers';
  * ("3/12"; its panel spells it "3 of 12 nodes"); the bar's "All meshes · 3
  * nodes" says "3 are visible".
  *
- * `aria-label` carries the scope's long form and `title` spells it out
- * further, so the glyph-only band costs no information, only a glance. The
- * long form IS the visible label everywhere except cross-Mesh Pinned, which
- * draws the short form ("all meshes · 3 nodes") and whose accessible name
- * adds the mode word ("Pinned across meshes · 3 nodes"). For that one scope
- * WCAG 2.5.3 Label in Name is NOT satisfied verbatim — the visible text is
- * not contained in the accessible name — and the mode word the name adds is
- * the one the highlighted switcher segment already shows, so the name still
- * names the scope the user is looking at.
+ * `aria-label` carries the VISIBLE label first and `title` spells the long
+ * form out further, so the glyph-only band costs no information, only a
+ * glance. WCAG 2.5.3 Label in Name holds in every scope: the accessible name
+ * CONTAINS the visible text verbatim, so voice dictation ("click all meshes")
+ * finds the control. Cross-Mesh Pinned draws the short form ("all meshes · 3
+ * nodes") and names itself with the mode word ("Pinned across meshes"), so
+ * its name carries both — the visible text first, count included, and the
+ * mode word after it. The mode word is the one the highlighted switcher
+ * segment shows, so the name still has to name the scope the user is looking
+ * at; it carries no count of its own, because the visible text has just
+ * announced it.
  */
 
 const PICKER_ID = dropdownId('titlebar', 'scope-picker');
@@ -188,12 +194,16 @@ function nodeCount(count: number): string {
 }
 
 export interface ScopeLabel {
-  /** The full label, and the accessible name, verbatim. */
+  /** The label the control names itself with: the full label in every scope
+   *  but cross-Mesh Pinned, whose name is the mode word alone. There the
+   *  drawn label already carries the count, so repeating it in the
+   *  accessible name would announce the count twice. */
   text: string;
   /** The text the bar draws. Equal to `text` except for the cross-Mesh
-   *  Pinned label, which drops its mode word: the highlighted segment
-   *  already names the mode, and the full form squeezed the command field at
-   *  1700-1760px (#2421 round 4). */
+   *  Pinned label, whose drawn form is the scope half ("all meshes · 3
+   *  nodes") and whose mode word moves into the accessible name instead:
+   *  the highlighted segment already names the mode, and the full form
+   *  squeezed the command field at 1700-1760px (#2421 round 4). */
   visible: string;
   /** The scope half of the compact `ViewSelector` label (#2421), which names
    *  the View Mode itself, so this part omits it: a Mesh, a node, or
@@ -283,13 +293,16 @@ function fullScopeLabel(scope: DerivedScope, soloNode: AgentNode | null, meshes:
       };
     case 'pinned':
       return {
-        text: `Pinned across meshes · ${count}`,
+        // The mode word alone, without the count. The drawn label carries
+        // the count and the accessible name spells the mode out in
+        // parentheses — repeating the count there would have a screen reader
+        // announce it twice.
+        text: 'Pinned across meshes',
         detail: `all meshes · ${count}`,
         tooltip: `Pinned across every Mesh — ${count}`,
         Icon: CrossMeshGlyph,
         meshScoped: false,
       };
-
   }
 }
 
@@ -447,10 +460,16 @@ export function ScopeIndicator() {
         type="button"
         onClick={() => setOpen(value => !value)}
         data-testid="scope-indicator"
-        // The accessible name is the scope's long form, so it survives the
-        // collapse. It is the visible label verbatim except in cross-Mesh
-        // Pinned, where it adds the mode word the switcher segment shows.
-        aria-label={text}
+        // The accessible name carries the VISIBLE label first, so WCAG 2.5.3
+        // Label in Name holds in every scope and voice dictation ("click all
+        // meshes") finds the control. Cross-Mesh Pinned draws the short form
+        // ("all meshes · 3 nodes") and names itself with the mode word
+        // ("Pinned across meshes"), so its name carries both: the visible
+        // text, count included, then the mode word the switcher segment
+        // shows. The mode word repeats no count — the visible text has just
+        // announced it. The name is independent of the rendered text, so it
+        // survives the collapse to the glyph.
+        aria-label={visible === text ? text : `${visible} (${text})`}
         aria-expanded={open}
         aria-haspopup="dialog"
         aria-controls={open ? PICKER_ID : undefined}
