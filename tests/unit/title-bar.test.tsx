@@ -680,23 +680,41 @@ describe('TitleBar (bespoke window chrome)', () => {
     });
 
     it.each([
-      ['all', null, '', 'All meshes · 3 nodes'],
-      ['pinned', 1, '', 'Pinned across meshes · 1 node'],
-    ] as [ViewMode, number | null, string, string][])(
+      ['all', null, '', 'All meshes · 3 nodes', 'All meshes · 3 nodes'],
+      [
+        'pinned',
+        1,
+        '',
+        'Pinned across meshes · 1 node',
+        'all meshes · 1 node (Pinned across meshes · 1 node)',
+      ],
+    ] as [ViewMode, number | null, string, string, string][])(
       'renders the honest cross-Mesh label and count in the %s view (%#)',
-      async (viewMode, selectedMeshId, query, label) => {
+      async (viewMode, selectedMeshId, query, label, accessibleName) => {
         act(() => {
           if (selectedMeshId !== null) useMeshStore.setState({ selectedMeshId });
           useUIStore.setState({ viewMode, lastNonSingleMode: viewMode, gridSearchQuery: query });
         });
         await renderTitleBar();
         const trigger = screen.getByTestId('scope-indicator');
-        // The accessible name is the full label. The visible text is the same
-        // string, except that Pinned draws the short form without its mode
-        // word (#2421 round 4): the highlighted segment names the mode.
-        expect(trigger.getAttribute('aria-label')).toBe(label);
+        // The visible text is the short form for Pinned (#2421 round 4: the
+        // highlighted switcher segment names the mode); every other scope
+        // draws the same string it names.
         const shortLabel = viewMode === 'pinned' ? label.replace(/^Pinned across meshes/, 'all meshes') : label;
         expect(trigger.textContent).toBe(shortLabel);
+        // The accessible name carries the visible text and, for Pinned, the
+        // mode word after it.
+        expect(trigger.getAttribute('aria-label')).toBe(accessibleName);
+        // WCAG 2.5.3 Label in Name: the accessible name must CONTAIN the
+        // visible label text, or voice dictation ("click all meshes") cannot
+        // find the control. The name may carry MORE than the visible text
+        // (the mode word), but never less.
+        expect(trigger.getAttribute('aria-label')).toContain(trigger.textContent ?? '');
+        // ...and the extra it carries must still name the scope, so the name
+        // cannot be shortened to the visible text alone.
+        if (viewMode === 'pinned') {
+          expect(trigger.getAttribute('aria-label')).toContain('Pinned');
+        }
         // A cross-Mesh mode must never name a Mesh — pinned legitimately keeps
         // a sidebar selection, and that Mesh is NOT the scope the grid is
         // showing.

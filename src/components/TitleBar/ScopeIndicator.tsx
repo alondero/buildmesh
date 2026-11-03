@@ -103,15 +103,16 @@ import { SCOPE_LABEL_MIN_WIDTH, tierWidthAtTextScale } from './titleBarTiers';
  * ("3/12"; its panel spells it "3 of 12 nodes"); the bar's "All meshes · 3
  * nodes" says "3 are visible".
  *
- * `aria-label` carries the scope's long form and `title` spells it out
- * further, so the glyph-only band costs no information, only a glance. The
- * long form IS the visible label everywhere except cross-Mesh Pinned, which
- * draws the short form ("all meshes · 3 nodes") and whose accessible name
- * adds the mode word ("Pinned across meshes · 3 nodes"). For that one scope
- * WCAG 2.5.3 Label in Name is NOT satisfied verbatim — the visible text is
- * not contained in the accessible name — and the mode word the name adds is
- * the one the highlighted switcher segment already shows, so the name still
- * names the scope the user is looking at.
+ * `aria-label` carries the VISIBLE label first and `title` spells the long
+ * form out further, so the glyph-only band costs no information, only a
+ * glance. WCAG 2.5.3 Label in Name holds in every scope: the accessible name
+ * CONTAINS the visible text verbatim, so voice dictation ("click all meshes")
+ * finds the control. Cross-Mesh Pinned draws the short form ("all meshes · 3
+ * nodes") and names itself with the long form ("Pinned across meshes · 3
+ * nodes"), so its name carries both — the visible text first, and the mode
+ * word after it, because the mode word is the one the highlighted switcher
+ * segment shows and the name still has to name the scope the user is looking
+ * at.
  */
 
 const PICKER_ID = dropdownId('titlebar', 'scope-picker');
@@ -289,7 +290,6 @@ function fullScopeLabel(scope: DerivedScope, soloNode: AgentNode | null, meshes:
         Icon: CrossMeshGlyph,
         meshScoped: false,
       };
-
   }
 }
 
@@ -447,10 +447,15 @@ export function ScopeIndicator() {
         type="button"
         onClick={() => setOpen(value => !value)}
         data-testid="scope-indicator"
-        // The accessible name is the scope's long form, so it survives the
-        // collapse. It is the visible label verbatim except in cross-Mesh
-        // Pinned, where it adds the mode word the switcher segment shows.
-        aria-label={text}
+        // The accessible name carries the VISIBLE label first, so WCAG 2.5.3
+        // Label in Name holds in every scope and voice dictation ("click all
+        // meshes") finds the control. Cross-Mesh Pinned draws the short form
+        // ("all meshes · 3 nodes") and names itself with the long form
+        // ("Pinned across meshes · 3 nodes"), so its name carries both: the
+        // visible text, then the mode word the switcher segment shows. The
+        // name is independent of the rendered text, so it survives the
+        // collapse to the glyph.
+        aria-label={visible === text ? text : `${visible} (${text})`}
         aria-expanded={open}
         aria-haspopup="dialog"
         aria-controls={open ? PICKER_ID : undefined}
