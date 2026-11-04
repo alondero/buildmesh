@@ -2717,7 +2717,7 @@ fn regenerate_current_keeps_a_deleted_recipe_and_explicit_pick_is_validated_befo
                     id: "codex".into(),
                     name: "Codex".into(),
                     harness: "codex".into(),
-                    runtime: Some(crate::models::EnvType::Windows),
+                    runtime: None,
                     wsl_distro: None,
                     executable: None,
                 });
@@ -2874,7 +2874,7 @@ fn regenerate_replaces_the_recipe_and_resumes_only_in_the_same_harness_home() {
                     id: "codex".into(),
                     name: "Codex".into(),
                     harness: "codex".into(),
-                    runtime: Some(crate::models::EnvType::Windows),
+                    runtime: None,
                     wsl_distro: None,
                     executable: None,
                 });
