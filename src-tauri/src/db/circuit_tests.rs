@@ -1053,7 +1053,16 @@ fn dismissing_attention_leaves_the_failed_run_intact_and_is_idempotent() {
         create_autopilot_circuit_inner(&conn, mesh.id, "attn", "", &sample_graph_json()).unwrap();
     let run =
         create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:one", "{}").unwrap();
-    commit_circuit_advance_locked(&mut conn, run, Some("failed"), Some("{}"), &[]).unwrap();
+    commit_circuit_advance_locked(
+        &mut conn,
+        run,
+        Some("failed"),
+        Some(&crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole("{}"),
+        )),
+        &[],
+    )
+    .unwrap();
 
     let stored = |conn: &Connection| get_circuit_run_inner(conn, run).unwrap().unwrap();
     assert_eq!(
@@ -1110,14 +1119,41 @@ fn bulk_dismissal_covers_exactly_the_attention_runs_on_the_mesh() {
 
     let failed =
         create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:failed", "{}").unwrap();
-    commit_circuit_advance_locked(&mut conn, failed, Some("failed"), Some("{}"), &[]).unwrap();
+    commit_circuit_advance_locked(
+        &mut conn,
+        failed,
+        Some("failed"),
+        Some(&crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole("{}"),
+        )),
+        &[],
+    )
+    .unwrap();
     let clean =
         create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:clean", "{}").unwrap();
-    commit_circuit_advance_locked(&mut conn, clean, Some("completed"), Some("{}"), &[]).unwrap();
+    commit_circuit_advance_locked(
+        &mut conn,
+        clean,
+        Some("completed"),
+        Some(&crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole("{}"),
+        )),
+        &[],
+    )
+    .unwrap();
     let elsewhere =
         create_circuit_run_locked(&mut conn, foreign.id, other.id, "manual:elsewhere", "{}")
             .unwrap();
-    commit_circuit_advance_locked(&mut conn, elsewhere, Some("failed"), Some("{}"), &[]).unwrap();
+    commit_circuit_advance_locked(
+        &mut conn,
+        elsewhere,
+        Some("failed"),
+        Some(&crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole("{}"),
+        )),
+        &[],
+    )
+    .unwrap();
 
     let dismissed_at = |conn: &Connection, id: i64| {
         get_circuit_run_inner(conn, id)
@@ -1247,7 +1283,16 @@ fn the_attention_count_names_every_run_dismiss_all_will_touch_past_the_ledger_wi
             "{}",
         )
         .unwrap();
-        commit_circuit_advance_locked(&mut conn, run, Some("failed"), Some("{}"), &[]).unwrap();
+        commit_circuit_advance_locked(
+            &mut conn,
+            run,
+            Some("failed"),
+            Some(&crate::db::circuit::context_store::ContextChange::from(
+                crate::db::circuit::context_store::ContextReplacement::whole("{}"),
+            )),
+            &[],
+        )
+        .unwrap();
     }
 
     // The ledger really is capped — this is what made the old label wrong.
@@ -1291,7 +1336,16 @@ fn dismissed_attention_stops_outranking_the_ordinary_history_window() {
         create_autopilot_circuit_inner(&conn, mesh.id, "attn", "", &sample_graph_json()).unwrap();
     let old =
         create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:old", "{}").unwrap();
-    commit_circuit_advance_locked(&mut conn, old, Some("failed"), Some("{}"), &[]).unwrap();
+    commit_circuit_advance_locked(
+        &mut conn,
+        old,
+        Some("failed"),
+        Some(&crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole("{}"),
+        )),
+        &[],
+    )
+    .unwrap();
     // Push it far past a one-run history window with newer, clean runs.
     for index in 0..3 {
         let fresh = create_circuit_run_locked(
@@ -1302,8 +1356,16 @@ fn dismissed_attention_stops_outranking_the_ordinary_history_window() {
             "{}",
         )
         .unwrap();
-        commit_circuit_advance_locked(&mut conn, fresh, Some("completed"), Some("{}"), &[])
-            .unwrap();
+        commit_circuit_advance_locked(
+            &mut conn,
+            fresh,
+            Some("completed"),
+            Some(&crate::db::circuit::context_store::ContextChange::from(
+                crate::db::circuit::context_store::ContextReplacement::whole("{}"),
+            )),
+            &[],
+        )
+        .unwrap();
     }
 
     let visible_ids = |conn: &Connection| -> Vec<i64> {
@@ -1339,7 +1401,16 @@ fn circuit_failure_atomically_records_cleanup_and_releases_admission_lease() {
     set_circuit_run_state_inner(&conn, run, "running").unwrap();
     assert!(reserve_circuit_agent_slots_locked(&mut conn, run, 2).unwrap());
     assert_eq!(count_active_circuit_runs_inner(&conn, mesh.id).unwrap(), 1);
-    commit_circuit_advance_locked(&mut conn, run, Some("failed"), Some("{}"), &[]).unwrap();
+    commit_circuit_advance_locked(
+        &mut conn,
+        run,
+        Some("failed"),
+        Some(&crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole("{}"),
+        )),
+        &[],
+    )
+    .unwrap();
     // No worker cleanup was called: inspect the terminal transaction itself.
     let stored = get_circuit_run_inner(&conn, run).unwrap().unwrap();
     let context: serde_json::Value = serde_json::from_str(&stored.context_json).unwrap();
@@ -2496,24 +2567,23 @@ fn node_review_ignores_ineligible_override_for_authored_circuit() {
 /// snapshots the stored app-wide Reviewer provider, so a stale ineligible
 /// value stored there (e.g. before the settings gate existed) must refuse
 /// the mint with Settings guidance instead of producing a run whose
-/// reviewer can never yield. Prefs are per-test-thread (issue #1386), so
-/// this never touches the real `preferences.json`.
+/// reviewer can never yield. The store below is this test's own, so the
+/// stored value never reaches the real `preferences.json` (issue #1482).
 #[test]
 fn node_review_refuses_stale_ineligible_app_wide_reviewer_on_inherit() {
-    let tmp = std::env::temp_dir().join(format!(
+    let store = crate::preferences::PreferencesStore::new(std::env::temp_dir().join(format!(
         "buildmesh-circuit-reviewer-inherit-{}-{}",
         std::process::id(),
         chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
-    ));
-    std::fs::create_dir_all(&tmp).expect("create temp dir");
-    crate::preferences::init_for_tests(tmp);
+    )));
     // Store the stale value directly, bypassing the now-validating
     // settings command — that is exactly the pre-gate state under test.
-    crate::preferences::save(crate::preferences::AppPreferences {
-        reviewer_provider: Some("terminal".to_string()),
-        ..Default::default()
-    })
-    .expect("store stale app-wide reviewer");
+    store
+        .save(crate::preferences::AppPreferences {
+            reviewer_provider: Some("terminal".to_string()),
+            ..Default::default()
+        })
+        .expect("store stale app-wide reviewer");
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "inherit-gate-mesh", "/tmp/inherit-gate").unwrap();
     let source = create_agent_node_inner(
@@ -2538,7 +2608,7 @@ fn node_review_refuses_stale_ineligible_app_wide_reviewer_on_inherit() {
     )
     .unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
-    let err = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None)
+    let err = create_node_circuit_run_locked_from(&mut conn, &store, source.id, None, 3, None)
         .unwrap_err()
         .to_string();
     assert!(
@@ -2550,12 +2620,14 @@ fn node_review_refuses_stale_ineligible_app_wide_reviewer_on_inherit() {
         "stale value must point at Settings, got {err:?}"
     );
     // An eligible stored value still inherits silently.
-    crate::preferences::save(crate::preferences::AppPreferences {
-        reviewer_provider: Some("codex".to_string()),
-        ..Default::default()
-    })
-    .expect("store eligible app-wide reviewer");
-    let run = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None).unwrap();
+    store
+        .save(crate::preferences::AppPreferences {
+            reviewer_provider: Some("codex".to_string()),
+            ..Default::default()
+        })
+        .expect("store eligible app-wide reviewer");
+    let run =
+        create_node_circuit_run_locked_from(&mut conn, &store, source.id, None, 3, None).unwrap();
     let ctx = crate::circuit::context::CircuitContext::from_json(
         &get_circuit_run_inner(&conn, run)
             .unwrap()
@@ -2564,7 +2636,6 @@ fn node_review_refuses_stale_ineligible_app_wide_reviewer_on_inherit() {
     )
     .unwrap();
     assert_eq!(ctx.get("review.provider"), Some("codex"));
-    crate::preferences::reset_for_tests();
 }
 
 // ---------------------------------------------------------------------------
@@ -2776,7 +2847,11 @@ fn run_and_step_ledger_records_status_outcome_and_timestamps() {
         &mut conn,
         run_id,
         Some("running"),
-        Some(r#"{"circuit.name":"ledgered"}"#),
+        Some(&crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole(
+                r#"{"circuit.name":"ledgered"}"#,
+            ),
+        )),
         &[
             CircuitStepOp {
                 node_id: "trigger".into(),
@@ -3240,7 +3315,9 @@ fn stale_worker_and_pause_writes_cannot_resurrect_a_cancelled_run() {
         &mut conn,
         run_id,
         Some("running"),
-        Some(r#"{"stale":true}"#),
+        Some(&crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole(r#"{"stale":true}"#),
+        )),
         &[CircuitStepOp {
             node_id: "spawn".into(),
             status: "running".into(),
@@ -3777,7 +3854,16 @@ fn active_run_listing_joins_circuit_fields_and_skips_terminal_runs() {
     set_autopilot_circuit_enabled_inner(&conn, circuit.id, true).unwrap();
 
     let done = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:1", "{}").unwrap();
-    commit_circuit_advance_locked(&mut conn, done, Some("completed"), Some("{}"), &[]).unwrap();
+    commit_circuit_advance_locked(
+        &mut conn,
+        done,
+        Some("completed"),
+        Some(&crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole("{}"),
+        )),
+        &[],
+    )
+    .unwrap();
     let live = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:2", "{}").unwrap();
 
     // With the per-test in-memory DB (issue #1691), the only runs

@@ -2,8 +2,8 @@ import { enterMeshGrid } from '../../lib/gridShortcuts';
 import { useUIStore, type ViewMode } from '../../stores/uiStore';
 
 /**
- * ViewModeSwitcher — the five-segment View Mode control (wayfinder #982 /
- * ticket #983; Filtered added by #1609). Lives in the bespoke TitleBar (see
+ * ViewModeSwitcher — the four-segment View Mode control (wayfinder #982 /
+ * ticket #983). Lives in the bespoke TitleBar (see
  * `components/TitleBar`, moved out of the old canvas header strip when the
  * window went frameless) and drives `uiStore.viewMode`. Hand-rolled
  * `<button>` + Tailwind per repo convention (no component library); icons
@@ -27,11 +27,7 @@ import { useUIStore, type ViewMode } from '../../stores/uiStore';
  *   - All Nodes: clear the mesh selection — the only route out of Mesh
  *                scope since #2072 removed the sidebar's re-click-deselect
  *                gesture. The sync flips the mode to 'all'.
- *   - Filtered:  cross-mesh view narrowed by the Grid Controls (the Search
- *                Nodes bar renders next to the switcher only in this mode,
- *                #1609). Clicking the segment focuses that search — the
- *                user's next keystroke starts filtering without a second
- *                click.
+
  */
 
 interface IconProps {
@@ -87,17 +83,6 @@ function PinnedIcon({ className }: IconProps) {
   );
 }
 
-/** Lucide `filter` (funnel) — Filtered (#1609). The filled-to-the-line
-    funnel reads as "narrowing" the way the grid glyphs read as layouts. */
-function FilteredIcon({ className }: IconProps) {
-  return (
-    <Svg className={className}>
-      <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
-    </Svg>
-  );
-}
-
-/** Lucide `layout-dashboard` — All Nodes. */
 function AllNodesIcon({ className }: IconProps) {
   return (
     <Svg className={className}>
@@ -115,19 +100,18 @@ export interface ViewModeSegment {
   Icon: (props: IconProps) => React.JSX.Element;
 }
 
-/** The five View Modes in switcher order — shared with the compact
+/** The four View Modes in switcher order — shared with the compact
     `ViewSelector` (#2421) so both name and draw a mode identically. */
 export const VIEW_MODE_SEGMENTS: ViewModeSegment[] = [
   { mode: 'single', label: 'Single', Icon: SingleIcon },
   { mode: 'mesh', label: 'Mesh Grid', Icon: MeshGridIcon },
   { mode: 'pinned', label: 'Pinned', Icon: PinnedIcon },
   { mode: 'all', label: 'All Nodes', Icon: AllNodesIcon },
-  { mode: 'filtered', label: 'Filtered', Icon: FilteredIcon },
 ];
 
 /** Select a View Mode the way a switcher segment does. Shared by the
   segments and the compact `ViewSelector` (#2421), so Mesh Grid's "ask for a
-  Mesh" and Filtered's "focus the search" have one spelling. */
+  Mesh" has one spelling. */
 export function selectViewMode(mode: ViewMode): void {
   // #2071/#2076 — Mesh Grid picks no Mesh. The mode is set and the Mesh
   // comes from the sidebar alone; #2071 deleted the fallback chain
@@ -142,24 +126,6 @@ export function selectViewMode(mode: ViewMode): void {
   // cycle asks identically instead of this being a second spelling of it.
   if (mode === 'mesh') {
     enterMeshGrid();
-    return;
-  }
-  if (mode === 'filtered') {
-    // #1609 — switch first, then request focus. The request counter
-    // pattern (App.tsx `focus-grid-search`) means the consumer's layout
-    // effect runs on the bump, but the input only exists once this
-    // render mounts `GridControls`; the bump is observed after commit,
-    // so the ordering here is what makes the first click focus the
-    // search. Re-clicking while already in Filtered re-arms the request
-    // — the user's intent when clicking a segment they're already on is
-    // "get me to the search box".
-    //
-    // #2076 — both halves of the gesture (the mode flip, the focus
-    // request) and the cross-Mesh-results notice live in one store
-    // action, because "the notice fires once per escape" is a property of
-    // the gesture, not of each caller. Calling it is also why the notice
-    // cannot fire on a re-click from Filtered: no escape happens then.
-    useUIStore.getState().enterFilteredFromSearch();
     return;
   }
   useUIStore.getState().setViewMode(mode);

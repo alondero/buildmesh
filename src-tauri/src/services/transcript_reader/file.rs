@@ -123,10 +123,41 @@ pub(super) fn last_assistant_message<R: TranscriptReader + ?Sized>(
     read_tail(adapter, path, 1)
 }
 
+/// The Node Glance window: the last [`GLANCE_TURNS`] turns of a byte-bounded
+/// tail, so a poll of a long session costs one fixed read. A window that holds
+/// no assistant text falls back to the whole file, as the digest does, so a
+/// tool-heavy turn still recovers the agent's last message.
+pub(super) fn glance_window<R: TranscriptReader + ?Sized>(
+    adapter: &R,
+    path: &Path,
+) -> Result<Parsed, UnavailableReason> {
+    use super::glance::GLANCE_TURNS;
+    const TAIL_BYTES: u64 = 256 * 1024;
+    let size = fs::metadata(path)
+        .map_err(|_| UnavailableReason::Unreadable)?
+        .len();
+    if size > TAIL_BYTES {
+        let window = parse_byte_window_keeping(adapter, path, TAIL_BYTES, GLANCE_TURNS)?;
+        if window.last_assistant_message.is_some() {
+            return Ok(window);
+        }
+    }
+    read_tail(adapter, path, GLANCE_TURNS)
+}
+
 fn parse_byte_window<R: TranscriptReader + ?Sized>(
     adapter: &R,
     path: &Path,
     tail_bytes: u64,
+) -> Result<Parsed, UnavailableReason> {
+    parse_byte_window_keeping(adapter, path, tail_bytes, 1)
+}
+
+fn parse_byte_window_keeping<R: TranscriptReader + ?Sized>(
+    adapter: &R,
+    path: &Path,
+    tail_bytes: u64,
+    keep: usize,
 ) -> Result<Parsed, UnavailableReason> {
     let mut file = fs::File::open(path).map_err(|_| UnavailableReason::Unreadable)?;
     file.seek(SeekFrom::End(-(tail_bytes as i64)))
@@ -136,7 +167,7 @@ fn parse_byte_window<R: TranscriptReader + ?Sized>(
     input
         .read_until(b'\n', &mut Vec::new())
         .map_err(|_| UnavailableReason::Unreadable)?;
-    parse_lines(adapter, input, 1)
+    parse_lines(adapter, input, keep)
 }
 
 pub(super) fn assistant_report<R: TranscriptReader + ?Sized>(

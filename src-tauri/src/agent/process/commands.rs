@@ -413,14 +413,8 @@ pub(super) fn deliver_prepared_handover(
 /// existing-node sibling of `commands::agent::spawn_handover_agent`, and the
 /// backing command for the terminal context menu's "Handover to node" rows.
 ///
-/// Delegates to [`crate::circuit::delivery::write_prompt_to_pty`] instead of
-/// writing the bytes here, because the submit is the hard part: a multi-line
-/// buffer has to arrive as ONE bracketed paste and the Enter has to land as its
-/// own write at an idle input box, or an ink TUI swallows the keystroke into
-/// the paste and the prompt sits staged forever (issue #874). That primitive
-/// also settles before the Enter when the target is one the turn evaluator does
-/// *not* buffer — the ordinary case here, since the agent a human hands work to
-/// is one the user spawned rather than one Autopilot owns.
+/// Uses Agent Node prompt delivery to stage one bracketed paste and send a
+/// separate Enter. Circuit-owned and borrowed targets require acknowledgement.
 #[command]
 pub async fn handover_to_agent(
     app: AppHandle,
@@ -432,10 +426,55 @@ pub async fn handover_to_agent(
         let prepared =
             prepare_existing_node_handover(target_node_id, &text, app_data_dir.as_deref())?;
         deliver_prepared_handover(prepared, |prompt| {
-            crate::circuit::delivery::write_prompt_to_pty(target_node_id, prompt, &app)
+            use crate::agent::prompt_delivery::PreparedPrompt;
+            let node =
+                db::get_agent_node_by_id(target_node_id).map_err(|error| error.to_string())?;
+            let provider = crate::preferences::resolve_harness_provider(&node.provider);
+            let prepared = PreparedPrompt::for_adapter(target_node_id, provider.adapter(), prompt);
+            deliver_handover_prompt(&PROCESS_REGISTRY, provider.adapter(), &prepared, || {
+                crate::commands::attention::mark_attention(target_node_id, &app);
+            })
         })
     })
     .await
+}
+
+pub(super) fn deliver_handover_prompt(
+    registry: &AgentProcessRegistry,
+    adapter: &dyn crate::agent::provider::AgentProvider,
+    prepared: &crate::agent::prompt_delivery::PreparedPrompt,
+    mark_attention: impl FnOnce(),
+) -> Result<(), String> {
+    use crate::agent::prompt_delivery::{
+        self, DeliveryMode, DeliveryProgress, DeliveryRequest, ObservationRequirement,
+    };
+    let target_node_id = prepared.node_id();
+    let observation = if crate::circuit::evaluator::is_circuit_piloted(target_node_id) {
+        ObservationRequirement::Required
+    } else {
+        ObservationRequirement::Unobserved
+    };
+    let outcome = prompt_delivery::deliver(
+        registry,
+        adapter,
+        DeliveryRequest {
+            prompt: prepared,
+            mode: DeliveryMode::LaterTurn,
+            observation,
+            expected_input: None,
+            still_current: &|| Ok(true),
+        },
+    );
+    tracing::info!(target_node_id, ?outcome, "Handover delivery finished");
+    if let Some(stop) = outcome.stop {
+        if outcome.progress == DeliveryProgress::NotStaged {
+            return Err(format!("Handover was not staged: {stop}"));
+        }
+        // The pointer may already be in the composer. Keep its brief and make
+        // any incomplete submission visible, including human takeover or exit.
+        mark_attention();
+    }
+    Ok(())
 }
 
 #[command]

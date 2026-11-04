@@ -6,6 +6,8 @@
  * contracts here are the seam that ticket builds on.
  */
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
   deriveScope,
   isMeshScopedView,
@@ -98,51 +100,7 @@ describe('scopeNodesForMode (wayfinder #982)', () => {
     expect(scopeNodesForMode('mesh', [], null)).toEqual([]);
   });
 
-  it("'filtered' keeps only nodes matching the search query (#1609)", () => {
-    const controls = { gridSearchQuery: 'A', gridProviderFilter: null, gridStatusFilter: null };
-    expect(scopeNodesForMode('filtered', NODES, null, controls).map(n => n.id))
-      .toEqual([a1.id, a2.id]);
-  });
 
-  it("'filtered' composes the search and status filters (#1609)", () => {
-    // All fixtures share provider 'claude', so the discriminating axes here
-    // are the name substring and the status.
-    const controls = { gridSearchQuery: 'a', gridProviderFilter: null, gridStatusFilter: 'running' };
-    expect(scopeNodesForMode('filtered', NODES, null, controls).map(n => n.id))
-      .toEqual([a1.id, a2.id]);
-    const providerOnly = { gridSearchQuery: '', gridProviderFilter: 'claude', gridStatusFilter: 'awaiting_input' };
-    expect(scopeNodesForMode('filtered', NODES, null, providerOnly)).toEqual([]);
-  });
-
-  it("'filtered' ignores the sidebar selection — cross-mesh like Pinned (#1609)", () => {
-    const controls = { gridSearchQuery: '', gridProviderFilter: null, gridStatusFilter: null };
-    expect(scopeNodesForMode('filtered', NODES, 10, controls).map(n => n.id))
-      .toEqual([a1.id, a2.id, b1.id, b2.id]);
-  });
-
-  it("'filtered' with the neutral controls is the All scope (#1609)", () => {
-    // No search, no filters → the dedicated view shows every node — the
-    // same contract 'all' pins, so the empty search never surprises.
-    const controls = { gridSearchQuery: '   ', gridProviderFilter: null, gridStatusFilter: null };
-    expect(scopeNodesForMode('filtered', NODES, null, controls)).toEqual(NODES);
-  });
-
-  it("'filtered' is whitespace-tolerant on the search and case-insensitive", () => {
-    const controls = { gridSearchQuery: '  B1  ', gridProviderFilter: null, gridStatusFilter: null };
-    expect(scopeNodesForMode('filtered', NODES, null, controls).map(n => n.id))
-      .toEqual([b1.id]);
-  });
-
-  it("mesh/pinned/all scopes are unaffected by the controls argument", () => {
-    // The Grid Controls belong to the Filtered view; the other scopes must
-    // not narrow even when a stale search text is in the store.
-    const controls = { gridSearchQuery: 'a1', gridProviderFilter: 'minimax', gridStatusFilter: 'error' };
-    expect(scopeNodesForMode('all', NODES, null, controls)).toEqual(NODES);
-    expect(scopeNodesForMode('pinned', NODES, null, controls).map(n => n.id))
-      .toEqual([a2.id, b1.id]);
-    expect(scopeNodesForMode('mesh', NODES, 10, controls).map(n => n.id))
-      .toEqual([a1.id, a2.id]);
-  });
 });
 
 // #2071 — the Mesh-scope fallback helper (`resolveMeshScopeId`) is gone. Its
@@ -171,7 +129,7 @@ describe('deriveScope (#2071)', () => {
     expect(scope({ viewMode: 'pinned' }).visibleNodes.map(n => n.id)).toEqual([a2.id, b1.id]);
     expect(scope({ viewMode: 'mesh', selectedMeshId: 20 }).visibleNodes.map(n => n.id)).toEqual([b1.id, b2.id]);
     expect(scope({
-      viewMode: 'filtered',
+      viewMode: 'all',
       controls: { gridSearchQuery: 'a', gridProviderFilter: null, gridStatusFilter: null },
     }).visibleNodes.map(n => n.id)).toEqual([a1.id, a2.id]);
   });
@@ -181,10 +139,10 @@ describe('deriveScope (#2071)', () => {
     expect(meshScope.mesh).toEqual({ id: 20, name: 'beta' });
     expect(meshScope.isMeshScoped).toBe(true);
 
-    // 'pinned' and 'filtered' are cross-Mesh by design (#983/#1609) and
-    // 'all' clears the selection — so a sidebar selection never turns
-    // one of them into a Mesh scope, even with the Mesh still selected.
-    for (const viewMode of ['all', 'pinned', 'filtered'] as const) {
+    // 'pinned' is cross-Mesh by design (#983) and 'all' clears the
+    // selection — so a sidebar selection never turns one of them into a
+    // Mesh scope, even with the Mesh still selected.
+    for (const viewMode of ['all', 'pinned'] as const) {
       const crossMesh = scope({ viewMode, selectedMeshId: 20 });
       expect(crossMesh.mesh).toBeNull();
       expect(crossMesh.isMeshScoped).toBe(false);
@@ -193,21 +151,21 @@ describe('deriveScope (#2071)', () => {
 
   it('counts the scope before the controls narrow it and what is visible now', () => {
     const filtered = scope({
-      viewMode: 'filtered',
+      viewMode: 'all',
       controls: { gridSearchQuery: 'b1', gridProviderFilter: null, gridStatusFilter: null },
     });
     expect(filtered.scopedNodeCount).toBe(4);
     expect(filtered.visibleNodeCount).toBe(1);
 
-    // A stale search must not narrow a Mesh-scoped view (#1609) — the
-    // scope and the visible set stay the full Mesh.
+    // The controls narrow the scope they are applied to: the Mesh still
+    // holds two nodes before the search, and none of them match it.
     const meshScope = scope({
       viewMode: 'mesh',
       selectedMeshId: 20,
       controls: { gridSearchQuery: 'no such node', gridProviderFilter: null, gridStatusFilter: null },
     });
     expect(meshScope.scopedNodeCount).toBe(2);
-    expect(meshScope.visibleNodeCount).toBe(2);
+    expect(meshScope.visibleNodeCount).toBe(0);
   });
 
   it("names the focused node's Mesh when it differs from the scope's", () => {
@@ -292,15 +250,20 @@ describe('resolveSingleNode (wayfinder #982)', () => {
     expect(resolveSingleNode(NODES, 999, 'mesh', 10)).toBe(a1);
   });
 
-  it('narrows the Filtered fallback by the Grid Controls (#1609)', () => {
-    // Entered Single from Filtered with a search active, then the active
-    // node vanished (deleted while soloed): the fallback must come from
-    // the matching set, not the unfiltered store — the user would
-    // otherwise land on a node the Filtered grid never showed.
+  it('does not broaden a filtered Mesh fallback when the active node is deleted', () => {
+    const controls = { gridSearchQuery: 'a1', gridProviderFilter: null, gridStatusFilter: null };
+    expect(resolveSingleNode([b1], 999, 'mesh', 10, controls)).toBeNull();
+  });
+
+  it('narrows the Single fallback by the Grid Controls (#1609)', () => {
+    // Entered Single with a search active, then the active node vanished
+    // (deleted while soloed): the fallback must come from the matching
+    // set, not the unfiltered store — the user would otherwise land on a
+    // node the narrowed grid never showed.
     const controls = { gridSearchQuery: 'a', gridProviderFilter: null, gridStatusFilter: null };
-    expect(resolveSingleNode(NODES, 999, 'filtered', null, controls)).toBe(a1);
+    expect(resolveSingleNode(NODES, 999, 'all', null, controls)).toBe(a1);
     const tight = { gridSearchQuery: 'b', gridProviderFilter: null, gridStatusFilter: null };
-    expect(resolveSingleNode(NODES, 999, 'filtered', null, tight)).toBe(b1);
+    expect(resolveSingleNode(NODES, 999, 'all', null, tight)).toBe(b1);
   });
 });
 
@@ -320,7 +283,6 @@ const SCOPE_CASES: Array<[ViewMode, NonSingleViewMode, number | null]> = [
   ['mesh', 'mesh', null],
   ['all', 'all', 10],
   ['pinned', 'pinned', 10],
-  ['filtered', 'filtered', 10],
   // Single reports the grid scope it was entered from, so a solo out of a
   // Mesh Grid is still a Mesh-anchored scope.
   ['single', 'mesh', 10],
@@ -353,15 +315,14 @@ describe('isMeshScopedView', () => {
 });
 
 describe('selectionMeshId', () => {
-  // This is a DESTINATION's subject, not the canvas scope: Pinned, Filtered
-  // and All have no grid Mesh by construction, yet a Mesh-lens Probe
-  // destination still acts on one. #2073 deleted the pins that could hold a
+  // This is a DESTINATION's subject, not the canvas scope: Pinned and All
+  // have no grid Mesh by construction, yet a Mesh-lens Probe destination
+  // still acts on one. #2073 deleted the pins that could hold a
   // Mesh the user had not chosen, so the rule is "the chosen Mesh, else the
   // focused node's Mesh" - never a Mesh the user did not choose (#2071).
   it.each([
     ['all', 10],
     ['pinned', 10],
-    ['filtered', 10],
     ['mesh', 10],
   ] as const)('keeps an explicitly selected Mesh authoritative in %s', (viewMode, expected) => {
     expect(selectionMeshId(viewMode, 10, 20)).toBe(expected);
@@ -371,7 +332,7 @@ describe('selectionMeshId', () => {
     expect(selectionMeshId('single', 10, 20)).toBe(20);
   });
 
-  it.each(['mesh', 'pinned', 'filtered', 'all'] as const)(
+  it.each(['mesh', 'pinned', 'all'] as const)(
     "stands the focused node's Mesh in for %s when nothing is selected",
     (viewMode) => {
       expect(selectionMeshId(viewMode, null, 20)).toBe(20);
@@ -379,8 +340,89 @@ describe('selectionMeshId', () => {
   );
 
   it('is null when there is neither a selection nor a focused node', () => {
-    for (const viewMode of ['all', 'pinned', 'filtered', 'mesh', 'single'] as const) {
+    for (const viewMode of ['all', 'pinned', 'mesh', 'single'] as const) {
       expect(selectionMeshId(viewMode, null, null)).toBeNull();
     }
   });
+});
+
+describe('search within the chosen scope (#2683)', () => {
+  it.each([
+    ['mesh', 10, 'b', []],
+    ['mesh', 10, 'a', [1, 2]],
+    ['pinned', 10, 'b', [3]],
+    ['all', null, 'b', [3, 4]],
+  ] as const)('narrows %s without widening it', (mode, selectedMeshId, query, expected) => {
+    const result = deriveScope({
+      viewMode: mode, lastNonSingleMode: mode, selectedMeshId, activeNodeId: null,
+      agentNodes: NODES,
+      controls: { gridSearchQuery: query, gridProviderFilter: null, gridStatusFilter: null },
+    });
+    expect(result.visibleNodes.map(node => node.id)).toEqual(expected);
+  });
+});
+
+/**
+ * `visibleNodes` is never the store's own node array, and the doc comment on
+ * `DerivedScope.visibleNodes` says so.
+ *
+ * The comment used to claim the opposite: that the 'all' view mode "hands
+ * back the shared derived node array unchanged". `scopeNodesForMode('all')`
+ * does return the shared array, but `deriveScope` narrows every scope with
+ * `filter`, so `visibleNodes` is a copy in every mode. A comment that
+ * promises identity sends the next caller to reach for `===` or to use the
+ * array as a memo key against a guarantee the code does not keep.
+ *
+ * These assertions pin the behaviour the comment states, not the words the
+ * comment uses. An earlier version searched the comment for the words
+ * "unchanged" or "shared" and asserted against the result of that search: a
+ * comment that made the same false promise in other words left the search
+ * false, so the assertion compared `true` with itself and the guard passed.
+ * Asserting that the array is not the caller's own cannot be fooled by
+ * wording — if the implementation ever hands the input array back, these
+ * assertions fail and the comment has to be re-read alongside them.
+ *
+ * What is NOT pinned is the array's identity ACROSS calls. The comment says
+ * callers must not rely on that identity, which is a prohibition on the
+ * caller rather than a guarantee about the implementation: a memoised
+ * derivation would still hand back a copy of the store's array and would
+ * still satisfy every promise the comment makes. An assertion that two
+ * calls return different objects would forbid that optimisation, and no
+ * caller needs it, so it is not here.
+ *
+ * The comment is checked for presence only. Nothing here can read whether
+ * its wording is true; what keeps it true is the behaviour asserted below.
+ */
+describe('DerivedScope.visibleNodes is never the store\'s own array', () => {
+  const SOURCE = readFileSync(resolve(__dirname, '../../src/lib/viewModes.ts'), 'utf8');
+
+  /** The doc comment the source carries for one interface member. */
+  function docCommentFor(member: string): string {
+    const at = SOURCE.indexOf(`${member}:`);
+    expect(at, `${member} is missing from src/lib/viewModes.ts`).toBeGreaterThan(-1);
+    const start = SOURCE.lastIndexOf('/**', at);
+    const end = SOURCE.indexOf('*/', start);
+    expect(start, `${member} carries no doc comment`).toBeGreaterThan(-1);
+    expect(end, `${member} carries no doc comment`).toBeLessThan(at);
+    expect(SOURCE.slice(end + 2, at).trim(), `${member} carries no doc comment`).toBe('');
+    return SOURCE.slice(start + 3, end);
+  }
+
+  it('keeps the promise documented', () => {
+    expect(docCommentFor('visibleNodes')).not.toBe('');
+  });
+
+  it.each([
+    ['all', 'all', null],
+    ['pinned', 'pinned', null],
+    ['mesh', 'mesh', 10],
+    ['single', 'all', null],
+  ] as const)('hands back a copy in the %s scope, never the caller\'s own',
+    (viewMode, lastNonSingleMode, selectedMeshId) => {
+      const scope = deriveScope({
+        viewMode, lastNonSingleMode, agentNodes: NODES,
+        selectedMeshId, activeNodeId: null,
+      });
+      expect(scope.visibleNodes).not.toBe(NODES);
+    });
 });

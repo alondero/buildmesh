@@ -140,7 +140,7 @@ fn fake_responses_server_proves_streaming_tool_round_trip() {
 /// duration of each test, so we no longer need either this module's
 /// `PREFS_TEST_LOCK` (paired-contention with peer preferences tests) or
 /// `preferences::test_state_guard()` (process-global contention). Each
-/// test gets its own `init_for_tests` + `reset_for_tests` round and
+/// test owns its own store — no ambient store is installed — and
 /// collateral tests run concurrently without seeing each other's
 /// state.
 /// A verification recorded against an older Codex CLI (npm auto-updates)
@@ -156,7 +156,7 @@ fn stale_after_cli_update_reports_the_cli_change_not_routing() {
     // alive until the test ends, so we hold it until the explicit
     // remove in the cleanup epilogue.
     let tmp = tempfile::tempdir().expect("tempdir");
-    preferences::init_for_tests(tmp.path().to_path_buf());
+    let store = preferences::PreferencesStore::new(tmp.path().to_path_buf());
 
     let pairing = ProviderPairing {
         harness_id: "codex".into(),
@@ -201,22 +201,22 @@ fn stale_after_cli_update_reports_the_cli_change_not_routing() {
         verified_at: Some(Utc::now()),
         reason: None,
     };
-    save_result(record.clone()).unwrap();
+    save_result_from(&store, record.clone()).unwrap();
     let mut other_model = pairing.clone();
     other_model.model_tiers.default = Some("another-model".into());
     let mut other_record = record.clone();
     other_record.model_id = "another-model".into();
     other_record.pairing_signature = signature_for(&other_model, &account, &old_install);
-    save_result(other_record).unwrap();
-    assert_eq!(preferences::load().unwrap().pairing_verifications.len(), 2);
+    save_result_from(&store, other_record).unwrap();
+    assert_eq!(store.load().unwrap().pairing_verifications.len(), 2);
     assert_eq!(
-        matching_verification(&pairing, &account, &old_install)
+        matching_verification_from(&store, &pairing, &account, &old_install)
             .unwrap()
             .status,
         PairingVerificationStatus::Verified
     );
     assert_eq!(
-        matching_verification(&other_model, &account, &old_install)
+        matching_verification_from(&store, &other_model, &account, &old_install)
             .unwrap()
             .status,
         PairingVerificationStatus::Verified
@@ -226,7 +226,7 @@ fn stale_after_cli_update_reports_the_cli_change_not_routing() {
         version: "0.149.0".into(),
         ..old_install.clone()
     };
-    let got = matching_verification(&pairing, &account, &new_install).unwrap();
+    let got = matching_verification_from(&store, &pairing, &account, &new_install).unwrap();
     assert_eq!(got.status, PairingVerificationStatus::Stale);
     let reason = got.reason.unwrap();
     assert!(
@@ -244,15 +244,15 @@ fn stale_after_cli_update_reports_the_cli_change_not_routing() {
         base_url: Some("https://api.minimax.io/v2".into()),
         ..pairing.clone()
     };
-    let got = matching_verification(&rerouted_pairing, &account, &old_install).unwrap();
+    let got =
+        matching_verification_from(&store, &rerouted_pairing, &account, &old_install).unwrap();
     assert_eq!(got.status, PairingVerificationStatus::Stale);
     assert_eq!(
         got.reason.as_deref(),
         Some("routing inputs changed; verify the pairing again")
     );
 
-    preferences::reset_for_tests();
-    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::remove_dir_all(tmp.path());
 }
 
 /// A saved record whose capability snapshot is incompatible (e.g. a WSL
@@ -267,7 +267,7 @@ fn incompatible_capability_record_keeps_its_reason_instead_of_stale_mask() {
     // Drop, unique path per call) instead of the hand-rolled path
     // that collided across parallel tests under the same `pid`.
     let tmp = tempfile::tempdir().expect("tempdir");
-    preferences::init_for_tests(tmp.path().to_path_buf());
+    let store = preferences::PreferencesStore::new(tmp.path().to_path_buf());
 
     let pairing = ProviderPairing {
         harness_id: "codex".into(),
@@ -314,14 +314,15 @@ fn incompatible_capability_record_keeps_its_reason_instead_of_stale_mask() {
         verified_at: None,
         reason: Some(incompatible_reason.into()),
     };
-    preferences::update(|prefs| prefs.pairing_verifications.push(record)).unwrap();
+    store
+        .update(|prefs| prefs.pairing_verifications.push(record))
+        .unwrap();
 
-    let got = matching_verification(&pairing, &account, &install).unwrap();
+    let got = matching_verification_from(&store, &pairing, &account, &install).unwrap();
     assert_eq!(got.status, PairingVerificationStatus::Failed);
     assert_eq!(got.reason.as_deref(), Some(incompatible_reason));
 
-    preferences::reset_for_tests();
-    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::remove_dir_all(tmp.path());
 }
 
 #[test]

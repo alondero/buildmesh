@@ -129,12 +129,9 @@ describe('dispatchShortcut — the table-driven shortcut dispatcher', () => {
     expect(useUIStore.getState().viewMode).toBe('pinned');
   });
 
-  it('lands the canvas in the Filtered view and bumps the focus request for focus-grid-search (issue #998)', () => {
-    // #1609: the search controls only exist in Filtered, so the action flips
-    // the mode AND requests focus in one store action. Bumping the counter is
-    // the whole imperative channel — GridControls' layout effect reads it.
+  it('focuses search without leaving the current Mesh scope', () => {
     expect(dispatchShortcut('focus-grid-search')).toBe('handled');
-    expect(useUIStore.getState().viewMode).toBe('filtered');
+    expect(useUIStore.getState().viewMode).toBe('mesh');
     expect(useUIStore.getState().focusGridSearchRequest).toBe(1);
   });
 

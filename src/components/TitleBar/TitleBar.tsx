@@ -46,11 +46,8 @@ import { UsageIcon } from '../Probe/probeIcons';
  * Settings and Remote Access pills. Usage/Settings/Remote Access are
  * entry points, not readouts — their state lives in the surface they open.
  *
- * Issue #1609 reshaped the clusters: the utility pills dropped their
- * borders and joined the switcher's label ladder of the time (since #2421 the
- * bar mounts different controls per width tier, see `titleBarTiers.ts`), and the GridControls "Search nodes" bar moved from
- * the right cluster into the left, mounted only while the Filtered view is
- * active — it is that view's control, not a global fixture.
+ * The search control sits beside the scope selector and narrows its grid.
+ * It is hidden while Single displays an agent.
  *
  * The Zoom pill (left of Usage) is the exception to "entry points, not
  * readouts": it discloses a popover with the terminal text-size slider and
@@ -58,10 +55,10 @@ import { UsageIcon } from '../Probe/probeIcons';
  * shortcuts already drive.
  *
  * Issue #2421 replaced the shared label ladder (every label dropping to a
- * glyph below 1440px) with width tiers that mount different controls — see
- * `titleBarTiers.ts`. Narrow windows get one labelled `ViewSelector` and fold
- * the four utilities into More; search, Notifications and More stay in the
- * bar at every width.
+ * glyph at one width) with width tiers that mount different controls — see
+ * `titleBarTiers.ts` for the current thresholds. Narrow windows get one
+ * labelled `ViewSelector` and fold the four utilities into More; search,
+ * Notifications and More stay in the bar at every width.
  */
 
 // `SHORTCUT_CATALOG` is a static module constant; resolving the
@@ -133,12 +130,18 @@ function NavigationControls() {
         title="Search or open… (command palette)"
         // 260px, growing toward the 640px wide-screen target only out of
         // width the side tracks do not need: in the centred grid each side
-        // track gets half of what this field leaves, and the widest left
-        // cluster (labelled segments plus a scope label at its 10rem cap)
-        // measured 727px, so 1460px is twice that (#2421). max-w-full lets
-        // Filtered search and the native caption controls claim their
-        // required space first.
-        className="@container flex h-10 w-[clamp(20rem,calc(100vw_-_1460px),640px)] min-w-0 max-w-full items-center gap-2 rounded-md border border-border-default bg-bg-base px-3 text-sm text-text-muted transition-colors hover:border-accent-cyan/50 hover:text-text-primary"
+        // track gets half of what this field leaves, so the track is
+        // `(viewport - 16 - field) / 2`. The 1820px reservation pins that
+        // track at 902px (`2 * 902 + 16`) across the band where the field
+        // grows. 902px is the left cluster's natural width on the WINDOWS
+        // chrome at 100% text; on macOS the cluster is 64px wider (its
+        // traffic lights live in the left cluster) and the capped track
+        // squeezes 68px out of it — 40px of scope label and 28px of grid
+        // search — rather than letting the cluster run under the field
+        // (#2421, re-derived for #2683's grid search). max-w-full lets the
+        // grid search and the native caption controls claim their required
+        // space first.
+        className="@container flex h-10 w-[clamp(20rem,calc(100vw_-_1820px),640px)] min-w-0 max-w-full items-center gap-2 rounded-md border border-border-default bg-bg-base px-3 text-sm text-text-muted transition-colors hover:border-accent-cyan/50 hover:text-text-primary"
       >
         <SearchIcon className="h-4 w-4 shrink-0" />
         <span className="min-w-0 flex-1 truncate text-left">Search or open…</span>
@@ -146,22 +149,21 @@ function NavigationControls() {
             conditional still keeps an empty <kbd> chip from appearing if
             the catalog row were ever renamed. The chip is the FIRST thing
             to disappear when narrowing, at the labelled-switcher tier
-            (1440px, #2081 review — measured clean in both header grids).
-            Its own `max-[1439px]` class hides it below 1439px (Tailwind's
+            (1700px, #2081 review — measured clean in both header grids).
+            Its own `max-[1699px]` class hides it below 1699px (Tailwind's
             max-[N] is exclusive), and it also yields when the field is narrow;
             user-facing affordances outlast the decorative keyboard hint.
-            The chip contributes ~13px of the centre's 143px min-content
-            in the labelled tier, which is part of why that tier starts at
-            1440. The class string MUST stay a literal so Tailwind v4's
+            The class string MUST stay a literal so Tailwind v4's
             source scanner picks it up — a template literal would defeat
             JIT detection and the rule would never compile. #2421: the
             field is also a size container. The label, icon and chip need
             about 208px of content width (icon 16 + gap 8 + label 85 + gap 8
             + chip 91), so the chip yields below 216px of content width. The
-            earlier 240px threshold compared against the field's outer width
-            and hid the chip at every 1440-1719px window (#2421 review). */}
+            earlier 240px threshold compared against the field's OUTER width
+            rather than its content width, so it hid the chip while the field
+            still had room for it (#2421 review). */}
         {SEARCH_SHORTCUT_LABEL !== '' && (
-          <kbd className="shrink-0 rounded-md border border-border-default bg-bg-card px-1.5 py-0.5 font-mono text-sm text-text-muted max-[1439px]:hidden @max-[216px]:hidden">
+          <kbd className="shrink-0 rounded-md border border-border-default bg-bg-card px-1.5 py-0.5 font-mono text-sm text-text-muted max-[1699px]:hidden @max-[216px]:hidden">
             {SEARCH_SHORTCUT_LABEL}
           </kbd>
         )}
@@ -413,9 +415,6 @@ export function TitleBar() {
   const appSettingsOpen = useUIStore((s) => s.appSettingsOpen);
   const appSettingsTab = useUIStore((s) => s.appSettingsTab);
   const remoteAccessOpen = useUIStore((s) => s.remoteAccessOpen);
-  // #1609 — the Filtered view owns the Search Nodes bar; the mode lives in
-  // uiStore so Omnibar view commands ("Switch view: Filtered") slide the
-  // bar in through the same state the switcher writes.
   const viewMode = useUIStore((s) => s.viewMode);
   // #2421 — which controls each width tier mounts (see `titleBarTiers`). The
   // thresholds are 100%-text measurements, so a larger interface text size
@@ -473,11 +472,27 @@ export function TitleBar() {
 
   return (
     <>
-      {/* Filtered and compact layouts budget side-cluster width first.
-          Regular wide layouts keep the command field viewport-centered. */}
+      {/* The centred grid — `minmax(0,1fr) auto minmax(0,1fr)` from 1300px up —
+          gives both side tracks half of what the command field leaves, so the
+          field lands on the window's centre line (issue #1375). Below 1300px
+          the field yields to the side clusters: the tracks are content-sized
+          there, so the field sits right of centre.
+
+          The side tracks are CAPPED, and #2683 widened the left cluster (the
+          grid search joined it in every mode except Single). The cap is what
+          makes that work — the cluster shrinks instead of running under the
+          field — but the cluster's MINIMUM width grows with the interface text
+          size, and the capped track has to hold that minimum. Measured in the
+          mock-IPC Chromium harness across both window chrome layouts (on
+          macOS the traffic lights live in the LEFT cluster, so that cluster is
+          the wider one and the ladder has to hold it) at 100% and 150% text:
+          1300px is the round width at which the capped track holds the
+          cluster at BOTH text sizes — 512px of track against 508px of
+          cluster, the grid search at its `min-w-24` floor at 150%. From there
+          up the field is centred (0px off) and no header cell overflows. */}
       <header
         data-tauri-drag-region
-        className={`grid h-14 shrink-0 grid-cols-[auto_minmax(0,1fr)_auto] items-stretch bg-bg-surface border-b border-border-subtle select-none ${viewMode === 'filtered' ? '' : 'min-[1100px]:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]'}`}
+        className="grid h-14 shrink-0 grid-cols-[auto_minmax(0,1fr)_auto] items-stretch bg-bg-surface border-b border-border-subtle select-none min-[1300px]:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]"
       >
         {/* Left cell — clusters hug the start edge. */}
         <div data-tauri-drag-region className="flex min-w-0 items-center pl-3 pr-2">
@@ -503,7 +518,7 @@ export function TitleBar() {
           <Wordmark />
           {/* #2074 — the scope indicator names the effective scope (the one
               `deriveScope` value) and doubles as the Mesh picker, between the
-              switcher that picks the View Mode and the Filtered search bar
+              switcher that picks the View Mode and the search bar
               that narrows it. #2421 — below the labelled tier both fold into
               one `ViewSelector` that names the view and scope in text, so a
               narrow window never shows a row of unlabelled mode glyphs. */}
@@ -515,14 +530,7 @@ export function TitleBar() {
           ) : (
             <ViewSelector />
           )}
-          {/* #1609 — the Search Nodes bar IS the Filtered view's control, so
-              it mounts beside the switcher only while that mode is active.
-              An honest conditional mount: CSS can't interpolate `width: auto`,
-              so a transition-all wrapper would snap anyway while leaving a
-              4px `ml-1` behind when unmounted — `ml-1` lives on GridControls'
-              own root instead, so nothing occupies layout space outside
-              Filtered. */}
-          {viewMode === 'filtered' && <GridControls />}
+          <GridControls hidden={viewMode === 'single'} />
         </div>
 
         {/* Centre cell — the #1375 command field. Non-draggable so clicks

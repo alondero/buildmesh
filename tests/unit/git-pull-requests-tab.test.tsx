@@ -1,3 +1,4 @@
+import { __resetHarnessLoginsForTests, publishHarnessLogins } from '../../src/hooks/useHarnessLogins';
 /**
  * Tests for the Git Pull Requests probe tab.
  *
@@ -185,6 +186,7 @@ const MERGE_BTN_FIND_TIMEOUT_MS = 5000;
 
 describe('GitPullRequestsTab', () => {
   beforeEach(() => {
+    __resetHarnessLoginsForTests();
     // `mockReset` (not `mockClear`) wipes both call history AND any
     // per-test `mockImplementationOnce` / `mockRejectedValueOnce`
     // overrides — guards against a future test that adds a one-off
@@ -209,6 +211,21 @@ describe('GitPullRequestsTab', () => {
   // then throws on multiple matches. Cleanup after each test.
   afterEach(() => {
     cleanup();
+  });
+
+  it('passes the Harness Login chosen from the shared Spawn Menu to node creation', async () => {
+    mockBackend({ providers: [{ id: 'codex', label: 'Codex', harness_id: 'codex', group_key: 'codex', provider_id: null, is_proxied: false, icon: 'X', color: '#fff', resumable: true }] });
+    publishHarnessLogins(['default', 'work'].map(id => ({
+      id, harness_id: 'codex', label: id === 'work' ? 'Work' : 'Default',
+      home: 'C:/codex/' + id, is_default: id === 'default', signed_in: true,
+      email: null, plan: null, same_account_as: null, sign_in: null,
+    })));
+    render(<GitPullRequestsTab />);
+    const toggles = await screen.findAllByTestId('spawn-dropdown-toggle');
+    await userEvent.click(toggles[0]);
+    await userEvent.click(screen.getByRole('button', { name: 'Codex logins' }));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Work' }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('create_pr_node', expect.objectContaining({ provider: 'codex', loginId: 'work' })));
   });
 
   it('lists open pull requests for the active mesh', async () => {

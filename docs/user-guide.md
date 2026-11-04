@@ -93,16 +93,16 @@ its own login; choose the same account or workspace as the meter.
 
 ## Your first session
 
-The empty workspace and each selected empty repository offer three readiness
-steps: add a repository, check your harness and runtime, then open a session.
-**Check runtime and login** opens **Settings → Providers**. **Skip setup guide**
-hides the guide across repositories; **Show setup guide** restores it.
-Detection confirms an installation, so sign
-in using the CLI in that runtime before launching an agent. **Start Terminal**
-lets you start locally without agent credentials or completed runtime checks
-once a repository is selected, using that repository's worktree setting.
-It stays available when the guide is hidden or other repositories have agents.
-Help contains the advanced keyboard shortcuts.
+Choose **New mesh** in the empty workspace to add your first repository.
+The sidebar appears after the first Mesh; add subsequent repositories there.
+An empty repository offers **Spawn agent**, or **Open Settings** when no agent is available.
+**Start Terminal** works without agent credentials or completed runtime checks,
+using the repository's worktree setting. Harness check failures show a retry
+action beside these controls. Detection confirms an installation; sign in using
+the CLI in that runtime before launching an agent.
+
+Settings rows show a name and control. Use the adjacent information button for
+details. Press **?** outside a terminal or text field for keyboard shortcuts.
 
 1. Install Buildmesh from the [latest release](https://github.com/alondero/buildmesh/releases/latest),
    or follow the [source-build instructions](../README.md#build-from-source).
@@ -149,8 +149,12 @@ The first successful loop is: **install → configure → spawn → inspect → 
 Use **More** at the right of the title bar to open **Project Files**,
 **Agent Changes**, **Project Settings**, **Repository**, **GitHub Issues**,
 **Pull Requests**, **Circuits**, **Agent History**, or **Notes** in the inspector.
-The menu uses the same names, descriptions, and icons as the command palette.
-**Usage** has its own title-bar button, alongside **Settings** and **Mobile**.
+More and the command palette's empty search show compact rows with a name and
+icon. The highlighted row marks the current choice; hover a tool for optional
+help. In the palette, Up/Down move through the rows and wrap at either end;
+Enter opens the highlighted tool while typing stays in the search field.
+**Usage**, **Settings** and **Mobile** have title-bar buttons on wider windows
+and move into **More** when space is limited.
 
 Settings opens with focus on **General**. Use Up/Down to select a section
 (wrapping at either end), or Home/End to select the first/last section. Tab
@@ -234,10 +238,15 @@ in-memory: closing the app ends the task, and only one task can run at once.
 
 The control left of the view modes always names what the canvas is showing.
 When a single Mesh is in scope it reads that Mesh's name; otherwise it reads
-the view and the node count, such as **Pinned across meshes · 3 nodes** or
-**Filtered across meshes · 2 of 5 nodes**. In **Single** it names the Agent
-Node you are soloing and its Mesh. On narrow windows the name collapses to an
-icon; hovering shows the same wording in full.
+the scope and the node count, such as **All meshes · 3 nodes**, or **all
+meshes · 3 nodes** in Pinned — there the highlighted view-mode segment is what
+names Pinned, and the control's accessible name spells it out as **all meshes
+· 3 nodes (Pinned across meshes)**. The accessible name repeats the visible
+text first, so speech control can find the control by what is on screen, and
+it repeats the node count only once — the mode word that follows carries no
+count of its own. In **Single** it names the Agent Node you are soloing and
+its Mesh. On narrow windows the name collapses to an icon; hovering shows the
+scope in full.
 
 Choose **All Nodes** to leave Mesh scope. It is the only route out, and it
 clears the Mesh selection.
@@ -256,10 +265,8 @@ choose, and the picker opens with focus inside it so you can tab straight to
 the list. `Ctrl+Alt+G` (`Cmd+Alt+G` on macOS) rotates through the view modes
 and asks the same way.
 
-Two scope changes announce themselves. A search that leaves a single Mesh
-tells you the results span every Mesh, because the search matches Agent Node
-names rather than one Mesh. Deleting the Mesh you are looking at tells you the
-canvas moved to **All Nodes**. Both are reminders only — the view still
+One scope change announces itself. Deleting the Mesh you are looking at tells
+you the canvas moved to **All Nodes**. It is a reminder only — the view still
 changes.
 
 ## Find agents that need attention
@@ -277,11 +284,12 @@ panel. Its **Lifecycle** view lists agents from every repository; in the
 agent's terminal, and offers **Retry** for a failed or lost one and **Resume**
 for a paused one.
 
-In **Filtered** view, use the header's **Filters** button for provider, status,
-sort and direction. The count shows matching nodes out of all loaded nodes.
-Remove an active chip or use **Clear all** to clear search and filters and
-restore the default sort. Your choices survive a restart, including a filter
-with no matches.
+Beside the search field, the sliders button opens **Filters and sort** for
+provider, status, sort and direction. It is available in **Mesh Grid**,
+**Pinned** and **All Nodes**, and hidden in **Single**. The count shows
+matching nodes out of the nodes in scope. Remove an active chip or use
+**Clear all** to clear search and filters and restore the default sort. Your
+choices survive a restart, including a filter with no matches.
 
 ## Configure Autopilot Circuits
 
@@ -372,6 +380,24 @@ means it finished. Hover the mark for a sentence describing both. If your
 operating system is set to reduce motion, the comet stays still at the top of the
 ring instead of circling. On a card title bar, click the mark to open that run in
 the Circuits tab.
+
+## See what an agent is doing
+
+Rest the mouse on a node in the sidebar for a moment to see what it is doing
+without opening its terminal: how long it has been in its current state and in
+its session, when it last did anything, its latest tool call (**Now:** while it
+is running, **Last:** otherwise), the last message it wrote, and the task it was
+given. Move the pointer away to close it; the card stays open while the pointer
+is over it.
+
+The same summary leads an agent's page on your phone, under **Right now**. It
+refreshes every few seconds while the page is open.
+
+It is read from the harness's own transcript. A harness without one that
+Buildmesh can read (Terminal, Kimi Code, Freebuff, DeepSeek Harness, Perch)
+shows the times and says so; open the terminal for those. The summary shows
+what the harness has recorded, so a harness that records a turn only when it
+ends shows the previous activity until then.
 
 ## Understand a circuit checkpoint
 
@@ -1326,7 +1352,8 @@ the draft. If the connection drops during launch, check the mesh's agents before
 the desktop may have accepted the request. Drafts are local to the browser,
 are not a desktop backlog, and disappear when site data is cleared.
 
-Tapping an agent opens **Work details**, with current status, base reference,
+Tapping an agent opens **Work details**, with current status, a **Right now**
+summary of what it is doing ([see what an agent is doing](#see-what-an-agent-is-doing)), base reference,
 **Review changes**, **Open terminal**, and a reply field. Replies send text
 and Enter to an idle or waiting agent; delivery confirmation means the text
 reached the terminal, not that the agent completed the request. Inspect the

@@ -252,14 +252,15 @@ fn stamp_effective_permission_uses_row_capabilities_and_prefs_snapshot() {
 fn provider_ipc_reports_failed_reads_while_internal_discovery_keeps_its_fallback() {
     let scratch = tempfile::tempdir().unwrap();
     std::fs::create_dir(scratch.path().join("preferences.json")).unwrap();
-    crate::preferences::init_for_tests(scratch.path().into());
-    let error = list_providers_blocking().unwrap_err();
+    let store = crate::preferences::PreferencesStore::new(scratch.path().to_path_buf());
+    let error = list_providers_blocking_from(&store).unwrap_err();
     assert!(
         error.starts_with("failed to read preferences.json:"),
         "{error}"
     );
-    assert!(available_providers().iter().any(|row| row.id == "terminal"));
-    crate::preferences::reset_for_tests();
+    assert!(available_providers_from(&store)
+        .iter()
+        .any(|row| row.id == "terminal"));
 }
 
 #[test]
@@ -1301,9 +1302,9 @@ fn parse_spawn_option_id_keeps_provider_part_intact_on_duplicate_colons() {
 #[test]
 fn resolve_harness_provider_legacy_minimax_id_falls_through_to_anthropic() {
     // `Provider::from_db_str("minimax")` is a static lookup —
-    // doesn't touch the preferences cache or APP_DATA_DIR. So we
-    // can verify the legacy fallback (issue #538 cutover) here
-    // without driving the temp-dir helper.
+    // it touches no preferences store. So we can verify the legacy
+    // fallback (issue #538 cutover) here without reading any profile
+    // state.
     //
     // `"kimi"` USED to fall through here too — Kimi Code (wayfinder
     // #918) is now a first-class native executor, so it resolves to
@@ -1490,9 +1491,9 @@ fn compose_menu_does_not_duplicate_a_detected_profile() {
 
 /// Pin the negative case for `resumable`: Terminal is always present
 /// (code-defined default), and a plain shell neither supports resume nor
-/// produces a readable transcript, so the flag must be `false`. This
-/// test runs in the bare-test env (no `with_temp_dir`), so the only row
-/// `available_providers()` sees is Terminal.
+/// produces a readable transcript, so the flag must be `false`. No store is
+/// installed here, so `available_providers()` reads the code-defined defaults
+/// and Terminal is the only row.
 #[test]
 fn available_providers_marks_terminal_as_not_resumable() {
     let providers = available_providers();
@@ -1514,9 +1515,9 @@ fn available_providers_marks_terminal_as_not_resumable() {
 /// the resolved adapter, not the stored id.
 ///
 /// Tested against `provider_info_for` (the pure helper) rather than
-/// `available_providers` so this test doesn't drive the preferences
-/// module's `APP_DATA_DIR` / `CACHE` globals — which are shared across
-/// the `preferences::tests` module's `with_temp_dir` and would race.
+/// `available_providers` so this test reads no preferences at all — the
+/// derivation reads the ambient store, which is a process-wide thing this
+/// suite has no business driving (issue #1482).
 #[test]
 fn provider_info_marks_claude_backed_profile_as_resumable() {
     use crate::preferences::HarnessProfile;
@@ -1742,7 +1743,7 @@ fn available_providers_emits_one_greppable_derivation_log_line() {
     //
     // The derivation itself, not `available_providers`: the memo
     // (issue #2349) turns a second call in the same preferences
-    // generation into a cache hit, and a hit logs nothing. The line
+    // revision into a cache hit, and a hit logs nothing. The line
     // belongs to the derivation, so drive that directly.
     let run_once = || {
         tracing::dispatcher::with_default(
@@ -1902,29 +1903,46 @@ fn memo_row() -> ProviderInfo {
     }
 }
 
-/// The memo key a test pins: the preferences generation plus the detection
-/// epoch (issue #2532).
-fn memo_key(generation: u64, detection_epoch: u64) -> MenuKey {
+/// The memo key a test pins: the preference **source**, the preferences
+/// revision, plus the detection epoch (issue #2532, #1482).
+fn memo_key(
+    source: &crate::preferences::SourceIdentity,
+    revision: u64,
+    detection_epoch: u64,
+) -> MenuKey {
     MenuKey {
-        generation,
+        source: source.clone(),
+        revision,
         detection_epoch,
     }
 }
 
-/// A repeat read inside one generation must not re-derive. Driven
-/// through the memo seam with a pinned generation and a counting closure
-/// rather than through wall-clock: the count is the observable, and no
+/// A distinct preference source, as the memo sees it.
+///
+/// The identity comes from a real store — the memo keys on it, so a test must
+/// not invent one. The directory is returned with it so the caller can keep
+/// it alive.
+fn memo_source() -> (tempfile::TempDir, crate::preferences::SourceIdentity) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::preferences::PreferencesStore::new(dir.path().to_path_buf());
+    (dir, store.source().clone())
+}
+
+/// A repeat read inside one revision must not re-derive. Driven
+/// through the memo seam with a pinned source and revision and a counting
+/// closure rather than through wall-clock: the count is the observable, and no
 /// sleep (or racing preferences write) can make it pass for the wrong
 /// reason.
 #[test]
 fn a_repeat_read_within_the_ttl_does_not_re_derive() {
+    let (_dir, source) = memo_source();
     let mut derivations = 0;
     let mut derive = || {
         derivations += 1;
         vec![memo_row()]
     };
-    let first = derived_menu_at(memo_key(7, 0), &mut derive);
-    let second = derived_menu_at(memo_key(7, 0), &mut derive);
+    let first = derived_menu_at(memo_key(&source, 7, 0), &mut derive);
+    let second = derived_menu_at(memo_key(&source, 7, 0), &mut derive);
     assert_eq!(derivations, 1, "the second read must be a memo hit");
     let ids = |rows: &[ProviderInfo]| {
         rows.iter()
@@ -1938,18 +1956,19 @@ fn a_repeat_read_within_the_ttl_does_not_re_derive() {
     );
 }
 
-/// The invalidation that keeps the memo honest is the preferences
-/// generation, which every preference write bumps. A read at the next
-/// generation must derive again.
+/// The invalidation that keeps the memo honest is the preferences revision,
+/// which every preference write advances. A read at the next revision must
+/// derive again.
 #[test]
-fn a_newer_generation_re_derives_the_menu() {
+fn a_newer_revision_re_derives_the_menu() {
+    let (_dir, source) = memo_source();
     let mut derivations = 0;
     let mut derive = || {
         derivations += 1;
         vec![memo_row()]
     };
-    derived_menu_at(memo_key(7, 0), &mut derive);
-    derived_menu_at(memo_key(8, 0), &mut derive);
+    derived_menu_at(memo_key(&source, 7, 0), &mut derive);
+    derived_menu_at(memo_key(&source, 8, 0), &mut derive);
     assert_eq!(
         derivations, 2,
         "a settings write must invalidate the memoized menu"
@@ -1962,13 +1981,14 @@ fn a_newer_generation_re_derives_the_menu() {
 /// timer.
 #[test]
 fn a_newer_detection_epoch_re_derives_the_menu() {
+    let (_dir, source) = memo_source();
     let mut derivations = 0;
     let mut derive = || {
         derivations += 1;
         vec![memo_row()]
     };
-    derived_menu_at(memo_key(7, 0), &mut derive);
-    derived_menu_at(memo_key(7, 1), &mut derive);
+    derived_menu_at(memo_key(&source, 7, 0), &mut derive);
+    derived_menu_at(memo_key(&source, 7, 1), &mut derive);
     assert_eq!(
         derivations, 2,
         "a new detection epoch must invalidate the memoized menu"
@@ -1977,18 +1997,19 @@ fn a_newer_detection_epoch_re_derives_the_menu() {
 
 /// The TTL is the only thing bounding a change made *outside* Buildmesh
 /// (a `npm i -g @openai/codex` while the window is open), and the
-/// generation cannot see that. Pinned with a synthetic clock so the
+/// preferences revision cannot see that. Pinned with a synthetic clock so the
 /// bound is asserted, not slept through.
 #[test]
 fn a_memoized_menu_expires_after_the_ttl() {
+    let (_dir, source) = memo_source();
     let mut cache = DerivedMenuCache::default();
     let derived_at = Instant::now();
     let menu = Arc::new(Vec::<ProviderInfo>::new());
-    cache.put(memo_key(0, 0), derived_at, Arc::clone(&menu));
+    cache.put(memo_key(&source, 0, 0), derived_at, Arc::clone(&menu));
     assert!(
         cache
             .get(
-                memo_key(0, 0),
+                memo_key(&source, 0, 0),
                 derived_at + DERIVED_MENU_TTL - Duration::from_nanos(1)
             )
             .is_some(),
@@ -1996,28 +2017,29 @@ fn a_memoized_menu_expires_after_the_ttl() {
     );
     assert!(
         cache
-            .get(memo_key(0, 0), derived_at + DERIVED_MENU_TTL)
+            .get(memo_key(&source, 0, 0), derived_at + DERIVED_MENU_TTL)
             .is_none(),
         "an expired menu must re-derive so an out-of-process install shows up"
     );
 }
 
 /// The write-side race guard, mirrored from `agent::launch_routing`: a
-/// derivation that sampled generation `G` cannot publish or evict once a
-/// settings write has moved the slot to `G+1`.
+/// derivation that sampled revision `R` cannot publish or evict once a
+/// settings write has moved the slot to `R+1`.
 #[test]
-fn a_derivation_from_an_older_generation_cannot_publish() {
+fn a_derivation_from_an_older_revision_cannot_publish() {
+    let (_dir, source) = memo_source();
     let mut cache = DerivedMenuCache::default();
     let now = Instant::now();
-    cache.get(memo_key(2, 0), now); // moves the slot to generation 2
-    cache.put(memo_key(1, 0), now, Arc::new(Vec::new()));
+    cache.get(memo_key(&source, 2, 0), now); // moves the slot to revision 2
+    cache.put(memo_key(&source, 1, 0), now, Arc::new(Vec::new()));
     assert!(
-        cache.get(memo_key(2, 0), now).is_none(),
+        cache.get(memo_key(&source, 2, 0), now).is_none(),
         "a stale derivation must not become serveable state"
     );
     assert!(
-        cache.get(memo_key(1, 0), now).is_none(),
-        "an older reader must not evict the newer generation"
+        cache.get(memo_key(&source, 1, 0), now).is_none(),
+        "an older reader must not evict the newer revision"
     );
 }
 
@@ -2026,17 +2048,40 @@ fn a_derivation_from_an_older_generation_cannot_publish() {
 /// `E+1`.
 #[test]
 fn a_derivation_from_an_older_detection_epoch_cannot_publish() {
+    let (_dir, source) = memo_source();
     let mut cache = DerivedMenuCache::default();
     let now = Instant::now();
-    cache.get(memo_key(2, 1), now); // moves the slot to epoch 1
-    cache.put(memo_key(2, 0), now, Arc::new(Vec::new()));
+    cache.get(memo_key(&source, 2, 1), now); // moves the slot to epoch 1
+    cache.put(memo_key(&source, 2, 0), now, Arc::new(Vec::new()));
     assert!(
-        cache.get(memo_key(2, 1), now).is_none(),
+        cache.get(memo_key(&source, 2, 1), now).is_none(),
         "a stale derivation must not become serveable state"
     );
     assert!(
-        cache.get(memo_key(2, 0), now).is_none(),
+        cache.get(memo_key(&source, 2, 0), now).is_none(),
         "an older reader must not evict the newer detection epoch"
+    );
+}
+
+/// Two stores can hold the **same revision number** while carrying different
+/// preferences — revisions are per store, so they are not comparable across
+/// stores. The source identity is what keeps their memos apart
+/// (issue #1482).
+#[test]
+fn two_sources_at_the_same_revision_do_not_share_a_memo() {
+    let (_first_dir, first) = memo_source();
+    let (_second_dir, second) = memo_source();
+    let mut cache = DerivedMenuCache::default();
+    let now = Instant::now();
+
+    cache.put(memo_key(&first, 4, 0), now, Arc::new(Vec::new()));
+    assert!(
+        cache.get(memo_key(&second, 4, 0), now).is_none(),
+        "a memo computed against another profile must not be a hit"
+    );
+    assert!(
+        cache.get(memo_key(&first, 4, 0), now).is_some(),
+        "the memo must still serve its own profile"
     );
 }
 
@@ -2053,28 +2098,28 @@ fn both_menu_entry_points_follow_a_preferences_write() {
         serde_json::to_vec_pretty(&crate::preferences::AppPreferences::default()).unwrap(),
     )
     .unwrap();
-    crate::preferences::init_for_tests(scratch.path().into());
+    let store = crate::preferences::PreferencesStore::new(scratch.path().to_path_buf());
 
     let present = |rows: &[ProviderInfo]| rows.iter().any(|row| row.id == "second-terminal");
-    assert!(!present(&available_providers()));
-    assert!(!present(&list_providers_blocking().unwrap()));
+    assert!(!present(&available_providers_from(&store)));
+    assert!(!present(&list_providers_blocking_from(&store).unwrap()));
 
-    crate::preferences::update(|prefs| {
-        prefs
-            .harness_profiles
-            .push(profile("second-terminal", "terminal"))
-    })
-    .expect("preferences write lands");
+    store
+        .update(|prefs| {
+            prefs
+                .harness_profiles
+                .push(profile("second-terminal", "terminal"))
+        })
+        .expect("preferences write lands");
 
     assert!(
-        present(&list_providers_blocking().unwrap()),
+        present(&list_providers_blocking_from(&store).unwrap()),
         "the command must serve the menu a write just changed"
     );
     assert!(
-        present(&available_providers()),
+        present(&available_providers_from(&store)),
         "the route must serve the menu a write just changed"
     );
-    crate::preferences::reset_for_tests();
 }
 
 // -----------------------------------------------------------------------
@@ -2086,17 +2131,19 @@ fn both_menu_entry_points_follow_a_preferences_write() {
 // per derivation, and a derivation a concurrent write leaves alone.
 // -----------------------------------------------------------------------
 
-/// Write an empty preferences file into a scratch directory and point the
-/// preferences module at it, so a test owns its preferences.
-fn scratch_preferences() -> tempfile::TempDir {
+/// Write an empty preferences file into a scratch directory and hand back the
+/// store over it, so a test owns its preferences (issue #1482: a test
+/// constructs its own store and passes the handle in — it never swaps an
+/// ambient one).
+fn scratch_store() -> (tempfile::TempDir, crate::preferences::PreferencesStore) {
     let scratch = tempfile::tempdir().unwrap();
     std::fs::write(
         scratch.path().join("preferences.json"),
         serde_json::to_vec_pretty(&crate::preferences::AppPreferences::default()).unwrap(),
     )
     .unwrap();
-    crate::preferences::init_for_tests(scratch.path().into());
-    scratch
+    let store = crate::preferences::PreferencesStore::new(scratch.path().to_path_buf());
+    (scratch, store)
 }
 
 /// The row ids of a menu, for order-independent comparison.
@@ -2112,10 +2159,10 @@ fn menu_ids(rows: &[ProviderInfo]) -> Vec<String> {
 /// parallel test on another worker thread leaves this thread's count alone.
 #[test]
 fn a_derivation_reads_preferences_exactly_once() {
-    let scratch = scratch_preferences();
+    let (_scratch, store) = scratch_store();
 
     let before = crate::preferences::load_count();
-    let snapshot = crate::preferences::load_snapshot().expect("preferences read");
+    let snapshot = crate::preferences::load_snapshot_from(&store).expect("preferences read");
     assert_eq!(
         crate::preferences::load_count() - before,
         1,
@@ -2133,9 +2180,6 @@ fn a_derivation_reads_preferences_exactly_once() {
         "the derivation must not read preferences at all — the snapshot is its \
          only source"
     );
-
-    crate::preferences::reset_for_tests();
-    drop(scratch);
 }
 
 /// A torn derivation is impossible (issue #2532): the rows are a pure
@@ -2146,25 +2190,27 @@ fn a_derivation_reads_preferences_exactly_once() {
 /// first assertion is about isolation, not about a write that failed to land.
 #[test]
 fn a_derivation_cannot_be_torn_by_a_concurrent_write() {
-    let scratch = scratch_preferences();
-    crate::preferences::update(|prefs| {
-        prefs
-            .harness_profiles
-            .push(profile("first-terminal", "terminal"))
-    })
-    .expect("preferences write lands");
+    let (_scratch, store) = scratch_store();
+    store
+        .update(|prefs| {
+            prefs
+                .harness_profiles
+                .push(profile("first-terminal", "terminal"))
+        })
+        .expect("preferences write lands");
 
     let detection = crate::agent::detection::detection_snapshot();
-    let snapshot = crate::preferences::load_snapshot().expect("preferences read");
+    let snapshot = crate::preferences::load_snapshot_from(&store).expect("preferences read");
     let before = available_providers_with_preferences(snapshot.clone(), &detection);
 
     // A write lands while the derivation is in flight.
-    crate::preferences::update(|prefs| {
-        prefs
-            .harness_profiles
-            .push(profile("second-terminal", "terminal"))
-    })
-    .expect("preferences write lands");
+    store
+        .update(|prefs| {
+            prefs
+                .harness_profiles
+                .push(profile("second-terminal", "terminal"))
+        })
+        .expect("preferences write lands");
 
     let after_write = available_providers_with_preferences(snapshot.clone(), &detection);
     assert_eq!(
@@ -2174,15 +2220,12 @@ fn a_derivation_cannot_be_torn_by_a_concurrent_write() {
     );
 
     // The write really landed: a fresh snapshot sees it.
-    let fresh = crate::preferences::load_snapshot().expect("preferences read");
+    let fresh = crate::preferences::load_snapshot_from(&store).expect("preferences read");
     let fresh_menu = available_providers_with_preferences(fresh, &detection);
     assert!(
         menu_ids(&fresh_menu).contains(&"second-terminal".to_string()),
         "the write must reach a derivation that starts after it"
     );
-
-    crate::preferences::reset_for_tests();
-    drop(scratch);
 }
 
 /// The detection epoch is what makes a harness installed while the app runs
@@ -2193,8 +2236,9 @@ fn a_derivation_cannot_be_torn_by_a_concurrent_write() {
 /// the memoized menu straight away.
 #[test]
 fn a_harness_installed_after_startup_appears_without_waiting_for_the_ttl() {
-    let scratch = scratch_preferences();
-    crate::preferences::update(|prefs| prefs.harness_profiles.push(profile("codex", "codex")))
+    let (_scratch, store) = scratch_store();
+    store
+        .update(|prefs| prefs.harness_profiles.push(profile("codex", "codex")))
         .expect("preferences write lands");
 
     let previous = crate::agent::detection::detection_snapshot();
@@ -2210,7 +2254,7 @@ fn a_harness_installed_after_startup_appears_without_waiting_for_the_ttl() {
         startup.epoch > previous.epoch,
         "the first observation must move the epoch"
     );
-    let snapshot = crate::preferences::load_snapshot().expect("preferences read");
+    let snapshot = crate::preferences::load_snapshot_from(&store).expect("preferences read");
     let menu = derived_menu(snapshot, available_providers_with_preferences);
     assert!(
         !menu_ids(&menu).contains(&"codex".to_string()),
@@ -2228,7 +2272,7 @@ fn a_harness_installed_after_startup_appears_without_waiting_for_the_ttl() {
 
     // The memo key changed with it, so the menu is derived again — inside the
     // TTL, without the timer being involved.
-    let snapshot = crate::preferences::load_snapshot().expect("preferences read");
+    let snapshot = crate::preferences::load_snapshot_from(&store).expect("preferences read");
     let menu = derived_menu(snapshot, available_providers_with_preferences);
     assert!(
         menu_ids(&menu).contains(&"codex".to_string()),
@@ -2236,8 +2280,6 @@ fn a_harness_installed_after_startup_appears_without_waiting_for_the_ttl() {
     );
 
     crate::agent::detection::restore_detection_state(&previous);
-    crate::preferences::reset_for_tests();
-    drop(scratch);
 }
 
 /// The epoch only moves on a real change: re-publishing the same observation

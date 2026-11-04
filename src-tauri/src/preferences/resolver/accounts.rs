@@ -1,7 +1,7 @@
 //! Account list — effective-account resolution, key lookups, mutators.
 
 use super::super::model::{AppPreferences, ProviderAccount};
-use super::super::storage::{load, save};
+use super::super::store::PreferencesStore;
 use super::catalog::{
     default_provider_accounts, is_claude_compatible_id, keyed_first_class_template,
 };
@@ -15,6 +15,16 @@ use super::catalog::{
 /// load-failure policy happen once, in the snapshot loader (issue #2532).
 pub fn provider_accounts() -> Vec<ProviderAccount> {
     super::snapshot::snapshot_or_default().accounts
+}
+
+/// [`provider_accounts`] against an explicit store.
+///
+/// The caller owns the store, so the list comes from *that* store's read
+/// rather than from the ambient one.
+pub fn provider_accounts_from(
+    store: &super::super::store::PreferencesStore,
+) -> Vec<ProviderAccount> {
+    super::snapshot::snapshot_or_default_from(store).accounts
 }
 
 /// The effective account list for an already-loaded preferences value: the
@@ -33,7 +43,14 @@ pub fn provider_accounts() -> Vec<ProviderAccount> {
 /// The stored list is left in place on `prefs` (migrated when it changed), so
 /// a caller that reconciles the same preferences value — the Spawn Menu
 /// derivation — still sees the user's stored accounts.
-pub(super) fn effective_provider_accounts(prefs: &mut AppPreferences) -> Vec<ProviderAccount> {
+///
+/// The migration writes through `store`, so a snapshot taken from an explicit
+/// store persists its migration to *that* store rather than to the ambient
+/// one.
+pub(super) fn effective_provider_accounts(
+    store: &PreferencesStore,
+    prefs: &mut AppPreferences,
+) -> Vec<ProviderAccount> {
     let legacy_minimax_key = prefs
         .minimax_api_key
         .as_deref()
@@ -42,7 +59,7 @@ pub(super) fn effective_provider_accounts(prefs: &mut AppPreferences) -> Vec<Pro
     let (migrated_stored, changed) = migrate_kimi_companion(prefs.provider_accounts.clone());
     if changed {
         prefs.provider_accounts = migrated_stored.clone();
-        if let Err(e) = save(prefs.clone()) {
+        if let Err(e) = store.save(prefs.clone()) {
             tracing::warn!(
                 "preferences::provider_accounts migration save failed: {}",
                 e
@@ -71,7 +88,9 @@ pub(super) fn effective_provider_accounts(prefs: &mut AppPreferences) -> Vec<Pro
 /// reads the files themselves. Empty means every key is in the credential
 /// store, which is the state that must show no notice.
 pub fn provider_accounts_with_keys_in_preferences() -> Vec<String> {
-    super::super::secrets::account_ids_with_keys_on_disk()
+    super::super::store::ambient_store()
+        .map(|store| store.provider_accounts_with_keys_in_preferences())
+        .unwrap_or_default()
 }
 
 /// Migrate any stored `kimi-via-claude` companion (left over from PR #1044)
@@ -132,8 +151,21 @@ fn merge_provider_accounts(
 /// #537 isn't lost). Empty strings are treated as absent. A single `load()` feeds
 /// both layers so the result is a consistent snapshot even under a concurrent save.
 pub fn minimax_api_key_resolved() -> Option<String> {
+    match super::super::store::ambient_store() {
+        Ok(store) => minimax_api_key_resolved_from(&store),
+        Err(_) => None,
+    }
+}
+
+/// [`minimax_api_key_resolved`] against an explicit store.
+///
+/// The caller owns the store, so the key comes from *that* store's read
+/// rather than from the ambient one.
+pub fn minimax_api_key_resolved_from(
+    store: &super::super::store::PreferencesStore,
+) -> Option<String> {
     let non_empty = |s: Option<String>| s.filter(|v| !v.is_empty());
-    let prefs = match load() {
+    let prefs = match store.load() {
         Ok(prefs) => prefs,
         Err(_) => return None,
     };

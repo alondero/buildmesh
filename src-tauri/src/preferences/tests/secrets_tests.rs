@@ -10,8 +10,8 @@
 
 use super::super::model::{AppPreferences, BillingMode, ProviderAccount};
 use super::super::secrets::test_support;
-use super::super::storage::{init_for_tests, load, restore_backup, save, update};
-use super::with_temp_dir;
+use super::super::store::PreferencesStore;
+use super::with_store;
 use std::path::Path;
 
 const KEY: &str = "sk-live-ACCOUNT-SECRET-0001";
@@ -39,14 +39,17 @@ fn file_text(path: &Path) -> String {
     String::from_utf8(std::fs::read(path).expect("read file")).expect("utf-8 file")
 }
 
-fn restart(tmp: &Path) {
-    // Drops the in-process cache; the credential store survives, exactly as
-    // the OS vault survives an app restart.
-    init_for_tests(tmp.to_path_buf());
+/// A restart: a fresh store over the same profile directory.
+///
+/// The credential store survives, exactly as the OS vault survives an app
+/// restart; the in-process cache does not.
+fn restart(store: &PreferencesStore) -> PreferencesStore {
+    PreferencesStore::new(store.profile_dir().to_path_buf())
 }
 
-fn account_key(id: &str) -> Option<String> {
-    load()
+fn account_key(store: &PreferencesStore, id: &str) -> Option<String> {
+    store
+        .load()
         .unwrap()
         .provider_accounts
         .into_iter()
@@ -56,13 +59,13 @@ fn account_key(id: &str) -> Option<String> {
 
 #[test]
 fn save_keeps_account_and_legacy_keys_out_of_the_file_and_its_backup() {
-    with_temp_dir(|tmp| {
+    with_store(|store| {
         let mut prefs = prefs_with(vec![keyed_account("minimax", Some(KEY))]);
         prefs.minimax_api_key = Some(LEGACY_KEY.to_string());
-        save(prefs).unwrap();
+        store.save(prefs).unwrap();
 
-        let path = tmp.join("preferences.json");
-        let backup = tmp.join("preferences.json.bak");
+        let path = store.profile_dir().join("preferences.json");
+        let backup = store.profile_dir().join("preferences.json.bak");
         for file in [&path, &backup] {
             let text = file_text(file);
             assert!(
@@ -81,30 +84,37 @@ fn save_keeps_account_and_legacy_keys_out_of_the_file_and_its_backup() {
         assert_eq!(held, vec![KEY.to_string(), LEGACY_KEY.to_string()]);
 
         // The running app still sees the keys, from the cache…
-        assert_eq!(account_key("minimax").as_deref(), Some(KEY));
+        assert_eq!(account_key(store, "minimax").as_deref(), Some(KEY));
         // …and a restart sees them again, hydrated from the store.
-        restart(tmp);
-        assert_eq!(account_key("minimax").as_deref(), Some(KEY));
-        assert_eq!(load().unwrap().minimax_api_key.as_deref(), Some(LEGACY_KEY));
+        let store = restart(store);
+        assert_eq!(account_key(&store, "minimax").as_deref(), Some(KEY));
+        assert_eq!(
+            store.load().unwrap().minimax_api_key.as_deref(),
+            Some(LEGACY_KEY)
+        );
     });
 }
 
 #[test]
 fn update_externalizes_a_key_added_after_startup() {
-    with_temp_dir(|tmp| {
-        save(prefs_with(vec![keyed_account("custom", None)])).unwrap();
-        update(|prefs| prefs.provider_accounts[0].api_key = Some(KEY.to_string())).unwrap();
+    with_store(|store| {
+        store
+            .save(prefs_with(vec![keyed_account("custom", None)]))
+            .unwrap();
+        store
+            .update(|prefs| prefs.provider_accounts[0].api_key = Some(KEY.to_string()))
+            .unwrap();
 
-        assert!(!file_text(&tmp.join("preferences.json")).contains(KEY));
-        restart(tmp);
-        assert_eq!(account_key("custom").as_deref(), Some(KEY));
+        assert!(!file_text(&store.profile_dir().join("preferences.json")).contains(KEY));
+        let store = restart(store);
+        assert_eq!(account_key(&store, "custom").as_deref(), Some(KEY));
     });
 }
 
 #[test]
 fn a_plaintext_file_from_an_older_build_is_migrated_on_first_load() {
-    with_temp_dir(|tmp| {
-        let path = tmp.join("preferences.json");
+    with_store(|store| {
+        let path = store.profile_dir().join("preferences.json");
         let legacy = serde_json::json!({
             "minimax_api_key": LEGACY_KEY,
             "provider_accounts": [
@@ -115,13 +125,16 @@ fn a_plaintext_file_from_an_older_build_is_migrated_on_first_load() {
         .to_string();
         std::fs::write(&path, &legacy).unwrap();
         // An older build also left a last-known-good copy with the same secrets.
-        std::fs::write(tmp.join("preferences.json.bak"), &legacy).unwrap();
+        std::fs::write(store.profile_dir().join("preferences.json.bak"), &legacy).unwrap();
 
         // Nothing but a read happens, yet the keys must leave the disk.
-        assert_eq!(account_key("minimax").as_deref(), Some(KEY));
-        assert_eq!(load().unwrap().minimax_api_key.as_deref(), Some(LEGACY_KEY));
+        assert_eq!(account_key(store, "minimax").as_deref(), Some(KEY));
+        assert_eq!(
+            store.load().unwrap().minimax_api_key.as_deref(),
+            Some(LEGACY_KEY)
+        );
 
-        for file in [&path, &tmp.join("preferences.json.bak")] {
+        for file in [&path, &store.profile_dir().join("preferences.json.bak")] {
             let text = file_text(file);
             assert!(
                 !text.contains(KEY),
@@ -134,44 +147,52 @@ fn a_plaintext_file_from_an_older_build_is_migrated_on_first_load() {
                 file.display()
             );
         }
-        restart(tmp);
-        assert_eq!(account_key("minimax").as_deref(), Some(KEY));
+        let store = restart(store);
+        assert_eq!(account_key(&store, "minimax").as_deref(), Some(KEY));
     });
 }
 
 #[test]
 fn an_unavailable_credential_store_keeps_the_key_in_the_file_instead_of_losing_it() {
-    with_temp_dir(|tmp| {
+    with_store(|store| {
         test_support::fail_writes(true);
-        save(prefs_with(vec![keyed_account("minimax", Some(KEY))])).unwrap();
+        store
+            .save(prefs_with(vec![keyed_account("minimax", Some(KEY))]))
+            .unwrap();
         assert!(
-            file_text(&tmp.join("preferences.json")).contains(KEY),
+            file_text(&store.profile_dir().join("preferences.json")).contains(KEY),
             "with no credential store the key must stay in the file so it is not lost"
         );
-        restart(tmp);
-        assert_eq!(account_key("minimax").as_deref(), Some(KEY));
+        let store = restart(store);
+        assert_eq!(account_key(&store, "minimax").as_deref(), Some(KEY));
 
         // The store comes back: the next write moves the key out of the file.
         test_support::fail_writes(false);
-        update(|prefs| prefs.default_provider = Some("minimax".into())).unwrap();
-        assert!(!file_text(&tmp.join("preferences.json")).contains(KEY));
-        restart(tmp);
-        assert_eq!(account_key("minimax").as_deref(), Some(KEY));
+        store
+            .update(|prefs| prefs.default_provider = Some("minimax".into()))
+            .unwrap();
+        assert!(!file_text(&store.profile_dir().join("preferences.json")).contains(KEY));
+        let store = restart(&store);
+        assert_eq!(account_key(&store, "minimax").as_deref(), Some(KEY));
     });
 }
 
 #[test]
 fn clearing_a_key_deletes_the_stored_secret() {
-    with_temp_dir(|tmp| {
-        save(prefs_with(vec![keyed_account("minimax", Some(KEY))])).unwrap();
+    with_store(|store| {
+        store
+            .save(prefs_with(vec![keyed_account("minimax", Some(KEY))]))
+            .unwrap();
         assert_eq!(test_support::stored_values(), vec![KEY.to_string()]);
 
-        update(|prefs| prefs.provider_accounts[0].api_key = None).unwrap();
+        store
+            .update(|prefs| prefs.provider_accounts[0].api_key = None)
+            .unwrap();
 
         assert!(test_support::stored_values().is_empty());
-        restart(tmp);
+        let store = restart(store);
         assert_eq!(
-            account_key("minimax"),
+            account_key(&store, "minimax"),
             None,
             "a cleared key must not come back"
         );
@@ -180,41 +201,49 @@ fn clearing_a_key_deletes_the_stored_secret() {
 
 #[test]
 fn removing_an_account_deletes_its_stored_secret() {
-    with_temp_dir(|tmp| {
-        save(prefs_with(vec![
-            keyed_account("minimax", Some(KEY)),
-            keyed_account("custom", Some("sk-other-0003")),
-        ]))
-        .unwrap();
+    with_store(|store| {
+        store
+            .save(prefs_with(vec![
+                keyed_account("minimax", Some(KEY)),
+                keyed_account("custom", Some("sk-other-0003")),
+            ]))
+            .unwrap();
 
-        update(|prefs| prefs.provider_accounts.retain(|a| a.id != "minimax")).unwrap();
+        store
+            .update(|prefs| prefs.provider_accounts.retain(|a| a.id != "minimax"))
+            .unwrap();
 
         assert_eq!(
             test_support::stored_values(),
             vec!["sk-other-0003".to_string()]
         );
-        restart(tmp);
-        assert_eq!(account_key("minimax"), None);
-        assert_eq!(account_key("custom").as_deref(), Some("sk-other-0003"));
+        let store = restart(store);
+        assert_eq!(account_key(&store, "minimax"), None);
+        assert_eq!(
+            account_key(&store, "custom").as_deref(),
+            Some("sk-other-0003")
+        );
     });
 }
 
 #[test]
 fn a_key_present_in_the_file_wins_over_an_older_stored_secret() {
-    with_temp_dir(|tmp| {
-        save(prefs_with(vec![keyed_account("minimax", Some(KEY))])).unwrap();
+    with_store(|store| {
+        store
+            .save(prefs_with(vec![keyed_account("minimax", Some(KEY))]))
+            .unwrap();
 
         // The user pastes a new key straight into the file (or restores an
         // older file that still carries one): the file is the newer intent.
-        let path = tmp.join("preferences.json");
+        let path = store.profile_dir().join("preferences.json");
         let mut value: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         value["provider_accounts"][0]["api_key"] = serde_json::json!("sk-hand-edited-0004");
         std::fs::write(&path, value.to_string()).unwrap();
 
-        restart(tmp);
+        let store = restart(store);
         assert_eq!(
-            account_key("minimax").as_deref(),
+            account_key(&store, "minimax").as_deref(),
             Some("sk-hand-edited-0004")
         );
         assert!(
@@ -226,17 +255,23 @@ fn a_key_present_in_the_file_wins_over_an_older_stored_secret() {
 
 #[test]
 fn restoring_the_backup_rehydrates_keys_from_the_store() {
-    with_temp_dir(|tmp| {
-        save(prefs_with(vec![keyed_account("minimax", Some(KEY))])).unwrap();
-        std::fs::write(tmp.join("preferences.json"), b"{\"provider_accounts\": [").unwrap();
-        restart(tmp);
+    with_store(|store| {
+        store
+            .save(prefs_with(vec![keyed_account("minimax", Some(KEY))]))
+            .unwrap();
+        std::fs::write(
+            store.profile_dir().join("preferences.json"),
+            b"{\"provider_accounts\": [",
+        )
+        .unwrap();
+        let store = restart(store);
 
-        let outcome = restore_backup().unwrap();
+        let outcome = store.restore_backup().unwrap();
         assert_eq!(
             outcome.preferences.provider_accounts[0].api_key.as_deref(),
             Some(KEY)
         );
-        assert_eq!(account_key("minimax").as_deref(), Some(KEY));
+        assert_eq!(account_key(&store, "minimax").as_deref(), Some(KEY));
     });
 }
 
@@ -244,31 +279,35 @@ fn restoring_the_backup_rehydrates_keys_from_the_store() {
 fn dev_and_stable_profiles_do_not_share_stored_keys() {
     // The two profiles run side by side as the same OS user, so they share one
     // credential vault; the profile (the data-dir leaf, i.e. the bundle id)
-    // must be part of the entry name.
+    // must be part of the entry name. The namespace follows the store, so
+    // each profile's store addresses its own entries.
     let root = super::test_dir();
     let stable = root.join("com.alond.buildmesh");
     let dev = root.join("com.alond.buildmesh.dev");
     std::fs::create_dir_all(&stable).unwrap();
     std::fs::create_dir_all(&dev).unwrap();
 
-    init_for_tests(stable.clone());
-    save(prefs_with(vec![keyed_account("minimax", Some(KEY))])).unwrap();
+    let stable_store = PreferencesStore::new(stable.clone());
+    stable_store
+        .save(prefs_with(vec![keyed_account("minimax", Some(KEY))]))
+        .unwrap();
 
     // The dev profile has the same account id but no key of its own.
-    init_for_tests(dev.clone());
-    save(prefs_with(vec![keyed_account("minimax", None)])).unwrap();
-    restart(&dev);
+    let dev_store = PreferencesStore::new(dev.clone());
+    dev_store
+        .save(prefs_with(vec![keyed_account("minimax", None)]))
+        .unwrap();
+    let dev_store = restart(&dev_store);
     assert_eq!(
-        account_key("minimax"),
+        account_key(&dev_store, "minimax"),
         None,
         "dev must not read stable's key"
     );
 
     // Saving a keyless dev account must not have deleted stable's secret.
-    restart(&stable);
-    assert_eq!(account_key("minimax").as_deref(), Some(KEY));
+    let stable_store = restart(&stable_store);
+    assert_eq!(account_key(&stable_store, "minimax").as_deref(), Some(KEY));
 
-    super::super::storage::reset_for_tests();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -301,8 +340,8 @@ fn a_scrubbed_legacy_file_still_migrates_its_endpoint_into_a_pairing() {
     // ADR-0025 creates a pairing only for an account that has a key. Moving the
     // key out of the file must not change what that migration produces on the
     // next start, or the endpoint the user configured silently vanishes.
-    with_temp_dir(|tmp| {
-        let path = tmp.join("preferences.json");
+    with_store(|store| {
+        let path = store.profile_dir().join("preferences.json");
         std::fs::write(
             &path,
             serde_json::json!({
@@ -317,14 +356,14 @@ fn a_scrubbed_legacy_file_still_migrates_its_endpoint_into_a_pairing() {
         )
         .unwrap();
 
-        let first = load().unwrap();
+        let first = store.load().unwrap();
         assert!(
             !file_text(&path).contains(KEY),
             "the key must have left the file"
         );
 
-        restart(tmp);
-        let second = load().unwrap();
+        let store = restart(store);
+        let second = store.load().unwrap();
         assert_eq!(second.provider_pairings, first.provider_pairings);
         assert!(
             second
@@ -334,15 +373,15 @@ fn a_scrubbed_legacy_file_still_migrates_its_endpoint_into_a_pairing() {
             "the keyed account's endpoint must still become a pairing, got {:?}",
             second.provider_pairings
         );
-        assert_eq!(account_key("minimax").as_deref(), Some(KEY));
+        assert_eq!(account_key(&store, "minimax").as_deref(), Some(KEY));
     });
 }
 
 #[test]
 fn a_scrubbed_kimi_companion_still_hands_its_key_to_the_first_class_row() {
-    with_temp_dir(|tmp| {
+    with_store(|store| {
         std::fs::write(
-            tmp.join("preferences.json"),
+            store.profile_dir().join("preferences.json"),
             serde_json::json!({
                 "provider_accounts": [{
                     "id": "kimi-via-claude", "name": "Kimi", "enabled": true,
@@ -354,16 +393,16 @@ fn a_scrubbed_kimi_companion_still_hands_its_key_to_the_first_class_row() {
         )
         .unwrap();
 
-        assert_eq!(account_key("kimi").as_deref(), Some(KEY));
-        restart(tmp);
-        assert_eq!(account_key("kimi").as_deref(), Some(KEY));
+        assert_eq!(account_key(store, "kimi").as_deref(), Some(KEY));
+        let store = restart(store);
+        assert_eq!(account_key(&store, "kimi").as_deref(), Some(KEY));
     });
 }
 
 #[test]
 fn a_refused_migration_leaves_the_plaintext_file_working() {
-    with_temp_dir(|tmp| {
-        let path = tmp.join("preferences.json");
+    with_store(|store| {
+        let path = store.profile_dir().join("preferences.json");
         let legacy = serde_json::json!({
             "provider_accounts": [{
                 "id": "minimax", "name": "MiniMax", "enabled": true,
@@ -374,7 +413,7 @@ fn a_refused_migration_leaves_the_plaintext_file_working() {
         std::fs::write(&path, &legacy).unwrap();
 
         test_support::fail_writes(true);
-        assert_eq!(account_key("minimax").as_deref(), Some(KEY));
+        assert_eq!(account_key(store, "minimax").as_deref(), Some(KEY));
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             legacy,
@@ -383,8 +422,8 @@ fn a_refused_migration_leaves_the_plaintext_file_working() {
 
         // Next start, the store is back: the migration completes.
         test_support::fail_writes(false);
-        restart(tmp);
-        assert_eq!(account_key("minimax").as_deref(), Some(KEY));
+        let store = restart(store);
+        assert_eq!(account_key(&store, "minimax").as_deref(), Some(KEY));
         assert!(!file_text(&path).contains(KEY));
     });
 }
@@ -393,17 +432,19 @@ fn a_refused_migration_leaves_the_plaintext_file_working() {
 fn a_plaintext_backup_is_scrubbed_even_when_the_primary_file_is_already_clean() {
     // The primary can be clean while the backup is not (an earlier scrub of the
     // backup failed, or the backup was restored from an older build's copy).
-    with_temp_dir(|tmp| {
-        save(prefs_with(vec![keyed_account("minimax", Some(KEY))])).unwrap();
-        let backup = tmp.join("preferences.json.bak");
+    with_store(|store| {
+        store
+            .save(prefs_with(vec![keyed_account("minimax", Some(KEY))]))
+            .unwrap();
+        let backup = store.profile_dir().join("preferences.json.bak");
         let mut value: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&backup).unwrap()).unwrap();
         value["provider_accounts"][0]["api_key"] = serde_json::json!(KEY);
         std::fs::write(&backup, value.to_string()).unwrap();
-        assert!(!file_text(&tmp.join("preferences.json")).contains(KEY));
+        assert!(!file_text(&store.profile_dir().join("preferences.json")).contains(KEY));
 
-        restart(tmp);
-        assert_eq!(account_key("minimax").as_deref(), Some(KEY));
+        let store = restart(store);
+        assert_eq!(account_key(&store, "minimax").as_deref(), Some(KEY));
 
         assert!(
             !file_text(&backup).contains(KEY),
@@ -414,25 +455,29 @@ fn a_plaintext_backup_is_scrubbed_even_when_the_primary_file_is_already_clean() 
 
 #[test]
 fn a_stale_key_in_the_backup_never_overwrites_the_newer_stored_key() {
-    with_temp_dir(|tmp| {
-        save(prefs_with(vec![keyed_account(
-            "minimax",
-            Some("sk-NEW-0005"),
-        )]))
-        .unwrap();
-        let backup = tmp.join("preferences.json.bak");
+    with_store(|store| {
+        store
+            .save(prefs_with(vec![keyed_account(
+                "minimax",
+                Some("sk-NEW-0005"),
+            )]))
+            .unwrap();
+        let backup = store.profile_dir().join("preferences.json.bak");
         let mut value: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&backup).unwrap()).unwrap();
         value["provider_accounts"][0]["api_key"] = serde_json::json!("sk-STALE-0006");
         std::fs::write(&backup, value.to_string()).unwrap();
 
-        restart(tmp);
-        assert_eq!(account_key("minimax").as_deref(), Some("sk-NEW-0005"));
+        let store = restart(store);
+        assert_eq!(
+            account_key(&store, "minimax").as_deref(),
+            Some("sk-NEW-0005")
+        );
         assert!(!file_text(&backup).contains("sk-STALE-0006"));
 
-        restart(tmp);
+        let store = restart(&store);
         assert_eq!(
-            account_key("minimax").as_deref(),
+            account_key(&store, "minimax").as_deref(),
             Some("sk-NEW-0005"),
             "scrubbing an old backup replaced the current key"
         );
@@ -455,18 +500,19 @@ fn a_stale_key_in_the_backup_never_overwrites_the_newer_stored_key() {
 /// honest answer — the notice should name each account whose key is exposed.
 #[test]
 fn only_the_accounts_whose_key_is_on_disk_are_reported() {
-    with_temp_dir(|tmp| {
+    with_store(|store| {
         // Healthy: the store accepts both keys, so nothing is on disk and
         // Settings must show no notice at all. `anthropic` is a keyless
         // self-auth built-in and must never appear.
-        save(prefs_with(vec![
-            keyed_account("minimax", Some(KEY)),
-            keyed_account("custom", Some("sk-CUSTOM-0007")),
-        ]))
-        .unwrap();
-        restart(tmp);
+        store
+            .save(prefs_with(vec![
+                keyed_account("minimax", Some(KEY)),
+                keyed_account("custom", Some("sk-CUSTOM-0007")),
+            ]))
+            .unwrap();
+        let store = restart(store);
         assert_eq!(
-            super::super::resolver::provider_accounts_with_keys_in_preferences(),
+            store.provider_accounts_with_keys_in_preferences(),
             Vec::<String>::new(),
             "a key the store accepted is not in preferences.json, so no notice is due"
         );
@@ -474,22 +520,23 @@ fn only_the_accounts_whose_key_is_on_disk_are_reported() {
         // Degraded: the store refuses, so the next save strands that key on
         // disk. The file is the evidence, not the in-memory struct.
         test_support::fail_writes(true);
-        update(|prefs| {
-            let custom = prefs
-                .provider_accounts
-                .iter_mut()
-                .find(|a| a.id == "custom")
-                .expect("custom account");
-            custom.api_key = Some("sk-CUSTOM-NEW-0008".to_string());
-        })
-        .unwrap();
-        restart(tmp);
+        store
+            .update(|prefs| {
+                let custom = prefs
+                    .provider_accounts
+                    .iter_mut()
+                    .find(|a| a.id == "custom")
+                    .expect("custom account");
+                custom.api_key = Some("sk-CUSTOM-NEW-0008".to_string());
+            })
+            .unwrap();
+        let store = restart(&store);
         assert!(
-            file_text(&tmp.join("preferences.json")).contains("sk-CUSTOM-NEW-0008"),
+            file_text(&store.profile_dir().join("preferences.json")).contains("sk-CUSTOM-NEW-0008"),
             "a refused key must stay on disk so it is not lost"
         );
         assert_eq!(
-            super::super::resolver::provider_accounts_with_keys_in_preferences(),
+            store.provider_accounts_with_keys_in_preferences(),
             vec!["custom".to_string(), "minimax".to_string()],
             "both keyed accounts are exposed by a store that refuses writes"
         );
@@ -497,11 +544,14 @@ fn only_the_accounts_whose_key_is_on_disk_are_reported() {
         // Recovered: the store accepts the next write, every key leaves the
         // file, and the notice must go away on its own — it must not latch.
         test_support::fail_writes(false);
-        update(|prefs| prefs.default_provider = Some("minimax".into())).unwrap();
-        restart(tmp);
-        assert!(!file_text(&tmp.join("preferences.json")).contains("sk-CUSTOM-NEW-0008"));
+        store
+            .update(|prefs| prefs.default_provider = Some("minimax".into()))
+            .unwrap();
+        let store = restart(&store);
+        assert!(!file_text(&store.profile_dir().join("preferences.json"))
+            .contains("sk-CUSTOM-NEW-0008"));
         assert_eq!(
-            super::super::resolver::provider_accounts_with_keys_in_preferences(),
+            store.provider_accounts_with_keys_in_preferences(),
             Vec::<String>::new(),
             "once the keys are stored, the notice must clear"
         );
@@ -518,9 +568,11 @@ fn only_the_accounts_whose_key_is_on_disk_are_reported() {
 /// before probing) and it is `load` that runs the backup scrub.
 #[test]
 fn a_key_left_only_in_the_backup_is_still_reported() {
-    with_temp_dir(|tmp| {
-        save(prefs_with(vec![keyed_account("minimax", Some(KEY))])).unwrap();
-        let backup = tmp.join("preferences.json.bak");
+    with_store(|store| {
+        store
+            .save(prefs_with(vec![keyed_account("minimax", Some(KEY))]))
+            .unwrap();
+        let backup = store.profile_dir().join("preferences.json.bak");
 
         let put_key_in_backup = || {
             let mut value: serde_json::Value =
@@ -530,10 +582,10 @@ fn a_key_left_only_in_the_backup_is_still_reported() {
         };
 
         put_key_in_backup();
-        restart(tmp);
-        load().expect("load");
+        let store = restart(store);
+        store.load().expect("load");
         assert_eq!(
-            super::super::resolver::provider_accounts_with_keys_in_preferences(),
+            store.provider_accounts_with_keys_in_preferences(),
             Vec::<String>::new(),
             "the load-time scrub cleared the backup, so nothing is on disk"
         );
@@ -543,14 +595,16 @@ fn a_key_left_only_in_the_backup_is_still_reported() {
         // an older build's backup still carries a plaintext copy. `load`
         // tries to move it out, the store refuses, so it stays on disk — and
         // the notice must appear rather than hide the exposure.
-        update(|prefs| prefs.provider_accounts[0].api_key = None).unwrap();
+        store
+            .update(|prefs| prefs.provider_accounts[0].api_key = None)
+            .unwrap();
         assert!(test_support::stored_values().is_empty());
         put_key_in_backup();
         test_support::fail_writes(true);
-        restart(tmp);
-        load().expect("load");
+        let store = restart(&store);
+        store.load().expect("load");
         assert_eq!(
-            super::super::resolver::provider_accounts_with_keys_in_preferences(),
+            store.provider_accounts_with_keys_in_preferences(),
             vec!["minimax".to_string()],
             "a key still sitting in the backup must be reported"
         );
@@ -564,23 +618,25 @@ fn a_key_left_only_in_the_backup_is_still_reported() {
 /// account's own (stored) key is what the app actually uses.
 #[test]
 fn the_deprecated_flat_key_is_reported_against_the_minimax_account() {
-    with_temp_dir(|tmp| {
+    with_store(|store| {
         let mut prefs = prefs_with(vec![]);
         prefs.minimax_api_key = Some(LEGACY_KEY.to_string());
-        save(prefs).unwrap();
+        store.save(prefs).unwrap();
 
         test_support::fail_writes(true);
-        update(|prefs| prefs.default_provider = Some("minimax".into())).unwrap();
-        restart(tmp);
+        store
+            .update(|prefs| prefs.default_provider = Some("minimax".into()))
+            .unwrap();
+        let store = restart(store);
         // `load` runs the scrub, which the refused store cannot perform — so
         // this is the production ordering, not just a cache reset.
-        load().expect("load");
+        store.load().expect("load");
         assert!(
-            file_text(&tmp.join("preferences.json")).contains(LEGACY_KEY),
+            file_text(&store.profile_dir().join("preferences.json")).contains(LEGACY_KEY),
             "a refused legacy key must stay on disk"
         );
         assert_eq!(
-            super::super::resolver::provider_accounts_with_keys_in_preferences(),
+            store.provider_accounts_with_keys_in_preferences(),
             vec!["minimax".to_string()],
             "the legacy flat key is reported against the account it feeds"
         );
@@ -588,10 +644,10 @@ fn the_deprecated_flat_key_is_reported_against_the_minimax_account() {
         // Recovered: the scrub moves it out and the notice clears. This also
         // pins that no stale `true` survives the state change.
         test_support::fail_writes(false);
-        restart(tmp);
-        load().expect("load");
+        let store = restart(&store);
+        store.load().expect("load");
         assert_eq!(
-            super::super::resolver::provider_accounts_with_keys_in_preferences(),
+            store.provider_accounts_with_keys_in_preferences(),
             Vec::<String>::new(),
             "the scrub clears the legacy key once the store is usable again"
         );

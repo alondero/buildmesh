@@ -1,3 +1,4 @@
+import type { RegenerateSelection } from '../../lib/regenerate';
 import { memo, useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import type { AgentNode } from '../../stores/agentNodeStore';
@@ -20,6 +21,9 @@ import { addToast } from '../../stores/toastStore';
 import { formatError } from '../../lib/errorUtils';
 import { getCircuitNodePresentation, hasActiveCircuitOwnership } from '../../lib/circuitNodePresentation';
 import { NodeStatusGlyph } from '../shared/NodeStatusGlyph';
+import { NodeGlanceHoverCard } from '../shared/NodeGlanceCard';
+import { useNodeGlance } from '../../hooks/useNodeGlance';
+import { getNodeGlance } from '../../lib/tauri/agentNode';
 
 // Issue #776 — Regenerate is the entry point for the new "restart this
 // node" flow wired up in ticket 03 of #774. We disable it (rather than
@@ -77,6 +81,10 @@ function areNodeItemPropsEqual(previous: NodeItemProps, next: NodeItemProps): bo
 }
 
 export const NodeItem = memo(NodeItemView, areNodeItemPropsEqual);
+
+/** Hover dwell before a row's Node Glance opens, and grace before it closes. */
+const GLANCE_OPEN_DELAY_MS = 500;
+const GLANCE_CLOSE_DELAY_MS = 150;
 
 function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNode }: NodeItemProps) {
   const config = getNodeStatusConfig(node);
@@ -196,12 +204,26 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
   // provider and close the menu. The disabled gate mirrors the trigger
   // so a programmatic `.click()` can't bypass it; the confirm state
   // machine and IPC dispatch live in `useRegenerateAction`.
-  const pickProvider = (providerId: string, providerLabel: string) => {
+  const pickProvider = (providerId: string, providerLabel: string, selection?: RegenerateSelection) => {
     if (isRegenerateDisabled || !hasRegenerateTargets) return;
     closeContextMenu();
-    regen.pickRegenerateProvider(providerId, providerLabel);
+    regen.pickRegenerateProvider(providerId, providerLabel, selection);
   };
 
+  // Node Glance: hovering a row for a moment shows what the agent is doing
+  // without opening its terminal. Nothing is read until the card opens.
+  const [glanceOpen, setGlanceOpen] = useState(false);
+  const glanceTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const glance = useNodeGlance(node.id, glanceOpen, getNodeGlance);
+  const scheduleGlance = (open: boolean) => {
+    clearTimeout(glanceTimer.current);
+    glanceTimer.current = setTimeout(() => setGlanceOpen(open), open ? GLANCE_OPEN_DELAY_MS : GLANCE_CLOSE_DELAY_MS);
+  };
+  const closeGlance = () => {
+    clearTimeout(glanceTimer.current);
+    setGlanceOpen(false);
+  };
+  useEffect(() => () => clearTimeout(glanceTimer.current), []);
   // Issue #1748 — bind the row's ids here, inside the body that already
   // executes per render, so `MeshItem` can pass the id-keyed handlers
   // straight through without allocating per-row closures of its own.
@@ -266,6 +288,8 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
         closeContextMenu();
         return;
       }
+      // The shared Spawn Menu owns vertical navigation inside its picker.
+      if (inSubmenu && e.key !== 'ArrowLeft') return;
       // Issue #774 — submenu navigation via the shared `useSubmenu`
       // hook. ArrowRight on a submenu trigger opens the picker and
       // moves focus to the first provider (deterministic post-commit
@@ -403,9 +427,13 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
       // the menu can return focus to its trigger on Escape, without
       // putting the row in the natural Tab order.
       tabIndex={-1}
-      onClick={isClosing ? undefined : handleSelect}
+      onClick={isClosing ? undefined : () => { closeGlance(); handleSelect(); }}
+      onPointerEnter={(event) => { if (event.pointerType === 'mouse') scheduleGlance(true); }}
+      onPointerLeave={() => scheduleGlance(false)}
+      aria-describedby={glanceOpen ? `node-glance-${node.id}` : undefined}
       onContextMenu={(e) => {
         e.preventDefault();
+        closeGlance();
         setContextMenu({ x: e.clientX, y: e.clientY });
       }}
       aria-busy={isClosing}
@@ -649,8 +677,6 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
             {regenSubmenu.submenuOpen && (
               <div
                 ref={regenSubmenu.submenuRef}
-                role="menu"
-                aria-label="Pick target provider"
                 data-testid="regenerate-submenu"
                 // Issue #814 — same scoped attribute as the parent menu
                 // so `useClickOutside` treats clicks inside the
@@ -666,6 +692,8 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
                 <RegenerateProviderMenu
                   providers={providerList ?? []}
                   currentProviderId={node.launch_configuration?.id ?? node.provider}
+                  currentConfiguration={node.launch_configuration}
+                  onClose={closeContextMenu}
                   onPick={pickProvider}
                 />
               </div>
@@ -725,6 +753,17 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
           </button>
         </div>,
         document.body,
+      )}
+
+      {glanceOpen && !contextMenuOpen && triggerRef.current && (
+        <NodeGlanceHoverCard
+          anchor={triggerRef.current}
+          id={`node-glance-${node.id}`}
+          name={node.name}
+          state={glance}
+          onPointerEnter={() => clearTimeout(glanceTimer.current)}
+          onPointerLeave={() => scheduleGlance(false)}
+        />
       )}
 
       {/* Issue #778 — confirmation dialog for running-node Regenerate.

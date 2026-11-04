@@ -139,6 +139,7 @@ pub struct AgentProcess {
     /// reader's EOF cannot delete a replacement process (issue #1531).
     /// `0` in a struct literal is unassigned; `insert` overwrites it.
     pub generation: u64,
+    pub(crate) delivery_output: Arc<crate::agent::prompt_delivery::OutputObservation>,
 }
 
 #[path = "terminal_input.rs"]
@@ -186,7 +187,7 @@ impl AgentProcess {
             child: Arc::new(Mutex::new(child)),
             writer_tx: Mutex::new(Some(writer_tx)),
             queue,
-            input_version: std::sync::atomic::AtomicU64::new(0),
+            input_version: std::sync::atomic::AtomicU64::new(InputStamp::INITIAL_VERSION),
             last_submit_ms: std::sync::atomic::AtomicI64::new(0),
             retired: AtomicBool::new(false),
             input_decoder: Mutex::new(TerminalInput::default()),
@@ -201,6 +202,7 @@ impl AgentProcess {
             spawn_start,
             first_user_input_logged: AtomicBool::new(false),
             generation: 0,
+            delivery_output: Arc::new(Default::default()),
         }
     }
 
@@ -214,7 +216,7 @@ impl AgentProcess {
             .map(|(_, activity)| activity)
     }
 
-    fn input_stamp_result(&self) -> Result<InputStamp, InputUnavailable> {
+    pub(crate) fn input_stamp_result(&self) -> Result<InputStamp, InputUnavailable> {
         let _guard = self.writer_tx.lock().unwrap();
         let input = self.input_decoder.lock().unwrap();
         if input.bracketed_paste {
@@ -450,7 +452,7 @@ impl AgentProcess {
 /// [`crate::agent::session_lifecycle::testing`]. They live in their own
 /// `cfg(test)` module rather than inside `mod tests` for two reasons: the
 /// capture seam swaps [`AgentProcess::writer_tx`], a private field, and
-/// `circuit::delivery`'s injected-registry tests need the same fixture.
+/// `agent::prompt_delivery`'s injected-registry tests need the same fixture.
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
@@ -637,6 +639,8 @@ pub async fn debug_crash_snapshot() -> CrashSnapshot {
 }
 
 #[cfg(test)]
+// allow-test-in-production: this inline handover-command suite predates the sibling-test-file
+// rule; relocating the pre-existing suite is out of scope for the issue #1482 migration.
 mod handover_command_tests {
     use super::*;
 
@@ -644,7 +648,6 @@ mod handover_command_tests {
     async fn existing_handover_validates_then_stages_and_discards_a_rejected_file() {
         let database = crate::db::test_support::isolated();
         let root = tempfile::tempdir().unwrap();
-        crate::preferences::init_for_tests(root.path().to_path_buf());
         let mesh =
             crate::db::create_mesh("existing handover", "C:/existing-handover-fixture").unwrap();
         let node = crate::db::create_agent_node(crate::db::NewAgentNode {
@@ -724,7 +727,6 @@ mod handover_command_tests {
             !files[0].exists(),
             "a rejected pointer must not leave its file"
         );
-        crate::preferences::reset_for_tests();
     }
 }
 

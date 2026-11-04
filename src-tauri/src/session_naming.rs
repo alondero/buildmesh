@@ -26,6 +26,9 @@ pub use engine::{cleanup, on_turn, reset_buffers};
 // re-exported separately so the gate on the function carries to this list.
 #[cfg(any(debug_assertions, feature = "dev-tools"))]
 pub use engine::buffers_size_bytes;
+#[cfg(test)]
+// allow-test-in-production: the store-scoped twin is reached from the suite that owns a store.
+pub(crate) use engine::naming_backend_env_from;
 pub(crate) use engine::{naming_backend_env, resolve_claude_binary_in, ClaudeSearch, ANSI_ESCAPE};
 pub use slug::{
     agent_reviewer_node_name, disambiguate_node_name, is_default_name, issue_node_name,

@@ -256,6 +256,19 @@ pub(crate) fn tls_dir() -> Option<std::path::PathBuf> {
     crate::preferences::app_data_dir().map(|dir| dir.join("tls"))
 }
 
+/// [`tls_dir`] against an explicit store.
+///
+/// The caller owns the store, so the certificates this names live under *that*
+/// profile directory (issue #1482).
+#[cfg(test)]
+// allow-test-in-production: the store-scoped twin of `tls_dir`, reached from the sibling
+// suite that owns a store.
+pub(crate) fn tls_dir_from(
+    store: &crate::preferences::PreferencesStore,
+) -> Option<std::path::PathBuf> {
+    Some(store.profile_dir().join("tls"))
+}
+
 pub(crate) fn app_identifier() -> Option<String> {
     app_handle().map(|app| app.config().identifier.clone())
 }
@@ -486,6 +499,8 @@ pub(crate) fn local_interface_ips() -> Vec<IpAddr> {
 }
 
 #[cfg(test)]
+// allow-test-in-production: this inline suite predates the sibling-test-file rule; the
+// issue #1482 migration edits it in place, and relocating the pre-existing suite is out of scope.
 mod tests {
     use super::*;
 
@@ -616,10 +631,11 @@ mod tests {
                 .expect("clock")
                 .as_nanos()
         ));
-        crate::preferences::init_for_tests(scratch.clone());
-        let dir = tls_dir().expect("installed profile yields a tls directory");
+        // The store is the test's own: there is no ambient profile to install
+        // and swap (issue #1482).
+        let store = crate::preferences::PreferencesStore::new(scratch.clone());
+        let dir = tls_dir_from(&store).expect("the store's profile yields a tls directory");
         assert_eq!(dir, scratch.join("tls"));
-        crate::preferences::reset_for_tests();
         assert!(
             tls_dir().is_none(),
             "an unset profile must not fall back to another folder"

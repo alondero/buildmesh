@@ -163,3 +163,93 @@ fn file_only_handoff_waits_for_a_finished_turn_and_a_valid_result_line() {
         Some(crate::circuit::observation::CircuitObservationBlocker::InputDraft)
     );
 }
+
+/// A file-only continuation must be judged against the profile the
+/// classification read (issue #1482).
+///
+/// The owed result file is found through the caller's store, so the revision
+/// the freshness check compares against must come from that store too. Read
+/// from a profile that cannot see the marker, the check finds no revision, and
+/// a fresh `Continue` is downgraded to `Working` — the circuit then does not
+/// recognise the continuation at all.
+#[test]
+fn a_file_only_continuation_is_judged_against_the_callers_profile() {
+    use crate::circuit::evaluator::Classification;
+    use crate::services::circuit_worker::observe_parity_tests::view;
+    use crate::services::circuit_worker::turn_classify::{observe_turn, ReviewerReadiness};
+
+    let directory = tempfile::tempdir().unwrap();
+    let store = crate::preferences::PreferencesStore::new(directory.path().to_path_buf());
+    // A live stand-in, so the freshness observation sees a running agent.
+    let agent_id = -721_999;
+    crate::agent::process::testing::insert_standin(
+        &crate::agent::process::PROCESS_REGISTRY,
+        agent_id,
+    );
+    let view = view(
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        RunState::Running,
+        StepStatus::Running,
+        Some(agent_id),
+    );
+    let agent = crate::models::AgentNode {
+        id: agent_id,
+        provider: "freebuff".into(),
+        status: SessionStatus::Ready,
+        cli_session_id: Some("freebuff-session".into()),
+        ..Default::default()
+    };
+    // The turn marker the caller's profile holds: the result file the turn
+    // owes lives under it.
+    crate::circuit::handoff::set_agent_turn_from(
+        &store,
+        view.run_id,
+        agent.id,
+        Some(&crate::circuit::handoff::HandoffTurn {
+            node_id: "step".into(),
+            attempt: 1,
+        }),
+    );
+    let result = crate::circuit::handoff::expected_result_from(&store, view.run_id, agent.id)
+        .expect("the marker names the result file the turn owes");
+    std::fs::write(&result, "The work is not done yet.\n").unwrap();
+    let (candidate, missing) = readiness::prepare_result_handoff(
+        &view,
+        "step",
+        &agent,
+        Some("100:ready"),
+        Ok("input-1".into()),
+        &result,
+        chrono::Utc::now().timestamp_millis(),
+    )
+    .unwrap()
+    .expect("a yielded agent binds the result file it owes")
+    .with_result_file(&result, &view, view.step("step").unwrap())
+    .unwrap()
+    .expect("the bound result file is the candidate's report");
+    assert!(!missing);
+
+    // The production freshness observation reads the caller's profile, so it
+    // finds the revision the candidate is fenced to and the continuation
+    // stays fresh.
+    let turn = candidate.into_classified_turn(
+        &view,
+        "step",
+        Some(Classification::Continue),
+        ReviewerReadiness::Reportable,
+        Some("100:ready".into()),
+        || observe_turn(Some(&store), view.run_id, &agent, agent_id),
+    );
+    assert_eq!(
+        turn.classification,
+        Some(Classification::Continue),
+        "a fresh file-only continuation must not be downgraded"
+    );
+    assert!(
+        turn.continuation.is_some(),
+        "the continuation must reach the agent"
+    );
+    crate::agent::process::PROCESS_REGISTRY.kill_session(agent_id);
+}

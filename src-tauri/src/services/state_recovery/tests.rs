@@ -680,7 +680,11 @@ fn keys_held_in_the_credential_store_travel_with_a_full_fidelity_copy_only() {
         r#"{"provider_accounts": [{"id": "minimax", "name": "MiniMax", "enabled": true,
             "billing_mode": "pay_as_you_go", "api_key": null}]}"#,
     );
-    crate::preferences::secrets::test_support::seed_account_secret("minimax", "sk-vault-SECRET");
+    crate::preferences::secrets::test_support::seed_account_secret(
+        &crate::preferences::credential_profile(),
+        "minimax",
+        "sk-vault-SECRET",
+    );
 
     let full = fixture.root.join("full.bmsnap");
     export_to_path(&fixture.root, &full, false).unwrap();

@@ -43,15 +43,16 @@ pub(crate) fn list_queued_circuit_runs_inner(
         ))
     })?;
     let mut queued: Vec<(AutopilotCircuitRun, String)> = rows.collect::<SqlResult<_>>()?;
-    // The Probe reads the bulky half of a run's context out of its
-    // `context_json` — the issue body it searches by, the review report it
-    // shows — so the projection rejoins the two halves before the run leaves
-    // the database layer.
+    // The Probe reads the run's whole context out of its `context_json` —
+    // the issue body it searches by, the review report it shows — so the
+    // projection serves the joined context. The bulky half is read in one
+    // query per chunk of runs, so the queue stays bounded whatever the
+    // number of pending runs.
     let ids: Vec<i64> = queued.iter().map(|(run, _)| run.id).collect();
-    let stored = super::artifacts::load_values_for_runs(db, &ids)?;
+    let served = super::context_store::load_served_json_for_runs(db, &ids)?;
     for (run, _) in queued.iter_mut() {
-        if let Some(values) = stored.get(&run.id) {
-            run.context_json = super::artifacts::join_context_json(&run.context_json, values);
+        if let Some(context_json) = served.get(&run.id) {
+            run.context_json = context_json.clone();
         }
     }
     Ok(queued)

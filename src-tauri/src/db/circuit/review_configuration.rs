@@ -2,10 +2,42 @@
 use crate::{circuit::model::CircuitNodeKind, db::DbError};
 
 pub fn reconfigure_reviewers(node_ids: &[i64], selection: &str) -> Result<(), DbError> {
+    match crate::preferences::default_store() {
+        Some(store) => reconfigure_reviewers_from(&store, node_ids, selection),
+        // A build with **no** store installed (a test that never installed one)
+        // reads the code-defined defaults, which is what the per-test helpers
+        // around this one have always done (issue #1482).
+        None => reconfigure_reviewers_with_preferences(
+            node_ids,
+            selection,
+            &crate::preferences::AppPreferences::default(),
+        ),
+    }
+}
+
+/// [`reconfigure_reviewers`] against an explicit store.
+///
+/// The caller owns the store, so the launch configuration this reconfiguration
+/// resolves is the one the caller set up (issue #1482).
+pub fn reconfigure_reviewers_from(
+    store: &crate::preferences::PreferencesStore,
+    node_ids: &[i64],
+    selection: &str,
+) -> Result<(), DbError> {
     crate::circuit::compatibility::validate_reviewer_provider_id(selection)?;
-    let prefs = crate::preferences::load()?;
+    let prefs = store.load()?;
+    reconfigure_reviewers_with_preferences(node_ids, selection, &prefs)
+}
+
+/// The reconfiguration itself, with the preferences already resolved.
+fn reconfigure_reviewers_with_preferences(
+    node_ids: &[i64],
+    selection: &str,
+    prefs: &crate::preferences::AppPreferences,
+) -> Result<(), DbError> {
+    crate::circuit::compatibility::validate_reviewer_provider_id(selection)?;
     let plan =
-        crate::preferences::launch_configurations::resolve(&prefs, selection, &Default::default())?;
+        crate::preferences::launch_configurations::resolve(prefs, selection, &Default::default())?;
     let snapshot =
         serde_json::to_string(&crate::preferences::launch_configurations::snapshot(plan))?;
     let mut db = crate::db::write_conn();
@@ -30,7 +62,10 @@ fn reconfigure_locked(
             .ok_or_else(|| DbError::not_found("Review run disappeared"))?;
         let graph = super::evidence::run_graph(&tx, run_id)?;
         let steps = super::ledger::list_circuit_run_steps_inner(&tx, run_id)?;
-        let mut context = super::artifacts::load_context(&tx, run_id)?;
+        // The launch plan and the provider are the only values that change.
+        // The rest of the run's context is left alone, so an operator's
+        // edit never rewrites what the worker holds.
+        let mut mutation = super::context_store::ContextMutation::new();
         let mut changed = false;
         for gate in &graph.nodes {
             let CircuitNodeKind::ReviewVerdict {
@@ -42,7 +77,7 @@ fn reconfigure_locked(
             if steps.iter().any(|step| step.node_id == *target) {
                 return Err(DbError::conflict(format!("Node {node_id}'s reviewer already started. Start a fresh review to change its Launch Configuration.")));
             }
-            context.set(&format!("review.launch.{target}"), snapshot.to_owned());
+            mutation.put(format!("review.launch.{target}"), snapshot.to_owned());
             changed = true;
         }
         if !changed {
@@ -50,9 +85,9 @@ fn reconfigure_locked(
                 "Node {node_id}'s circuit has no reviewer"
             )));
         }
-        context.set("review.provider", selection);
-        let context_json = super::artifacts::write_context(&tx, run_id, &context.to_json()?)?;
-        tx.execute("UPDATE autopilot_circuit_runs SET context_json=?2, updated_at=datetime('now') WHERE id=?1", rusqlite::params![run_id, context_json])?;
+        mutation.put("review.provider", selection);
+        let applied = super::context_store::apply_mutation(&tx, run_id, &mutation)?;
+        tx.execute("UPDATE autopilot_circuit_runs SET context_json=?2, updated_at=datetime('now') WHERE id=?1", rusqlite::params![run_id, applied.column_json()])?;
         super::evidence::append_history(
             &tx,
             super::evidence::HistoryEvent {

@@ -37,7 +37,7 @@ pub(crate) fn prepare(
     app_data_dir: Option<&Path>,
 ) -> Result<PreparedHandover, String> {
     if provider != Provider::Codex
-        || text.chars().count() <= crate::circuit::delivery::VISIBLE_PASTE_TEXT_LIMIT
+        || text.chars().count() <= crate::agent::prompt_delivery::VISIBLE_PASTE_TEXT_LIMIT
     {
         return Ok(PreparedHandover {
             prompt: text.to_string(),
@@ -104,6 +104,8 @@ pub(crate) fn remove_node_files(node_id: i64, app_data_dir: Option<&Path>) {
 }
 
 #[cfg(test)]
+// allow-test-in-production: this inline handover suite predates the sibling-test-file rule;
+// relocating the pre-existing suite is out of scope for the issue #1482 migration.
 mod tests {
     use super::*;
     use crate::models::EnvType;
@@ -112,6 +114,7 @@ mod tests {
 
     struct Fixture {
         root: tempfile::TempDir,
+        store: crate::preferences::PreferencesStore,
         node: AgentNode,
         _db: crate::db::test_support::IsolatedDbGuard,
     }
@@ -119,8 +122,11 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             let db = crate::db::test_support::isolated();
+            // The handover path takes the node directory as an argument, so the
+            // fixture owns that directory directly — and the store over it, so
+            // the delete path can be handed the same profile (issue #1482).
             let root = tempfile::tempdir().unwrap();
-            crate::preferences::init_for_tests(root.path().to_path_buf());
+            let store = crate::preferences::PreferencesStore::new(root.path().to_path_buf());
             let mesh = crate::db::create_mesh("handover", "C:/handover-fixture").unwrap();
             let node = crate::db::create_agent_node(crate::db::NewAgentNode {
                 mesh_id: mesh.id,
@@ -142,6 +148,7 @@ mod tests {
             .unwrap();
             Self {
                 root,
+                store,
                 node,
                 _db: db,
             }
@@ -152,12 +159,6 @@ mod tests {
                 .unwrap()
                 .map(|entry| entry.unwrap().path())
                 .collect()
-        }
-    }
-
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            crate::preferences::reset_for_tests();
         }
     }
 
@@ -283,7 +284,6 @@ mod tests {
     #[test]
     fn missing_app_data_prevents_delivery() {
         let fixture = Fixture::new();
-        crate::preferences::reset_for_tests();
         let error = prepare(
             &fixture.node,
             Provider::Codex,
@@ -351,7 +351,7 @@ mod tests {
         .unwrap();
         crate::agent::node_teardown::release(fixture.node.id);
         assert_eq!(fixture.files().len(), 1);
-        crate::services::agent_node::delete(fixture.node.id, false).unwrap();
+        crate::services::agent_node::delete_from(&fixture.store, fixture.node.id, false).unwrap();
         assert!(!node_dir(fixture.root.path(), fixture.node.id).exists());
     }
 
@@ -365,7 +365,7 @@ mod tests {
             Some(fixture.root.path()),
         )
         .unwrap();
-        crate::services::agent_node::delete(fixture.node.id, false).unwrap();
+        crate::services::agent_node::delete_from(&fixture.store, fixture.node.id, false).unwrap();
         let error = prepare(
             &fixture.node,
             Provider::Codex,

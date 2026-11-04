@@ -1,5 +1,6 @@
 use super::*;
 use crate::circuit::{
+    context::CircuitContext,
     model::CircuitGraph,
     stepper::{RunState, TransitionFence},
 };
@@ -69,7 +70,9 @@ fn editing_allowance_preserves_in_flight_work_and_blueprint_and_fences_stale_wor
         &mut db,
         1,
         Some("failed"),
-        "{}",
+        &crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole("{}")
+        ),
         &[],
         super::super::evidence::EvidenceWrite {
             expected: Some(&stale),
@@ -167,6 +170,28 @@ fn probe_and_overview_use_pinned_allowance_even_when_blueprint_loses_its_review_
             .unwrap()
             .review_round_limit,
         Some(9)
+    );
+}
+
+#[test]
+fn a_context_that_cannot_be_read_cannot_be_configured() {
+    // A payload that is not a flat map has no review budget to read. The
+    // selector reports that rather than answering "no budget": a run whose
+    // context cannot be read must not look like a run that was never given
+    // one (issue #2672).
+    let _db = crate::db::test_support::isolated();
+    seed("running", CircuitGraph::agent_review(None, None, 3));
+    crate::db::write_conn()
+        .execute(
+            "UPDATE autopilot_circuit_runs SET context_json=?1 WHERE id=1",
+            [r#"{"not":{"a":"flat map"}}"#],
+        )
+        .unwrap();
+    let run = crate::db::get_circuit_run(1).unwrap().unwrap();
+    let db = crate::db::write_conn();
+    assert!(
+        super::current_limit(&db, &run).is_err(),
+        "a context that cannot be read answered with a review budget"
     );
 }
 

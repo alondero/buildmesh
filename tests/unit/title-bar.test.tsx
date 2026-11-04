@@ -339,7 +339,7 @@ describe('TitleBar (bespoke window chrome)', () => {
     });
   });
 
-  describe('navigation cluster (issue #1375; Filtered search #1609)', () => {
+  describe('navigation cluster (issue #1375; grid search #1609)', () => {
     it('the labelled search field opens the command palette in files mode', async () => {
       await renderTitleBar();
       expect(useUIStore.getState().omnibarOpen).toBe(false);
@@ -404,8 +404,8 @@ describe('TitleBar (bespoke window chrome)', () => {
         for (const button of buttons) {
           expect(button.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true');
         }
-        expect(panel.textContent).toContain('Review what the focused agent changed');
-        expect(panel.textContent).toContain('Check health, recover, and clean up branches');
+        expect(within(panel).getByRole('button', { name: 'Agent Changes', exact: true }).getAttribute('aria-description')).toBe('Review what the focused agent changed');
+        expect(within(panel).getByRole('button', { name: 'Repository', exact: true }).getAttribute('aria-description')).toBe('Check health, recover, and clean up branches');
         expect(within(panel).queryByText('Usage')).toBeNull();
         expect(within(panel).queryByText('Notifications')).toBeNull();
         expect(screen.getByRole('button', { name: 'Open Usage' })).toBeTruthy();
@@ -477,38 +477,44 @@ describe('TitleBar (bespoke window chrome)', () => {
       }
       const switcherGroup = screen.getByRole('group', { name: /view mode/i });
       expect(switcherGroup.querySelector('span')?.className ?? '').not.toContain('hidden');
-      // The kbd chip still hides FIRST when narrowing at 1439px — user-facing
-      // affordances outlast the decorative keyboard hint. Class literals are
-      // the contract — they MUST stay as literal strings (not template
-      // literals) so Tailwind v4's source scanner compiles them.
+      // The kbd chip still hides FIRST when narrowing, at the
+      // labelled-switcher tier (1699px) — user-facing affordances outlast the
+      // decorative keyboard hint. Class literals are the contract — they MUST
+      // stay as literal strings (not template literals) so Tailwind v4's
+      // source scanner compiles them.
       const chip = container.querySelector('kbd');
-      expect(chip?.className).toContain('max-[1439px]:hidden');
+      expect(chip?.className).toContain('max-[1699px]:hidden');
       // #2421 — and it also yields to the field's OWN width: at 1700px
-      // Filtered with a status filter the field is ~158px, where the chip
+      // the All Nodes scope with a status filter has the field at ~158px, where the chip
       // left the label as "S." beside a full "Ctrl+Shift+K". The field is a
       // size container; the label, icon and chip need about 208px of content
       // width, so below 216px the chip goes and the label keeps the room.
       expect(screen.getByTestId('titlebar-command-search').className).toContain('@container');
       expect(chip?.className).toContain('@max-[216px]:hidden');
       // The scope indicator is deliberately NOT on this tier. Its label
-      // collapses LATER (`max-[1700px]:hidden`, pinned in the #2074 block
-      // below): with the switcher's labels at 1440px, the Filtered centre cell
-      // still cannot afford the 134.88px a labelled indicator adds between
-      // 1440 and 1600px (1600px is the first width measured clear, 1700px
-      // the first comfortable one). Asserted here as the inversion, so a
-      // future "one ladder for the whole bar" refactor cannot silently rejoin it.
-      const scopeLabel = screen.getByTestId('scope-indicator').querySelector('span');
-      expect(scopeLabel?.className).toContain('max-[1700px]:hidden');
-      expect(scopeLabel?.className).not.toContain('max-[1439px]:hidden');
+      // collapses LATER — at `SCOPE_LABEL_MIN_WIDTH` (2000px, pinned per tier
+      // in `title-bar-compact.test.tsx`): #2683's grid search took the track
+      // the label needed, so the label now collapses by NOT MOUNTING its span
+      // and the control falls back to its glyph. Asserted here as the
+      // inversion, so a future "one ladder for the whole bar" refactor cannot
+      // silently rejoin it.
+      const scopeLabel = screen.getByTestId('scope-indicator').querySelector('[data-testid="scope-label"]');
+      expect(scopeLabel?.className).toContain('max-w-[16rem]');
+      expect(scopeLabel?.className).toContain('truncate');
       // Responsive palette width (PR #1623 review; fluid since #2421): the
       // field is 260px (20rem at the 13px root) on narrow windows and grows
       // toward its VS Code-parity 640px only out of the width the centred
-      // grid's side tracks do not need — `100vw - 1460px`, twice the widest
-      // measured left cluster. The old fixed 640px step at 1786px squeezed
-      // that cluster to 573px and truncated the scope label to "All m…"
-      // at 1920px. Pin the literal so a rebase back to a fixed step fails.
+      // grid's side tracks do not need — `100vw - 1820px`, which is
+      // `2 * 902 + 16`: the pinned side track is 902px and the widest measured
+      // left cluster is 898px (the labelled segments, a scope label at its
+      // 16rem cap, the grid search and the wordmark — measured on macOS,
+      // whose traffic lights live in that cluster and make it the wider of
+      // the two chrome layouts). The old fixed 640px
+      // step at 1786px squeezed that cluster to 573px and truncated the scope
+      // label to "All m…" at 1920px. Pin the literal so a rebase back to a
+      // fixed step fails.
       const searchButton = screen.getByTestId('titlebar-command-search');
-      expect(searchButton.className).toContain('w-[clamp(20rem,calc(100vw_-_1460px),640px)]');
+      expect(searchButton.className).toContain('w-[clamp(20rem,calc(100vw_-_1820px),640px)]');
       expect(searchButton.className).not.toContain('min-[1786px]:w-[640px]');
       // Flex floor: the palette field's wrapper must never collapse below
       // its yield-first floor.
@@ -525,17 +531,37 @@ describe('TitleBar (bespoke window chrome)', () => {
       }
     });
 
-    it('hides the Search Nodes bar outside the Filtered view (#1609)', async () => {
+    it('keeps filters unchanged while Single is shown', async () => {
+      useUIStore.setState({ viewMode: 'single', lastNonSingleMode: 'mesh', gridSearchQuery: 'runner' });
       await renderTitleBar();
-      // Default boot mode (all) → no search input, no placeholder competing
-      // with the wordmark/switcher for width.
-      expect(screen.queryByTestId('grid-controls')).toBeNull();
+      expect(screen.getByTestId('grid-controls').hidden).toBe(true);
+      act(() => useUIStore.getState().exitSingleMode());
+      expect((screen.getByTestId('grid-search-input') as HTMLInputElement).value).toBe('runner');
     });
 
-    it('mounts the Search Nodes bar beside the switcher only in the Filtered view (#1609)', async () => {
+    it('does not refocus search on returning from Single without a new search request', async () => {
+      useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all', focusGridSearchRequest: 0 });
+      await renderTitleBar();
+      const search = screen.getByTestId('grid-search-input');
+      act(() => useUIStore.getState().focusScopedSearch());
+      expect(document.activeElement).toBe(search);
+      act(() => useUIStore.getState().setViewMode('single'));
+      const destination = screen.getByRole('button', { name: 'Open settings' });
+      destination.focus();
+      expect(document.activeElement).toBe(destination);
+      act(() => useUIStore.getState().exitSingleMode());
+      expect(document.activeElement).toBe(destination);
+    });
+
+    it('shows search in the All Nodes scope', async () => {
+      await renderTitleBar();
+      expect(screen.getByTestId('grid-controls')).toBeTruthy();
+    });
+
+    it('mounts the Search Nodes bar beside the switcher in every view but Single (#1609, #2683)', async () => {
       await renderTitleBar();
       act(() => {
-        useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered' });
+        useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all' });
       });
       const controls = screen.getByTestId('grid-controls');
       // The search mounts in the LEFT cell (wordmark → switcher → search):
@@ -547,19 +573,19 @@ describe('TitleBar (bespoke window chrome)', () => {
       expect(cell.contains(paletteField)).toBe(false);
     });
 
-    it('clears the search input on view switches away from Filtered without wiping the stored query', async () => {
+    it('keeps the search input across view switches without wiping the stored query', async () => {
       // The query persists in the store/localStorage (#988 contract), so
-      // re-entering Filtered restores the previous search. Only the input
-      // unmounts — the store value is never reset by a mode change.
+      // returning to the scope restores the previous search. The store value
+      // is never reset by a mode change.
       await renderTitleBar();
       act(() => {
-        useUIStore.setState({ viewMode: 'filtered', gridSearchQuery: 'alpha' });
+        useUIStore.setState({ viewMode: 'all', gridSearchQuery: 'alpha' });
       });
       expect((screen.getByTestId('grid-search-input') as HTMLInputElement).value).toBe('alpha');
       act(() => {
         useUIStore.setState({ viewMode: 'all' });
       });
-      expect(screen.queryByTestId('grid-search-input')).toBeNull();
+      expect((screen.getByTestId('grid-search-input') as HTMLInputElement).value).toBe('alpha');
       expect(useUIStore.getState().gridSearchQuery).toBe('alpha');
     });
   });
@@ -607,14 +633,14 @@ describe('TitleBar (bespoke window chrome)', () => {
       seedAgentNodes([NODE, NODE_OTHER_MESH, NODE_SAME_MESH]);
     });
 
-    it('mounts in the left cell between the switcher and the Filtered search bar', async () => {
+    it('mounts in the left cell between the switcher and the grid search bar', async () => {
       act(() => {
-        useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered' });
+        useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all' });
       });
       await renderTitleBar();
       const cell = screen.getByTestId('scope-indicator').closest('[data-tauri-drag-region]')!;
-      // Same toolbar cluster as the switcher, and ahead of the Filtered
-      // view's own search bar — one left cluster, one degradation curve.
+      // Same toolbar cluster as the switcher, and ahead of the grid
+      // search bar — one left cluster, one degradation curve.
       expect(cell.contains(screen.getByRole('group', { name: /view mode/i }))).toBe(true);
       const children = Array.from(cell.children);
       const switcherIndex = children.indexOf(screen.getByRole('group', { name: /view mode/i }));
@@ -654,42 +680,67 @@ describe('TitleBar (bespoke window chrome)', () => {
     });
 
     it.each([
-      ['all', null, '', 'All meshes · 3 nodes'],
-      ['pinned', 1, '', 'Pinned across meshes · 1 node'],
-      ['filtered', 1, 'agent-c', 'Filtered across meshes · 1 of 3 nodes'],
-    ] as [ViewMode, number | null, string, string][])(
+      ['all', null, '', 'All meshes · 3 nodes', 'All meshes · 3 nodes'],
+      // Pinned draws the short form (#2421 round 4: the highlighted switcher
+      // segment names the mode) and names itself with the visible text plus
+      // the mode word.
+      [
+        'pinned',
+        1,
+        '',
+        'all meshes · 1 node',
+        'all meshes · 1 node (Pinned across meshes)',
+      ],
+    ] as [ViewMode, number | null, string, string, string][])(
       'renders the honest cross-Mesh label and count in the %s view (%#)',
-      async (viewMode, selectedMeshId, query, label) => {
+      async (viewMode, selectedMeshId, query, label, accessibleName) => {
         act(() => {
           if (selectedMeshId !== null) useMeshStore.setState({ selectedMeshId });
           useUIStore.setState({ viewMode, lastNonSingleMode: viewMode, gridSearchQuery: query });
         });
         await renderTitleBar();
         const trigger = screen.getByTestId('scope-indicator');
-        // The accessible name is the full label. The visible text is the same
-        // string, except that Pinned and Filtered draw the short form without
-        // their mode word (#2421 round 4): the highlighted segment names the mode.
-        expect(trigger.getAttribute('aria-label')).toBe(label);
-        const shortLabel = viewMode === 'filtered'
-          ? label.replace(/^Filtered across meshes · (\d+ of \d+) nodes$/, 'all meshes · $1')
-          : viewMode === 'pinned'
-            ? label.replace(/^Pinned across meshes/, 'all meshes')
-            : label;
-        expect(trigger.textContent).toBe(shortLabel);
-        // A cross-Mesh mode must never name a Mesh — pinned and filtered
-        // legitimately keep a sidebar selection, and that Mesh is NOT the
-        // scope the grid is showing.
+        expect(trigger.textContent).toBe(label);
+        // The accessible name carries the visible text and, for Pinned, the
+        // mode word after it.
+        expect(trigger.getAttribute('aria-label')).toBe(accessibleName);
+        // WCAG 2.5.3 Label in Name: the accessible name must CONTAIN the
+        // visible label text, or voice dictation ("click all meshes") cannot
+        // find the control. The name may carry MORE than the visible text
+        // (the mode word), but never less.
+        expect(trigger.getAttribute('aria-label')).toContain(trigger.textContent ?? '');
+        // ...and the extra it carries must still name the scope, so the name
+        // cannot be shortened to the visible text alone.
+        if (viewMode === 'pinned') {
+          expect(trigger.getAttribute('aria-label')).toContain('Pinned');
+        }
+        // A cross-Mesh mode must never name a Mesh — pinned legitimately keeps
+        // a sidebar selection, and that Mesh is NOT the scope the grid is
+        // showing.
         expect(trigger.textContent).not.toContain('demo-1');
       },
     );
 
-    it('names the narrowed count against the scope total in Filtered, so an empty result is distinguishable', async () => {
+    it('announces the cross-Mesh Pinned count once, not twice', async () => {
       act(() => {
-        useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered', gridSearchQuery: 'no-such-node' });
+        useUIStore.setState({ viewMode: 'pinned', lastNonSingleMode: 'pinned' });
       });
       await renderTitleBar();
-      // 0 of 3 — "the filters excluded everything", not "the app is broken".
-      expect(screen.getByTestId('scope-indicator').getAttribute('aria-label')).toBe('Filtered across meshes · 0 of 3 nodes');
+      const trigger = screen.getByTestId('scope-indicator');
+      const name = trigger.getAttribute('aria-label') ?? '';
+      // The drawn label carries the count and the mode word that follows it
+      // names the scope WITHOUT repeating that count: a screen reader
+      // announces "1 node" once, not twice.
+      expect(name).toBe('all meshes · 1 node (Pinned across meshes)');
+      expect(name.match(/1 node/g)).toHaveLength(1);
+      // WCAG 2.5.3 still holds — the name contains the drawn label verbatim.
+      expect(name).toContain(trigger.textContent ?? '');
+    });
+
+    it('reports an empty narrowed All scope', async () => {
+      act(() => useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all', gridSearchQuery: 'no-such-node' }));
+      await renderTitleBar();
+      expect(screen.getByTestId('scope-indicator').getAttribute('aria-label')).toBe('All meshes \u00b7 0 nodes');
     });
 
     it('says so honestly in Mesh Grid with no Mesh selected', async () => {
@@ -705,24 +756,21 @@ describe('TitleBar (bespoke window chrome)', () => {
         enterMesh(1);
       });
       await renderTitleBar();
-      const label = screen.getByTestId('scope-indicator').querySelector('span');
+      const label = screen.getByTestId('scope-indicator').querySelector('[data-testid="scope-label"]');
       const className = label?.className ?? '';
       // Truncate BEFORE the collapse: a bounded, ellipsised label at every
-      // width. But the collapse tier sits ABOVE the switcher segments' and the
-      // utility pills' 1440px tier. Measured against the real window in the
-      // Filtered view — the only mode whose header grid is
-      // `auto_minmax(0,1fr)_auto`, so the centre absorbs the overflow down to
-      // its own 16px padding floor — a labelled indicator costs the left
-      // track 134.88px. With the switcher's labels at 1440px the labelled tier
-      // occupies 1440–1599px, where the centre measured 170px at 1600px
-      // (first clear) and 270px at 1700px (first comfortable) against a
-      // 130–143px min-content. 1600px is the first width measured CLEAR, not
-      // a comfortable one, so the label waits for 1700px.
+      // width. The collapse tier sits ABOVE the switcher segments' 1700px tier
+      // and the utility pills' 1700px tier, and it is a JS tier like them
+      // (`SCOPE_LABEL_MIN_WIDTH`, 2000px) so the label's own width — which is
+      // text — follows the interface text size. Measured against the real
+      // window: the centred grid caps the left track at half of what the
+      // command field leaves, and that track has to carry the wordmark, the
+      // labelled segments, the grid search (#2683) and this label. 2000px is
+      // the first width at which the label fits whole; below it the control
+      // keeps its glyph, which says more than a clipped "All mes…".
       expect(className).toContain('truncate');
       expect(className).toContain('max-w-[16rem]');
       // 16rem (208px) fits the longest wide label (~194px); 10rem clipped it by ~64px (#2421 round 4).
-      expect(className).toContain('max-[1700px]:hidden');
-      expect(className).not.toContain('max-[1439px]:hidden');
       // The accessible name is the label string, so it survives the collapse.
       expect(screen.getByTestId('scope-indicator').getAttribute('aria-label')).toBe('demo-1');
     });

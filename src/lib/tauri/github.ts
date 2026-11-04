@@ -111,8 +111,8 @@ export const spawnIssueAgent = (meshId: number, issueNumber: number, issueTitle:
 /// transient prefill to a second IPC command.
 export type { IssueNodeDraft };
 
-export const createIssueNode = (meshId: number, issueNumber: number, issueTitle: string, provider?: string, configurationId?: string) =>
-  _invoke<IssueNodeDraft>('create_issue_node', { meshId, issueNumber, issueTitle, provider, configurationId });
+export const createIssueNode = (meshId: number, issueNumber: number, issueTitle: string, provider?: string, configurationId?: string, loginId?: string) =>
+  _invoke<IssueNodeDraft>('create_issue_node', { meshId, issueNumber, issueTitle, provider, configurationId, ...(loginId ? { loginId } : {}) });
 
 export const createPrForMesh = (meshPath: string, title: string, body: string, baseBranch: string) =>
   _invoke<string>('create_pr_for_mesh', { meshPath, title, body, baseBranch });
@@ -153,6 +153,7 @@ export const createPrNode = (
   // node's worktree — see `commands::agent::create_pr_node`'s `reviewer`
   // parameter for why sharing one is destructive. Omit for the probe's `+`.
   reviewer?: boolean,
+  loginId?: string,
 ) =>
   _invoke<IssueNodeDraft>('create_pr_node', {
     meshId,
@@ -165,4 +166,5 @@ export const createPrNode = (
     headRepoCloneUrl,
     configurationId,
     reviewer,
+    ...(loginId ? { loginId } : {}),
   });

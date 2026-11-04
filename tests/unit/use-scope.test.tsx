@@ -143,10 +143,10 @@ describe('useScope (issue #2529)', () => {
     expect(empty.result.current.currentNode).toBeNull();
   });
 
-  it('narrows Filtered scope, and the Single fallback, with the grid controls', () => {
+  it('narrows the scope with a search query, and the Single fallback with it', () => {
     useUIStore.setState({
-      viewMode: 'filtered',
-      lastNonSingleMode: 'filtered',
+      viewMode: 'all',
+      lastNonSingleMode: 'all',
       gridSearchQuery: 'gam',
     });
     const filtered = renderHook(() => useScope());
@@ -154,7 +154,7 @@ describe('useScope (issue #2529)', () => {
     expect(filtered.result.current.visibleNodeCount).toBe(1);
     expect(filtered.result.current.scopedNodeCount).toBe(3);
 
-    useUIStore.setState({ viewMode: 'single', lastNonSingleMode: 'filtered' });
+    useUIStore.setState({ viewMode: 'single', lastNonSingleMode: 'all' });
     const solo = renderHook(() => useScope());
     expect(solo.result.current.currentNodeId).toBe(gamma.id);
   });

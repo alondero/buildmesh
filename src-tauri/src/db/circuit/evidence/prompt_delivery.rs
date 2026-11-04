@@ -396,7 +396,7 @@ fn attest_locked(
         &tx,
         run.id,
         None,
-        Some(&view.context.to_json()?),
+        Some(&crate::db::circuit::context_store::ContextChange::from_context(&view.context)),
         &[super::super::CircuitStepOp {
             node_id: node.clone(),
             status: "running".into(),

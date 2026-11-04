@@ -16,15 +16,35 @@
 //! templating is the hand-rolled placeholder substitution in
 //! `circuit::finish::render`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Namespaced template context for one run. A `BTreeMap<String, String>`
 /// with dotted keys is the whole model; builders below populate the
 /// namespaces so call sites never hand-assemble `"circuit.run_id"`.
-#[derive(Debug, Clone, Default, PartialEq)]
+///
+/// The context also remembers which keys it removed. A removal is a fact
+/// about the run's context, not only about this map: the value is gone from
+/// the map, and the persistence seam has to learn that too, or a value that
+/// lives in the bulky half of the storage comes back on the next read. The
+/// ledger is that intent — it is pure data, and it never reaches the
+/// rendered context.
+#[derive(Debug, Clone, Default)]
 pub struct CircuitContext {
     vars: BTreeMap<String, String>,
     runtime_lifecycle_blockers: BTreeMap<String, String>,
+    /// The keys this context removed, so the seam can apply the removal to
+    /// the storage half the map does not hold.
+    removed: BTreeSet<String>,
+}
+
+impl PartialEq for CircuitContext {
+    fn eq(&self, other: &Self) -> bool {
+        // The removal ledger is intent, not state. Two contexts hold the
+        // same values when their values match, whatever they removed along
+        // the way.
+        self.vars == other.vars
+            && self.runtime_lifecycle_blockers == other.runtime_lifecycle_blockers
+    }
 }
 
 /// The pull request a run was triggered by: the fields the `pr.*` namespace
@@ -48,6 +68,9 @@ impl CircuitContext {
     /// Set one dotted path.
     pub fn set(&mut self, path: &str, value: impl Into<String>) {
         self.vars.insert(path.to_string(), value.into());
+        // A value that is set again is present, not removed: the removal
+        // intent dies with the value.
+        self.removed.remove(path);
     }
 
     pub fn get(&self, path: &str) -> Option<&str> {
@@ -55,8 +78,26 @@ impl CircuitContext {
     }
 
     /// Drop one dotted path.
+    ///
+    /// The removal is recorded: the value is gone from this context, and the
+    /// persistence seam has to learn that as well, or a value the map does
+    /// not hold comes back on the next read.
     pub fn remove(&mut self, path: &str) {
         self.vars.remove(path);
+        self.removed.insert(path.to_string());
+    }
+
+    /// The values this context holds.
+    pub fn values(&self) -> &BTreeMap<String, String> {
+        &self.vars
+    }
+
+    /// The keys this context removed since it was loaded.
+    ///
+    /// A key that was removed and then set again is not in the ledger: it is
+    /// present.
+    pub fn removed(&self) -> impl Iterator<Item = &str> {
+        self.removed.iter().map(String::as_str)
     }
 
     /// Attach lifecycle evidence to this in-memory view. These projections
@@ -100,6 +141,21 @@ impl CircuitContext {
         self
     }
 
+    /// [`with_app_reviewer_provider`] against an explicit store.
+    ///
+    /// The caller owns the store, so the provider is the one **that** profile
+    /// configures rather than the ambient one (issue #1482).
+    pub fn with_app_reviewer_provider_from(
+        &mut self,
+        store: &crate::preferences::PreferencesStore,
+    ) -> &mut Self {
+        self.set(
+            "review.provider",
+            store.reviewer_provider().as_deref().unwrap_or(""),
+        );
+        self
+    }
+
     /// Populate the per-run identity (`circuit.run_id`).
     pub fn with_run(&mut self, run_id: i64) -> &mut Self {
         self.set("circuit.run_id", run_id.to_string());
@@ -128,25 +184,57 @@ impl CircuitContext {
         url: &str,
         labels: &[String],
     ) -> &mut Self {
+        self.set_issue_fields(number, title, body, author, url, labels);
+        // The circuit InjectPty path honours the same stored Issues-probe
+        // template as every other Issue seam: with a custom template the
+        // trigger-supplied URL feeds `render_issue_spawn_prompt_with_url`
+        // (owner/repo are parsed from the canonical URL); without one the
+        // legacy formatter keeps the historical wording byte-identical.
+        let prefill = issue_prefill(crate::preferences::issue_spawn_prompt(), number, title, url);
+        self.set("issue.prefill", prefill);
+        self
+    }
+
+    /// [`with_issue`] against an explicit store.
+    ///
+    /// The caller owns the store, so the prefill honours the Issues-probe
+    /// template **that** profile stores rather than the ambient one
+    /// (issue #1482).
+    // The issue fields are a fixed set the GitHub trigger supplies; bundling
+    // them behind a struct would only move the same six values somewhere else.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_issue_from(
+        &mut self,
+        store: &crate::preferences::PreferencesStore,
+        number: i64,
+        title: &str,
+        body: &str,
+        author: &str,
+        url: &str,
+        labels: &[String],
+    ) -> &mut Self {
+        self.set_issue_fields(number, title, body, author, url, labels);
+        let prefill = issue_prefill(store.issue_spawn_prompt(), number, title, url);
+        self.set("issue.prefill", prefill);
+        self
+    }
+
+    /// The `issue.*` namespace fields that do not depend on preferences.
+    fn set_issue_fields(
+        &mut self,
+        number: i64,
+        title: &str,
+        body: &str,
+        author: &str,
+        url: &str,
+        labels: &[String],
+    ) {
         self.set("issue.number", number.to_string());
         self.set("issue.title", title);
         self.set("issue.body", body);
         self.set("issue.author", author);
         self.set("issue.url", url);
         self.set("issue.labels", labels.join(", "));
-        // The circuit InjectPty path honours the same stored Issues-probe
-        // template as every other Issue seam: with a custom template the
-        // trigger-supplied URL feeds `render_issue_spawn_prompt_with_url`
-        // (owner/repo are parsed from the canonical URL); without one the
-        // legacy formatter keeps the historical wording byte-identical.
-        let prefill = match crate::preferences::issue_spawn_prompt() {
-            Some(template) => crate::agent::spawn::render_issue_spawn_prompt_with_url(
-                &template, number, title, url,
-            ),
-            None => crate::agent::spawn::format_issue_prefill_with_url(number, title, url),
-        };
-        self.set("issue.prefill", prefill);
-        self
     }
 
     /// Populate the dynamic wrap-up prompt used by the issue-driven circuit
@@ -161,6 +249,23 @@ impl CircuitContext {
         self.set(
             "autopilot.finish_prompt",
             crate::circuit::finish::finish_prompt(issue_number, action_on_success),
+        );
+        self
+    }
+
+    /// [`with_circuit_finish_prompt`] against an explicit store.
+    ///
+    /// The caller owns the store, so the wrap-up template is the one **that**
+    /// profile carries rather than the ambient one (issue #1482).
+    pub fn with_circuit_finish_prompt_from(
+        &mut self,
+        store: &crate::preferences::PreferencesStore,
+        issue_number: Option<i64>,
+        action_on_success: Option<&str>,
+    ) -> &mut Self {
+        self.set(
+            "autopilot.finish_prompt",
+            crate::circuit::finish::finish_prompt_from(store, issue_number, action_on_success),
         );
         self
     }
@@ -205,15 +310,27 @@ impl CircuitContext {
 
     /// Parse back from `context_json`.
     pub fn from_json(json: &str) -> Result<Self, String> {
-        let mut vars: BTreeMap<String, String> =
+        let vars: BTreeMap<String, String> =
             serde_json::from_str(json).map_err(|e| format!("invalid context_json: {}", e))?;
+        Ok(Self::from_values(vars))
+    }
+
+    /// Build a context from a map of values.
+    ///
+    /// The values are the run's context. A lifecycle blocker among them is
+    /// runtime state rather than context — it is a live veto projected onto
+    /// the run while an agent is blocked — so it is dropped here, the same
+    /// way [`CircuitContext::from_json`] drops it.
+    pub fn from_values(values: BTreeMap<String, String>) -> Self {
+        let mut vars = values;
         // Older builds could accidentally persist a recovery-view projection.
         // Drop it on load so a settled lifecycle report releases that veto.
         vars.retain(|key, _| !is_lifecycle_blocker_key(key));
-        Ok(Self {
+        Self {
             vars,
             runtime_lifecycle_blockers: BTreeMap::new(),
-        })
+            removed: BTreeSet::new(),
+        }
     }
 
     /// Resolve every `{{ path }}` placeholder in `template` against this
@@ -244,6 +361,23 @@ impl CircuitContext {
     }
 }
 
+/// The `issue.prefill` text: the stored Issues-probe template when one is
+/// configured, else the legacy formatter's wording.
+///
+/// The circuit InjectPty path honours the same stored Issues-probe template as
+/// every other Issue seam: with a custom template the trigger-supplied URL
+/// feeds `render_issue_spawn_prompt_with_url` (owner/repo are parsed from the
+/// canonical URL); without one the legacy formatter keeps the historical
+/// wording byte-identical.
+fn issue_prefill(template: Option<String>, number: i64, title: &str, url: &str) -> String {
+    match template {
+        Some(template) => {
+            crate::agent::spawn::render_issue_spawn_prompt_with_url(&template, number, title, url)
+        }
+        None => crate::agent::spawn::format_issue_prefill_with_url(number, title, url),
+    }
+}
+
 /// Whether a context path holds a lifecycle blocker.
 ///
 /// The blocker is runtime state, not context: [`CircuitContext::from_json`]
@@ -257,6 +391,8 @@ pub(crate) fn is_lifecycle_blocker_key(key: &str) -> bool {
 }
 
 #[cfg(test)]
+// allow-test-in-production: this inline suite predates the sibling-test-file rule. Issue #1482
+// only moves the preferences fixture to its new module path; moving the suite is out of scope.
 mod tests {
     use super::*;
 
@@ -354,19 +490,17 @@ mod tests {
     /// custom render instead of the legacy formatter.
     #[test]
     fn issue_prefill_applies_stored_probe_template() {
-        let dir = std::env::temp_dir().join(format!(
-            "buildmesh-circuit-prefill-test-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        crate::preferences::storage::init_for_tests(dir.clone());
-        crate::preferences::update(|prefs| {
-            prefs.issue_spawn_prompt = Some("Circuit: {{owner}}/{{repo}}#{{number}}".into());
-        })
-        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::preferences::PreferencesStore::new(directory.path().to_path_buf());
+        store
+            .update(|prefs| {
+                prefs.issue_spawn_prompt = Some("Circuit: {{owner}}/{{repo}}#{{number}}".into());
+            })
+            .unwrap();
 
         let mut ctx = CircuitContext::new();
-        ctx.with_issue(
+        ctx.with_issue_from(
+            &store,
             7,
             "T",
             "b",
@@ -378,9 +512,6 @@ mod tests {
             ctx.resolve("{{issue.prefill}}"),
             "Circuit: alondero/buildmesh#7"
         );
-
-        crate::preferences::storage::reset_for_tests();
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

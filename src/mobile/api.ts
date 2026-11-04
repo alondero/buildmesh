@@ -443,6 +443,11 @@ export function cancelCircuitRun(runId: number): Promise<void> {
   return postCircuit(`/api/circuit-runs/${runId}/cancel`);
 }
 
+/** What one node is doing; read for the node on screen, never on the list poll. */
+export async function getNodeGlance(nodeId: number, signal?: AbortSignal): Promise<import('../types/generated/NodeGlance').NodeGlance> {
+  return (await apiFetch(`/api/nodes/${nodeId}/glance`, { signal })).json();
+}
+
 export async function listNodeReviews(nodeId: number, signal?: AbortSignal): Promise<NodeReviewOption[]> {
   const body: unknown = await (await apiFetch(`/api/nodes/${nodeId}/reviews`, { signal })).json();
   if (Array.isArray(body)) return body as NodeReviewOption[];

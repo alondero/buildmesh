@@ -35,16 +35,8 @@ function compareStableOrder(a: AgentNode, b: AgentNode): number {
  * Derive the ordered grid sequence from the derived scope and the
  * persisted Grid Controls state.
  *
- * This function has exactly one job: ORDERING. Which nodes are candidates
- * — including the Mesh scope, and the Grid Controls narrowing that applies
- * only inside the 'filtered' View Mode — is owned entirely by
- * `deriveScope` (src/lib/viewModes.ts), which this function receives as
- * an argument rather than re-deriving (#2071). There must be no filter
- * logic and no control-dependent early return here: the search text
- * persists in the store across mode switches (#1609), so any guard on
- * it would run on every Mesh/Pinned/All render and, by skipping the sort
- * below, silently serve store-insertion order. Sorting runs
- * unconditionally on whatever the scope contains.
+ * This function only orders nodes. deriveScope owns scope and filtering;
+ * sorting runs on the resulting candidates in every grid mode.
  */
 export function deriveVisibleNodes(
   scope: DerivedScope,

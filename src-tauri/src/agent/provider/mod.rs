@@ -458,7 +458,7 @@ pub struct ProviderInfo {
 
 /// Paste-gate policy for a staged multiline prompt (issue #2061).
 ///
-/// Declared by each harness adapter so `circuit::delivery` does not branch
+/// Declared by each harness adapter so `agent::prompt_delivery` does not branch
 /// on harness name strings: the adapter that owns the spawn behavior also
 /// owns the knowledge of how that harness renders a pasted prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -479,6 +479,12 @@ pub enum PasteGatePolicy {
     /// paste bursts (Codex). Confirm the sequence of inline text and counted
     /// markers against the expected prompt, independent of burst boundaries.
     RenderedWithSplitMarker,
+}
+
+/// A native session receipt captured before staging a prompt. PTY redraws do
+/// not satisfy this evidence; the adapter owns its native acceptance format.
+pub trait PromptAcceptanceReceipt: Send {
+    fn accepted(&self) -> bool;
 }
 
 /// Behaviour an agent provider must declare.
@@ -725,10 +731,20 @@ pub trait AgentProvider: Send + Sync {
     /// harness (issue #2061). Only harnesses whose composer redraws a
     /// pasted prompt opt into the rendered gate; of those, only harnesses
     /// that draw mid-size pastes inline take the tail-anchor variant.
-    /// `circuit::delivery` consults this instead of comparing harness
+    /// `agent::prompt_delivery` consults this instead of comparing harness
     /// name strings.
     fn paste_gate_policy(&self) -> PasteGatePolicy {
         PasteGatePolicy::Generic
+    }
+
+    /// Capture the native receipt for this prompt before writing it. `None`
+    /// uses fresh PTY output as acknowledgement; errors prevent staging.
+    fn prompt_acceptance_receipt(
+        &self,
+        _node_id: i64,
+        _prompt: &str,
+    ) -> Result<Option<Box<dyn PromptAcceptanceReceipt>>, String> {
+        Ok(None)
     }
 
     /// Whether a staged multi-line paste must carry CR line endings.
@@ -740,7 +756,7 @@ pub trait AgentProvider: Send + Sync {
     /// by default, so delivering CR mirrors standard paste behavior (the Unix basis is
     /// inferred from this manual-paste behavior and has not yet been probed on native Linux/macOS PTYs).
     /// (WSL nodes on Windows hosts also route through Windows ConPTY.) Applied
-    /// at `circuit::delivery::PreparedPrompt::prepare` for circuit prompt dispatches
+    /// at `agent::prompt_delivery::PreparedPrompt::prepare` for circuit prompt dispatches
     /// (turns, continuations, nudges) and terminal handovers. The coordinator's
     /// `AgentDriver::send_prompt` is single-line by contract and bypasses staged
     /// delivery. Harnesses whose composer requires CR opt in (Grok, `docs/learning/grok-terminal-paste.md`).

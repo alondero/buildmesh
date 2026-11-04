@@ -2403,40 +2403,69 @@ fn regenerate_load_blocking_rejects_spawning_status() {
     }
 }
 
+fn regenerate_apply_blocking_from(
+    store: &crate::preferences::PreferencesStore,
+    node_id: i64,
+    old_provider: &str,
+    new_provider: &str,
+) -> Result<bool, AgentNodeError> {
+    let prefs = store.load().map_err(AgentNodeError::Backend)?;
+    let prepared = regenerate_prepare_selection(
+        &prefs,
+        node_id,
+        old_provider,
+        new_provider,
+        None,
+        None,
+        false,
+    )?;
+    regenerate_apply_prepared_blocking(node_id, prepared)
+}
+
 #[test]
 fn regenerate_apply_blocking_writes_provider_and_decides_resume() {
     let prefs_dir = tempfile::tempdir().unwrap();
-    crate::preferences::init_for_tests(prefs_dir.path().into());
-    crate::preferences::save(serde_json::from_value(serde_json::json!({
+    let store = crate::preferences::PreferencesStore::new(prefs_dir.path().into());
+    // The seeded account carries an API key, so the credential-store double
+    // is reset at both ends of the test (issue #1482).
+    crate::preferences::secrets::test_support::reset();
+    store
+        .save(serde_json::from_value(serde_json::json!({
             "provider_accounts": [{"id":"minimax","name":"MiniMax","enabled":true,"billing_mode":"pay_as_you_go","api_key":"test-key"}],
             "provider_pairings": [{"harness_id":"claude","provider_id":"minimax","surface":"anthropic","base_url":"https://api.minimax.io/anthropic","model_tiers":{"default":"MiniMax-M3[1m]"}}]
-        })).unwrap()).unwrap();
+        })).unwrap())
+        .unwrap();
     // Same-harness provider swap with a captured cli_session_id:
     // apply_blocking must write the new provider AND report
     // `resume = true` (because `decide_resume` continues the
     // session for same-harness swaps).
     let _db = crate::db::test_support::isolated();
     let mesh_id = fresh_mesh();
-    let node = create(NodeCreateParams {
-        mesh_id,
-        path: "/tmp/buildmesh_regen_apply",
-        branch: "main",
-        provider: Some("claude"),
-        source_issue: None,
-        source_pr: None,
-        source_pr_pinned_sha: None,
-        use_worktree_override: None,
-        name_override: None,
-        head_repo_owner: None,
-        head_repo_clone_url: None,
-        configuration: None,
-        initial_prompt: None,
-        operation: None,
-    })
-    .expect("seed node");
+    let node = create_blocking_configured_from(
+        &store,
+        NodeCreateParams {
+            mesh_id,
+            path: "/tmp/buildmesh_regen_apply",
+            branch: "main",
+            provider: Some("claude"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: None,
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: None,
+            operation: None,
+        },
+        false,
+    )
+    .expect("seed node")
+    .node;
     db::update_cli_session_id(node.id, "sess-abc").expect("set cli_session_id");
 
-    let resume = regenerate_apply_blocking(node.id, "claude", "claude:minimax")
+    let resume = regenerate_apply_blocking_from(&store, node.id, "claude", "claude:minimax")
         .expect("apply should succeed");
     assert!(resume, "same-harness swap with a session id must resume");
 
@@ -2450,36 +2479,42 @@ fn regenerate_apply_blocking_writes_provider_and_decides_resume() {
         Some("sess-abc"),
         "apply_blocking must NOT clear cli_session_id — the spawner owns that policy",
     );
+    crate::preferences::secrets::test_support::reset();
 }
 
 #[test]
 fn regenerate_apply_blocking_starts_fresh_on_cross_harness() {
     let prefs_dir = tempfile::tempdir().unwrap();
-    crate::preferences::init_for_tests(prefs_dir.path().into());
+    let store = crate::preferences::PreferencesStore::new(prefs_dir.path().into());
     // Claude → Codex: the captured Claude session id is not a valid
     // Codex id, so the apply step must report `resume = false`.
     let _db = crate::db::test_support::isolated();
     let mesh_id = fresh_mesh();
-    let node = create(NodeCreateParams {
-        mesh_id,
-        path: "/tmp/buildmesh_regen_apply_cross",
-        branch: "main",
-        provider: Some("claude"),
-        source_issue: None,
-        source_pr: None,
-        source_pr_pinned_sha: None,
-        use_worktree_override: None,
-        name_override: None,
-        head_repo_owner: None,
-        head_repo_clone_url: None,
-        configuration: None,
-        initial_prompt: None,
-        operation: None,
-    })
-    .expect("seed node");
+    let node = create_blocking_configured_from(
+        &store,
+        NodeCreateParams {
+            mesh_id,
+            path: "/tmp/buildmesh_regen_apply_cross",
+            branch: "main",
+            provider: Some("claude"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: None,
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: None,
+            initial_prompt: None,
+            operation: None,
+        },
+        false,
+    )
+    .expect("seed node")
+    .node;
     db::update_cli_session_id(node.id, "claude-uuid").expect("set cli_session_id");
 
-    let resume = regenerate_apply_blocking(node.id, "claude:anthropic", "codex")
+    let resume = regenerate_apply_blocking_from(&store, node.id, "claude:anthropic", "codex")
         .expect("apply should succeed");
     assert!(
         !resume,
@@ -2523,20 +2558,21 @@ fn regenerate_reload_blocking_returns_fresh_node() {
 #[test]
 fn regenerate_apply_blocking_keeps_the_login_of_a_resumed_session() {
     let prefs_dir = tempfile::tempdir().unwrap();
-    crate::preferences::init_for_tests(prefs_dir.path().into());
-    crate::preferences::storage::try_update(|prefs| {
-        prefs
-            .harness_logins
-            .push(crate::preferences::harness_logins::HarnessLogin {
-                id: "work".into(),
-                harness_id: "codex".into(),
-                label: "Work".into(),
-                home: "C:/Users/u/.codex-accounts/work".into(),
-            });
-        Ok(())
-    })
-    .unwrap();
-    let prefs = crate::preferences::load().unwrap();
+    let store = crate::preferences::PreferencesStore::new(prefs_dir.path().into());
+    store
+        .try_update(|prefs| {
+            prefs
+                .harness_logins
+                .push(crate::preferences::harness_logins::HarnessLogin {
+                    id: "work".into(),
+                    harness_id: "codex".into(),
+                    label: "Work".into(),
+                    home: "C:/Users/u/.codex-accounts/work".into(),
+                });
+            Ok(())
+        })
+        .unwrap();
+    let prefs = store.load().unwrap();
     let configuration = crate::preferences::spawn_configurations::with_login_pick(
         &prefs,
         "codex",
@@ -2548,7 +2584,8 @@ fn regenerate_apply_blocking_keeps_the_login_of_a_resumed_session() {
     let _db = crate::db::test_support::isolated();
     let mesh_id = fresh_mesh();
     // `create` (the test helper) drops configurations; take the real path.
-    let node = crate::services::agent_node::create_blocking_configured(
+    let node = crate::services::agent_node::create_blocking_configured_from(
+        &store,
         NodeCreateParams {
             mesh_id,
             path: "/tmp/buildmesh_regen_login",
@@ -2572,7 +2609,7 @@ fn regenerate_apply_blocking_keeps_the_login_of_a_resumed_session() {
     db::update_cli_session_id(node.id, "019a0000-0000-7000-8000-000000000001")
         .expect("set cli_session_id");
 
-    let resume = regenerate_apply_blocking(node.id, "codex", "codex").expect("apply");
+    let resume = regenerate_apply_blocking_from(&store, node.id, "codex", "codex").expect("apply");
     assert!(resume, "same-harness regenerate resumes the session");
     let login = db::node_spawn_configuration(node.id, "codex")
         .unwrap()
@@ -2588,31 +2625,33 @@ fn regenerate_apply_blocking_keeps_the_login_of_a_resumed_session() {
 #[test]
 fn regenerate_apply_blocking_keeps_the_default_login_of_a_resumed_session() {
     let prefs_dir = tempfile::tempdir().unwrap();
-    crate::preferences::init_for_tests(prefs_dir.path().into());
-    crate::preferences::storage::try_update(|prefs| {
-        prefs
-            .harness_logins
-            .push(crate::preferences::harness_logins::HarnessLogin {
-                id: "work".into(),
-                harness_id: "codex".into(),
-                label: "Work".into(),
-                home: "C:/Users/u/.codex-accounts/work".into(),
-            });
-        prefs.spawn_configurations.push(
-            crate::preferences::spawn_configurations::SpawnConfiguration {
-                id: "launch/codex-work".into(),
-                name: "Work".into(),
-                spawn_option_id: "codex".into(),
-                login_id: Some("work".into()),
-                ..Default::default()
-            },
-        );
-        Ok(())
-    })
-    .unwrap();
+    let store = crate::preferences::PreferencesStore::new(prefs_dir.path().into());
+    store
+        .try_update(|prefs| {
+            prefs
+                .harness_logins
+                .push(crate::preferences::harness_logins::HarnessLogin {
+                    id: "work".into(),
+                    harness_id: "codex".into(),
+                    label: "Work".into(),
+                    home: "C:/Users/u/.codex-accounts/work".into(),
+                });
+            prefs.spawn_configurations.push(
+                crate::preferences::spawn_configurations::SpawnConfiguration {
+                    id: "launch/codex-work".into(),
+                    name: "Work".into(),
+                    spawn_option_id: "codex".into(),
+                    login_id: Some("work".into()),
+                    ..Default::default()
+                },
+            );
+            Ok(())
+        })
+        .unwrap();
     let _db = crate::db::test_support::isolated();
     let mesh_id = fresh_mesh();
-    let node = crate::services::agent_node::create_blocking_configured(
+    let node = crate::services::agent_node::create_blocking_configured_from(
+        &store,
         NodeCreateParams {
             mesh_id,
             path: "/tmp/buildmesh_regen_default_login",
@@ -2647,11 +2686,298 @@ fn regenerate_apply_blocking_keeps_the_default_login_of_a_resumed_session() {
     db::update_cli_session_id(node.id, "019a0000-0000-7000-8000-000000000002")
         .expect("set cli_session_id");
 
-    let resume = regenerate_apply_blocking(node.id, "codex", "launch/codex-work").expect("apply");
+    let resume = regenerate_apply_blocking_from(&store, node.id, "codex", "launch/codex-work")
+        .expect("apply");
     assert!(resume, "same-harness regenerate resumes the session");
     assert_eq!(
         frozen_login(node.id),
         Some(None),
         "the resumed session stays on the Default login that holds it"
     );
+}
+
+#[test]
+fn regenerate_current_keeps_a_deleted_recipe_and_explicit_pick_is_validated_before_mutation() {
+    let _db = crate::db::test_support::isolated();
+    let root = tempfile::tempdir().unwrap();
+    let store = crate::preferences::PreferencesStore::new(root.path().join("prefs"));
+    store
+        .try_update(|prefs| {
+            prefs
+                .harness_logins
+                .push(crate::preferences::harness_logins::HarnessLogin {
+                    id: "work".into(),
+                    harness_id: "codex".into(),
+                    label: "Work".into(),
+                    home: "C:/Users/u/.codex-accounts/work".into(),
+                });
+            prefs
+                .harness_profiles
+                .push(crate::preferences::HarnessProfile {
+                    id: "codex".into(),
+                    name: "Codex".into(),
+                    harness: "codex".into(),
+                    runtime: None,
+                    wsl_distro: None,
+                    executable: None,
+                });
+            prefs.spawn_configurations.push(
+                crate::preferences::spawn_configurations::SpawnConfiguration {
+                    id: "launch/saved".into(),
+                    name: "Saved".into(),
+                    spawn_option_id: "codex".into(),
+                    effort: Some("high".into()),
+                    ..Default::default()
+                },
+            );
+            Ok(())
+        })
+        .unwrap();
+    let mesh_id = fresh_mesh();
+    let configuration = crate::preferences::spawn_configurations::resolve_menu_selection_from(
+        Some(&store),
+        "codex",
+        Some("launch/saved"),
+        Some("work"),
+    )
+    .unwrap()
+    .unwrap();
+    let node = create_blocking_configured_from(
+        &store,
+        NodeCreateParams {
+            mesh_id,
+            path: "",
+            branch: "main",
+            provider: Some("codex"),
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree_override: Some(false),
+            name_override: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            configuration: Some(&configuration),
+            initial_prompt: None,
+            operation: None,
+        },
+        false,
+    )
+    .unwrap()
+    .node;
+    db::update_cli_session_id(node.id, "existing-session").unwrap();
+    store
+        .try_update(|prefs| {
+            prefs.spawn_configurations.clear();
+            Ok(())
+        })
+        .unwrap();
+    let prefs = store.load().unwrap();
+    let current =
+        regenerate_prepare_selection(&prefs, node.id, "codex", "codex", None, None, false).unwrap();
+    assert!(regenerate_apply_prepared_blocking(node.id, current).unwrap());
+    let frozen = db::node_spawn_configuration(node.id, "codex")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        frozen
+            .resolved
+            .as_ref()
+            .unwrap()
+            .harness_login
+            .as_ref()
+            .unwrap()
+            .id,
+        "work"
+    );
+    assert_eq!(frozen.effort.as_deref(), Some("high"));
+    assert!(regenerate_prepare_selection(
+        &prefs,
+        node.id,
+        "codex",
+        "codex",
+        Some("launch/deleted"),
+        Some("work"),
+        true
+    )
+    .is_err());
+    assert!(regenerate_prepare_selection(
+        &prefs,
+        node.id,
+        "codex",
+        "codex",
+        None,
+        Some("deleted"),
+        true
+    )
+    .is_err());
+    assert_eq!(
+        db::node_spawn_configuration(node.id, "codex")
+            .unwrap()
+            .unwrap(),
+        frozen
+    );
+    assert_eq!(
+        db::get_agent_node_by_id(node.id)
+            .unwrap()
+            .cli_session_id
+            .as_deref(),
+        Some("existing-session")
+    );
+    let picked = regenerate_prepare_selection(
+        &prefs,
+        node.id,
+        "codex",
+        "codex",
+        None,
+        Some("default"),
+        true,
+    )
+    .unwrap();
+    assert!(
+        !regenerate_apply_prepared_blocking(node.id, picked).unwrap(),
+        "an explicit pick never resumes a transcript from another login"
+    );
+    assert!(db::node_spawn_configuration(node.id, "codex")
+        .unwrap()
+        .unwrap()
+        .resolved
+        .unwrap()
+        .harness_login
+        .is_none());
+}
+
+#[test]
+fn regenerate_replaces_the_recipe_and_resumes_only_in_the_same_harness_home() {
+    use crate::preferences::harness_logins::HarnessLogin;
+    use crate::preferences::spawn_configurations::SpawnConfiguration;
+
+    let _db = crate::db::test_support::isolated();
+    let root = tempfile::tempdir().unwrap();
+    let store = crate::preferences::PreferencesStore::new(root.path().join("prefs"));
+    store
+        .try_update(|prefs| {
+            for (id, home) in [
+                ("work", "C:/Users/u/.codex-accounts/work"),
+                ("work-alias", "C:/Users/u/.codex-accounts/work"),
+                ("personal", "C:/Users/u/.codex-accounts/personal"),
+            ] {
+                prefs.harness_logins.push(HarnessLogin {
+                    id: id.into(),
+                    harness_id: "codex".into(),
+                    label: id.into(),
+                    home: home.into(),
+                });
+            }
+            prefs
+                .harness_profiles
+                .push(crate::preferences::HarnessProfile {
+                    id: "codex".into(),
+                    name: "Codex".into(),
+                    harness: "codex".into(),
+                    runtime: None,
+                    wsl_distro: None,
+                    executable: None,
+                });
+            for (id, effort) in [("launch/high", "high"), ("launch/low", "low")] {
+                prefs.spawn_configurations.push(SpawnConfiguration {
+                    id: id.into(),
+                    name: effort.into(),
+                    spawn_option_id: "codex".into(),
+                    effort: Some(effort.into()),
+                    ..Default::default()
+                });
+            }
+            Ok(())
+        })
+        .unwrap();
+    let mesh_id = fresh_mesh();
+    for (initial_login, selected_login, configuration_id, moved_home, expected_resume) in [
+        ("work", "work", Some("launch/low"), false, true),
+        ("default", "default", Some("launch/low"), false, true),
+        ("work", "work-alias", Some("launch/low"), false, true),
+        ("work", "work", None, false, true),
+        ("work", "personal", Some("launch/low"), false, false),
+        ("work", "work", Some("launch/low"), true, false),
+    ] {
+        let configuration = crate::preferences::spawn_configurations::resolve_menu_selection_from(
+            Some(&store),
+            "codex",
+            Some("launch/high"),
+            Some(initial_login),
+        )
+        .unwrap()
+        .unwrap();
+        let node = create_blocking_configured_from(
+            &store,
+            NodeCreateParams {
+                mesh_id,
+                path: "",
+                branch: "main",
+                provider: Some("codex"),
+                source_issue: None,
+                source_pr: None,
+                source_pr_pinned_sha: None,
+                use_worktree_override: Some(false),
+                name_override: None,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                configuration: Some(&configuration),
+                initial_prompt: None,
+                operation: None,
+            },
+            false,
+        )
+        .unwrap()
+        .node;
+        db::update_cli_session_id(node.id, "existing-session").unwrap();
+        if moved_home {
+            store
+                .try_update(|prefs| {
+                    prefs
+                        .harness_logins
+                        .iter_mut()
+                        .find(|login| login.id == "work")
+                        .unwrap()
+                        .home = "C:/Users/u/.codex-accounts/moved-work".into();
+                    Ok(())
+                })
+                .unwrap();
+        }
+        let prefs = store.load().unwrap();
+        let prepared = regenerate_prepare_selection(
+            &prefs,
+            node.id,
+            "codex",
+            "codex",
+            configuration_id,
+            Some(selected_login),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            regenerate_apply_prepared_blocking(node.id, prepared).unwrap(),
+            expected_resume,
+            "{initial_login} -> {selected_login}, moved home={moved_home}"
+        );
+        let selected = db::node_spawn_configuration(node.id, "codex")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            selected.effort.as_deref(),
+            configuration_id.map(|_| "low"),
+            "resuming keeps the replacement's settings rather than the previous recipe"
+        );
+        let plan = selected.resolved.unwrap();
+        assert_eq!(
+            plan.harness_login.as_ref().map(|login| login.id.as_str()),
+            (selected_login != "default").then_some(selected_login),
+            "resuming never overwrites the selected login identity"
+        );
+        if moved_home {
+            assert_eq!(
+                plan.harness_login.unwrap().home,
+                "C:/Users/u/.codex-accounts/moved-work"
+            );
+        }
+    }
 }

@@ -41,6 +41,10 @@ fn terminal_protocol_preserves_registry_report_fence_across_packets() {
     let agent = registry.get(&id).unwrap();
     *agent.writer_tx.lock().unwrap() = Some(tx);
     let stamp = registry.input_stamp(id).unwrap();
+    assert_eq!(
+        stamp,
+        InputStamp::at_process_start(agent.generation).encode()
+    );
     for packet in [
         b"\x1b[I".as_slice(),
         b"\x1b[O",
@@ -883,6 +887,115 @@ fn handover_rejects_text_with_nothing_in_it() {
             "{text:?} carries text"
         );
     }
+}
+
+#[test]
+fn handover_circuit_target_keeps_rendered_paste_and_enter_retry() {
+    use crate::agent::prompt_delivery::PreparedPrompt;
+    use crate::agent::provider::adapters::CODEX;
+    let _db = crate::db::test_support::isolated();
+    let (id, _) = crate::db::test_support::installed_node_id_range().unwrap();
+    let (registry, writes) = testing::capturing_registry(id);
+    crate::circuit::evaluator::register_circuit(id);
+    let output = Arc::clone(&registry.get(&id).unwrap().delivery_output);
+    let target = Arc::clone(&registry);
+    let worker = std::thread::spawn(move || {
+        let prompt =
+            PreparedPrompt::for_adapter(id, &CODEX, "line \x1b[31mone\x1b[0m\x07\nline two");
+        commands::deliver_handover_prompt(&target, &CODEX, &prompt, || {})
+    });
+    let paste = writes
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    output.on_output("[Pasted Content 17 chars]");
+    let first_enter = writes.recv_timeout(std::time::Duration::from_secs(5));
+    let second_enter = writes.recv_timeout(std::time::Duration::from_secs(10));
+    if second_enter.is_ok() {
+        output.on_output("working");
+    } else {
+        registry.write_input(id, b"\x03").unwrap();
+    }
+    let result = worker.join().unwrap();
+    crate::circuit::evaluator::unregister(id);
+    registry.kill_session(id);
+    assert_eq!(paste, b"\x1b[200~line one\rline two\x1b[201~");
+    assert_eq!(first_enter.unwrap(), b"\r");
+    assert_eq!(
+        second_enter.unwrap(),
+        b"\r",
+        "Circuit handover must retry an unacknowledged Enter"
+    );
+    assert!(result.is_ok(), "{result:?}");
+}
+
+#[test]
+fn takeover_after_handover_staging_raises_attention_and_retains_the_brief() {
+    use crate::agent::prompt_delivery::PreparedPrompt;
+    use crate::agent::provider::adapters::CODEX;
+    let _db = crate::db::test_support::isolated();
+    let root = tempfile::tempdir().unwrap();
+    let mesh = crate::db::create_mesh("handover-takeover", "C:/handover-takeover").unwrap();
+    let node = crate::db::create_agent_node(crate::db::NewAgentNode {
+        mesh_id: mesh.id,
+        name: "handover-takeover",
+        path: &mesh.path,
+        branch: "main",
+        env: EnvType::Windows,
+        provider: "codex",
+        worktree_name: None,
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree: false,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        worktree_path: None,
+        spawn_configuration: None,
+    })
+    .unwrap();
+    let text = "Read every finding carefully.\n".repeat(40);
+    let handover = crate::agent::handover::prepare(
+        &node,
+        crate::models::Provider::Codex,
+        &text,
+        Some(root.path()),
+    )
+    .unwrap();
+    let pointer = handover.prompt().to_string();
+    let (registry, writes) = testing::capturing_registry(node.id);
+    let target = Arc::clone(&registry);
+    let worker = std::thread::spawn(move || {
+        let mut attention = false;
+        let result = commands::deliver_prepared_handover(handover, |text| {
+            let prompt = PreparedPrompt::for_adapter(node.id, &CODEX, text);
+            commands::deliver_handover_prompt(&target, &CODEX, &prompt, || attention = true)
+        });
+        (result, attention)
+    });
+    let paste = writes
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    registry.write_input(node.id, b"x").unwrap();
+    let (result, attention) = worker.join().unwrap();
+    registry.kill_session(node.id);
+    let remaining: Vec<_> = writes.try_iter().collect();
+    let files: Vec<_> = std::fs::read_dir(root.path().join(format!("handovers/node-{}", node.id)))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(paste, pointer.as_bytes());
+    assert_eq!(
+        remaining,
+        vec![b"x".to_vec()],
+        "takeover must prevent Enter"
+    );
+    assert!(
+        result.is_ok(),
+        "an accepted pointer must not be discarded: {result:?}"
+    );
+    assert_eq!(files.len(), 1);
+    assert_eq!(std::fs::read_to_string(&files[0]).unwrap(), text);
+    assert!(attention, "a staged handover without Enter needs attention");
 }
 
 #[test]

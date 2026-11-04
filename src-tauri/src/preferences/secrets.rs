@@ -32,19 +32,25 @@ fn account_slot(account_id: &str) -> String {
     format!("provider-account:{account_id}")
 }
 
-/// The profile the running instance owns: the app-data directory's leaf, which
-/// is the bundle identifier (`com.alond.buildmesh` / `com.alond.buildmesh.dev`).
-fn profile() -> String {
-    super::storage::app_data_dir()
-        .and_then(|dir| {
-            dir.file_name()
-                .map(|leaf| leaf.to_string_lossy().into_owned())
-        })
+/// The credential namespace of a profile directory: the app-data directory's
+/// leaf, which is the bundle identifier (`com.alond.buildmesh` /
+/// `com.alond.buildmesh.dev`).
+///
+/// Entry names carry it because the stable and dev builds run side by side as
+/// the same OS user and so share one vault; without the profile in the name a
+/// dev save would overwrite or delete the stable build's keys.
+///
+/// The namespace follows the **store** that owns the profile, so a store over
+/// another directory never writes into another profile's vault.
+pub(crate) fn profile_for(profile_dir: &std::path::Path) -> String {
+    profile_dir
+        .file_name()
+        .map(|leaf| leaf.to_string_lossy().into_owned())
         .unwrap_or_else(|| "default".to_string())
 }
 
-fn target(slot: &str) -> String {
-    format!("buildmesh:{}:{slot}", profile())
+fn target_for(profile: &str, slot: &str) -> String {
+    format!("buildmesh:{profile}:{slot}")
 }
 
 fn non_empty(value: &Option<String>) -> Option<&str> {
@@ -116,14 +122,14 @@ fn non_empty_json<'a>(
 /// cue to [`scrub_file`] it. A store read error is logged (never the value) and
 /// leaves the key absent for this session; it is not an error, because every
 /// other setting must keep working.
-pub(crate) fn hydrate_json(value: &mut serde_json::Value) -> bool {
+pub(crate) fn hydrate_json(value: &mut serde_json::Value, profile: &str) -> bool {
     let mut plaintext_in_file = false;
     visit_secret_fields(value, |owner, field, slot| {
         if non_empty_json(owner, field).is_some() {
             plaintext_in_file = true;
             return;
         }
-        match backend::get(&target(&slot)) {
+        match backend::get(&target_for(profile, &slot)) {
             Ok(Some(secret)) if !secret.is_empty() => {
                 owner.insert(field.to_string(), serde_json::Value::String(secret));
             }
@@ -150,7 +156,11 @@ pub(crate) fn hydrate_json(value: &mut serde_json::Value) -> bool {
 /// last-known-good backup, which is older: there a key is only stored when the
 /// store has none, and is otherwise just dropped, so an old backup can never
 /// overwrite a newer key.
-pub(crate) fn scrub_file(path: &std::path::Path, authoritative: bool) -> Result<(), String> {
+pub(crate) fn scrub_file(
+    path: &std::path::Path,
+    authoritative: bool,
+    profile: &str,
+) -> Result<(), String> {
     let raw = match std::fs::read(path) {
         Ok(raw) => raw,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -165,13 +175,13 @@ pub(crate) fn scrub_file(path: &std::path::Path, authoritative: bool) -> Result<
             return;
         };
         if !authoritative
-            && matches!(backend::get(&target(&slot)), Ok(Some(stored)) if !stored.is_empty())
+            && matches!(backend::get(&target_for(profile, &slot)), Ok(Some(stored)) if !stored.is_empty())
         {
             owner.insert(field.to_string(), serde_json::Value::Null);
             changed = true;
             return;
         }
-        match backend::set(&target(&slot), &secret) {
+        match backend::set(&target_for(profile, &slot), &secret) {
             Ok(()) => {
                 owner.insert(field.to_string(), serde_json::Value::Null);
                 changed = true;
@@ -194,26 +204,26 @@ pub(crate) fn scrub_file(path: &std::path::Path, authoritative: bool) -> Result<
 /// redaction switched off): its promise is that restoring it, possibly on
 /// another machine, brings the keys with it. A file that cannot be parsed is
 /// returned unchanged — that is the bundler's call to make, not this one's.
-pub(crate) fn with_keys_inlined(raw: Vec<u8>) -> Vec<u8> {
+pub(crate) fn with_keys_inlined(raw: Vec<u8>, profile: &str) -> Vec<u8> {
     let mut value = match serde_json::from_slice::<serde_json::Value>(&raw) {
         Ok(value) if value.is_object() => value,
         _ => return raw,
     };
-    hydrate_json(&mut value);
+    hydrate_json(&mut value, profile);
     serde_json::to_vec_pretty(&value).unwrap_or(raw)
 }
 
 /// Struct-level counterpart of [`hydrate_json`], for a backup restored through
 /// `recovery` (which classifies the bytes itself). A backup is always written in
 /// the current shape, so skipping the pre-migration ordering is safe here.
-pub(crate) fn hydrate(prefs: &mut AppPreferences) -> bool {
+pub(crate) fn hydrate(prefs: &mut AppPreferences, profile: &str) -> bool {
     let mut plaintext_in_file = false;
     let mut fill = |field: &mut Option<String>, slot: String| {
         if non_empty(field).is_some() {
             plaintext_in_file = true;
             return;
         }
-        match backend::get(&target(&slot)) {
+        match backend::get(&target_for(profile, &slot)) {
             Ok(Some(value)) if !value.is_empty() => *field = Some(value),
             Ok(_) => {}
             Err(error) => {
@@ -292,14 +302,14 @@ fn account_ids_with_keys_in_file(path: &std::path::Path) -> HashSet<String> {
 /// secret in both, and a user told "this key is not in your file" while it
 /// sits in the backup would be told a falsehood.
 ///
+/// `primary` is the store's own preferences file, so the report is about the
+/// profile the caller asked about.
+///
 /// Sorted, so the Settings list is stable between reads.
-pub(crate) fn account_ids_with_keys_on_disk() -> Vec<String> {
-    let Ok(primary) = super::storage::preferences_path() else {
-        return Vec::new();
-    };
-    let mut ids = account_ids_with_keys_in_file(&primary);
+pub(crate) fn account_ids_with_keys_on_disk(primary: &std::path::Path) -> Vec<String> {
+    let mut ids = account_ids_with_keys_in_file(primary);
     ids.extend(account_ids_with_keys_in_file(
-        &super::recovery::backup_path(&primary),
+        &super::recovery::backup_path(primary),
     ));
     let mut ids: Vec<String> = ids.into_iter().collect();
     ids.sort();
@@ -314,13 +324,14 @@ pub(crate) fn account_ids_with_keys_on_disk() -> Vec<String> {
 pub(crate) fn externalize(
     prefs: &AppPreferences,
     previous: Option<&AppPreferences>,
+    profile: &str,
 ) -> AppPreferences {
     let mut on_disk = prefs.clone();
     let move_out = |field: &mut Option<String>, slot: String| {
         let Some(value) = non_empty(field) else {
             return;
         };
-        match backend::set(&target(&slot), value) {
+        match backend::set(&target_for(profile, &slot), value) {
             Ok(()) => *field = None,
             Err(error) => {
                 tracing::warn!(%slot, %error, "credential store write failed; the key stays in preferences.json");
@@ -339,7 +350,7 @@ pub(crate) fn externalize(
     if let Some(previous) = previous {
         let live = keyed_slots(prefs);
         for slot in keyed_slots(previous).difference(&live) {
-            if let Err(error) = backend::delete(&target(slot)) {
+            if let Err(error) = backend::delete(&target_for(profile, slot)) {
                 tracing::warn!(%slot, %error, "credential store delete failed; a stale key entry remains");
             }
         }
@@ -405,6 +416,16 @@ mod unavailable {
 /// Per-thread in-memory vault, mirroring the per-thread preferences cache so
 /// parallel tests never share secrets and never touch the real Credential
 /// Manager.
+///
+/// This is the one place where a test double differs from production in
+/// *scope* rather than in implementation: the real Windows Credential Manager
+/// is machine-wide, so a secret written on one thread is visible on another,
+/// while this vault is per thread. A test that drives a store from a spawned
+/// worker thread therefore sees a different vault there, and a key it seeds on
+/// the parent thread is invisible to that worker. The *behaviour* is the same
+/// on both sides — a keyed entry is written, read back and deleted by name —
+/// and the issue's seam for this adapter is explicit, so the difference is
+/// documented here rather than papered over.
 #[cfg(test)]
 mod test_vault {
     use std::cell::RefCell;
@@ -448,6 +469,8 @@ mod test_vault {
 }
 
 #[cfg(test)]
+// allow-test-in-production: the credential-store double is a fake for an external OS vault,
+// shared by the sibling suites that seed and inspect stored secrets.
 pub(crate) mod test_support {
     use super::test_vault::VAULT;
 
@@ -461,10 +484,10 @@ pub(crate) mod test_support {
         VAULT.with(|vault| vault.borrow_mut().fail_writes = fail);
     }
 
-    /// Store `value` as the key of provider account `id` in the current profile,
-    /// as if a build had saved it there.
-    pub(crate) fn seed_account_secret(id: &str, value: &str) {
-        super::backend::set(&super::target(&super::account_slot(id)), value).unwrap();
+    /// Store `value` as the key of provider account `id` in `profile`, as if a
+    /// build had saved it there.
+    pub(crate) fn seed_account_secret(profile: &str, id: &str, value: &str) {
+        super::backend::set(&super::target_for(profile, &super::account_slot(id)), value).unwrap();
     }
 
     /// Every secret value currently held by the in-memory credential store.

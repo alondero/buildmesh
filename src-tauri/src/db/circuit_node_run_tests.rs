@@ -79,7 +79,24 @@ fn set_context(conn: &mut Connection, run: i64, pairs: &[(&str, &str)]) {
     for (key, value) in pairs {
         context.set(key, *value);
     }
-    commit_circuit_advance_locked(conn, run, None, Some(&context.to_json().unwrap()), &[]).unwrap();
+    commit_circuit_advance_locked(
+        conn,
+        run,
+        None,
+        Some(&crate::db::circuit::context_store::ContextChange::from_context(&context)),
+        &[],
+    )
+    .unwrap();
+}
+
+/// A historical payload that is not a flat string map, written the way an
+/// older build left it: straight into the column, with no seam involved.
+fn set_raw_context(conn: &Connection, run: i64, payload: &str) {
+    conn.execute(
+        "UPDATE autopilot_circuit_runs SET context_json = ?1 WHERE id = ?2",
+        rusqlite::params![payload, run],
+    )
+    .unwrap();
 }
 
 fn only(conn: &Connection) -> NodeCircuitRun {
@@ -488,6 +505,42 @@ fn only_the_latest_live_or_unacknowledged_run_per_node_is_listed() {
 }
 
 #[test]
+fn a_completed_run_with_a_non_flat_context_does_not_fail_the_listing() {
+    let mut conn = conn();
+    let (_, node) = source(&conn, "historical");
+    let run = review(&mut conn, node, 3);
+    commit_circuit_advance_locked(&mut conn, run, Some("completed"), None, &[]).unwrap();
+    set_raw_context(&conn, run, r#"{"x":{"y":"z"}}"#);
+
+    assert!(
+        list_node_circuit_runs_inner(&conn).unwrap().is_empty(),
+        "a completed run is not listed, so its historical payload is never read"
+    );
+}
+
+#[test]
+fn a_listed_run_with_a_non_flat_context_still_refuses_the_listing() {
+    let mut conn = conn();
+    let (_, node) = source(&conn, "malformed");
+    let run = review(&mut conn, node, 3);
+    commit_circuit_advance_locked(
+        &mut conn,
+        run,
+        Some("running"),
+        None,
+        &[step_op("verdict", "running", 1, None)],
+    )
+    .unwrap();
+    set_raw_context(&conn, run, r#"{"x":{"y":"z"}}"#);
+
+    let error = list_node_circuit_runs_inner(&conn).unwrap_err();
+    assert!(
+        matches!(&error, DbError::Rendered(message) if message.contains("invalid context_json")),
+        "a listed run still needs a logical map, so the malformed payload is refused: {error:?}"
+    );
+}
+
+#[test]
 fn an_archived_node_is_not_listed() {
     let mut conn = conn();
     let (_, node) = source(&conn, "archived");
@@ -541,6 +594,70 @@ fn a_reviewer_helper_node_is_not_listed_as_an_implementation_node() {
         listed.iter().map(|row| row.node_id).collect::<Vec<_>>(),
         vec![node],
         "the reviewer is the run's helper, so the status line belongs to the implementer"
+    );
+}
+
+#[test]
+fn a_reviewer_child_row_with_a_non_flat_context_does_not_fail_the_listing() {
+    let mut conn = conn();
+    let (mesh, node) = source(&conn, "reviewer-child");
+    let run = review(&mut conn, node, 3);
+    commit_circuit_advance_locked(
+        &mut conn,
+        run,
+        Some("running"),
+        None,
+        &[step_op("verdict", "running", 1, None)],
+    )
+    .unwrap();
+    let reviewer = create_agent_node_inner(
+        &conn,
+        NewAgentNode {
+            mesh_id: mesh,
+            name: "Code reviewer",
+            path: "/tmp/reviewer-child",
+            branch: "review",
+            env: EnvType::Windows,
+            provider: "claude",
+            worktree_name: None,
+            source_issue: None,
+            source_pr: None,
+            source_pr_pinned_sha: None,
+            use_worktree: false,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            worktree_path: None,
+            spawn_configuration: None,
+        },
+    )
+    .unwrap();
+    commit_circuit_advance_locked(
+        &mut conn,
+        run,
+        Some("running"),
+        None,
+        &[CircuitStepOp {
+            agent_node_id: Some(reviewer.id),
+            ..step_op("reviewer", "running", 1, None)
+        }],
+    )
+    .unwrap();
+    set_circuit_step_agent_node_with_parent_inner(&conn, run, "reviewer", reviewer.id, Some(node))
+        .unwrap();
+    set_raw_context(&conn, run, r#"{"x":{"y":"z"}}"#);
+    // The source node is archived, so the reviewer helper's row is the only
+    // ownership row left for this run. The run is still live: the reviewer
+    // rule alone keeps it out of the listing.
+    update_agent_node_status_inner(&conn, node, SessionStatus::Archived).unwrap();
+
+    let listed = list_node_circuit_runs_inner(&conn);
+    assert!(
+        listed.is_ok(),
+        "a reviewer helper's row must not read the run's context: {listed:?}"
+    );
+    assert!(
+        listed.unwrap().is_empty(),
+        "a reviewer helper is not an implementation node, so it is not listed"
     );
 }
 

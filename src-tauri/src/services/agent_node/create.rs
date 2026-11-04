@@ -9,15 +9,46 @@ pub(super) fn place_worktree(
     mesh_worktree_directory: Option<&str>,
     worktree_segment: Option<&str>,
 ) -> (Option<String>, crate::models::EnvType) {
-    let app_dir = crate::preferences::worktree_directory();
+    place_worktree_with_app_dir(
+        mesh_path,
+        mesh_worktree_directory,
+        worktree_segment,
+        crate::preferences::worktree_directory().as_deref(),
+    )
+}
+
+/// [`place_worktree`] with the app-wide Worktree Node directory supplied.
+///
+/// The caller owns the preferences the directory comes from, so a caller that
+/// reads its own store's preferences resolves the same placement the store
+/// would (issue #1482).
+pub(super) fn place_worktree_with_app_dir(
+    mesh_path: &str,
+    mesh_worktree_directory: Option<&str>,
+    worktree_segment: Option<&str>,
+    app_dir: Option<&str>,
+) -> (Option<String>, crate::models::EnvType) {
     let effective_dir =
-        env::effective_worktree_dir_raw(mesh_path, mesh_worktree_directory, app_dir.as_deref());
+        env::effective_worktree_dir_raw(mesh_path, mesh_worktree_directory, app_dir);
     let path = worktree_segment
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .map(|name| env::resolve_worktree_node_raw(&effective_dir, name));
     let resolved = env::resolve_agent_path_in_dir(mesh_path, &effective_dir, worktree_segment);
     (path, resolved.env_type)
+}
+
+/// The app-wide Worktree Node directory carried by a preferences value.
+///
+/// The same rule the store's own accessor applies: a blank stored value
+/// collapses to "no override".
+fn app_worktree_directory(prefs: &crate::preferences::AppPreferences) -> Option<String> {
+    prefs
+        .worktree_directory
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 /// Capability only. Install detection stays on spawn preflight: a missing
@@ -80,7 +111,22 @@ pub struct NodeCreateParams<'a> {
     pub operation: Option<&'a db::CreateOperationBinding>,
 }
 
-pub fn create_with_source_pr_fork_configured(
+/// The create against an explicit store.
+///
+/// The caller owns the store, so the launch selection, the saved
+/// configurations and the Worktree Node directory this node resolves are the
+/// ones the caller set up (issue #1482).
+pub fn create_with_source_pr_fork_configured_from(
+    store: &crate::preferences::PreferencesStore,
+    request: NodeCreateParams<'_>,
+) -> Result<CreatedNode, AgentNodeError> {
+    let prefs = store.load().map_err(AgentNodeError::Backend)?;
+    create_with_source_pr_fork_configured_with(prefs, request)
+}
+
+/// The create itself, with the preferences already read.
+fn create_with_source_pr_fork_configured_with(
+    mut prefs: crate::preferences::AppPreferences,
     request: NodeCreateParams<'_>,
 ) -> Result<CreatedNode, AgentNodeError> {
     let NodeCreateParams {
@@ -100,7 +146,6 @@ pub fn create_with_source_pr_fork_configured(
         operation,
     } = request;
     let mesh = db::get_mesh_by_id(mesh_id)?;
-    let mut prefs = crate::preferences::load().map_err(AgentNodeError::Backend)?;
     let selection = crate::preferences::resolve_default_provider(
         provider.map(str::to_string),
         mesh.default_provider.clone(),
@@ -171,8 +216,12 @@ pub fn create_with_source_pr_fork_configured(
     // Nodes. Existing rows without it retain the legacy fallback via
     // `env::node_working_path`, so changing a setting affects future nodes
     // without moving live worktrees.
-    let (worktree_path_owned, placed_env) =
-        place_worktree(path, mesh.worktree_directory.as_deref(), worktree_db_name);
+    let (worktree_path_owned, placed_env) = place_worktree_with_app_dir(
+        path,
+        mesh.worktree_directory.as_deref(),
+        worktree_db_name,
+        app_worktree_directory(&prefs).as_deref(),
+    );
     let env_type = runtime.unwrap_or(placed_env);
     // Store the harness/profile id verbatim (issue #535) — no premature parse
     // to the legacy `Provider` enum, which would flatten an unknown profile id
@@ -287,7 +336,7 @@ pub struct CreatedNode {
 /// every entry point has the exact same shape (issue #1658 step 5).
 ///
 /// Mirrors the `*_blocking` convention established by
-/// [`regenerate_load_blocking`] / [`regenerate_apply_blocking`] /
+/// [`regenerate_load_blocking`] / [`regenerate_apply_prepared_blocking`] /
 /// [`regenerate_reload_blocking`] (see also `regenerate_agent_node`):
 /// pure sync, returns [`AgentNodeError`], the caller wraps a single
 /// `crate::commands::run_blocking` around the call. The offload
@@ -351,6 +400,39 @@ pub fn create_blocking_configured(
     request: NodeCreateParams<'_>,
     pending: bool,
 ) -> Result<CreatedNode, AgentNodeError> {
+    match crate::preferences::default_store() {
+        Some(store) => create_blocking_configured_from(&store, request, pending),
+        // A build with **no** store installed (a test that never installed one)
+        // reads the code-defined defaults, so a caller that does not depend on
+        // stored preferences keeps working (issue #1482).
+        None => create_blocking_configured_with(
+            crate::preferences::AppPreferences::default(),
+            request,
+            pending,
+        ),
+    }
+}
+
+/// [`create_blocking_configured`] against an explicit store.
+///
+/// The caller owns the store, so the launch selection and the saved
+/// configurations this node resolves are the ones the caller set up
+/// (issue #1482).
+pub fn create_blocking_configured_from(
+    store: &crate::preferences::PreferencesStore,
+    request: NodeCreateParams<'_>,
+    pending: bool,
+) -> Result<CreatedNode, AgentNodeError> {
+    let prefs = store.load().map_err(AgentNodeError::Backend)?;
+    create_blocking_configured_with(prefs, request, pending)
+}
+
+/// The shared runner, with the preferences already read.
+fn create_blocking_configured_with(
+    prefs: crate::preferences::AppPreferences,
+    request: NodeCreateParams<'_>,
+    pending: bool,
+) -> Result<CreatedNode, AgentNodeError> {
     let NodeCreateParams {
         mesh_id,
         branch,
@@ -405,47 +487,53 @@ pub fn create_blocking_configured(
     //    `use_worktree_override = Some(false)` now sees its override
     //    honored on the Pending path, not silently swallowed.
     if pending {
-        create_pending_with_source_pr_fork_and_worktree(NodeCreateParams {
-            mesh_id,
-            // The path comes from the mesh row looked up above, which is why
-            // callers of this runner pass `path: ""`.
-            path: &mesh.path,
-            branch: &branch,
-            provider,
-            source_issue,
-            source_pr: None,
-            source_pr_pinned_sha: None,
-            use_worktree_override,
-            name_override,
-            head_repo_owner: None,
-            head_repo_clone_url: None,
-            configuration,
-            initial_prompt,
-            operation: None,
-        })
+        create_pending_with_source_pr_fork_and_worktree_with(
+            prefs,
+            NodeCreateParams {
+                mesh_id,
+                // The path comes from the mesh row looked up above, which is why
+                // callers of this runner pass `path: ""`.
+                path: &mesh.path,
+                branch: &branch,
+                provider,
+                source_issue,
+                source_pr: None,
+                source_pr_pinned_sha: None,
+                use_worktree_override,
+                name_override,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                configuration,
+                initial_prompt,
+                operation: None,
+            },
+        )
         .map(|node| CreatedNode {
             node,
             replayed: false,
         })
     } else {
-        create_with_source_pr_fork_configured(NodeCreateParams {
-            mesh_id,
-            // The path comes from the mesh row looked up above, which is why
-            // callers of this runner pass `path: ""`.
-            path: &mesh.path,
-            branch: &branch,
-            provider,
-            source_issue,
-            source_pr: None,
-            source_pr_pinned_sha: None,
-            use_worktree_override,
-            name_override,
-            head_repo_owner: None,
-            head_repo_clone_url: None,
-            configuration,
-            initial_prompt,
-            operation,
-        })
+        create_with_source_pr_fork_configured_with(
+            prefs,
+            NodeCreateParams {
+                mesh_id,
+                // The path comes from the mesh row looked up above, which is why
+                // callers of this runner pass `path: ""`.
+                path: &mesh.path,
+                branch: &branch,
+                provider,
+                source_issue,
+                source_pr: None,
+                source_pr_pinned_sha: None,
+                use_worktree_override,
+                name_override,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                configuration,
+                initial_prompt,
+                operation,
+            },
+        )
     }
 }
 
@@ -476,14 +564,80 @@ pub fn create_pending_with_source_pr_fork_configured(
     })
 }
 
+/// [`create_pending_with_source_pr_fork_configured`] against an explicit
+/// store.
+///
+/// The caller owns the store, so the launch selection this node resolves is
+/// the one the caller set up (issue #1482).
+pub fn create_pending_with_source_pr_fork_configured_from(
+    store: &crate::preferences::PreferencesStore,
+    request: NodeCreateParams<'_>,
+) -> Result<AgentNode, AgentNodeError> {
+    create_pending_with_source_pr_fork_and_worktree_from(
+        store,
+        NodeCreateParams {
+            use_worktree_override: None,
+            operation: None,
+            ..request
+        },
+    )
+}
+
 pub(super) fn create_pending_with_source_pr_fork_and_worktree(
     request: NodeCreateParams<'_>,
 ) -> Result<AgentNode, AgentNodeError> {
-    let mut node = create_with_source_pr_fork_configured(NodeCreateParams {
-        operation: None,
-        ..request
-    })?
+    match crate::preferences::default_store() {
+        Some(store) => create_pending_with_source_pr_fork_and_worktree_from(&store, request),
+        // A build with **no** store installed (a test that never installed one)
+        // reads the code-defined defaults (issue #1482).
+        None => create_pending_with_source_pr_fork_and_worktree_with(
+            crate::preferences::AppPreferences::default(),
+            request,
+        ),
+    }
+}
+
+/// The pending create, with the preferences already read.
+///
+/// The fallback for a build with no store installed: it reads the code-defined
+/// defaults, so a caller that does not depend on stored preferences keeps
+/// working (issue #1482).
+fn create_pending_with_source_pr_fork_and_worktree_with(
+    prefs: crate::preferences::AppPreferences,
+    request: NodeCreateParams<'_>,
+) -> Result<AgentNode, AgentNodeError> {
+    let node = create_with_source_pr_fork_configured_with(
+        prefs,
+        NodeCreateParams {
+            operation: None,
+            ..request
+        },
+    )?
     .node;
+    finish_pending_create(node)
+}
+
+/// The pending create against an explicit store.
+///
+/// The caller owns the store, so the launch selection this node resolves is
+/// the one the caller set up (issue #1482).
+fn create_pending_with_source_pr_fork_and_worktree_from(
+    store: &crate::preferences::PreferencesStore,
+    request: NodeCreateParams<'_>,
+) -> Result<AgentNode, AgentNodeError> {
+    let node = create_with_source_pr_fork_configured_from(
+        store,
+        NodeCreateParams {
+            operation: None,
+            ..request
+        },
+    )?
+    .node;
+    finish_pending_create(node)
+}
+
+/// The pending half of the create: the status write the Pending path needs.
+fn finish_pending_create(mut node: AgentNode) -> Result<AgentNode, AgentNodeError> {
     // Two writes (insert + status update) is one extra ~1ms SQLite round
     // trip. Acceptable: this function is on the fast path, and the second
     // write is the whole point — without it the new node would look

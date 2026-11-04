@@ -271,7 +271,32 @@ pub fn validate_reviewer_provider_id(value: &str) -> Result<(), String> {
         return Ok(());
     }
     let selected = crate::preferences::launch_configurations::selection_option(trimmed)?;
-    let harness_id = SpawnOptionId::from(selected.as_str())
+    validate_reviewer_provider_selection(&selected)
+}
+
+/// Explicit-store path — the caller owns the store.
+///
+/// A test constructs its own [`crate::preferences::PreferencesStore`] over a
+/// temporary directory and passes it here, so the preferences this call reads
+/// are the ones the caller set up (issue #1482).
+pub fn validate_reviewer_provider_id_from(
+    store: &crate::preferences::PreferencesStore,
+    value: &str,
+) -> Result<(), String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    let selected =
+        crate::preferences::launch_configurations::selection_option_from(store, trimmed)?;
+    validate_reviewer_provider_selection(&selected)
+}
+
+/// The part of the reviewer-Spawn-Option validation that depends only on the
+/// resolved selection, so the ambient and the explicit-store paths share one
+/// implementation.
+fn validate_reviewer_provider_selection(selected: &str) -> Result<(), String> {
+    let harness_id = SpawnOptionId::from(selected)
         .harness_id()
         .trim()
         .to_string();

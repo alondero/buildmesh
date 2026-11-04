@@ -1,3 +1,4 @@
+import { __resetHarnessLoginsForTests, publishHarnessLogins } from '../../src/hooks/useHarnessLogins';
 /**
  * Tests for the Git Issues probe tab — issue #378.
  *
@@ -156,6 +157,7 @@ function mockBackend(opts: { issues?: GitHubIssue[]; providers?: Array<Record<st
 
 describe('GitIssuesTab (#378)', () => {
   beforeEach(() => {
+    __resetHarnessLoginsForTests();
     // `mockReset` (not `mockClear`) wipes both call history AND any
     // per-test `mockImplementationOnce` / `mockRejectedValueOnce`
     // overrides — guards against a future test that adds a one-off
@@ -173,6 +175,21 @@ describe('GitIssuesTab (#378)', () => {
       meshesById: new Map([[MESH.id, MESH]]),
       selectedMeshId: MESH.id,
     });
+  });
+
+  it('passes the Harness Login chosen from the shared Spawn Menu to node creation', async () => {
+    mockBackend({ providers: [{ id: 'codex', label: 'Codex', harness_id: 'codex', group_key: 'codex', provider_id: null, is_proxied: false, icon: 'X', color: '#fff', resumable: true }] });
+    publishHarnessLogins(['default', 'work'].map(id => ({
+      id, harness_id: 'codex', label: id === 'work' ? 'Work' : 'Default',
+      home: 'C:/codex/' + id, is_default: id === 'default', signed_in: true,
+      email: null, plan: null, same_account_as: null, sign_in: null,
+    })));
+    render(<GitIssuesTab />);
+    const toggles = await screen.findAllByTestId('spawn-dropdown-toggle');
+    await userEvent.click(toggles[0]);
+    await userEvent.click(screen.getByRole('button', { name: 'Codex logins' }));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Work' }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('create_issue_node', expect.objectContaining({ provider: 'codex', loginId: 'work' })));
   });
 
   it('lists open issues for the active mesh', async () => {

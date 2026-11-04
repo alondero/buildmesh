@@ -101,7 +101,7 @@ pub(in crate::db::circuit) fn record_outcome_locked(
             &tx,
             run.id,
             None,
-            Some(&view.context.to_json()?),
+            Some(&crate::db::circuit::context_store::ContextChange::from_context(&view.context)),
             &[crate::db::circuit::CircuitStepOp {
                 node_id: step.node_id.clone(),
                 status: "completed".into(),
@@ -169,7 +169,7 @@ pub(in crate::db::circuit) fn record_outcome_locked(
             &tx,
             run.id,
             None,
-            Some(&view.context.to_json()?),
+            Some(&crate::db::circuit::context_store::ContextChange::from_context(&view.context)),
             &[crate::db::circuit::CircuitStepOp {
                 node_id: step.node_id.clone(),
                 status: "completed".into(),
@@ -220,23 +220,26 @@ pub(in crate::db::circuit) fn record_outcome_locked(
         if !(observed_recheck || (open_pr && has_open_pr_target)) {
             return Err(DbError::invalid("This action has no authoritative automatic evidence recheck. Inspect the external result."));
         }
-        let mut context = super::super::artifacts::load_context(&tx, request.run_id)?;
-        context.set(&format!("node.{}.wait.attempt", step.node_id), "");
-        context.set(&format!("node.{}.evaluated_attempt", step.node_id), "");
-        context.set(
-            &format!("node.{}.classifier_error.{}", step.node_id, step.attempt),
+        // The recheck clears the step's error and records what it is
+        // checking. Only those values change: the rest of the run's context
+        // is left alone.
+        let mut mutation = crate::db::circuit::context_store::ContextMutation::new();
+        mutation.put(format!("node.{}.wait.attempt", step.node_id), "");
+        mutation.put(format!("node.{}.evaluated_attempt", step.node_id), "");
+        mutation.put(
+            format!("node.{}.classifier_error.{}", step.node_id, step.attempt),
             "",
         );
-        context.set(
-            &format!("node.{}.classifier_failures.{}", step.node_id, step.attempt),
+        mutation.put(
+            format!("node.{}.classifier_failures.{}", step.node_id, step.attempt),
             "0",
         );
-        context.set(&format!("node.{}.recheck_only", step.node_id), "1");
+        mutation.put(format!("node.{}.recheck_only", step.node_id), "1");
         // The recheck clears the step's error. Keep the checkpoint it is
         // rechecking, so a recheck the step's evidence cannot resolve can
         // restore it.
-        context.set(
-            &format!("node.{}.recheck_checkpoint", step.node_id),
+        mutation.put(
+            format!("node.{}.recheck_checkpoint", step.node_id),
             step.error_message.clone().unwrap_or_default(),
         );
         let op = crate::db::circuit::CircuitStepOp {
@@ -256,7 +259,9 @@ pub(in crate::db::circuit) fn record_outcome_locked(
             &tx,
             request.run_id,
             None,
-            Some(&context.to_json()?),
+            Some(&crate::db::circuit::context_store::ContextChange::from(
+                mutation,
+            )),
             &[op],
         )?;
         if !commit.applied {
@@ -282,8 +287,8 @@ pub(in crate::db::circuit) fn record_outcome_locked(
         )?;
         return Ok(tx.commit()?);
     }
-    let mut context = super::super::artifacts::load_context(&tx, request.run_id)?;
-    context.set(&format!("node.{}.recheck_only", request.node_id), "0");
+    let mut mutation = crate::db::circuit::context_store::ContextMutation::new();
+    mutation.put(format!("node.{}.recheck_only", request.node_id), "0");
     let effect_kind = match graph.node(&request.node_id).map(|n| &n.kind) {
         Some(CircuitNodeKind::GithubAction { .. }) => "github",
         Some(CircuitNodeKind::InjectPty { .. }) => "prompt",
@@ -383,7 +388,9 @@ pub(in crate::db::circuit) fn record_outcome_locked(
         &tx,
         request.run_id,
         None,
-        Some(&context.to_json()?),
+        Some(&crate::db::circuit::context_store::ContextChange::from(
+            mutation,
+        )),
         &[op],
     )?;
     if !commit.applied {

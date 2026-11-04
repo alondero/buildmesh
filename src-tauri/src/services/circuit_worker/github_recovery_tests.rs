@@ -205,7 +205,7 @@ fn open_pr_fixture() -> OpenPrFixture {
     crate::db::circuit::evidence::commit_transition(
         run_id,
         Some("running"),
-        &seed.to_json().unwrap(),
+        &crate::db::circuit::context_store::ContextChange::from_context(&seed),
         &[step],
         EvidenceWrite {
             intents: std::slice::from_ref(&intent),
@@ -235,8 +235,14 @@ fn open_pr_fixture() -> OpenPrFixture {
         .into_iter()
         .find(|active| active.run.id == run_id)
         .unwrap();
-    let revision = crate::db::circuit::evidence::observation_revision(&active.run).unwrap();
-    let mut context = CircuitContext::default();
+    let logical = crate::db::circuit::context_store::load_logical_run(run_id).unwrap();
+    let revision = crate::db::circuit::evidence::observation_revision(
+        run_id,
+        &active.run.state,
+        &crate::db::circuit::context_store::ContextRevision::of_column(&active.run.context_json),
+    )
+    .unwrap();
+    let mut context = logical.runtime();
     context.with_run(run_id);
     context.set("node.open_pr.recheck_only", "1");
     context.set("evidence.revision", revision.to_string());
@@ -420,9 +426,15 @@ fn restart_view_from_db(run_id: i64, circuit_graph_json: &str) -> RunView {
     let run = crate::db::get_circuit_run(run_id)
         .expect("read run")
         .expect("run row survives");
-    let mut context = CircuitContext::from_json(&run.context_json).expect("context parses");
-    let revision =
-        crate::db::circuit::evidence::observation_revision(&run).expect("revision reads");
+    let logical =
+        crate::db::circuit::context_store::load_logical_run(run_id).expect("context reads");
+    let revision = crate::db::circuit::evidence::observation_revision(
+        run_id,
+        &run.state,
+        &crate::db::circuit::context_store::ContextRevision::of_column(&run.context_json),
+    )
+    .expect("revision reads");
+    let mut context = logical.runtime();
     context.set("evidence.revision", revision.to_string());
     context.with_run(run_id);
     RunView {
@@ -905,7 +917,11 @@ fn dispatch_fixture() -> DispatchFixture {
     crate::db::circuit::evidence::commit_transition(
         run_id,
         Some("running"),
-        "{}",
+        &crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::with_values(
+                std::collections::BTreeMap::new(),
+            ),
+        ),
         &[
             CircuitStepOp {
                 node_id: "implementer".into(),
@@ -956,8 +972,14 @@ fn running_view(run_id: i64) -> RunView {
 
 fn view_from_active(active: &crate::db::ActiveCircuitRun) -> RunView {
     let graph = CircuitGraph::from_json(&active.circuit_graph_json).unwrap();
-    let mut context = CircuitContext::from_json(&active.run.context_json).unwrap();
-    let revision = crate::db::circuit::evidence::observation_revision(&active.run).unwrap();
+    let logical = crate::db::circuit::context_store::load_logical_run(active.run.id).unwrap();
+    let revision = crate::db::circuit::evidence::observation_revision(
+        active.run.id,
+        &active.run.state,
+        &crate::db::circuit::context_store::ContextRevision::of_column(&active.run.context_json),
+    )
+    .unwrap();
+    let mut context = logical.runtime();
     context.set("evidence.revision", revision.to_string());
     RunView {
         run_id: active.run.id,
@@ -1091,7 +1113,12 @@ fn reconcile_stuck_github_step(view: &mut RunView) {
 /// (it parks the step as `pending_slot` for the worker to reschedule).
 fn operator_recheck(run_id: i64) {
     let active = active_run(run_id);
-    let revision = crate::db::circuit::evidence::observation_revision(&active.run).unwrap();
+    let revision = crate::db::circuit::evidence::observation_revision(
+        run_id,
+        &active.run.state,
+        &crate::db::circuit::context_store::ContextRevision::of_column(&active.run.context_json),
+    )
+    .unwrap();
     crate::db::circuit::evidence::record_outcome(
         &crate::db::circuit::evidence::CheckpointRequest {
             run_id,

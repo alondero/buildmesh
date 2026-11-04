@@ -79,53 +79,60 @@ mod tests {
 
     #[test]
     fn harness_runtime_persists_and_legacy_switch_restores_mesh_runtime() {
-        // `isolated` also wires this thread's preferences directory, which is
-        // the other half of this test's setup.
+        // `isolated` also gives this thread its own preferences store, which
+        // is the other half of this test's setup: the harness runtime this
+        // test reads comes from *that* store (issue #1482).
         let _db = crate::db::test_support::isolated();
-        crate::preferences::merge_detected_profiles(vec![crate::preferences::HarnessProfile {
-            id: "muse-wsl-test".into(),
-            name: "Muse (WSL)".into(),
-            harness: "muse".into(),
-            runtime: Some(crate::models::EnvType::Wsl),
-            wsl_distro: Some("Ubuntu".into()),
-            executable: None,
-        }])
+        let store = crate::db::test_support::installed_store().expect("the install owns a store");
+        crate::preferences::resolver::merge_detected_profiles_in(
+            &store,
+            vec![crate::preferences::HarnessProfile {
+                id: "muse-wsl-test".into(),
+                name: "Muse (WSL)".into(),
+                harness: "muse".into(),
+                runtime: Some(crate::models::EnvType::Wsl),
+                wsl_distro: Some("Ubuntu".into()),
+                executable: None,
+            }],
+        )
         .unwrap();
         let path = format!("C:/buildmesh-runtime-{}", uuid::Uuid::new_v4());
         let mesh = crate::db::create_mesh("Runtime test", &path).unwrap();
-        let node = crate::db::create_agent_node(crate::db::NewAgentNode {
-            mesh_id: mesh.id,
-            name: "Muse",
-            path: &path,
-            branch: "main",
-            env: crate::models::EnvType::Windows,
-            provider: "muse-wsl-test",
-            worktree_name: None,
-            source_issue: None,
-            source_pr: None,
-            source_pr_pinned_sha: None,
-            use_worktree: false,
-            head_repo_owner: None,
-            head_repo_clone_url: None,
-            worktree_path: None,
-            spawn_configuration: None,
-        })
+        let node = crate::db::create_agent_node_from(
+            &store,
+            crate::db::NewAgentNode {
+                mesh_id: mesh.id,
+                name: "Muse",
+                path: &path,
+                branch: "main",
+                env: crate::models::EnvType::Windows,
+                provider: "muse-wsl-test",
+                worktree_name: None,
+                source_issue: None,
+                source_pr: None,
+                source_pr_pinned_sha: None,
+                use_worktree: false,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                worktree_path: None,
+                spawn_configuration: None,
+            },
+        )
         .unwrap();
         assert_eq!(node.env, crate::models::EnvType::Wsl);
         assert_eq!(
             crate::db::get_agent_node_by_id(node.id).unwrap().env,
             crate::models::EnvType::Wsl
         );
-        crate::db::set_agent_node_provider(node.id, "terminal").unwrap();
+        crate::db::set_agent_node_provider_from(&store, node.id, "terminal").unwrap();
         let node = crate::db::get_agent_node_by_id(node.id).unwrap();
         assert_eq!(node.provider, "terminal");
         assert_eq!(node.env, crate::models::EnvType::Windows);
-        crate::db::set_agent_node_provider(node.id, "muse-wsl-test").unwrap();
+        crate::db::set_agent_node_provider_from(&store, node.id, "muse-wsl-test").unwrap();
         assert_eq!(
             crate::db::get_agent_node_by_id(node.id).unwrap().env,
             crate::models::EnvType::Wsl
         );
-        crate::preferences::reset_for_tests();
     }
 
     /// Test: creating a project with a duplicate path should NOT crash.

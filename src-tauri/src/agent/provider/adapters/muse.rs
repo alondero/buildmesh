@@ -210,6 +210,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 pub struct MuseAdapter;
+
+impl crate::agent::provider::PromptAcceptanceReceipt
+    for crate::services::muse_watcher::PromptReceipt
+{
+    fn accepted(&self) -> bool {
+        crate::services::muse_watcher::PromptReceipt::accepted(self)
+    }
+}
 pub static MUSE: MuseAdapter = MuseAdapter;
 
 /// Muse's configuration directory, relative to the runtime home: the XDG
@@ -586,6 +594,18 @@ impl AgentProvider for MuseAdapter {
     /// marker, so the paste gate also confirms a long draft by its tail.
     fn paste_gate_policy(&self) -> crate::agent::provider::PasteGatePolicy {
         crate::agent::provider::PasteGatePolicy::RenderedWithTailAnchor
+    }
+    fn prompt_acceptance_receipt(
+        &self,
+        node_id: i64,
+        prompt: &str,
+    ) -> Result<Option<Box<dyn crate::agent::provider::PromptAcceptanceReceipt>>, String> {
+        let node = crate::db::get_agent_node_by_id(node_id).map_err(|error| error.to_string())?;
+        crate::services::muse_watcher::PromptReceipt::capture(&node, prompt).map(|receipt| {
+            receipt.map(|receipt| {
+                Box::new(receipt) as Box<dyn crate::agent::provider::PromptAcceptanceReceipt>
+            })
+        })
     }
     fn self_assigns_session_id(&self) -> bool {
         true

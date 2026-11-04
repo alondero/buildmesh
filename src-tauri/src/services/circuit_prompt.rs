@@ -1,6 +1,7 @@
 //! Retain exactly what delivery prepared, and expose it only for its current
 //! unverified checkpoint. Filesystem work stays outside database connections.
-use crate::circuit::{delivery::PreparedPrompt, handoff};
+use crate::agent::prompt_delivery::PreparedPrompt;
+use crate::circuit::handoff;
 use crate::db::{
     circuit::evidence::{
         prompt_delivery::{self, CircuitPromptRequest, PayloadIdentity},
@@ -29,10 +30,37 @@ pub(crate) fn retain(
     kind: DeliveryKind,
     turn: Option<&handoff::HandoffTurn>,
 ) -> Result<i64, DbError> {
-    let saved = crate::preferences::app_data_dir().is_some_and(|root| {
-        handoff::write_prompt(&payload_path(&root, run_id, node_id, attempt), prompt.text())
-            .map_err(|error| tracing::warn!(run_id, node_id, %error, "Could not retain manual-delivery payload")).is_ok()
-    });
+    match crate::preferences::ambient_store() {
+        Ok(store) => retain_from(&store, run_id, node_id, attempt, prompt, kind, turn),
+        // No profile directory to retain the payload in: the submission is
+        // recorded without a file, exactly as a failed write is.
+        Err(_) => {
+            crate::db::circuit::evidence::record_prompt_submission(run_id, node_id, attempt, prompt)
+        }
+    }
+}
+
+/// [`retain`] against an explicit store.
+///
+/// The caller owns the store, so the retained payload is written under **that**
+/// profile directory rather than the ambient one (issue #1482).
+pub(crate) fn retain_from(
+    store: &crate::preferences::PreferencesStore,
+    run_id: i64,
+    node_id: &str,
+    attempt: i32,
+    prompt: &PreparedPrompt,
+    kind: DeliveryKind,
+    turn: Option<&handoff::HandoffTurn>,
+) -> Result<i64, DbError> {
+    let saved = handoff::write_prompt(
+        &payload_path(store.profile_dir(), run_id, node_id, attempt),
+        prompt.text(),
+    )
+    .map_err(
+        |error| tracing::warn!(run_id, node_id, %error, "Could not retain manual-delivery payload"),
+    )
+    .is_ok();
     if !saved {
         return crate::db::circuit::evidence::record_prompt_submission(
             run_id, node_id, attempt, prompt,
@@ -50,10 +78,22 @@ pub(crate) fn retain(
 }
 
 pub(crate) fn payload(request: &CircuitPromptRequest) -> Result<String, DbError> {
+    match crate::preferences::ambient_store() {
+        Ok(store) => payload_from(&store, request),
+        Err(_) => Err(DbError::invalid("App data directory is unavailable.")),
+    }
+}
+
+/// [`payload`] against an explicit store.
+///
+/// The caller owns the store, so the retained payload read back is the one
+/// under **that** profile directory rather than the ambient one (issue #1482).
+pub(crate) fn payload_from(
+    store: &crate::preferences::PreferencesStore,
+    request: &CircuitPromptRequest,
+) -> Result<String, DbError> {
     let identity = prompt_delivery::payload_identity(request)?;
-    let root = crate::preferences::app_data_dir()
-        .ok_or_else(|| DbError::invalid("App data directory is unavailable."))?;
-    let text = read_payload(&root, request, &identity)?;
+    let text = read_payload(store.profile_dir(), request, &identity)?;
     // A worker/operator can change the run while the file is read.
     if prompt_delivery::payload_identity(request)? != identity {
         return Err(DbError::conflict(

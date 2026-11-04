@@ -29,6 +29,7 @@ import {
   type ReactNode,
 } from 'react';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
+import { DestinationRow } from '../DestinationRow';
 import { CompanionMode } from './CompanionMode';
 import { useCompanionStore } from '../../stores/companionStore';
 import { useUIStore, type OmnibarMode, type ProbeTab } from '../../stores/uiStore';
@@ -49,9 +50,7 @@ import { PROBE_TAB_DEFINITIONS } from '../../lib/probeContext';
 import {
   TOOL_DISCOVERY_GROUPS,
   TOOL_DISCOVERY_TILES,
-  toolDiscoveryArrowTarget,
   toolTileId,
-  type ToolDiscoveryArrowDirection,
 } from './toolDiscovery';
 import type { FuzzyResult } from '../../lib/omnibar';
 import type { SpawnOption } from '../../lib/groups';
@@ -67,15 +66,6 @@ const RESULT_LIMIT = 30;
 const LISTBOX_ID = 'command-omnibar-listbox';
 const GROUPS_ID = 'command-omnibar-tool-groups';
 const optionId = (index: number) => `command-omnibar-option-${index}`;
-const TOOL_ARROW_DIRECTIONS: Readonly<
-  Record<string, ToolDiscoveryArrowDirection | undefined>
-> = {
-  ArrowDown: 'down',
-  ArrowUp: 'up',
-  ArrowLeft: 'left',
-  ArrowRight: 'right',
-};
-
 const isKnownPrefix = (query: string): boolean =>
   PREFIX_FILTERS.some((f) => f.prefix === query[0]);
 
@@ -107,7 +97,7 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
   const [query, setQuery] = useState(() => (mode === 'commands' ? '>' : ''));
   const [activeIndex, setActiveIndex] = useState(0);
   // Discovery-screen highlight into TOOL_DISCOVERY_TILES. The index stays flat
-  // for DOM ids, while arrow movement follows the rendered grid rows. Virtual
+  // for DOM ids, while arrows walk the single-column rows. Virtual
   // only — DOM focus never leaves the input for arrows, so typing is never
   // interrupted. Tab moves real focus into the tiles and syncs this index back
   // via onFocusTile.
@@ -241,7 +231,7 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
   // Tool discovery start screen (Option A, ADR-0031): an empty query shows
   // the grouped destination shortcuts in the results area BELOW the search
   // input (the input stays anchored on top — no layout shift when typing).
-  // A tile opens its destination directly: the tab id is already known, so
+  // A row opens its destination directly: the tab id is already known, so
   // there is no reason to round-trip through the search index and the
   // command-id dispatchers to reach `openProbeTab`.
   const showToolGroups = !promptTarget && query === '';
@@ -254,10 +244,11 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
     if (showToolGroups) setActiveTile(0);
   }, [showToolGroups]);
 
-  const moveTileHighlight = (direction: ToolDiscoveryArrowDirection) => {
+  const moveTileHighlight = (direction: 'up' | 'down') => {
     const current =
       TOOL_DISCOVERY_TILES[activeTile] === undefined ? 0 : activeTile;
-    const next = toolDiscoveryArrowTarget(current, direction);
+    const delta = direction === 'down' ? 1 : -1;
+    const next = (current + delta + TOOL_DISCOVERY_TILES.length) % TOOL_DISCOVERY_TILES.length;
     const tile = TOOL_DISCOVERY_TILES[next];
     if (tile === undefined) return;
     setActiveTile(next);
@@ -279,22 +270,11 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
       useCompanionStore.setState({ visible: true });
       return;
     }
-    // Discovery-screen arrows move a virtual highlight across the tiles
-    // while DOM focus stays in the input: typing is never interrupted,
-    // Tab order is untouched, and there is always an implicit return path
-    // (focus never left). Enter activates the highlighted tile.
-    const toolArrowDirection = TOOL_ARROW_DIRECTIONS[e.key];
-    const isVerticalToolArrow = e.key === 'ArrowUp' || e.key === 'ArrowDown';
-    const isHorizontalToolArrow =
-      query === '' && (e.key === 'ArrowLeft' || e.key === 'ArrowRight');
-    if (
-      showToolGroups &&
-      results.length === 0 &&
-      toolArrowDirection &&
-      (isVerticalToolArrow || isHorizontalToolArrow)
-    ) {
+    // The discovery list is one column. Up/Down walk every destination;
+    // Left/Right retain their normal input caret behavior.
+    if (showToolGroups && results.length === 0 && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
       e.preventDefault();
-      moveTileHighlight(toolArrowDirection);
+      moveTileHighlight(e.key === 'ArrowDown' ? 'down' : 'up');
       return;
     }
     if (showToolGroups && query === '' && results.length === 0) {
@@ -361,7 +341,7 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
   };
 
   const showingList = !promptTarget && results.length > 0;
-  // The discovery grid is the combobox popup while the query is empty, so
+  // The discovery list is the combobox popup while the query is empty, so
   // the input's expanded/controls/activedescendant wiring tracks it exactly
   // like the results listbox — focus itself never leaves the input.
   const showingTools = showToolGroups && results.length === 0;
@@ -435,7 +415,7 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
             className="px-4 py-3 text-2xs text-text-muted"
             data-testid="command-omnibar-prompt-hint"
           >
-            Enter to spawn · Esc to go back
+            Enter to choose launch options · Esc to go back
           </div>
         ) : results.length > 0 ? (
           <ul
@@ -505,8 +485,8 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
 /**
  * Tool discovery start screen (Option A). Renders in the results area BELOW
  * the search input on first open — the input stays anchored on top, so
- * typing only swaps this grid for filtered results with zero layout shift.
- * One named section per `TOOL_DISCOVERY_GROUPS` entry; tiles are real
+ * typing only swaps this list for filtered results with zero layout shift.
+ * One named section per `TOOL_DISCOVERY_GROUPS` entry; rows are real
  * buttons (Tab-reachable, natively activatable) while arrow-key navigation
  * stays virtual on the input via `aria-activedescendant`, so focus — and
  * therefore typing — is never stolen.
@@ -546,43 +526,24 @@ function ToolGroups({
             >
               {group.title}
             </span>
-            <div className="grid grid-cols-2 gap-1.5">
+            <div className="flex flex-col gap-0.5">
               {group.tiles.map((tile) => {
                 const Icon = PROBE_TAB_DEFINITIONS[tile.tab].icon;
                 const isActive = tile.tab === activeTab;
                 return (
-                  <button
+                  <DestinationRow
                     key={tile.tab}
-                    type="button"
                     id={toolTileId(tile.tab)}
                     data-testid={toolTileId(tile.tab)}
                     data-active={isActive || undefined}
                     onClick={() => onSelect(tile.tab)}
                     onFocus={() => onFocusTile(tile.tab)}
-                    className={`flex items-center gap-2 text-left px-2.5 py-1.5 rounded-md border transition-colors focus-visible:outline-none focus-visible:border-accent-cyan focus-visible:ring-2 focus-visible:ring-accent-cyan/30 ${
-                      isActive
-                        ? 'bg-bg-card border-accent-cyan/50'
-                        : 'bg-bg-card border-border-default hover:border-accent-cyan/40'
-                    }`}
-                  >
-                    <Icon className="w-4 h-4 shrink-0 text-text-secondary" />
-                    <span className="flex-1 min-w-0">
-                      <span
-                        className="block truncate text-xs font-medium text-text-primary"
-                        title={tile.title}
-                      >
-                        {tile.title}
-                      </span>
-                      {/* Descriptions wrap (two lines max) instead of
-                          truncating — the tail carries meaning. */}
-                      <span
-                        className="block text-2xs text-text-muted leading-snug line-clamp-2"
-                        title={tile.description}
-                      >
-                        {tile.description}
-                      </span>
-                    </span>
-                  </button>
+                    icon={Icon}
+                    label={tile.title}
+                    description={tile.description}
+                    active={isActive}
+                    onMouseDown={(e) => e.preventDefault()}
+                  />
                 );
               })}
             </div>

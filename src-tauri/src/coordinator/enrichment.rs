@@ -189,6 +189,43 @@ pub fn digest_enrichment(node: &AgentNode) -> Option<TranscriptTail> {
     )))
 }
 
+/// The transcript layer of a Node Glance, under the same capability gate and
+/// secret scrubbing as the digest: a harness without a readable transcript is
+/// `Unsupported` without touching the filesystem, and every string the glance
+/// carries is scrubbed before it leaves the host for a paired phone.
+pub(crate) fn transcript_glance(
+    node: &AgentNode,
+) -> Result<transcript_reader::TranscriptGlance, UnavailableReason> {
+    let adapter = crate::preferences::resolve_harness_provider(&node.provider).adapter();
+    if !adapter.produces_readable_transcript() {
+        return Err(UnavailableReason::Unsupported);
+    }
+    let format =
+        TranscriptFormat::for_harness(adapter.id()).ok_or(UnavailableReason::Unsupported)?;
+    transcript_reader::read_glance(
+        format,
+        node.cli_session_id.as_deref(),
+        &transcript_dir(node),
+    )
+    .map(scrub_glance)
+}
+
+fn scrub_glance(
+    mut glance: transcript_reader::TranscriptGlance,
+) -> transcript_reader::TranscriptGlance {
+    let scrub = |text: &mut Option<String>| {
+        if let Some(value) = text.as_mut() {
+            *value = SecretScrubber::scrub(value);
+        }
+    };
+    scrub(&mut glance.last_prompt);
+    scrub(&mut glance.last_message);
+    for activity in &mut glance.activity {
+        scrub(&mut activity.target);
+    }
+    glance
+}
+
 pub(crate) fn assistant_report(node: &AgentNode) -> Option<transcript_reader::AssistantReport> {
     let adapter = crate::preferences::resolve_harness_provider(&node.provider).adapter();
     if !adapter.produces_readable_transcript() {

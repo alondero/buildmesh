@@ -241,7 +241,10 @@ list. A waiting agent who is on their own is left out of the rows under it. A pa
 shows meshes only; a wide window keeps the deck in the agents pane beside the
 mesh list. The dashboard refreshes by pull-to-refresh as well as through the app-bar
 action, and the app-bar progress bar belongs to the first load and to a read the
-user asked for — the five-second poll never pulses the chrome. Node details put
+user asked for — the five-second poll never pulses the chrome. Node details open
+with the **Right now** [Node Glance](node-glance.md) card (`NodeGlance.kt`),
+read while the screen is resumed; for a node waiting on a person it follows the
+request and reply instead. Node details put
 the reply composer directly under the request it answers, above the
 terminal/changes/PR sections, which on a phone can be screens deep.
 
@@ -397,7 +400,7 @@ content that overlaps it.
 The ViewModel owns foreground polling and its share of the event feed. The poll reads one
 snapshot (`/api/meshes`, `/api/nodes`, `/api/providers`) every 5s while
 foregrounded, so it hits the desktop's provider-menu route even when nothing
-changed; that route memoizes its derivation per preferences generation rather
+changed; that route memoizes its derivation per preferences revision rather
 than re-deriving per poll (see
 [providers.md](providers.md#the-spawn-menu-derivation-reads-one-preferences-snapshot-and-one-alias-table)).
 Refresh requests are coalesced and versioned so polling cannot starve slow

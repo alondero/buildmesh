@@ -25,6 +25,7 @@ pub mod mesh;
 pub(crate) mod mesh_folder;
 pub mod muse_sessions;
 pub mod muse_watcher;
+pub mod node_glance;
 pub mod opencode_oauth;
 pub mod opencode_session;
 pub mod pool_worker;
