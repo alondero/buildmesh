@@ -91,7 +91,7 @@ export function createLifecycleSlice(set: SetAgentNodeState, get: GetAgentNodeSt
     await get().fetchAgentNodes();
   },
 
-  regenerateAgentNode: async (nodeId, newProviderId) => {
+  regenerateAgentNode: async (nodeId, newProviderId, selection) => {
     try {
       // The backend's returned `AgentNode` is the pre-spawn snapshot
       // (services::agent_node::regenerate reloads after the provider
@@ -102,7 +102,7 @@ export function createLifecycleSlice(set: SetAgentNodeState, get: GetAgentNodeSt
       // refetch reads the DB, which `spawn_agent_inner` has already
       // written, so the new `provider` / `cli_session_id` / `status`
       // all line up.
-      await api.regenerateAgentNode(nodeId, newProviderId);
+      await api.regenerateAgentNode(nodeId, newProviderId, selection);
       await get().fetchAgentNodes();
       const updated = get().nodesById[nodeId];
       if (!updated) {

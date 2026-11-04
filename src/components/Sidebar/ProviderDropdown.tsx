@@ -1,5 +1,5 @@
 import { useRef, type ReactNode } from 'react';
-import { GroupedProviderMenu } from '../Providers/GroupedProviderMenu';
+import { GroupedProviderMenu, type GroupedProviderMenuProps } from '../Providers/GroupedProviderMenu';
 import { SafeLink } from '../shared/SafeLink';
 import { hasSpawnableAgent, type SpawnOption } from '../../lib/groups';
 import { PREREQUISITES_URL } from '../../lib/urls';
@@ -25,7 +25,7 @@ interface ProviderDropdownProps {
    */
   dropdownKey: string;
   providers: SpawnOption[];
-  onSelect: (providerId: string, altKey: boolean, configurationId?: string, loginId?: string) => void;
+  onSelect: GroupedProviderMenuProps['onSelect'];
   /**
    * Issue #814 — Escape closes the dropdown. The parent (e.g. the
    * sidebar's `SpawnButtonCluster`) owns the `isOpen` state, so it must
@@ -35,9 +35,9 @@ interface ProviderDropdownProps {
    * so the two paths share the same close action.
    */
   onClose?: () => void;
-  configurationsEnabled?: boolean;
-  /** Offer the Codex login submenu; set only where `onSelect` forwards the login. */
-  loginsEnabled?: boolean;
+  /** Spawn selects a login; saved settings pin logins through configurations;
+   * resume keeps the node's frozen login and offers resumable routes. */
+  mode?: GroupedProviderMenuProps['mode'];
   /** Optional footer rendered at the bottom of the menu (e.g. a
    *  worktree-gated modifier hint). Omitted when undefined. */
   footer?: ReactNode;
@@ -52,7 +52,7 @@ interface ProviderDropdownProps {
   menuId?: string;
 }
 
-export function ProviderDropdown({ dropdownKey, providers, onSelect, onClose, menuId, configurationsEnabled, loginsEnabled, footer }: ProviderDropdownProps) {
+export function ProviderDropdown({ dropdownKey, providers, onSelect, onClose, menuId, mode, footer }: ProviderDropdownProps) {
   // Issue #575 / ADR-0016 — render the harness-grouped, always-expanded
   // Spawn Menu. The backend-derived list is grouped by `group_key`
   // (== `harness_id`): each native harness is a clickable parent, and
@@ -116,7 +116,7 @@ export function ProviderDropdown({ dropdownKey, providers, onSelect, onClose, me
       {/* Issue #814 — forward `onClose` to `GroupedProviderMenu` so its
           keyboard handler (Escape → close) calls the same callback the
           parent's `useClickOutside` and outside-mousedown paths call. */}
-      <GroupedProviderMenu providers={providers} onSelect={onSelect} onClose={onClose} configurationsEnabled={configurationsEnabled} loginsEnabled={loginsEnabled} footer={footer} />
+      <GroupedProviderMenu providers={providers} onSelect={onSelect} onClose={onClose} mode={mode} footer={footer} />
     </div>
   );
 }

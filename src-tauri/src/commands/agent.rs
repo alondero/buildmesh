@@ -596,13 +596,17 @@ pub fn create_issue_node(
     issue_title: String,
     provider: Option<String>,
     configuration_id: Option<String>,
+    login_id: Option<String>,
 ) -> Result<IssueNodeDraft, String> {
-    let (draft, intent) = create_issue_node_impl(
+    let store = crate::preferences::default_store();
+    let (draft, intent) = create_issue_node_impl_with(
+        store.as_ref(),
         mesh_id,
         issue_number,
         issue_title,
         provider,
         configuration_id,
+        login_id,
     )?;
 
     let _ = app.emit("node-created", NodeCreatedPayload { id: draft.node.id });
@@ -628,30 +632,7 @@ pub fn create_issue_node(
     Ok(draft)
 }
 
-/// DB + runner half of [`create_issue_node`]. Isolated from `AppHandle` so
-/// tests can pin the prompt-capability gate without emitting events.
-pub(crate) fn create_issue_node_impl(
-    mesh_id: i64,
-    issue_number: i64,
-    issue_title: String,
-    provider: Option<String>,
-    configuration_id: Option<String>,
-) -> Result<(IssueNodeDraft, SpawnIntent), String> {
-    // The store installed at startup. A build with no store installed keeps
-    // reading the code-defined defaults, exactly as it did before
-    // (issue #1482).
-    let store = crate::preferences::default_store();
-    create_issue_node_impl_with(
-        store.as_ref(),
-        mesh_id,
-        issue_number,
-        issue_title,
-        provider,
-        configuration_id,
-    )
-}
-
-/// [`create_issue_node_impl`] against an explicit store.
+/// The issue-spawn runner against an explicit store.
 ///
 /// The caller owns the store, so the launch selection and the saved
 /// configuration this node resolves are the ones the caller set up
@@ -673,6 +654,7 @@ pub(crate) fn create_issue_node_impl_from(
         issue_title,
         provider,
         configuration_id,
+        None,
     )
 }
 
@@ -684,6 +666,7 @@ fn create_issue_node_impl_with(
     issue_title: String,
     provider: Option<String>,
     configuration_id: Option<String>,
+    login_id: Option<String>,
 ) -> Result<(IssueNodeDraft, SpawnIntent), String> {
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
     let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)
@@ -730,18 +713,12 @@ fn create_issue_node_impl_with(
     // helper own the resolution — one git lookup per call instead
     // of two — and `branch` becomes dead code that's been
     // removed.
-    let configuration = match store {
-        Some(store) => crate::preferences::spawn_configurations::resolve_saved_from(
-            store,
-            &effective_provider,
-            configuration_id.as_deref().filter(|s| !s.trim().is_empty()),
-        ),
-        None => crate::preferences::spawn_configurations::resolve_saved(
-            &effective_provider,
-            configuration_id.as_deref().filter(|s| !s.trim().is_empty()),
-        ),
-    }
-    .map_err(|error| error.to_string())?;
+    let configuration = crate::preferences::spawn_configurations::resolve_menu_selection_from(
+        store,
+        &effective_provider,
+        configuration_id.as_deref(),
+        login_id.as_deref(),
+    )?;
     let params = crate::services::agent_node::NodeCreateParams {
         mesh_id: mesh.id,
         // The runner reads the path from the mesh row it looks up.
@@ -887,6 +864,8 @@ pub struct CreatePrNodeRequest {
     pub head_repo_clone_url: Option<String>,
     #[serde(default)]
     pub configuration_id: Option<String>,
+    #[serde(default)]
+    pub login_id: Option<String>,
     /// `true` spawns a *reviewer sibling* for the PR (the PR pill's "Spawn
     /// reviewer agent" row). Same intent and head pinning as the implementation
     /// spawn, but named distinctly — see the naming block in the body, and
@@ -988,11 +967,13 @@ pub fn create_pr_node_for_request(
 /// [`SpawnIntent::initial_prompt`] — the single source of truth shared
 /// with the background launch path and the Circuit worker.
 #[cfg(test)]
+// allow-test-in-production: existing shared wrapper preserves legacy defaults for sibling spawn suites.
 pub(crate) fn create_pr_node_impl(
     request: CreatePrNodeRequest,
 ) -> Result<(IssueNodeDraft, SpawnIntent), String> {
     create_pr_node_impl_configured(CreatePrNodeRequest {
         configuration_id: None,
+        login_id: None,
         reviewer: None,
         ..request
     })
@@ -1013,6 +994,7 @@ pub(crate) fn create_pr_node_impl_from(
         store,
         CreatePrNodeRequest {
             configuration_id: None,
+            login_id: None,
             reviewer: None,
             ..request
         },
@@ -1037,6 +1019,7 @@ pub(crate) fn create_pr_reviewer_node_impl_from(
         store,
         CreatePrNodeRequest {
             configuration_id: None,
+            login_id: None,
             reviewer: Some(true),
             ..request
         },
@@ -1082,6 +1065,7 @@ fn create_pr_node_impl_configured_with(
         head_repo_owner,
         head_repo_clone_url,
         configuration_id,
+        login_id,
         reviewer,
     } = request;
     let reviewer = reviewer.unwrap_or(false);
@@ -1169,18 +1153,12 @@ fn create_pr_node_impl_configured_with(
         Some(&head_sha)
     };
 
-    let configuration = match store {
-        Some(store) => crate::preferences::spawn_configurations::resolve_saved_from(
-            store,
-            &effective_provider,
-            configuration_id.as_deref().filter(|s| !s.trim().is_empty()),
-        ),
-        None => crate::preferences::spawn_configurations::resolve_saved(
-            &effective_provider,
-            configuration_id.as_deref().filter(|s| !s.trim().is_empty()),
-        ),
-    }
-    .map_err(|error| error.to_string())?;
+    let configuration = crate::preferences::spawn_configurations::resolve_menu_selection_from(
+        store,
+        &effective_provider,
+        configuration_id.as_deref(),
+        login_id.as_deref(),
+    )?;
     let params = crate::services::agent_node::NodeCreateParams {
         mesh_id: mesh.id,
         path: &mesh.path,
@@ -1350,6 +1328,10 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[path = "agent_spawn_menu_tests.rs"]
+mod spawn_menu_tests;
+
+#[cfg(test)]
 // allow-test-in-production: this inline suite predates the sibling-test-file rule; the
 // issue #1482 migration edits it in place, and relocating the pre-existing suite is out of scope.
 mod tests {
@@ -1367,7 +1349,7 @@ mod tests {
 
     // ----- create_pr_node wire contract (issue #2449) --------------------
     //
-    // `create_pr_node` reads its ten fields through `WirePayload` so the
+    // `create_pr_node` reads its eleven fields through `WirePayload` so the
     // Rust signature stops being a positional bag. The wire itself is the
     // contract — `createPrNode` in `src/lib/tauri.ts`, the e2e specs and a
     // dozen vitest suites send it flat — so it is pinned here.
@@ -1523,6 +1505,7 @@ mod tests {
             head_repo_owner: None,
             head_repo_clone_url: None,
             configuration_id: None,
+            login_id: None,
             reviewer: None,
         })
         .expect_err("head_ref=\"\" must be rejected (cannot check out branch \"\")");
@@ -1560,6 +1543,7 @@ mod tests {
             head_repo_owner: Some("alice".to_string()), // owner present
             head_repo_clone_url: None,                  // clone_url MISSING — XOR violation
             configuration_id: None,
+            login_id: None,
             reviewer: None,
         })
         .expect_err("owner without clone_url must be rejected");
@@ -1591,6 +1575,7 @@ mod tests {
             head_repo_owner: None,
             head_repo_clone_url: None,
             configuration_id: None,
+            login_id: None,
             reviewer: None,
         })
         .expect_err("unknown mesh_id must be rejected");
@@ -1649,6 +1634,7 @@ mod tests {
                 head_repo_owner: None,
                 head_repo_clone_url: None,
                 configuration_id: None,
+                login_id: None,
                 reviewer: None,
             },
         )
@@ -1694,6 +1680,7 @@ mod tests {
                 head_repo_owner: None,
                 head_repo_clone_url: None,
                 configuration_id: None,
+                login_id: None,
                 reviewer: None,
             },
         )
@@ -1776,6 +1763,7 @@ mod tests {
                 head_repo_owner: None,
                 head_repo_clone_url: None,
                 configuration_id: None,
+                login_id: None,
                 reviewer: Some(true),
             },
         )
@@ -1816,6 +1804,7 @@ mod tests {
                 head_repo_owner: None,
                 head_repo_clone_url: None,
                 configuration_id: None,
+                login_id: None,
                 reviewer: Some(true),
             },
         )
@@ -1859,6 +1848,7 @@ mod tests {
                 head_repo_owner: None, // explicit native selection
                 head_repo_clone_url: None,
                 configuration_id: None,
+                login_id: None,
                 reviewer: None,
             },
         )
@@ -1897,6 +1887,7 @@ mod tests {
                 head_repo_owner: None, // no explicit — fall through
                 head_repo_clone_url: None,
                 configuration_id: None,
+                login_id: None,
                 reviewer: None,
             },
         )
@@ -1939,6 +1930,7 @@ mod tests {
                 head_repo_owner: None,
                 head_repo_clone_url: None,
                 configuration_id: None,
+                login_id: None,
                 reviewer: None,
             },
         )
@@ -1964,6 +1956,7 @@ mod tests {
                 head_repo_owner: None,
                 head_repo_clone_url: None,
                 configuration_id: None,
+                login_id: None,
                 reviewer: None,
             },
         )

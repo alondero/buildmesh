@@ -101,6 +101,7 @@ export function HarnessLoginMenu({ option, anchor, keyboard, logins, configurati
       <div role="menu" aria-label={`${option.label} logins`}>
         {logins.map((login, index) => {
           const unavailable = loginUnavailableReason(login);
+          const defaultsUnavailable = unavailable ?? option.unavailable_reason;
           return (
             <div key={login.id} role="presentation" className="flex"
               onMouseEnter={(e) => {
@@ -114,11 +115,11 @@ export function HarnessLoginMenu({ option, anchor, keyboard, logins, configurati
                 tabIndex={index === active ? 0 : -1}
                 aria-haspopup={unavailable ? undefined : 'menu'}
                 aria-expanded={unavailable ? undefined : submenu?.login.id === login.id}
-                aria-disabled={Boolean(unavailable)}
-                title={unavailable ?? login.email ?? undefined}
+                aria-disabled={Boolean(defaultsUnavailable)}
+                title={defaultsUnavailable ?? login.email ?? undefined}
                 className={rowClass(index)}
                 onFocus={() => setActive(index)}
-                onClick={(e) => { if (!unavailable) onSelect(option.id, e.altKey, undefined, login.id); }}
+                onClick={(e) => { if (!defaultsUnavailable) onSelect(option.id, e.altKey, undefined, login.id); }}
                 onKeyDown={(e) => {
                   if (e.key === 'ArrowRight' && !unavailable) {
                     e.preventDefault(); e.stopPropagation();

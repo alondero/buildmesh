@@ -611,18 +611,20 @@ describe('NodeItem context menu (issue #776)', () => {
       ]);
 
       const submenu = screen.getByTestId('regenerate-submenu');
+      // The context menu and shared picker each expose one accessible menu.
+      expect(screen.getAllByRole('menu')).toHaveLength(2);
       // Current section pinned on top (in-place kick-start).
       const currentSection = submenu.querySelector('[data-regenerate-section="current"]')!;
       expect(currentSection).toBeTruthy();
       expect(currentSection.querySelector('[data-spawn-id="anthropic"]')).toBeTruthy();
       expect(currentSection.textContent).toMatch(/Current \(Anthropic\)/);
       expect(currentSection.querySelector('[data-is-current="true"]')).toBeTruthy();
-      // Two harness groups for alternates (anthropic lives in the current section, not grouped).
-      expect(submenu.querySelectorAll('[data-spawn-group]')).toHaveLength(2);
-      // claude group carries its harness header + proxied child.
+      // Keep the current harness available for other logins/configurations.
+      expect(submenu.querySelectorAll('[data-spawn-group]')).toHaveLength(3);
+      // Raw provider routes stay behind saved configurations.
       const claudeGroup = submenu.querySelector('[data-spawn-group="claude"]')!;
-      expect(claudeGroup.querySelectorAll('[data-spawn-id]')).toHaveLength(2);
-      // Total picker rows = 4 (current + claude + claude-minimax + kimi).
+      expect(claudeGroup.querySelectorAll('[data-spawn-id]')).toHaveLength(1);
+      // Current plus the three harness rows.
       expect(submenu.querySelectorAll('[role="menuitem"]')).toHaveLength(4);
     });
 
@@ -673,7 +675,7 @@ describe('NodeItem context menu (issue #776)', () => {
 
       // IPC fires with the chosen provider id (NOT the current one).
       expect(useAgentNodeStore.getState().regenerateAgentNode).toHaveBeenCalledTimes(1);
-      expect(useAgentNodeStore.getState().regenerateAgentNode).toHaveBeenCalledWith(91, 'claude');
+      expect(useAgentNodeStore.getState().regenerateAgentNode).toHaveBeenCalledWith(91, 'claude', expect.objectContaining({ replaceSelection: true }));
       // The whole menu (parent + submenu) closes.
       await waitFor(() => {
         expect(document.querySelector('[role="menu"]')).toBeNull();
@@ -714,7 +716,7 @@ describe('NodeItem context menu (issue #776)', () => {
       // IPC was called exactly once before the toast — pins the
       // catch-side firing, not a re-throw-and-catch dance.
       expect(useAgentNodeStore.getState().regenerateAgentNode).toHaveBeenCalledTimes(1);
-      expect(useAgentNodeStore.getState().regenerateAgentNode).toHaveBeenCalledWith(411, 'claude');
+      expect(useAgentNodeStore.getState().regenerateAgentNode).toHaveBeenCalledWith(411, 'claude', expect.objectContaining({ replaceSelection: true }));
     });
 
     it('renders an empty-state message when no providers are available at all (issue #1502)', async () => {
@@ -725,7 +727,7 @@ describe('NodeItem context menu (issue #776)', () => {
       expect(empty.textContent).toMatch(/no providers available/i);
     });
 
-    it('renders the current provider alone when it is the only option (in-place kick-start, issue #1502)', async () => {
+    it('offers Current and explicit defaults when only one harness is present', async () => {
       const node = makeNode({ provider: 'anthropic' });
       await openSubmenu(node, [
         makeProvider('anthropic', { label: 'Anthropic', group_key: 'anthropic', harness_id: 'anthropic' }),
@@ -735,7 +737,7 @@ describe('NodeItem context menu (issue #776)', () => {
       const current = screen.getByTestId('regenerate-submenu-current');
       expect(current).toBeTruthy();
       expect(current.textContent).toMatch(/Current \(Anthropic\)/);
-      expect(screen.getByTestId('regenerate-submenu').querySelectorAll('[role="menuitem"]')).toHaveLength(1);
+      expect(screen.getByTestId('regenerate-submenu').querySelectorAll('[role="menuitem"]')).toHaveLength(2);
     });
 
     it('disables the trigger when providerList is empty', () => {
@@ -865,13 +867,15 @@ describe('NodeItem context menu (issue #776)', () => {
         const items = () => Array.from(
           screen.getByTestId('regenerate-submenu').querySelectorAll<HTMLButtonElement>('[role="menuitem"]'),
         );
-        expect(items()).toHaveLength(3);
+        expect(items()).toHaveLength(4);
         expect(document.activeElement).toBe(items()[0]);
         expect(items()[0].getAttribute('data-testid')).toBe('regenerate-submenu-current');
         fireEvent.keyDown(document, { key: 'ArrowDown' });
         expect(document.activeElement).toBe(items()[1]);
         fireEvent.keyDown(document, { key: 'ArrowDown' });
         expect(document.activeElement).toBe(items()[2]);
+        fireEvent.keyDown(document, { key: 'ArrowDown' });
+        expect(document.activeElement).toBe(items()[3]);
         fireEvent.keyDown(document, { key: 'ArrowDown' });
         // Wrap-around: kimi → current.
         expect(document.activeElement).toBe(items()[0]);
