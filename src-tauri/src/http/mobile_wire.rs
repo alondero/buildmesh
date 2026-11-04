@@ -378,7 +378,8 @@ fn gh_auth() -> crate::http::routes::git::GitHubAuthStatus {
 /// node's (no transcript, with its reason), so the phone reads both shapes.
 fn node_glances() -> [crate::services::node_glance::NodeGlance; 2] {
     use crate::services::node_glance::NodeGlance;
-    use crate::services::transcript_reader::{GlanceActivity, TranscriptGlance, UnavailableReason};
+    use crate::services::transcript_reader::glance::GlanceActivity;
+    use crate::services::transcript_reader::{TranscriptGlance, UnavailableReason};
     let running = NodeGlance {
         node_id: 7,
         status: crate::models::SessionStatus::Running,

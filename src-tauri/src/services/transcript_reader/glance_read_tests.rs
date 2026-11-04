@@ -1,5 +1,6 @@
 //! Node Glance reads across the reader seam: every wired harness fixture, the
 //! change-stamped cache, and the typed degrade for a store with no turns.
+use super::glance::GlanceActivity;
 use super::test_support::fixture;
 use super::*;
 

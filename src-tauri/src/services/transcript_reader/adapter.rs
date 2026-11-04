@@ -108,7 +108,7 @@ pub(crate) trait TranscriptReader: Send + Sync {
     /// the common input fields every wired harness uses (`command`, `cmd`,
     /// `file_path`, `path`, `pattern`, …); a harness whose tools carry their
     /// subject elsewhere overrides it.
-    fn describe_tool_call(&self, call: &super::ToolCall) -> super::glance::GlanceActivity {
+    fn describe_tool_call(&self, call: &super::types::ToolCall) -> super::glance::GlanceActivity {
         super::glance::describe_tool_call(call)
     }
 

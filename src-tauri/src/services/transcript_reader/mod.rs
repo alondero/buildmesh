@@ -22,7 +22,7 @@ pub(crate) mod types;
 
 use file::assistant_revision;
 pub(crate) use file::same_assistant_revision;
-pub use glance::{GlanceActivity, TranscriptGlance};
+pub use glance::TranscriptGlance;
 pub(crate) use native_completion::{
     read_native_turn_completion, NativeTurnCompletion, NativeTurnSnapshot,
 };
