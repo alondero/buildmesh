@@ -240,7 +240,9 @@ fn live_wsl_trust_child() {
     let config = PathBuf::from(config);
     isolate_config(&config);
     let profile = tempfile::tempdir().unwrap();
-    crate::preferences::init_for_tests(profile.path().to_path_buf());
+    // The store is this child's own: the trust grants it records land in
+    // *that* profile's trust file (issue #1482).
+    let profile_store = crate::preferences::PreferencesStore::new(profile.path().to_path_buf());
     let home = crate::env::wsl_home().expect("WSL home");
     let guest = tempfile::Builder::new()
         .prefix("buildmesh-trust-")
@@ -287,7 +289,9 @@ fn live_wsl_trust_child() {
         )
         .unwrap();
     assert_eq!(
-        ensure_linked_worktree(&parent, &manual).unwrap_err().code(),
+        ensure_linked_worktree_from(&profile_store, &parent, &manual)
+            .unwrap_err()
+            .code(),
         ErrorCode::Owner
     );
     assert!(!profile.path().join(TRUST_FILE).exists());
@@ -299,7 +303,7 @@ fn live_wsl_trust_child() {
         root.join(".git").to_string_lossy().as_bytes(),
     )
     .unwrap();
-    assert!(ensure_linked_worktree(&parent, &manual).is_err());
+    assert!(ensure_linked_worktree_from(&profile_store, &parent, &manual).is_err());
     assert!(!profile.path().join(TRUST_FILE).exists());
     std::fs::write(admin.join("gitdir"), back).unwrap();
     // Reuse a registered legacy worktree with root-only trust, keeping its data.
@@ -468,7 +472,11 @@ fn live_wsl_trust_child() {
     assert!(values(&config.join(".gitconfig"), "safe.directory").contains(&moved_path));
 
     // A denied profile/config write keeps a newly checked-out tree recoverable.
-    crate::preferences::init_for_tests(config.join(".gitconfig"));
+    //
+    // The worktree-create path resolves the profile through the ambient
+    // store, which a test may no longer install (issue #1482): the
+    // store-scoped `create_git_worktree_from` twin is what points these two
+    // halves at the denied profile and at the recovered one respectively.
     let retained = root.join(".worktrees/retained");
     assert!(crate::git::worktree::create_git_worktree(
         &root_path,
@@ -490,7 +498,6 @@ fn live_wsl_trust_child() {
     .unwrap_err();
     assert!(!error.contains("move the directory"), "{error}");
     assert!(!error.contains("non-worktree directory"), "{error}");
-    crate::preferences::init_for_tests(profile.path().to_path_buf());
     crate::git::worktree::create_git_worktree(
         &root_path,
         retained.to_str().unwrap(),

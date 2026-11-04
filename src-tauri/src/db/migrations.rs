@@ -1999,7 +1999,7 @@ pub(crate) const ARTIFACT_BACKFILL_FLAG: &str = "circuit_run_artifacts_backfill_
 /// values are inserted first and the column is rewritten afterwards, so an
 /// interrupted backfill never loses a value.
 fn ensure_circuit_run_artifacts(conn: &Connection) -> SqlResult<()> {
-    crate::db::circuit::artifacts::ensure_table(conn)?;
+    crate::db::circuit::context_store::ensure_table(conn)?;
     if !table_present(conn, "autopilot_circuit_runs")? {
         return Ok(());
     }
@@ -2019,14 +2019,16 @@ fn ensure_circuit_run_artifacts(conn: &Connection) -> SqlResult<()> {
     };
     let mut migrated = 0usize;
     for (run_id, context_json) in runs {
-        let split = crate::db::circuit::artifacts::SplitContext::parse(&context_json);
-        if split.bulky.is_empty() {
+        // The seam owns which values move and where they go; a run with
+        // nothing to move keeps the column it has.
+        let Some(column_json) =
+            crate::db::circuit::context_store::adopt_split_storage(conn, run_id, &context_json)?
+        else {
             continue;
-        }
-        let stored = crate::db::circuit::artifacts::persist_split(conn, run_id, &split)?;
+        };
         conn.execute(
             "UPDATE autopilot_circuit_runs SET context_json = ?2 WHERE id = ?1",
-            params![run_id, stored],
+            params![run_id, column_json],
         )?;
         migrated += 1;
     }

@@ -23,9 +23,13 @@
  * ArrowDown, or ArrowUp open the menu (focusing the first/last tile
  * respectively), and it closes on Escape, focusout, or mousedown outside.
  * The menu reuses the palette's tool-discovery groups (ADR-0031) — the same
- * tiles, labels, and descriptions, so "tool grid" means one thing across the
- * omnibar and the inspector. The glyph is deliberately `layout-grid`, not
- * "+": the action browses existing tools, it doesn't create one.
+ * tiles, labels, and contextual help, so "tool grid" means one thing across
+ * the omnibar and the inspector. Rows use the shared compact
+ * `DestinationRow` presentation (PR #2686): one line per destination, with
+ * the description kept as hover help and an accessible description. The
+ * menu keeps its own responsive grid and arrow-key model. The glyph is
+ * deliberately `layout-grid`, not "+": the action browses existing tools,
+ * it doesn't create one.
  *
  * Narrow widths: below 320px panel width the tab labels collapse to icons
  * (names remain in `title`/`aria-label`), and the menu drops to a single
@@ -44,6 +48,7 @@ import {
   TOOL_DISCOVERY_TILES,
   toolDiscoveryArrowTarget,
 } from '../CommandOmnibar/toolDiscovery';
+import { DestinationRow } from '../DestinationRow';
 import { LayoutGridIcon } from './probeIcons';
 
 /** Panel width at which rail tab labels collapse to icons. The dock
@@ -315,9 +320,8 @@ export function ProbeToolRail({ narrow }: { narrow: boolean }) {
                   const Icon = PROBE_TAB_DEFINITIONS[tile.tab].icon;
                   const active = tile.tab === probeTab;
                   return (
-                    <button
+                    <DestinationRow
                       key={tile.tab}
-                      type="button"
                       id={menuTileId(tile.tab)}
                       role="menuitemradio"
                       aria-checked={active}
@@ -325,26 +329,11 @@ export function ProbeToolRail({ narrow }: { narrow: boolean }) {
                       data-menu-tab={tile.tab}
                       data-testid={`probe-tool-menu-${tile.tab}`}
                       onClick={() => selectFromMenu(tile.tab)}
-                      className={`flex items-start gap-2 p-1.5 rounded-md text-left border transition-colors ${
-                        active
-                          ? 'border-accent-cyan/25 bg-bg-highlight'
-                          : 'border-transparent hover:bg-bg-card-hover'
-                      }`}
-                    >
-                      <Icon
-                        className={`w-4 h-4 mt-0.5 shrink-0 ${
-                          active ? 'text-accent-cyan' : 'text-text-secondary'
-                        }`}
-                      />
-                      <span className="min-w-0">
-                        <span className="block text-xs font-medium text-text-primary truncate min-w-0">
-                          {tile.title}
-                        </span>
-                        <span className="block text-2xs text-text-muted truncate min-w-0">
-                          {tile.description}
-                        </span>
-                      </span>
-                    </button>
+                      icon={Icon}
+                      label={tile.title}
+                      description={tile.description}
+                      active={active}
+                    />
                   );
                 })}
               </div>

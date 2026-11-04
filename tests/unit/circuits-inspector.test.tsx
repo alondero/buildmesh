@@ -22,9 +22,25 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import React from 'react';
+import { HARNESS_IDS, HARNESS_LABEL } from '../../src/components/Circuits/harnessCapabilities';
 import { getCapabilitiesFor } from '../../src/components/Circuits/harnessCapabilities';
-const { listConfigurations } = vi.hoisted(() => ({ listConfigurations: vi.fn().mockRejectedValue(new Error('offline')) }));
-vi.mock('../../src/lib/tauri/provider', () => ({ listProviders: listConfigurations }));
+const { listConfigurations, savedConfigurations } = vi.hoisted(() => ({ listConfigurations: vi.fn(), savedConfigurations: vi.fn().mockResolvedValue([]) }));
+vi.mock('../../src/lib/tauri/provider', async importOriginal => ({
+  ...await importOriginal<typeof import('../../src/lib/tauri/provider')>(),
+  listProviders: listConfigurations, listSpawnConfigurations: savedConfigurations,
+}));
+beforeEach(() => {
+  savedConfigurations.mockReset().mockResolvedValue([]);
+  listConfigurations.mockResolvedValue(HARNESS_IDS.map(id => ({
+    id, label: HARNESS_LABEL[id], harness_id: id, group_key: id,
+    provider_id: null, is_proxied: false, color: '#fff', icon: 'X', resumable: true,
+    capabilities: getCapabilitiesFor(id),
+  })));
+});
+async function pickProvider(label: string) {
+  fireEvent.click(screen.getByRole('button', { name: 'Provider' }));
+  fireEvent.click(await screen.findByRole('menuitem', { name: label }));
+}
 
 class ResizeObserverMock {
   observe() {}
@@ -155,17 +171,22 @@ describe('InspectorPanel — OpenPr policy', () => {
 });
 
 describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', () => {
-  it('round-trips live configuration IDs and shows unavailable choices', async () => {
+  it('round-trips saved configurations through the shared menu and blocks unavailable choices', async () => {
+    const recipes = [
+      { id: 'launch/fast', name: 'Fast review', spawn_option_id: 'anthropic', model: null, effort: null, extra_args: null },
+      { id: 'launch/missing', name: 'Missing route', spawn_option_id: 'anthropic', model: null, effort: null, extra_args: null },
+    ];
+    savedConfigurations.mockResolvedValue(recipes);
     listConfigurations.mockResolvedValueOnce([
-      { id: 'launch/fast', label: 'Fast review', capabilities: getCapabilitiesFor('anthropic') },
-      { id: 'launch/missing', label: 'Missing route', unavailable_reason: 'Route unavailable' },
+      { id: 'anthropic', label: 'Claude Code', harness_id: 'anthropic', group_key: 'anthropic', is_proxied: false, capabilities: getCapabilitiesFor('anthropic') },
+      ...recipes.map((configuration, i) => ({ id: configuration.id, label: configuration.name, harness_id: 'anthropic', group_key: 'anthropic', configuration, unavailable_reason: i ? 'Route unavailable' : undefined })),
     ]);
     const onChange = vi.fn();
     renderNode(spawnNode({ provider: 'launch/removed' }), onChange);
-    await screen.findByRole('option', { name: 'Fast review' });
-    expect((screen.getByLabelText('Provider') as HTMLSelectElement).value).toBe('launch/removed');
-    expect((screen.getByRole('option', { name: 'Missing route — Route unavailable' }) as HTMLOptionElement).disabled).toBe(true);
-    fireEvent.change(screen.getByLabelText('Provider'), { target: { value: 'launch/fast' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Provider' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Claude Code configurations' }));
+    expect((await screen.findByRole('menuitem', { name: /^Missing route/ })).getAttribute('aria-disabled')).toBe('true');
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Fast review' }));
     expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ provider: 'launch/fast', model: null, effort: null, extra_args: null }));
   });
   beforeEach(() => {
@@ -177,15 +198,13 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
 
   it('renders the provider select with Default selected when no provider is set', () => {
     renderNode(spawnNode());
-    const select = screen.getByTestId('inspector-provider-select');
-    expect(select).toBeTruthy();
-    expect((select as HTMLSelectElement).value).toBe('');
+    expect(screen.getByRole('button', { name: 'Provider' }).textContent).toContain('Default (mesh provider)');
   });
 
   it('uses generic provider wording for ordinary spawn nodes', () => {
     renderNode(spawnNode());
     expect(screen.getByText('Provider override')).toBeTruthy();
-    expect(screen.getByRole('option', { name: 'Default (mesh provider)' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Provider' })).toBeTruthy();
   });
 
   it('uses reviewer fallback wording only for a spawn targeted by ReviewVerdict', () => {
@@ -204,7 +223,7 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
       screen.getByText('Provider (explicit override; otherwise Reviewer provider/source agent)'),
     ).toBeTruthy();
     expect(
-      screen.getByRole('option', { name: 'Default (Reviewer provider/source agent)' }),
+      screen.getByRole('button', { name: 'Provider' }),
     ).toBeTruthy();
   });
 
@@ -284,13 +303,11 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
 
   it('normalizes command-code and cmdc aliases to commandcode in the provider select', () => {
     const { unmount } = renderNode(spawnNode({ provider: 'command-code' }));
-    const select1 = screen.getByTestId('inspector-provider-select') as HTMLSelectElement;
-    expect(select1.value).toBe('commandcode');
+    expect(screen.getByTestId('inspector-model-input')).toBeTruthy();
     unmount();
 
     renderNode(spawnNode({ provider: 'cmdc' }));
-    const select2 = screen.getByTestId('inspector-provider-select') as HTMLSelectElement;
-    expect(select2.value).toBe('commandcode');
+    expect(screen.getByTestId('inspector-model-input')).toBeTruthy();
   });
 
   it('writes back the model through onChange', () => {
@@ -327,11 +344,10 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
     expect((lastCall as { extra_args: string }).extra_args).toBe('--verbose --debug');
   });
 
-  it('clears provider to null when Default is selected', () => {
+  it('clears provider to null when Default is selected', async () => {
     const onChange = vi.fn();
     renderNode(spawnNode({ provider: 'codex' }), onChange);
-    const select = screen.getByTestId('inspector-provider-select');
-    fireEvent.change(select, { target: { value: '' } });
+    await pickProvider('Default (mesh provider)');
     const lastCall = onChange.mock.calls[onChange.mock.calls.length - 1]?.[0];
     expect((lastCall as { provider: string | null }).provider).toBeNull();
   });
@@ -363,7 +379,7 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
   // them at spawn time. `timeout_seconds` is the exception — it's
   // orchestrator-level policy, not a harness capability, so the
   // authored budget must persist across switches.
-  it('clears model/effort/extra_args but PRESERVES timeout_seconds on provider switch', () => {
+  it('clears model/effort/extra_args but PRESERVES timeout_seconds on provider switch', async () => {
     const onChange = vi.fn();
     // Codex row with Anthropic-incompatible overrides set.
     renderNode(
@@ -377,8 +393,7 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
       onChange,
     );
     // User switches to Anthropic via the dropdown.
-    const select = screen.getByTestId('inspector-provider-select');
-    fireEvent.change(select, { target: { value: 'anthropic' } });
+    await pickProvider(HARNESS_LABEL.anthropic);
     const lastCall = onChange.mock.calls[onChange.mock.calls.length - 1]?.[0];
     expect(lastCall).toBeDefined();
     // Provider is now Anthropic; the harness-specific overrides are
@@ -518,7 +533,7 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
     expect((lastCall as { timeout_seconds: number | null }).timeout_seconds).toBeNull();
   });
 
-  it('clears overrides when switching back to Default (mesh provider)', () => {
+  it('clears overrides when switching back to Default (mesh provider)', async () => {
     const onChange = vi.fn();
     renderNode(
       spawnNode({
@@ -527,8 +542,7 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
       }),
       onChange,
     );
-    const select = screen.getByTestId('inspector-provider-select');
-    fireEvent.change(select, { target: { value: '' } });
+    await pickProvider('Default (mesh provider)');
     const lastCall = onChange.mock.calls[onChange.mock.calls.length - 1]?.[0];
     expect((lastCall as { provider: string | null }).provider).toBeNull();
     expect((lastCall as { model: string | null }).model).toBeNull();

@@ -149,7 +149,6 @@ function viewModeForRow(rowText: string): string {
   if (rowText.includes('Mesh Grid')) return 'mesh';
   if (rowText.includes('Pinned')) return 'pinned';
   if (rowText.includes('All Nodes')) return 'all';
-  if (rowText.includes('Filtered')) return 'filtered';
   throw new Error(`Unexpected view row text: ${rowText}`);
 }
 
@@ -499,16 +498,6 @@ describe('CommandOmnibar — command execution routing', () => {
     expect(useUIStore.getState().viewMode).toBe('single');
   });
 
-  it('routes the view-filtered command to the Filtered view (#1609)', () => {
-    executeOmnibarItem('command:view-filtered', {
-      meshes: [mesh],
-      spawnOptions: [],
-      setViewMode: useUIStore.getState().setViewMode,
-      openProbeTab: vi.fn(),
-    });
-    expect(useUIStore.getState().viewMode).toBe('filtered');
-    expect(useUIStore.getState().lastNonSingleMode).toBe('filtered');
-  });
 
   it('selects a mesh and aligns the canvas with Mesh Grid', () => {
     useUIStore.setState({ viewMode: 'pinned' });
@@ -566,7 +555,7 @@ describe('CommandOmnibar — command execution routing', () => {
     expect(openProbeTab).not.toHaveBeenCalled();
   });
 
-  it('routes a spawn item through selectProviderForMesh with the right mesh and option', () => {
+  it('continues a palette harness choice in the shared Spawn Menu', () => {
     const spy = vi
       .spyOn(useAgentNodeStore.getState(), 'selectProviderForMesh')
       .mockResolvedValue(node);
@@ -576,18 +565,13 @@ describe('CommandOmnibar — command execution routing', () => {
       setViewMode: vi.fn(),
       openProbeTab: vi.fn(),
     });
-    expect(spy).toHaveBeenCalledWith(
-      mesh.id,
-      mesh.name,
-      mesh.path,
-      spawnOption.id,
-      undefined,
-      undefined,
-    );
+    expect(spy).not.toHaveBeenCalled();
+    expect(useUIStore.getState().canvasSpawnMenuMeshId).toBe(mesh.id);
+    expect(useUIStore.getState().canvasSpawnMenuOptions).toEqual({ providerId: spawnOption.harness_id, initialPrompt: undefined });
     spy.mockRestore();
   });
 
-  it('forwards an initial prompt turn to selectProviderForMesh (issue #1413)', () => {
+  it('retains the initial prompt while opening the shared Spawn Menu', () => {
     const spy = vi
       .spyOn(useAgentNodeStore.getState(), 'selectProviderForMesh')
       .mockResolvedValue(node);
@@ -598,14 +582,9 @@ describe('CommandOmnibar — command execution routing', () => {
       openProbeTab: vi.fn(),
       initialPrompt: 'fix the flaky test',
     });
-    expect(spy).toHaveBeenCalledWith(
-      mesh.id,
-      mesh.name,
-      mesh.path,
-      spawnOption.id,
-      undefined,
-      'fix the flaky test',
-    );
+    expect(spy).not.toHaveBeenCalled();
+    expect(useUIStore.getState().canvasSpawnMenuMeshId).toBe(mesh.id);
+    expect(useUIStore.getState().canvasSpawnMenuOptions).toEqual({ providerId: spawnOption.harness_id, initialPrompt: 'fix the flaky test' });
     spy.mockRestore();
   });
 
@@ -881,7 +860,7 @@ describe('CommandOmnibar — go to Mesh entry (issue #2077)', () => {
 
   it('view-mesh returns the canvas to the selected Mesh Grid without asking again', () => {
     useMeshStore.setState({ selectedMeshId: mesh.id });
-    useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered' });
+    useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all' });
 
     runOmnibarCommand('view-mesh', {
       meshes: [mesh, projectY],
@@ -978,14 +957,9 @@ describe('CommandOmnibar — quick spawn prompt mode (issue #1413)', () => {
     fireEvent.keyDown(input, { key: 'Tab' });
     fireEvent.change(input, { target: { value: 'fix the flaky test' } });
     fireEvent.keyDown(input, { key: 'Enter' });
-    expect(spy).toHaveBeenCalledWith(
-      mesh.id,
-      mesh.name,
-      mesh.path,
-      spawnOption.id,
-      undefined,
-      'fix the flaky test',
-    );
+    expect(spy).not.toHaveBeenCalled();
+    expect(useUIStore.getState().canvasSpawnMenuMeshId).toBe(mesh.id);
+    expect(useUIStore.getState().canvasSpawnMenuOptions).toEqual({ providerId: spawnOption.harness_id, initialPrompt: 'fix the flaky test' });
     expect(useUIStore.getState().omnibarOpen).toBe(false);
     spy.mockRestore();
   });
@@ -996,14 +970,9 @@ describe('CommandOmnibar — quick spawn prompt mode (issue #1413)', () => {
       .mockResolvedValue(node);
     const input = await openSpawnResults();
     fireEvent.keyDown(input, { key: 'Enter' });
-    expect(spy).toHaveBeenCalledWith(
-      mesh.id,
-      mesh.name,
-      mesh.path,
-      spawnOption.id,
-      undefined,
-      undefined,
-    );
+    expect(spy).not.toHaveBeenCalled();
+    expect(useUIStore.getState().canvasSpawnMenuMeshId).toBe(mesh.id);
+    expect(useUIStore.getState().canvasSpawnMenuOptions).toEqual({ providerId: spawnOption.harness_id, initialPrompt: undefined });
     expect(useUIStore.getState().omnibarOpen).toBe(false);
     spy.mockRestore();
   });
@@ -1046,12 +1015,12 @@ describe('CommandOmnibar — tool discovery start screen (Option A)', () => {
     }
   });
 
-  it('renders the discovery grid below the search input, which stays anchored on top', () => {
+  it('renders the discovery list below the search input, which stays anchored on top', () => {
     render(<CommandOmnibar />);
     openOmnibar('files');
     const input = screen.getByRole('combobox');
     const groups = screen.getByTestId('command-omnibar-tool-groups');
-    // Input precedes the grid in document order — typing swaps the grid
+    // Input precedes the list in document order — typing swaps the list
     // for results in place instead of teleporting the input.
     expect(input.compareDocumentPosition(groups) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
@@ -1064,7 +1033,7 @@ describe('CommandOmnibar — tool discovery start screen (Option A)', () => {
     expect(github.textContent).toMatch(/Pull Requests/);
   });
 
-  it('renders each tool group as a bare heading plus its tiles, with no scope notes', () => {
+  it('renders each tool group as a bare heading plus single-line destination names', () => {
     render(<CommandOmnibar />);
     openOmnibar('files');
     // ADR-0031 scope-note refinement (2026-09-22): a group renders exactly its
@@ -1077,18 +1046,18 @@ describe('CommandOmnibar — tool discovery start screen (Option A)', () => {
       );
       expect(heading?.textContent).toBe(group.title);
       expect(container.textContent).toBe(
-        group.title + group.tiles.map((t) => t.title + t.description).join(''),
+        group.title + group.tiles.map((t) => t.title).join(''),
       );
     }
   });
 
-  it('describes Agent Changes as following the focused agent', () => {
+  it('keeps the focused-agent explanation in contextual help instead of a second line', () => {
     render(<CommandOmnibar />);
     openOmnibar('files');
-    // The headings dropped the one scope exception, so the tile carries it.
-    expect(screen.getByTestId('command-omnibar-tool-review').textContent).toContain(
-      'Review what the focused agent changed',
-    );
+    const row = screen.getByRole('button', { name: 'Agent Changes', exact: true });
+    expect(row.textContent).toBe('Agent Changes');
+    expect(row.getAttribute('aria-description')).toBe('Review what the focused agent changed');
+    expect(row.title).toBe('Agent Changes: Review what the focused agent changed');
   });
 
   it('typing hides the groups and searches instead', () => {
@@ -1114,54 +1083,32 @@ describe('CommandOmnibar — tool discovery start screen (Option A)', () => {
     expect([...grouped].sort()).toEqual([...PROBE_TAB_ORDER].sort());
   });
 
-  it('moves vertically through the tool grid without moving focus', () => {
+  it('walks every discovery row in DOM order, wraps, and keeps input focus', () => {
     render(<CommandOmnibar />);
     openOmnibar('files');
     const input = screen.getByRole('combobox');
-
-    const activeTab = () =>
-      input.getAttribute('aria-activedescendant')?.replace('command-omnibar-tool-', '');
-    const press = (key: string) => {
-      fireEvent.keyDown(input, { key });
-      return activeTab();
-    };
-
-    // Every group renders as two columns. The first row is Files | Agent
-    // Changes; the second row is the Project group (issue #1460 moved
-    // Project Settings and Repository out of "Code" into their own heading).
-    // ArrowDown must follow the visual column rather than the flat render
-    // order.
-    expect(press('ArrowDown')).toBe('properties');
-    expect(press('ArrowDown')).toBe('issues');
-    expect(press('ArrowUp')).toBe('properties');
-
-    // Vertical navigation keeps its existing wrap-around contract while
-    // preserving the active column at the edge of the grid.
-    expect(press('ArrowUp')).toBe('files');
-    expect(press('ArrowUp')).toBe('usage');
-
-    // Focus stays in the combobox throughout virtual tile navigation.
-    expect(document.activeElement).toBe(input);
+    const rows = TOOL_DISCOVERY_GROUPS.flatMap((group) => group.tiles);
+    for (const row of [...rows.slice(1), rows[0]]) {
+      fireEvent.keyDown(input, { key: 'ArrowDown' });
+      expect(input.getAttribute('aria-activedescendant')).toBe(`command-omnibar-tool-${row.tab}`);
+      expect(document.activeElement).toBe(input);
+    }
+    for (const row of [...rows].reverse()) {
+      fireEvent.keyDown(input, { key: 'ArrowUp' });
+      expect(input.getAttribute('aria-activedescendant')).toBe(`command-omnibar-tool-${row.tab}`);
+    }
   });
 
-  it('keeps horizontal tile movement within a row without wrapping', () => {
+  it('leaves horizontal arrows to the input caret in the single-column list', () => {
     render(<CommandOmnibar />);
     openOmnibar('files');
     const input = screen.getByRole('combobox');
-
-    const activeTab = () =>
-      input
-        .getAttribute('aria-activedescendant')
-        ?.replace('command-omnibar-tool-', '');
-    const press = (key: string) => {
-      fireEvent.keyDown(input, { key });
-      return activeTab();
-    };
-
-    expect(press('ArrowRight')).toBe('review');
-    expect(press('ArrowRight')).toBe('review');
-    expect(press('ArrowLeft')).toBe('files');
-    expect(press('ArrowLeft')).toBe('files');
+    for (const key of ['ArrowLeft', 'ArrowRight']) {
+      const event = createEvent.keyDown(input, { key });
+      fireEvent(input, event);
+      expect(event.defaultPrevented).toBe(false);
+      expect(input.getAttribute('aria-activedescendant')).toBe('command-omnibar-tool-files');
+    }
     expect(document.activeElement).toBe(input);
   });
 
@@ -1180,32 +1127,16 @@ describe('CommandOmnibar — tool discovery start screen (Option A)', () => {
     }
   });
 
-  it('ArrowDown highlights the tile immediately below and wraps by column', () => {
+  it('scrolls the next highlighted row into view', () => {
     render(<CommandOmnibar />);
     openOmnibar('files');
     const input = screen.getByRole('combobox');
     const scrollIntoView = vi.mocked(Element.prototype.scrollIntoView);
     scrollIntoView.mockClear();
     fireEvent.keyDown(input, { key: 'ArrowDown' });
-    // Focus never leaves the input — the highlight is virtual. The tile below
-    // `files` is the first Project tile (issue #1460 moved Project Settings
-    // and Repository into their own group, which is the second row).
-    expect(document.activeElement).toBe(input);
-    expect(input.getAttribute('aria-activedescendant')).toBe('command-omnibar-tool-properties');
-    expect(screen.getByTestId('command-omnibar-tool-properties').getAttribute('data-active')).toBe('true');
+    expect(input.getAttribute('aria-activedescendant')).toBe('command-omnibar-tool-review');
+    expect(screen.getByTestId('command-omnibar-tool-review').getAttribute('data-active')).toBe('true');
     expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' });
-
-    // The last left-column tile wraps back to the first left-column tile.
-    fireEvent.keyDown(input, { key: 'ArrowDown' });
-    fireEvent.keyDown(input, { key: 'ArrowDown' });
-    fireEvent.keyDown(input, { key: 'ArrowDown' });
-    fireEvent.keyDown(input, { key: 'ArrowDown' });
-    fireEvent.keyDown(input, { key: 'ArrowDown' });
-    expect(input.getAttribute('aria-activedescendant')).toBe('command-omnibar-tool-files');
-
-    // ArrowUp from the first tile wraps to the last tile in its column.
-    fireEvent.keyDown(input, { key: 'ArrowUp' });
-    expect(input.getAttribute('aria-activedescendant')).toBe('command-omnibar-tool-usage');
   });
 
   it('Enter opens the highlighted tile and typing afterwards still works', () => {
@@ -1226,8 +1157,8 @@ describe('CommandOmnibar — tool discovery start screen (Option A)', () => {
     fireEvent.keyDown(input, { key: 'ArrowDown' });
     fireEvent.keyDown(input, { key: 'Enter' });
     expect(useUIStore.getState().probeOpen).toBe(true);
-    // The tile below `files` is Project Settings after the #1460 regroup.
-    expect(useUIStore.getState().probeTab).toBe('properties');
+    // The row below Project Files is Agent Changes.
+    expect(useUIStore.getState().probeTab).toBe('review');
     expect(useUIStore.getState().omnibarOpen).toBe(false);
   });
 

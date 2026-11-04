@@ -43,6 +43,11 @@ fun NodeScreen(node: JsonObject, vm: BuildmeshViewModel, terminal: () -> Unit, c
         Text("${node.text("provider")} · ${node.text("branch")}", color = MeshColors.secondary)
         if (node.text("signal_health") in setOf("unavailable", "degraded")) Text("Session observation: ${node.text("signal_health")}. Check the terminal for current activity.", color = MeshColors.amber)
         if (node.text("signal_health") == "unverified") Text("Session observation has not been verified yet.", color = MeshColors.secondary)
+        // The glance leads the screen: what the agent is doing is why most
+        // visits open a node. A node waiting on you is the exception — its
+        // request and the reply to it come first, and the glance follows.
+        val waiting = node.text("status") == "awaiting_input"
+        if (!waiting) vm.api?.let { NodeGlancePanel(it, id) }
         lifecycle?.text("message")?.takeIf { it.isNotBlank() }?.let { Text(it) }
         lifecycle?.objectAt("semantic_turn")?.text("description")?.takeIf { it.isNotBlank() && it != lifecycle.text("message") }?.let { Text(it) }
         // The reply sits directly under the request it answers, above the
@@ -58,6 +63,7 @@ fun NodeScreen(node: JsonObject, vm: BuildmeshViewModel, terminal: () -> Unit, c
             if (!fits) Text("Reply is too long. Use the terminal for longer text.", color = MeshColors.amber)
             Button(shape = MaterialTheme.shapes.small, enabled = canReply && fits && draft.isNotBlank(), onClick = { send(draft.trim() + "\r") }, modifier = Modifier.fillMaxWidth()) { Text("Send reply") }
         }
+        if (waiting) vm.api?.let { NodeGlancePanel(it, id) }
         Button(shape = MaterialTheme.shapes.small, onClick = terminal, modifier = Modifier.fillMaxWidth()) { Text("Open terminal") }
         OutlinedButton(shape = MaterialTheme.shapes.small, onClick = changes, modifier = Modifier.fillMaxWidth()) { Text("Review changes") }
         OutlinedButton(shape = MaterialTheme.shapes.small, onClick = createPr, modifier = Modifier.fillMaxWidth()) { Text("Create pull request") }

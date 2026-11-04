@@ -2,7 +2,7 @@
 //!
 //! These wrappers exist so the boundary rejects — not to be reached in
 //! production. Every live caller goes through `create_blocking`,
-//! `create_blocking_configured`, `create_with_source_pr_fork_configured`
+//! `create_blocking_configured`, `create_with_source_pr_fork_configured_from`
 //! or `create_pending_with_source_pr_fork_configured`. They live here,
 //! declared at the bottom of the parent, so production code carries no
 //! `#[cfg(test)]` item above its own call sites — which keeps the
@@ -65,12 +65,21 @@ pub fn create(request: NodeCreateParams<'_>) -> Result<AgentNode, AgentNodeError
 pub fn create_with_source_pr_fork(
     request: NodeCreateParams<'_>,
 ) -> Result<AgentNode, AgentNodeError> {
-    create_with_source_pr_fork_configured(NodeCreateParams {
-        configuration: None,
-        initial_prompt: None,
-        operation: None,
-        ..request
-    })
+    // The test owns its preferences: a store over a fresh temporary directory
+    // reads as "no preferences yet", which is the code-defined defaults. The
+    // handle is passed explicitly rather than swapped into an ambient slot
+    // (issue #1482).
+    let profile = tempfile::tempdir().unwrap();
+    let store = crate::preferences::PreferencesStore::new(profile.path().to_path_buf());
+    create_with_source_pr_fork_configured_from(
+        &store,
+        NodeCreateParams {
+            configuration: None,
+            initial_prompt: None,
+            operation: None,
+            ..request
+        },
+    )
     .map(|created| created.node)
 }
 

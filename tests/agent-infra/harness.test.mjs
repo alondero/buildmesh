@@ -2398,6 +2398,12 @@ test('a Rust file attached with #[path] selects the module that owns it', () => 
   assert.equal(rustModule('src-tauri/src/commands/prune_tests.rs'), 'commands::prune::prune_tests');
   assert.equal(rustModule('src-tauri/src/services/legacy_retirement/retirement_crash_tests.rs'), 'services::legacy_retirement::retirement_crash_tests');
   assert.equal(rustModule('src-tauri/src/agent/terminal_input.rs'), 'agent::process::terminal_input');
+  assert.equal(rustModule('src-tauri/src/agent/prompt_delivery_tests.rs'), 'agent::prompt_delivery::tests');
+  assert.equal(rustModule('src-tauri/src/agent/prompt_delivery/prefill_tests.rs'), 'agent::prompt_delivery::prefill_tests');
+  assert.equal(rustModule('src-tauri/src/agent/prompt_delivery/operation_tests.rs'), 'agent::prompt_delivery::operation_tests');
+  assert.equal(rustModule('src-tauri/src/agent/prompt_delivery/conpty_tests.rs'), 'agent::prompt_delivery');
+  assert.equal(rustModule('src-tauri/src/agent/prompt_delivery/observation.rs'), 'agent::prompt_delivery');
+  assert.equal(rustModule('src-tauri/src/agent/spawn/startup_prompt.rs'), 'agent::prompt_delivery');
   // A production file whose tests live in a sibling `<stem>_tests` module the
   // PARENT declares: a plain path walk maps it to a module that holds no
   // tests, so the filter would select zero and the strict zero-test rule

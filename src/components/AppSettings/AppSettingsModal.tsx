@@ -167,10 +167,7 @@ function SettingsShell({
           the settings body is scrolled. */}
       <div className="shrink-0 flex items-start justify-between gap-4 px-10 pt-8 pb-4 border-b border-border-subtle">
         <div>
-          <h2 id="app-settings-title" className="text-2xl font-semibold text-text-primary mb-1">Settings</h2>
-          <p className="text-base text-text-muted">
-            Buildmesh-wide defaults. Per-mesh values in Project Settings take precedence.
-          </p>
+          <h2 id="app-settings-title" className="text-2xl font-semibold text-text-primary">Settings</h2>
         </div>
         <ModalCloseButton onClose={onClose} label="Close settings" />
       </div>

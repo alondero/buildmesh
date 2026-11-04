@@ -101,6 +101,29 @@ pub async fn review_options(req: &ParsedRequest) -> Response {
 }
 
 fn start_review_core(node_id: i64, request: StartNodeReviewRequest) -> Result<i64, ActError> {
+    start_review_core_with(None, node_id, request)
+}
+
+/// [`start_review_core`] against an explicit store.
+///
+/// The caller owns the store, so the reviewer launch configuration this run
+/// freezes is the one the caller set up (issue #1482).
+#[cfg(test)]
+// allow-test-in-production: the route's sibling suite owns a store and passes it in.
+fn start_review_core_from(
+    store: &crate::preferences::PreferencesStore,
+    node_id: i64,
+    request: StartNodeReviewRequest,
+) -> Result<i64, ActError> {
+    start_review_core_with(Some(store), node_id, request)
+}
+
+/// The route's core, over the store the caller resolved.
+fn start_review_core_with(
+    store: Option<&crate::preferences::PreferencesStore>,
+    node_id: i64,
+    request: StartNodeReviewRequest,
+) -> Result<i64, ActError> {
     if !review_options_core(node_id)?
         .iter()
         .any(|o| o.circuit_id == request.circuit_id)
@@ -109,14 +132,25 @@ fn start_review_core(node_id: i64, request: StartNodeReviewRequest) -> Result<i6
             "Select a Review Circuit from this agent's Mesh.".into(),
         ));
     }
-    circuit_commands::trigger_circuit_from_node_now(
-        state::app_handle(),
-        node_id,
-        request.circuit_id,
-        request.max_rounds,
-        request.reviewer_provider,
-    )
-    .map_err(ActError::Refused)
+    match store {
+        Some(store) => crate::commands::circuit::trigger_circuit_from_node_now_from(
+            store,
+            state::app_handle(),
+            node_id,
+            request.circuit_id,
+            request.max_rounds,
+            request.reviewer_provider,
+        )
+        .map_err(ActError::Refused),
+        None => crate::commands::circuit::trigger_circuit_from_node_now(
+            state::app_handle(),
+            node_id,
+            request.circuit_id,
+            request.max_rounds,
+            request.reviewer_provider,
+        )
+        .map_err(ActError::Refused),
+    }
 }
 
 pub async fn start_review(req: &ParsedRequest) -> Response {

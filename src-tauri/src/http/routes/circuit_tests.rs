@@ -114,7 +114,11 @@ fn starting_a_review_parses_strictly_and_refuses_unavailable_sources() {
 #[test]
 fn starting_a_review_uses_the_desktop_run_and_deduplicates_retries() {
     let _db = db::test_support::isolated();
-    let mut preferences = crate::preferences::load().unwrap();
+    // The profile this test owns: the reviewer configuration it stores and the
+    // run it freezes are read from it (issue #1482).
+    let profile = tempfile::tempdir().unwrap();
+    let store = crate::preferences::PreferencesStore::new(profile.path().to_path_buf());
+    let mut preferences = store.load().unwrap();
     preferences.spawn_configurations.push(
         crate::preferences::spawn_configurations::SpawnConfiguration {
             id: "launch/mobile-reviewer".into(),
@@ -126,7 +130,7 @@ fn starting_a_review_uses_the_desktop_run_and_deduplicates_retries() {
             ..Default::default()
         },
     );
-    crate::preferences::save(preferences).unwrap();
+    store.save(preferences).unwrap();
     let unique = 89_000_000 + i64::from(std::process::id());
     db::write_conn()
         .execute(
@@ -151,9 +155,12 @@ fn starting_a_review_uses_the_desktop_run_and_deduplicates_retries() {
         max_rounds: 3,
         reviewer_provider: Some("launch/mobile-reviewer".into()),
     };
-    let run = start_review_core(node, request()).unwrap();
+    let run = start_review_core_from(&store, node, request()).unwrap();
     assert_ne!(run, old_run);
-    assert_eq!(start_review_core(node, request()).unwrap(), run);
+    assert_eq!(
+        start_review_core_from(&store, node, request()).unwrap(),
+        run
+    );
     let stored = db::get_circuit_run(run).unwrap().unwrap();
     assert_eq!(stored.source_agent_node_id, Some(node));
     assert_eq!(stored.state, "pending");
@@ -170,7 +177,8 @@ fn starting_a_review_uses_the_desktop_run_and_deduplicates_retries() {
     assert_eq!(reply(run, Ok(())).status, "200 OK");
     cancel_core(run).unwrap();
     for reviewer in ["terminal", "launch/deleted"] {
-        let refusal = start_review_core(
+        let refusal = start_review_core_from(
+            &store,
             node,
             StartNodeReviewRequest {
                 reviewer_provider: Some(reviewer.into()),
@@ -183,7 +191,8 @@ fn starting_a_review_uses_the_desktop_run_and_deduplicates_retries() {
     }
     let saved =
         db::circuit::ledger::copy_review_blueprint(stored.circuit_id, "Team review").unwrap();
-    let saved_run = start_review_core(
+    let saved_run = start_review_core_from(
+        &store,
         node,
         StartNodeReviewRequest {
             circuit_id: Some(saved.id),
@@ -200,7 +209,9 @@ fn starting_a_review_uses_the_desktop_run_and_deduplicates_retries() {
     // A source with no lifecycle of its own (dsh, freebuff) is reviewable: it
     // hands off through result files. Only the plain shell is refused.
     db::set_agent_node_provider(node, "terminal").unwrap();
-    let refusal = start_review_core(node, request()).unwrap_err().response();
+    let refusal = start_review_core_from(&store, node, request())
+        .unwrap_err()
+        .response();
     assert_eq!(refusal.status, "409 Conflict");
     assert!(text(&refusal).contains("require an AI agent"));
 }

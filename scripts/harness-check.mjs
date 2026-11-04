@@ -76,6 +76,8 @@ export function frontendInScope(paths) {
 // `pathIncludeDrift` below, so a new `#[path]` fails the gate that runs on the
 // Rust diff itself, not only the one CI happens to run (review of PR #2232).
 export const RUST_PATH_INCLUDES = {
+  'src-tauri/src/commands/agent_spawn_menu_tests.rs': 'commands::agent::spawn_menu_tests',
+  'src-tauri/src/circuit/evaluator_tests.rs': 'circuit::evaluator::tests',
   'src-tauri/src/db/circuit/recovery_tests.rs': 'db::circuit::recovery::tests',
   'src-tauri/src/db/circuit/review_rounds_tests.rs': 'db::circuit::review_rounds::tests',
   'src-tauri/src/agent/opencode_detection_tests.rs': 'agent::detection::opencode_detection_tests',
@@ -84,7 +86,7 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/services/transcript_reader/readers/opencode2_tests.rs': 'services::transcript_reader::readers::opencode2::tests',
   'src-tauri/src/git/trust_tests.rs': 'git::trust::tests',
   'src-tauri/src/db/circuit/review_configuration_tests.rs': 'db::circuit::review_configuration::tests',
-  'src-tauri/src/db/circuit/artifacts_tests.rs': 'db::circuit::artifacts::tests',
+  'src-tauri/src/db/circuit/context_store_tests.rs': 'db::circuit::context_store::tests',
   'src-tauri/src/agent/terminal_input.rs': 'agent::process::terminal_input',
   'src-tauri/src/agent/process_tests.rs': 'agent::process::tests',
   'src-tauri/src/agent/provider_menu_tests.rs': 'agent::provider_menu::tests',
@@ -97,9 +99,13 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/agent/provider/adapters/mcode_tests.rs': 'agent::provider::adapters::mcode::tests',
   'src-tauri/src/agent/provider/adapters/opencode_tests.rs': 'agent::provider::adapters::opencode::child_session_tests',
   'src-tauri/src/agent/provider/adapters/perch_tests.rs': 'agent::provider::adapters::perch::tests',
-  'src-tauri/src/agent/spawn/startup_prompt_tests.rs': 'agent::spawn::startup_prompt::tests',
   'src-tauri/src/circuit/compatibility_tests.rs': 'circuit::compatibility::tests',
-  'src-tauri/src/circuit/delivery_tests.rs': 'circuit::delivery::tests',
+  'src-tauri/src/agent/prompt_delivery_tests.rs': 'agent::prompt_delivery::tests',
+  'src-tauri/src/agent/prompt_delivery/prefill_tests.rs': 'agent::prompt_delivery::prefill_tests',
+  'src-tauri/src/agent/prompt_delivery/operation_tests.rs': 'agent::prompt_delivery::operation_tests',
+  // The installed-harness smoke is opt-in; scoped checks also run executable
+  // operation coverage instead of selecting an ignored-only test module.
+  'src-tauri/src/agent/prompt_delivery/conpty_tests.rs': 'agent::prompt_delivery',
   'src-tauri/src/circuit/observation_tests.rs': 'circuit::observation::owned_work_tests',
   'src-tauri/src/circuit/vocabulary_tests.rs': 'circuit::vocabulary::tests',
   'src-tauri/src/commands/git_status_bench.rs': 'commands::git_tests',
@@ -132,8 +138,10 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/http/routes/providers_tests.rs': 'http::routes::providers::usage_tests',
   'src-tauri/src/http/routes/circuit_tests.rs': 'http::routes::circuit::tests',
   'src-tauri/src/http/routes/nodes_close_tests.rs': 'http::routes::nodes::close_tests',
+  'src-tauri/src/http/routes/nodes_glance_tests.rs': 'http::routes::nodes::glance_tests',
   'src-tauri/src/preferences/launch_catalog_tests.rs': 'preferences::launch_catalog::tests',
   'src-tauri/src/preferences/launch_configurations_tests.rs': 'preferences::launch_configurations::tests',
+  'src-tauri/src/preferences/spawn_configurations_tests.rs': 'preferences::spawn_configurations::tests',
   'src-tauri/src/preferences/resolver/accounts_tests.rs': 'preferences::resolver::accounts::tests',
   'src-tauri/src/preferences/resolver/catalog_tests.rs': 'preferences::resolver::catalog::tests',
   'src-tauri/src/preferences/resolver/harness_tests.rs': 'preferences::resolver::harness::tests',
@@ -151,6 +159,9 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/services/legacy_retirement/retirement_crash_tests.rs': 'services::legacy_retirement::retirement_crash_tests',
   'src-tauri/src/services/pool_worker_tests.rs': 'services::pool_worker::tests',
   'src-tauri/src/services/transcript_reader/report_snapshot_tests.rs': 'services::transcript_reader::report_snapshot::tests',
+  'src-tauri/src/services/transcript_reader/glance_read_tests.rs': 'services::transcript_reader::glance_read_tests',
+  'src-tauri/src/services/transcript_reader/glance_tests.rs': 'services::transcript_reader::glance::tests',
+  'src-tauri/src/services/node_glance_tests.rs': 'services::node_glance::tests',
   'src-tauri/src/services/warm_pool_tests.rs': 'services::warm_pool::tests',
   'src-tauri/src/services/warm_pool_backoff_tests.rs': 'services::warm_pool_backoff::tests',
   'src-tauri/src/services/mesh_folder_tests.rs': 'services::mesh_folder::tests',
@@ -224,11 +235,18 @@ export const RUST_SIBLING_TESTS = {
   // `tests/result_handoff.rs`) the parent declares.
   'src-tauri/src/services/circuit_worker/readiness.rs': 'services::circuit_worker::tests',
   'src-tauri/src/services/github/pagination.rs': 'services::github::pagination_tests',
+  // The preferences production files carry no tests of their own: the suites
+  // the `preferences::tests` parent declares cover them.
+  'src-tauri/src/preferences/secrets.rs': 'preferences::tests::secrets_tests',
+  'src-tauri/src/preferences/storage.rs': 'preferences::tests::storage_tests',
+  'src-tauri/src/preferences/store.rs': 'preferences::tests::store_tests',
 };
 
 // Private implementations keep their contract tests at the owning facade.
 // Map them explicitly so editing an extracted child still executes that suite.
 export const RUST_IMPLEMENTATION_TESTS = {
+  'src-tauri/src/agent/prompt_delivery/observation.rs': 'agent::prompt_delivery',
+  'src-tauri/src/agent/spawn/startup_prompt.rs': 'agent::prompt_delivery',
   'src-tauri/src/agent/provider/adapters/opencode2/config.rs': 'agent::provider::adapters::opencode2',
   'src-tauri/src/agent/process/input.rs': 'agent::process',
   'src-tauri/src/agent/process/registry.rs': 'agent::process',

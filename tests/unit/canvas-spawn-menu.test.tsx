@@ -56,8 +56,9 @@ vi.mock('../../src/hooks/useProviderList', () => ({
 // mount/unmount. The mock exposes BOTH a plain click and an
 // alt-click so the worktree-toggle path can be exercised.
 vi.mock('../../src/components/Providers/GroupedProviderMenu', () => ({
-  GroupedProviderMenu: ({ onSelect }: { onSelect: (id: string, alt: boolean) => void }) => (
+  GroupedProviderMenu: ({ onSelect }: { onSelect: (id: string, alt: boolean, configurationId?: string, loginId?: string) => void }) => (
     <div>
+      <button type="button" data-testid="fake-spawn-login-pick" onClick={() => onSelect('codex', false, 'launch/fast', 'work')}>Pick Work configuration</button>
       <button
         type="button"
         data-testid="fake-spawn-pick"
@@ -107,7 +108,7 @@ const MESH: Mesh = {
 };
 
 beforeEach(() => {
-  useUIStore.setState({ canvasSpawnMenuMeshId: null });
+  useUIStore.setState({ canvasSpawnMenuMeshId: null, canvasSpawnMenuOptions: null });
   useMeshStore.setState({ meshes: [], meshesById: new Map(), selectedMeshId: null });
   // Restore the real (non-mocked) `selectProviderForMesh` between tests
   // — `useAgentNodeStore.setState` patches are scoped to each test.
@@ -115,6 +116,17 @@ beforeEach(() => {
 });
 
 describe('CanvasSpawnMenu mount lifecycle (issue #1536)', () => {
+  it('carries the palette prompt together with the shared menu configuration and login pick', async () => {
+    useMeshStore.setState({ meshes: [MESH], meshesById: new Map([[MESH.id, MESH]]) });
+    useUIStore.getState().openCanvasSpawnMenu(MESH.id, { providerId: 'codex', initialPrompt: 'Fix the issue' });
+    const selectSpy = vi.fn().mockResolvedValue(undefined);
+    useAgentNodeStore.setState({ selectProviderForMesh: selectSpy });
+    render(<CanvasSpawnMenu meshId={MESH.id} />);
+    fireEvent.click(screen.getByTestId('fake-spawn-login-pick'));
+    await waitFor(() => expect(selectSpy).toHaveBeenCalledWith(MESH.id, MESH.name, MESH.path,
+      'codex', true, 'Fix the issue', 'launch/fast', 'work'));
+    expect(useUIStore.getState().canvasSpawnMenuOptions).toBeNull();
+  });
   it('renders the spawn dialog for the requested mesh', () => {
     useMeshStore.setState({ meshes: [MESH], meshesById: new Map([[MESH.id, MESH]]) });
     useUIStore.setState({ canvasSpawnMenuMeshId: MESH.id });

@@ -380,6 +380,10 @@ pub(super) fn start_reader(
         spawn_start,
         mesh_id,
     } = session;
+    let delivery_output = crate::agent::process::PROCESS_REGISTRY
+        .get(&session_id)
+        .filter(|process| process.generation == generation)
+        .map(|process| std::sync::Arc::clone(&process.delivery_output));
     let app_clone = app;
     let reader_alive_clone = reader_alive;
     // Issue #1221: stateful wrapper that stitches PTY chunks so the
@@ -456,7 +460,9 @@ pub(super) fn start_reader(
                     // unarmed nodes.
                     crate::attention_autoclear::on_output(session_id, data.len());
                     // Boot tracking for a prompt typed after startup.
-                    super::startup_prompt::on_output(session_id, &text);
+                    if let Some(output) = &delivery_output {
+                        output.on_output(&text);
+                    }
 
                     if let Some(uuid) = uuid {
                         // The structured hook and Codex rollout fallback can

@@ -42,6 +42,10 @@ pub async fn close(req: &ParsedRequest) -> Response {
 #[path = "nodes_close_tests.rs"]
 mod close_tests;
 
+#[cfg(test)]
+#[path = "nodes_glance_tests.rs"]
+mod glance_tests;
+
 /// The authoritative agent-node inventory as a JSON body.
 ///
 /// Issue #2330: this ended in `Err(_) => "[]"`, and a failed query was
@@ -383,6 +387,23 @@ pub(crate) const INPUT_BODY_MAX_BYTES: usize = 1024;
 /// now carries the typed disposition and a refusal is a distinct status
 /// (issue #1530). A backpressured write is *transient*: the same bytes can be
 /// re-sent, and `Retry-After` says so.
+/// `GET /api/nodes/{id}/glance`: what the node is doing, for the phone's node
+/// screen. Read only for the node being looked at, never on the list poll. A
+/// missing node is `404`, a failed row read `503`, and a transcript that cannot
+/// be read is a `200` glance that names why.
+pub async fn glance(req: &ParsedRequest) -> Response {
+    let node_id = req.id0();
+    let glance =
+        crate::commands::run_blocking_typed::<_, Unavailable, _>("http_node_glance", move || {
+            crate::services::node_glance::read_blocking(node_id)
+        })
+        .await;
+    match glance {
+        Ok(glance) => serialized_or_500("200 OK", &glance),
+        Err(failure) => read_response(&failure, "Node not found"),
+    }
+}
+
 pub async fn post_input(req: &ParsedRequest) -> Response {
     let node_id = req.id0();
 
@@ -491,6 +512,8 @@ fn input_write_response(write: Result<crate::agent::process::InputOutcome, Strin
 }
 
 #[cfg(test)]
+// allow-test-in-production: this inline suite predates the sibling-test-file rule; the
+// issue #1482 migration edits it in place, and relocating the pre-existing suite is out of scope.
 mod tests {
     //! Issue #1377 — `POST /api/nodes/{id}/input` is the new triage-deck
     //! input endpoint. The handler must:
@@ -617,15 +640,17 @@ mod tests {
         // and the service must not turn a client error into a *committed*
         // outcome. The desktop half still runs on this thread.
         //
-        // The HTTP half cannot be driven from here: both the database and the
-        // preferences app-data dir are `thread_local!` under `cfg(test)`, and
-        // the route reaches them from `spawn_blocking`, where neither install
-        // is visible. The equivalent HTTP assertion therefore lives in
+        // The HTTP half cannot be driven from here: the database install is a
+        // `thread_local!` under `cfg(test)`, and the route reaches it from
+        // `spawn_blocking`, where the install is invisible. The equivalent
+        // HTTP assertion therefore lives in
         // `services::create_operation::tests`, which injects `InlineWork` and
         // runs the same code path on this thread.
         let _db = crate::db::test_support::shared_global_db();
-        let root = tempfile::tempdir().unwrap();
-        crate::preferences::init_for_tests(root.path().to_path_buf());
+        // The profile this test owns: the desktop create reads its saved
+        // configuration from it (issue #1482).
+        let profile = tempfile::tempdir().unwrap();
+        let store = crate::preferences::PreferencesStore::new(profile.path().to_path_buf());
         let mesh_id = crate::db::create_mesh(
             "prompt-gate",
             &format!("/tmp/buildmesh_prompt_gate_{}", std::process::id()),
@@ -633,7 +658,8 @@ mod tests {
         .unwrap()
         .id;
 
-        let desktop = crate::commands::agent_node::create_agent_node_blocking(
+        let desktop = crate::commands::agent_node::create_agent_node_blocking_from(
+            &store,
             mesh_id,
             "main",
             Some("terminal"),
@@ -697,8 +723,6 @@ mod tests {
     #[test]
     fn an_omitted_provider_resolves_the_mesh_default() {
         let _db = crate::db::test_support::isolated();
-        let root = tempfile::tempdir().unwrap();
-        crate::preferences::init_for_tests(root.path().to_path_buf());
         let path = |name: &str| format!("/tmp/buildmesh_default_{}_{name}", std::process::id());
         let plain = crate::db::create_mesh("plain", &path("plain")).unwrap();
         let pinned = crate::db::create_mesh("pinned", &path("pinned")).unwrap();

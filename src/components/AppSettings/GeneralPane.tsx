@@ -64,8 +64,7 @@ function InterfaceTextSizeControl() {
 
   return (
     <>
-      <div className="mb-2 flex items-center justify-between">
-        <span className="text-xs text-text-secondary">Text size</span>
+      <div className="mb-2 flex justify-end">
         <span
           className="font-mono text-xs text-text-primary"
           data-testid="interface-text-scale-value"
@@ -309,7 +308,6 @@ export function GeneralPane() {
         <SettingsRow
           label="Theme"
           summary="Colour theme for the app and terminals."
-          layout="stacked"
           details={
             <>
               Dark is the default; light inverts the surface and text tokens while

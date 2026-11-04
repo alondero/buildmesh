@@ -3,7 +3,6 @@ import { useUIStore, type DiffContext } from '../../src/stores/uiStore';
 import { enterMesh } from '../../src/lib/navigation';
 import { useMeshStore } from '../../src/stores/meshStore';
 import { useToastStore } from '../../src/stores/toastStore';
-import { SCOPE_NOTICE_PROVIDER } from '../../src/lib/scopeNotices';
 
 // A representative single-file diff context (issue #379). The overlay needs
 // the path + root to fetch, the node/mesh to label and auto-close, and the
@@ -91,7 +90,7 @@ describe('useUIStore', () => {
       // === null` — is enforced at the transition so every caller
       // (switcher, Pinned empty state, omnibar, keyboard cycle) gets it
       // for free. The reverse is NOT true: a null selectedMeshId is
-      // also valid in `pinned`, `filtered`, and `single` modes.
+      // also valid in `pinned` and `single` modes.
       it('repairs an All Nodes selection on a same-mode request', () => {
         useMeshStore.setState({ selectedMeshId: 7 });
         useUIStore.setState({ viewMode: 'all' });
@@ -108,9 +107,9 @@ describe('useUIStore', () => {
       });
 
       it('does not touch selectedMeshId for non-All transitions', () => {
-        // The invariant is forward-only — a switch to Pinned/Filtered/
-        // Mesh/Single must leave selectedMeshId alone so the sidebar
-        // highlight and the canvas stay coupled.
+        // The invariant is forward-only — a switch to Pinned/Mesh/Single
+        // must leave selectedMeshId alone so the sidebar highlight and the
+        // canvas stay coupled.
         enterMesh(7);
         useUIStore.setState({ viewMode: 'all' });
         useUIStore.getState().setViewMode('pinned');
@@ -123,7 +122,7 @@ describe('useUIStore', () => {
         // they switched — otherwise a caller that skips `setViewMode` would
         // leave All Nodes paired with a highlighted Mesh. Driven through the
         // setter, not through the sidebar, because the invariant lives here.
-        for (const mode of ['mesh', 'pinned', 'filtered', 'single'] as const) {
+        for (const mode of ['mesh', 'pinned', 'single'] as const) {
           useMeshStore.setState({ selectedMeshId: 7 });
           useUIStore.getState().setViewMode(mode);
           expect(useMeshStore.getState().selectedMeshId).toBe(7);
@@ -140,6 +139,32 @@ describe('useUIStore', () => {
       // loadViewMode runs once at store-module creation, so these tests
       // re-import the store on a fresh module registry with localStorage
       // pre-seeded. The statically-imported store above is unaffected.
+      it('migrates Filtered to All while preserving its active filters', async () => {
+        localStorage.removeItem('buildmesh.scoped-search-migrated');
+        localStorage.setItem('buildmesh.view-mode', 'filtered');
+        localStorage.setItem('buildmesh.grid-controls', JSON.stringify({ searchQuery: 'runner', provider: 'claude', status: 'idle', sortBy: 'name', sortDirection: 'asc' }));
+        vi.resetModules();
+        const fresh = await import('../../src/stores/uiStore');
+        expect(fresh.useUIStore.getState()).toMatchObject({ viewMode: 'all', gridSearchQuery: 'runner', gridProviderFilter: 'claude', gridStatusFilter: 'idle' });
+        expect(localStorage.getItem('buildmesh.view-mode')).toBe('all');
+      });
+
+      it('clears formerly dormant filters once, preserving sort and subsequent searches', async () => {
+        localStorage.removeItem('buildmesh.scoped-search-migrated');
+        localStorage.setItem('buildmesh.view-mode', 'mesh');
+        localStorage.setItem('buildmesh.grid-controls', JSON.stringify({ searchQuery: 'old', provider: 'claude', status: 'idle', sortBy: 'name', sortDirection: 'asc' }));
+        vi.resetModules();
+        const fresh = await import('../../src/stores/uiStore');
+        expect(fresh.useUIStore.getState()).toMatchObject({ gridSearchQuery: '', gridProviderFilter: null, gridStatusFilter: null, gridSortBy: 'name' });
+        vi.useFakeTimers();
+        fresh.useUIStore.getState().setGridSearchQuery('new');
+        vi.advanceTimersByTime(300);
+        vi.useRealTimers();
+        vi.resetModules();
+        const reloaded = await import('../../src/stores/uiStore');
+        expect(reloaded.useUIStore.getState().gridSearchQuery).toBe('new');
+      });
+
       it('boots into a valid persisted mode', async () => {
         localStorage.setItem('buildmesh.view-mode', 'pinned');
         vi.resetModules();
@@ -576,9 +601,8 @@ describe('useUIStore', () => {
 
   // #2076 — "scope changes announce themselves". Two channels live here:
   // the open request the Mesh Grid segment sends to the title bar's scope
-  // picker, and `enterFilteredFromSearch`, the one shared implementation of
-  // the "jump to the search box" gesture that both the switcher segment and
-  // the ⌘/Ctrl+F shortcut already had duplicated.
+  // picker, and `focusScopedSearch`, the one shared implementation of
+  // the "jump to the search box" gesture the ⌘/Ctrl+F shortcut now owns.
   describe('scope-change notices (#2076)', () => {
     beforeEach(() => {
       localStorage.removeItem('buildmesh.view-mode');
@@ -602,51 +626,28 @@ describe('useUIStore', () => {
       expect(useUIStore.getState().openScopePickerRequest).toBe(2);
     });
 
-    it('announces once when a search escapes a Mesh-scoped view', () => {
+    it('keeps Mesh scope when search is requested', () => {
       useMeshStore.setState({ selectedMeshId: 4 });
       useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh' });
-
-      useUIStore.getState().enterFilteredFromSearch();
-
-      const toasts = useToastStore.getState().toasts;
-      expect(toasts).toHaveLength(1);
-      expect(toasts[0].message).toBe(
-        'Search results span every Mesh — the search matches Agent Node names, not one Mesh.',
-      );
-      expect(toasts[0].provider).toBe(SCOPE_NOTICE_PROVIDER);
-      expect(toasts[0].severity).toBe('info');
+      useUIStore.getState().focusScopedSearch();
+      expect(useUIStore.getState().viewMode).toBe('mesh');
+      expect(useMeshStore.getState().selectedMeshId).toBe(4);
+      expect(useToastStore.getState().toasts).toEqual([]);
     });
 
-    it('announces the escape from a Mesh-scoped Single view too — the scope, not the label, decides', () => {
-      // Single reports the grid scope it was entered from, so a solo out of
-      // a Mesh is still a Mesh-anchored scope and the search still spans
-      // every Mesh.
+    it('returns from Single to its previous scope for search', () => {
       useMeshStore.setState({ selectedMeshId: 4 });
-      useUIStore.setState({ viewMode: 'single', lastNonSingleMode: 'mesh' });
-
-      useUIStore.getState().enterFilteredFromSearch();
-
-      expect(useToastStore.getState().toasts).toHaveLength(1);
+      useUIStore.setState({ viewMode: 'single', lastNonSingleMode: 'mesh', gridSearchQuery: 'abc' });
+      useUIStore.getState().focusScopedSearch();
+      expect(useUIStore.getState().viewMode).toBe('mesh');
+      expect(useUIStore.getState().gridSearchQuery).toBe('abc');
     });
 
     it('announces nothing when the search starts from a cross-Mesh view', () => {
       useMeshStore.setState({ selectedMeshId: 4 });
       useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all' });
 
-      useUIStore.getState().enterFilteredFromSearch();
-
-      expect(useToastStore.getState().toasts).toEqual([]);
-    });
-
-    it('announces nothing on a second search from the Filtered view itself', () => {
-      // A re-click means "get me to the search box" — no scope change
-      // happened, so there is nothing to announce. The predicate gets this
-      // for free: Filtered is cross-Mesh by construction, so it can never
-      // report an escape.
-      useMeshStore.setState({ selectedMeshId: 4 });
-      useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered' });
-
-      useUIStore.getState().enterFilteredFromSearch();
+      useUIStore.getState().focusScopedSearch();
 
       expect(useToastStore.getState().toasts).toEqual([]);
     });
@@ -654,7 +655,7 @@ describe('useUIStore', () => {
     it('announces nothing from Mesh Grid with no Mesh selected — there was no Mesh to leave', () => {
       useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh' });
 
-      useUIStore.getState().enterFilteredFromSearch();
+      useUIStore.getState().focusScopedSearch();
 
       expect(useToastStore.getState().toasts).toEqual([]);
     });
@@ -663,10 +664,10 @@ describe('useUIStore', () => {
       useMeshStore.setState({ selectedMeshId: 4 });
       useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh' });
 
-      useUIStore.getState().enterFilteredFromSearch();
-      useUIStore.getState().enterFilteredFromSearch();
+      useUIStore.getState().focusScopedSearch();
+      useUIStore.getState().focusScopedSearch();
 
-      expect(useUIStore.getState().viewMode).toBe('filtered');
+      expect(useUIStore.getState().viewMode).toBe('mesh');
       expect(useUIStore.getState().focusGridSearchRequest).toBe(2);
     });
   });
@@ -688,7 +689,7 @@ describe('useUIStore', () => {
       expect(useUIStore.getState().viewMode).toBe('mesh');
     });
 
-    it.each(['pinned', 'filtered', 'single'] as const)(
+    it.each(['pinned', 'single'] as const)(
       'returns the canvas to that Mesh Grid when the already-selected Mesh is chosen from %s',
       (mode) => {
         useMeshStore.setState({ selectedMeshId: 7 });

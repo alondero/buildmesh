@@ -211,6 +211,7 @@ enum Handler {
     NodesCreate,
     NodesInput,
     NodesClose,
+    NodeGlance,
     PrCreate,
     PrSource,
     PrMerge,
@@ -397,6 +398,16 @@ const ROUTES: &[Route] = &[
         scope: RouteScope::Admin,
         body: BodyPolicy::None,
         handler: Handler::NodesClose,
+    },
+    Route {
+        method: "GET",
+        m: RouteMatch::OneId {
+            prefix: "/api/nodes/",
+            suffix: "/glance",
+        },
+        scope: RouteScope::Admin,
+        body: BodyPolicy::None,
+        handler: Handler::NodeGlance,
     },
     Route {
         method: "POST",
@@ -889,6 +900,7 @@ async fn run_handler(handler: Handler, req: &ParsedRequest) -> DispatchResult {
         Handler::NodesCreate => Http(routes::nodes::create(req).await),
         Handler::NodesInput => Http(routes::nodes::post_input(req).await),
         Handler::NodesClose => Http(routes::nodes::close(req).await),
+        Handler::NodeGlance => Http(routes::nodes::glance(req).await),
         Handler::PrCreate => Http(routes::pr::create(req).await),
         Handler::PrSource => Http(routes::pr::pr_source(req).await),
         Handler::PrMerge => Http(routes::pr::merge(req).await),

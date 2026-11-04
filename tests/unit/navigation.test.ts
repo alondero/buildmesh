@@ -66,7 +66,7 @@ describe('desktop navigation intents', () => {
     expect(tuple()).toEqual([42, 900, 'single', false, 'files', null]);
   });
 
-  it.each(['all', 'pinned', 'filtered', 'mesh'] as const)(
+  it.each(['all', 'pinned', 'mesh'] as const)(
     'solos a card from %s and restores that grid on exit', (mode) => {
       useUIStore.getState().setViewMode(mode);
       const selectedMesh = useMeshStore.getState().selectedMeshId;
@@ -102,7 +102,7 @@ describe('desktop navigation intents', () => {
     expect(useNodeActivityStore.getState().selections).toEqual({});
   });
 
-  it.each(['all', 'pinned', 'filtered', 'single', 'mesh'] as ViewMode[])(
+  it.each(['all', 'pinned', 'single', 'mesh'] as ViewMode[])(
     'entering the selected mesh from %s restores its grid and opens the requested Probe', (mode) => {
       useUIStore.setState({ viewMode: mode });
       enterMesh(7, { probeTab: 'worktrees' });

@@ -255,8 +255,8 @@ pub fn startup_reconcile_pass(app: &AppHandle) {
                 continue;
             }
         };
-        let context = match db::circuit::artifacts::load_run_context(active.run.id) {
-            Ok(context) => context,
+        let context = match db::circuit::context_store::load_logical_run(active.run.id) {
+            Ok(context) => context.runtime(),
             Err(e) => {
                 let reason = format!("unreadable context_json, failing: {}", e);
                 tracing::warn!("circuits: run {} {}", active.run.id, reason);

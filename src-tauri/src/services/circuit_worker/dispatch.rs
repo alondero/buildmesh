@@ -7,10 +7,11 @@
 
 use tauri::{AppHandle, Emitter};
 
-use crate::circuit::delivery::PreparedPrompt;
+use crate::agent::prompt_delivery::PreparedPrompt;
 use crate::circuit::stepper::{CircuitEvent, Effect, EffectJournal, RunState, RunView};
 use crate::db;
-use crate::models::{AgentNode, SessionStatus};
+use crate::models::{AgentNode, EnvType, SessionStatus};
+use crate::preferences::PreferencesStore;
 
 use super::{
     background_wake_is_current, begin_circuit_effect_batch, close_blocker,
@@ -47,11 +48,27 @@ pub(super) trait EffectHost {
         view: &mut RunView,
         node_id: &str,
     ) -> Result<(), String>;
+    /// Spawn the step's agent against an explicit profile store.
+    ///
+    /// The default keeps a host that cannot scope its spawn to a profile
+    /// working: it spawns through the unscoped path, which resolves the
+    /// ambient store itself.
+    fn spawn_step_agent_from(
+        &self,
+        _store: &PreferencesStore,
+        run_id: i64,
+        mesh_id: i64,
+        view: &mut RunView,
+        node_id: &str,
+    ) -> Result<(), String> {
+        self.spawn_step_agent(run_id, mesh_id, view, node_id)
+    }
     fn input_stamp(&self, agent_id: i64) -> Option<String>;
     fn write_prompt(
         &self,
         prepared: &PreparedPrompt,
         expected_input: Option<&str>,
+        still_current: &dyn Fn() -> Result<bool, String>,
     ) -> Result<bool, String>;
     fn agent_alive(&self, agent_id: i64) -> bool;
     fn millis_since_last_output(&self, agent_id: i64) -> Option<u128>;
@@ -98,6 +115,17 @@ impl EffectHost for AppEffectHost<'_> {
         super::spawn::spawn_step_agent(self.app, run_id, mesh_id, view, node_id)
     }
 
+    fn spawn_step_agent_from(
+        &self,
+        store: &PreferencesStore,
+        run_id: i64,
+        mesh_id: i64,
+        view: &mut RunView,
+        node_id: &str,
+    ) -> Result<(), String> {
+        super::spawn::spawn_step_agent_from(store, self.app, run_id, mesh_id, view, node_id)
+    }
+
     fn input_stamp(&self, agent_id: i64) -> Option<String> {
         crate::agent::process::PROCESS_REGISTRY.input_stamp(agent_id)
     }
@@ -106,13 +134,26 @@ impl EffectHost for AppEffectHost<'_> {
         &self,
         prepared: &PreparedPrompt,
         expected_input: Option<&str>,
+        still_current: &dyn Fn() -> Result<bool, String>,
     ) -> Result<bool, String> {
-        crate::circuit::delivery::write_prompt_to_pty_guarded(
+        let node = crate::db::get_agent_node_by_id(prepared.node_id())
+            .map_err(|error| error.to_string())?;
+        let provider = crate::preferences::resolve_harness_provider(&node.provider);
+        let outcome = crate::agent::prompt_delivery::deliver(
             &crate::agent::process::PROCESS_REGISTRY,
-            prepared,
-            self.app,
-            expected_input,
-        )
+            provider.adapter(),
+            crate::agent::prompt_delivery::DeliveryRequest {
+                prompt: prepared,
+                mode: crate::agent::prompt_delivery::DeliveryMode::LaterTurn,
+                observation: crate::agent::prompt_delivery::ObservationRequirement::Required,
+                expected_input,
+                still_current,
+            },
+        );
+        if outcome.stop == Some(crate::agent::prompt_delivery::DeliveryStop::Superseded) {
+            return Ok(false);
+        }
+        outcome.require_acknowledgement().map(|()| true)
     }
 
     fn agent_alive(&self, agent_id: i64) -> bool {
@@ -249,10 +290,167 @@ fn defer_effect(view: &RunView, effect: &Effect, outcomes: &mut Vec<CircuitEvent
     outcomes.push(event);
 }
 
+/// Stages this attempt's prompt against the profile the dispatch owns.
+///
+/// Without a store there is no profile directory to stage in, so the prompt is
+/// pasted inline — the degradation the ambient path had before a profile was
+/// known.
+fn stage_prompt_for(
+    store: Option<&PreferencesStore>,
+    run_id: i64,
+    node_id: &str,
+    attempt: i32,
+    env: EnvType,
+    full_prompt: &str,
+    requests_result: bool,
+) -> crate::circuit::handoff::StagedPrompt {
+    match store {
+        Some(store) => crate::circuit::handoff::stage_prompt_from(
+            store,
+            run_id,
+            node_id,
+            attempt,
+            env,
+            full_prompt,
+            requests_result,
+        ),
+        None => crate::circuit::handoff::stage_prompt(
+            run_id,
+            node_id,
+            attempt,
+            env,
+            full_prompt,
+            requests_result,
+        ),
+    }
+}
+
+/// Records which handoff the agent's current turn belongs to.
+fn set_agent_turn_for(
+    store: Option<&PreferencesStore>,
+    run_id: i64,
+    agent_node_id: i64,
+    turn: Option<&crate::circuit::handoff::HandoffTurn>,
+) {
+    match store {
+        Some(store) => {
+            crate::circuit::handoff::set_agent_turn_from(store, run_id, agent_node_id, turn)
+        }
+        None => crate::circuit::handoff::set_agent_turn(run_id, agent_node_id, turn),
+    }
+}
+
+/// The handoff the agent's current turn belongs to.
+fn agent_turn_for(
+    store: Option<&PreferencesStore>,
+    run_id: i64,
+    agent_node_id: i64,
+) -> Option<crate::circuit::handoff::HandoffTurn> {
+    match store {
+        Some(store) => crate::circuit::handoff::agent_turn_from(store, run_id, agent_node_id),
+        None => crate::circuit::handoff::agent_turn(run_id, agent_node_id),
+    }
+}
+
+/// Prepares a continuation prompt against the profile the dispatch owns.
+fn prepare_continuation_for(
+    store: Option<&PreferencesStore>,
+    run_id: i64,
+    agent_node_id: i64,
+    env: EnvType,
+    prompt: &str,
+) -> String {
+    match store {
+        Some(store) => crate::circuit::handoff::prepare_continuation_from(
+            store,
+            run_id,
+            agent_node_id,
+            env,
+            prompt,
+        ),
+        None => crate::circuit::handoff::prepare_continuation(run_id, agent_node_id, env, prompt),
+    }
+}
+
+/// Retains the delivered prompt for the evidence ledger.
+///
+/// Without a store the submission is recorded without a payload file, exactly
+/// as a failed write is.
+fn retain_prompt_for(
+    store: Option<&PreferencesStore>,
+    run_id: i64,
+    node_id: &str,
+    attempt: i32,
+    prepared: &PreparedPrompt,
+    kind: crate::services::circuit_prompt::DeliveryKind,
+    turn: Option<&crate::circuit::handoff::HandoffTurn>,
+) -> Result<i64, crate::db::DbError> {
+    match store {
+        Some(store) => crate::services::circuit_prompt::retain_from(
+            store, run_id, node_id, attempt, prepared, kind, turn,
+        ),
+        None => {
+            crate::services::circuit_prompt::retain(run_id, node_id, attempt, prepared, kind, turn)
+        }
+    }
+}
+
+/// Spawns the step's agent against the profile the dispatch owns.
+fn spawn_step_agent_for(
+    host: &impl EffectHost,
+    store: Option<&PreferencesStore>,
+    run_id: i64,
+    mesh_id: i64,
+    view: &mut RunView,
+    node_id: &str,
+) -> Result<(), String> {
+    match store {
+        Some(store) => host.spawn_step_agent_from(store, run_id, mesh_id, view, node_id),
+        None => host.spawn_step_agent(run_id, mesh_id, view, node_id),
+    }
+}
+
 /// Run an already-committed effect batch. The cancellation flag is sampled
 /// before the batch permit drops, including on the early returns that stop
 /// the rest of the batch.
 pub(super) fn dispatch_effects(
+    host: &impl EffectHost,
+    active: &db::ActiveCircuitRun,
+    view: &mut RunView,
+    effects: &[Effect],
+    github_client: Option<&crate::services::github::GitHubClient>,
+) -> Result<DispatchedEffects, String> {
+    // The store installed at startup. Without one there is no profile
+    // directory to stage the batch's prompts in, so it degrades exactly as it
+    // did before a profile was known.
+    match crate::preferences::ambient_store() {
+        Ok(store) => dispatch_effects_from(&store, host, active, view, effects, github_client),
+        Err(_) => dispatch_effects_with(None, host, active, view, effects, github_client),
+    }
+}
+
+/// [`dispatch_effects`] against an explicit store.
+///
+/// The caller owns the store, so the prompts, turn markers and retained
+/// payloads this batch writes land under **that** profile directory rather
+/// than the ambient one (issue #1482).
+pub(super) fn dispatch_effects_from(
+    store: &PreferencesStore,
+    host: &impl EffectHost,
+    active: &db::ActiveCircuitRun,
+    view: &mut RunView,
+    effects: &[Effect],
+    github_client: Option<&crate::services::github::GitHubClient>,
+) -> Result<DispatchedEffects, String> {
+    dispatch_effects_with(Some(store), host, active, view, effects, github_client)
+}
+
+/// The effect batch itself, over an optional store.
+///
+/// `None` means no profile is known: every handoff degrades to the inline
+/// fallback the ambient path had before a profile was installed.
+fn dispatch_effects_with(
+    store: Option<&PreferencesStore>,
     host: &impl EffectHost,
     active: &db::ActiveCircuitRun,
     view: &mut RunView,
@@ -311,9 +509,14 @@ pub(super) fn dispatch_effects(
                 else {
                     continue;
                 };
-                if let Err(error) =
-                    host.spawn_step_agent(active.run.id, active.run.mesh_id, view, node_id)
-                {
+                if let Err(error) = spawn_step_agent_for(
+                    host,
+                    store,
+                    active.run.id,
+                    active.run.mesh_id,
+                    view,
+                    node_id,
+                ) {
                     outcome_events.push(CircuitEvent::EffectUncertain {
                         node_id: node_id.clone(),
                         attempt,
@@ -405,7 +608,8 @@ pub(super) fn dispatch_effects(
                         // The full prompt goes to its handoff file; the terminal
                         // receives either the same text or a pointer to it. The
                         // digest and the PTY write both use what is delivered.
-                        let staged = crate::circuit::handoff::stage_prompt(
+                        let staged = stage_prompt_for(
+                            store,
                             active.run.id,
                             node_id,
                             attempt,
@@ -414,17 +618,14 @@ pub(super) fn dispatch_effects(
                             requests_result,
                         );
                         let prepared = PreparedPrompt::prepare(target, &staged.delivered)?;
-                        crate::circuit::handoff::set_agent_turn(
-                            active.run.id,
-                            target,
-                            staged.turn.as_ref(),
-                        );
+                        set_agent_turn_for(store, active.run.id, target, staged.turn.as_ref());
                         // Record the submission before the PTY write. Claude
                         // echoes the prompt back within milliseconds of Enter,
                         // and that echo only proves *this* submission if the
                         // record already exists when the hook is handled
                         // (issue #1898).
-                        match crate::services::circuit_prompt::retain(
+                        match retain_prompt_for(
+                            store,
                             active.run.id,
                             node_id,
                             attempt,
@@ -457,7 +658,12 @@ pub(super) fn dispatch_effects(
                                 let input = host.input_stamp(target).ok_or(
                                     "Terminal input is already owned; prompt was not sent",
                                 )?;
-                                host.write_prompt(&prepared, Some(&input))
+                                host.write_prompt(&prepared, Some(&input), &|| {
+                                    if effect_batch.is_cancelled() {
+                                        return Ok(false);
+                                    }
+                                    super::run_accepts_effects(active.run.id)
+                                })
                             },
                             || {
                                 db::circuit::evidence::acknowledge_prompt_delivery(
@@ -601,7 +807,8 @@ pub(super) fn dispatch_effects(
                     .to_owned();
                 // The agent may owe a result file from an earlier turn. Archive it so the
                 // continuation cannot be judged from that stale report.
-                let prompt = crate::circuit::handoff::prepare_continuation(
+                let prompt = prepare_continuation_for(
+                    store,
                     active.run.id,
                     *target_agent_id,
                     node.env,
@@ -609,8 +816,9 @@ pub(super) fn dispatch_effects(
                 );
                 let prepared = PreparedPrompt::prepare(*target_agent_id, &prompt)?;
                 let attempt = view.step(node_id).map_or(1, |s| s.attempt);
-                let turn = crate::circuit::handoff::agent_turn(active.run.id, *target_agent_id);
-                let revision = crate::services::circuit_prompt::retain(
+                let turn = agent_turn_for(store, active.run.id, *target_agent_id);
+                let revision = retain_prompt_for(
+                    store,
                     active.run.id,
                     node_id,
                     attempt,
@@ -620,7 +828,12 @@ pub(super) fn dispatch_effects(
                 )
                 .map_err(|e| e.to_string())?;
                 view.context.set("evidence.revision", revision.to_string());
-                match host.write_prompt(&prepared, Some(&expected)) {
+                match host.write_prompt(&prepared, Some(&expected), &|| {
+                    if effect_batch.is_cancelled() {
+                        return Ok(false);
+                    }
+                    super::run_accepts_effects(active.run.id)
+                }) {
                     Ok(true) => {
                         let _ =
                             db::update_agent_node_status(*target_agent_id, SessionStatus::Running);
@@ -800,8 +1013,9 @@ pub(super) fn dispatch_effects(
                 // The nudge is a real prompt submission, so it is recorded the
                 // same way an injected one is: the receipt it may produce has to
                 // bind to a submission Buildmesh itself made.
-                let turn = crate::circuit::handoff::agent_turn(active.run.id, *target_agent_id);
-                match crate::services::circuit_prompt::retain(
+                let turn = agent_turn_for(store, active.run.id, *target_agent_id);
+                match retain_prompt_for(
+                    store,
                     active.run.id,
                     node_id,
                     attempt,
@@ -826,7 +1040,12 @@ pub(super) fn dispatch_effects(
                         continue;
                     }
                 }
-                match host.write_prompt(&prepared, Some(&expected)) {
+                match host.write_prompt(&prepared, Some(&expected), &|| {
+                    if effect_batch.is_cancelled() {
+                        return Ok(false);
+                    }
+                    super::run_accepts_effects(active.run.id)
+                }) {
                     Ok(true) => {
                         let _ =
                             db::update_agent_node_status(*target_agent_id, SessionStatus::Running);

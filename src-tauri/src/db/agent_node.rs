@@ -1,6 +1,7 @@
 //! Agent Node persistence, coordinator node digest rows, and the pending
 //! worktree-removal queue.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use rusqlite::{params, Connection};
@@ -32,28 +33,81 @@ fn migrate_launch_selections_inner(
             params![old, new],
         )?;
     }
-    for (select, update) in [
-        (
-            "SELECT id, graph_json FROM autopilot_circuits",
-            "UPDATE autopilot_circuits SET graph_json = ?2 WHERE id = ?1",
-        ),
-        (
-            "SELECT id, context_json FROM autopilot_circuit_runs",
-            "UPDATE autopilot_circuit_runs SET context_json = ?2 WHERE id = ?1",
-        ),
-    ] {
-        let rows = tx
-            .prepare(select)?
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
-            .collect::<SqlResult<Vec<_>>>()?;
-        for (id, raw) in rows {
-            let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else {
-                continue;
-            };
-            if migrate_launch_json(&mut value, mappings) {
-                tx.execute(update, params![id, value.to_string()])?;
+    // A circuit's graph is not a run context: the rename is a plain JSON
+    // rewrite of the row it lives in.
+    let graphs = tx
+        .prepare("SELECT id, graph_json FROM autopilot_circuits")?
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<SqlResult<Vec<_>>>()?;
+    for (id, raw) in graphs {
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        if migrate_launch_json(&mut value, mappings) {
+            tx.execute(
+                "UPDATE autopilot_circuits SET graph_json = ?2 WHERE id = ?1",
+                params![id, value.to_string()],
+            )?;
+        }
+    }
+    // A run's context is one logical thing: the store owns which half of it
+    // lands in the column and which half in the side table, so the rename
+    // goes through it and reaches both halves.
+    let runs = tx
+        .prepare("SELECT id, context_json FROM autopilot_circuit_runs")?
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<SqlResult<Vec<_>>>()?;
+    for (id, raw) in runs {
+        // The rewrite is the one the graph path uses, so a run's context is
+        // renamed the same way a circuit's graph is: nested objects and
+        // arrays included.
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        if !migrate_launch_json(&mut value, mappings) {
+            continue;
+        }
+        let Ok(original) = serde_json::from_str::<BTreeMap<String, String>>(&raw) else {
+            // A payload that is not a flat map has no logical context: the
+            // seam stores such a payload as it stands, so the rename lands
+            // in the column and the stored half is left alone.
+            let replacement =
+                crate::db::circuit::context_store::ContextReplacement::whole(value.to_string());
+            let applied =
+                crate::db::circuit::context_store::apply_replacement(&tx, id, &replacement)?;
+            tx.execute(
+                "UPDATE autopilot_circuit_runs SET context_json = ?2 WHERE id = ?1",
+                params![id, applied.column_json()],
+            )?;
+            continue;
+        };
+        let rewritten: BTreeMap<String, String> = serde_json::from_str(&value.to_string())
+            .expect("the rewrite keeps the payload's shape");
+        // The renamed values, as the column holds them: the provider a
+        // context names is a short value, so it lives there.
+        let mut renamed = BTreeMap::new();
+        for (key, next) in &rewritten {
+            if original.get(key) != Some(next) {
+                renamed.insert(key.clone(), next.clone());
             }
         }
+        if renamed.is_empty() {
+            continue;
+        }
+        // The run's whole context, both halves, with the renamed values on
+        // top.
+        let Ok(logical) = crate::db::circuit::context_store::load_logical(&tx, id) else {
+            continue;
+        };
+        let mut values = logical.values().clone();
+        values.extend(renamed);
+        let replacement =
+            crate::db::circuit::context_store::ContextReplacement::with_values(values);
+        let applied = crate::db::circuit::context_store::apply_replacement(&tx, id, &replacement)?;
+        tx.execute(
+            "UPDATE autopilot_circuit_runs SET context_json = ?2 WHERE id = ?1",
+            params![id, applied.column_json()],
+        )?;
     }
     tx.commit()
 }
@@ -860,6 +914,20 @@ pub fn create_agent_node(node: NewAgentNode<'_>) -> SqlResult<AgentNode> {
     create_agent_node_configured(node, None)
 }
 
+/// [`create_agent_node`] against an explicit store.
+///
+/// The caller owns the store, so the harness runtime this node resolves comes
+/// from *that* store's stored harness profiles (issue #1482).
+#[cfg(test)]
+// allow-test-in-production: the store-scoped twin of `create_agent_node`, reached
+// from the sibling suite that owns a store.
+pub fn create_agent_node_from(
+    store: &crate::preferences::PreferencesStore,
+    node: NewAgentNode<'_>,
+) -> SqlResult<AgentNode> {
+    create_agent_node_configured_from(store, node, None)
+}
+
 pub fn create_agent_node_configured(
     node: NewAgentNode<'_>,
     configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
@@ -870,6 +938,37 @@ pub fn create_agent_node_configured(
         node.use_worktree,
         node.env,
     );
+    create_agent_node_configured_with_env(node, configuration, env)
+}
+
+/// [`create_agent_node_configured`] against an explicit store.
+///
+/// The caller owns the store, so the harness runtime this node resolves comes
+/// from *that* store's stored harness profiles (issue #1482).
+#[cfg(test)]
+// allow-test-in-production: the store-scoped twin of `create_agent_node_configured`,
+// reached from the sibling suite that owns a store.
+pub fn create_agent_node_configured_from(
+    store: &crate::preferences::PreferencesStore,
+    node: NewAgentNode<'_>,
+    configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
+) -> SqlResult<AgentNode> {
+    let env = resolve_spawn_env_from(
+        store,
+        node.provider,
+        node.worktree_path,
+        node.use_worktree,
+        node.env,
+    );
+    create_agent_node_configured_with_env(node, configuration, env)
+}
+
+/// The insert itself, with the spawn environment already resolved.
+fn create_agent_node_configured_with_env(
+    node: NewAgentNode<'_>,
+    configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
+    env: EnvType,
+) -> SqlResult<AgentNode> {
     let snapshot = configuration
         .map(serde_json::to_string)
         .transpose()
@@ -1022,12 +1121,39 @@ fn resolve_spawn_env(
     use_worktree: bool,
     default: EnvType,
 ) -> EnvType {
-    crate::preferences::harness_runtime(provider).unwrap_or_else(|| {
-        worktree_path
-            .filter(|path| use_worktree && !path.trim().is_empty())
-            .map(|path| crate::env::resolve_raw_path(path).env_type)
-            .unwrap_or(default)
-    })
+    crate::preferences::harness_runtime(provider)
+        .unwrap_or_else(|| fallback_spawn_env(worktree_path, use_worktree, default))
+}
+
+/// [`resolve_spawn_env`] against an explicit store.
+///
+/// The caller owns the store, so the harness runtime this resolves comes from
+/// *that* store's stored harness profiles (issue #1482).
+#[cfg(test)]
+// allow-test-in-production: the store-scoped twin of `resolve_spawn_env`, reached
+// from the sibling suite that owns a store.
+fn resolve_spawn_env_from(
+    store: &crate::preferences::PreferencesStore,
+    provider: &str,
+    worktree_path: Option<&str>,
+    use_worktree: bool,
+    default: EnvType,
+) -> EnvType {
+    crate::preferences::harness_runtime_from(store, provider)
+        .unwrap_or_else(|| fallback_spawn_env(worktree_path, use_worktree, default))
+}
+
+/// The environment a node falls back to when its provider names no known
+/// harness: the worktree path's own environment, else the caller's default.
+fn fallback_spawn_env(
+    worktree_path: Option<&str>,
+    use_worktree: bool,
+    default: EnvType,
+) -> EnvType {
+    worktree_path
+        .filter(|path| use_worktree && !path.trim().is_empty())
+        .map(|path| crate::env::resolve_raw_path(path).env_type)
+        .unwrap_or(default)
 }
 
 /// Per-test isolated variant of [`create_agent_node`] (issue #1691).
@@ -1276,8 +1402,42 @@ pub(crate) fn adopt_manual_pool_slug_with_path_inner(
 /// silently drop a real rewrite if the comparison string ever drifted
 /// from the column's storage form.
 #[cfg(test)]
+// allow-test-in-production: this test-only helper predates the sibling-test-file rule; the
+// issue #1482 migration edits it in place, and relocating the pre-existing suite is out of scope.
 pub fn set_agent_node_provider(id: i64, provider: &str) -> SqlResult<()> {
     let runtime = match crate::preferences::harness_runtime(provider) {
+        Some(runtime) => runtime,
+        None => match get_agent_node_by_id(id) {
+            Ok(node) => {
+                crate::env::resolve_raw_path(&crate::env::node_working_path(&node).raw_path)
+                    .env_type
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(()),
+            Err(error) => return Err(error),
+        },
+    }
+    .to_string();
+    let db = write_conn();
+    db.execute(
+        "UPDATE agent_nodes SET provider = ?1, env = ?3, spawn_configuration = NULL WHERE id = ?2",
+        params![provider, id, runtime],
+    )?;
+    Ok(())
+}
+
+/// [`set_agent_node_provider`] against an explicit store.
+///
+/// The caller owns the store, so the harness runtime this node resolves comes
+/// from *that* store's stored harness profiles (issue #1482).
+#[cfg(test)]
+// allow-test-in-production: the store-scoped twin of `set_agent_node_provider`, reached
+// from the sibling suite that owns a store.
+pub fn set_agent_node_provider_from(
+    store: &crate::preferences::PreferencesStore,
+    id: i64,
+    provider: &str,
+) -> SqlResult<()> {
+    let runtime = match crate::preferences::harness_runtime_from(store, provider) {
         Some(runtime) => runtime,
         None => match get_agent_node_by_id(id) {
             Ok(node) => {
@@ -1438,6 +1598,35 @@ pub(crate) fn list_agent_history_inner(
         })
     })?;
     rows.collect()
+}
+
+/// One node's [`AgentHistoryEntry`]: the row plus the two timestamps the
+/// Node Glance reports (how long in this state, how long this session has run).
+/// A missing node is `QueryReturnedNoRows`, so the caller can tell absence from
+/// a failed read.
+pub fn get_agent_history_entry(id: i64) -> SqlResult<crate::models::AgentHistoryEntry> {
+    let conn = read_conn()?;
+    get_agent_history_entry_inner(&conn, id)
+}
+
+pub(crate) fn get_agent_history_entry_inner(
+    conn: &Connection,
+    id: i64,
+) -> SqlResult<crate::models::AgentHistoryEntry> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {}, session_started_at FROM agent_nodes WHERE id = ?1",
+        AGENT_NODE_COLUMNS
+    ))?;
+    stmt.query_row(params![id], |row| {
+        let node = map_agent_node_row(row)?;
+        Ok(crate::models::AgentHistoryEntry {
+            status_changed_at: row
+                .get::<_, Option<String>>("status_changed_at")?
+                .map(|raw| parse_db_timestamp(&raw)),
+            session_started_at: row.get::<_, Option<i64>>("session_started_at")?,
+            node,
+        })
+    })
 }
 
 pub fn reopen_agent_node(id: i64) -> SqlResult<AgentNode> {
@@ -1918,9 +2107,11 @@ pub(crate) fn recover_circuit_agent_turn_inner(
     if state != "running" {
         return Ok(false);
     }
-    // The bulky half of the context lives in the side table (issue #2601);
-    // the view needs the whole of it to judge the step's evidence.
-    let Ok(context) = crate::db::circuit::artifacts::load_context(conn, fence.run_id) else {
+    // The view needs the whole of the run's context to judge the step's
+    // evidence.
+    let Ok(context) = crate::db::circuit::context_store::load_logical(conn, fence.run_id)
+        .map(|context| context.runtime())
+    else {
         return Ok(false);
     };
     let mut statement = conn.prepare("SELECT node_id,status,attempt,agent_node_id FROM autopilot_circuit_run_steps WHERE run_id=?1")?;

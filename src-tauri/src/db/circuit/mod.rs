@@ -4,9 +4,9 @@
 //! - [`ledger`] — blueprint/run/step CRUD and [`ledger::commit_circuit_advance`].
 //! - [`queue`] — queued list / neighbour move / reorder.
 //! - [`leases`] — reservations, ownership claims, cleanup, retention.
-//! - [`artifacts`] — the side table that holds a run's bulky context values
-//!   (issue #2601), so an advance rewrites a small `context_json` rather than
-//!   the whole blob.
+//! - [`context_store`] — the logical context seam (issue #2672): the run's
+//!   context as one logical thing, with the split into a small column and a
+//!   bulky side table owned by the adapter (issue #2601).
 //!
 //! Locking discipline (see `db::mod` hard rules): every public fn takes
 //! one reader or writer connection exactly once and never calls another public
@@ -15,7 +15,7 @@
 //! of one stepper transition land in ONE transaction so a crash can
 //! never leave a half-applied decision.
 
-pub mod artifacts;
+pub mod context_store;
 pub mod evidence;
 pub mod history_compaction;
 pub mod leases;

@@ -819,6 +819,33 @@ For scoped project launch directories, use `env::node_working_path`; checkout
 ownership and Git watcher identity use separate helpers. See
 [Agent Node worktree support](agent-nodes.md#worktree-support-git2-based).
 
+### Desktop Spawn Menu ownership
+
+`GroupedProviderMenu` owns harness ordering, keyboard navigation, availability,
+Harness Login selection and saved Launch Configuration flyouts. Its default
+`spawn` mode offers logins wherever the shared menu is used. Context adapters
+own placement and the action performed after a pick:
+
+| Context | Adapter | Shared menu behavior |
+|---|---|---|
+| Mesh sidebar, Issues and Pull Requests Probes | `SpawnButtonCluster` / `ProviderDropdown` | Harness → login → configuration; forwards configuration and login to node creation |
+| Canvas, command palette and PR reviewer dialog | `CanvasSpawnMenu`, `PrReviewerSpawnDialog` | Same selection ladder in a dialog |
+| Automated review loop | `AgentReviewButton` | Same ladder; excludes Terminal and decorates incompatible reviewers, including loaded recipes |
+| Regenerate in sidebar or node header | `RegenerateProviderMenu` | Adds Current to the shared navigation; explicit alternatives replace the launch plan |
+| App/Mesh defaults and Circuit editor | `SpawnOptionPicker` (`settings` mode) | Persists a harness or saved configuration id; a saved configuration can pin a login |
+| Archived resume | `SpawnButtonCluster` (`resume` mode) | Offers resumable native/provider routes; keeps the node's frozen login |
+
+Current regenerates using the node's frozen configuration and login, including
+when the original saved recipe was deleted. Selecting an alternative replaces the launch plan; regeneration forks the
+conversation when the harness and login home are compatible, and starts fresh
+when either changes. The replacement is validated before interrupting the process. `spawn_configurations::resolve_menu_selection` owns saved
+configuration and login resolution for node creation and explicit replacement.
+Review circuits freeze the chosen login into their reviewer launch snapshot,
+so subsequent review rounds retain it.
+
+Mobile web and Android retain their touch/native render adapters over the same
+backend catalogue; they do not offer a separate Harness Login pick.
+
 ## Harness Logins (more than one Codex subscription)
 
 Codex keeps one signed-in ChatGPT account per `CODEX_HOME` and writes refreshed
@@ -849,9 +876,10 @@ configurations (`HarnessLoginMenu`); a pick reaches `create_agent_node` as
 `loginId`, and `spawn_configurations::with_login_pick` folds it into the
 configuration (or, for defaults, a frozen default plan). A Launch Configuration
 can also pin `login_id`; a pinned configuration appears only under its own
-login, and an unpinned one under every login. Surfaces that create nodes through
-another path (issue and pull request spawns, archived resume, mobile) do not
-offer the submenu and launch with the configuration's pin or the default.
+login, and an unpinned one under every login. Desktop spawn surfaces share this
+submenu, including issue and pull request spawns, regenerate alternatives and
+review circuits. Archived resume retains the frozen login; mobile uses the
+configuration's pin or the default.
 `launch_configurations::resolve_plan` freezes the choice on
 `ResolvedLaunchPlan.harness_login` (id, label and home), so resume keeps the
 same account after the login is renamed. `launch_routing::prepare_snapshot`
@@ -877,6 +905,105 @@ default Codex row and, once an additional login produced a row, labels every
 Codex row with `ProviderMeters.login`, so the Usage tab and the mobile usage
 list show one labelled meter per login.
 
+## The preferences store owns one profile's state
+
+`preferences::store::PreferencesStore` is the owner of one profile's persisted
+preferences. It is a clonable handle to **one immutable profile directory**,
+and it owns everything about that profile:
+
+- the **cached value** and the **revision** it was published at, together under
+  one mutex — so a reader can never pair a value with another revision;
+- the **write coordination** for the durable replacement — so a clone shares
+  the same locks and the same cache;
+- the **source identity** — the name a derived cache keys on, so an entry
+  computed against another profile can never become a hit.
+
+A store's directory never changes after construction: there is no path
+setter, and `RwLock<Option<PathBuf>>` on a path that can be immutable is
+avoided on purpose.
+
+### Production and tests use the same implementation
+
+The cache and the write lock are `std::sync::Mutex` in **every** build. There
+is no `cfg(test)` fork of the storage semantics. Before this, the module held
+process-wide `APP_DATA_DIR` / `CACHE` / `WRITE_LOCK` / `GENERATION` statics
+whose test counterparts were thread-local `RefCell`s — two different
+synchronization implementations of the same behaviour, so no test could
+establish what production does, and a test that spawned a worker thread
+silently read an uninitialized source.
+
+The derived caches repeated that fork, and have been fixed with it:
+`agent::launch_routing`'s routing cache and `agent::provider_menu`'s Spawn
+Menu memo are one process-wide cache each, in every build. Isolation now comes
+from the **key** — each memo is scoped to the preference source that produced
+it — not from a different code path.
+
+A test that owns its state constructs a store over a temporary directory and
+passes the handle in (`preferences::tests::with_store`). It never mutates an
+ambient global to achieve isolation: there is **no test-only ambient store**.
+The free-function façade (`preferences::load`, `preferences::save`, …) remains
+for the production callers that have not yet been given an explicit handle; it
+delegates to the ambient store — the process-wide one installed at startup. In
+a test build no store is installed, so the façade reports that the module is
+not initialised rather than silently reading some other profile. A test that
+needs preferences state calls the store-scoped twin of the function it
+exercises (`*_from(store, …)`), and clones the handle into a worker thread when
+it spawns one — the handle shares the cache, the revision and the locks, so
+the worker reads the profile the parent wrote.
+
+### The revision is per store
+
+The revision advances **only** after a durable write has landed, so it
+identifies a persisted value — never one a failed write manufactured. A
+refused write (a corrupt file, an unreadable path) leaves the previously
+published value and the previous revision authoritative.
+
+Revisions are **per store**, so two stores can hold the same revision number
+while carrying different preferences. A revision is therefore not comparable
+across stores, and a derived cache needs the source identity alongside it.
+
+### The lock order
+
+The state lock is taken first and the write lock second, and both are held
+across the mutator, the durable write and the publish. Holding the state lock
+across the disk write is what serialises competing read-modify-write
+operations: releasing it between the mutator and the write would let two
+concurrent updaters both win the in-memory race against the on-disk one. A
+whole-value `save` holds the same two locks across the same span, so a
+concurrent `save` cannot leave the cache and the file disagreeing.
+
+The reverse order is never taken. `restore_backup` and `reset` need the write
+lock on its own, so they release it before publishing.
+
+## The launch routing derives from one preferences read
+
+`agent::launch_routing` memoises a routing under the key (the preference source
+identity, the preferences revision, the spawn option, the provider and the
+runtime). The value it stores and the key it stores it under must describe the
+**same** preferences read: a caller holding one revision must not be served a
+routing that was computed from another.
+
+So the routing takes **one** snapshot and derives everything from it. The
+stored pairing and its account
+(`preferences::resolver::pairings::resolve_stored_pairing_and_account_from_snapshot`),
+the preflight that refuses a custom endpoint without a primary model
+(`preferences::preflight_resolve_provider_env`) and the spawn env
+(`preferences::resolve_provider_env`) all read that snapshot. A write that
+lands after the snapshot was taken therefore cannot publish a routing under a
+revision that does not describe it — the write advances the revision, so the
+next caller reads the newer snapshot and derives again.
+
+This is why the env and the preflight take a **snapshot** rather than a store.
+A store-scoped call reads preferences again, and that second read can answer
+from a newer revision than the key names. The store-scoped twins
+(`preferences::compatibility::resolve_provider_env_from`,
+`preferences::compatibility::preflight_resolve_provider_env_from`) exist for
+the sibling suites that own a store.
+
+The rules are pinned by
+`agent::launch_routing::routing_cache_tests::a_routing_reads_preferences_exactly_once`
+and `::a_routing_is_derived_from_the_snapshot_it_is_keyed_on`.
+
 ## The Spawn Menu derivation reads one preferences snapshot and one alias table
 
 Both production readers of the Spawn Menu — `available_providers` (the mobile
@@ -899,8 +1026,9 @@ crate at `debug`.
 `preferences::resolver::snapshot::PreferencesSnapshot` is the single read. It
 carries the values the derivation consumes — the effective accounts, the stored
 pairings, the effective harness profiles, the harness order, the proxied child
-order and the pairing-verification records — all from one generation, plus the
-`preferences::generation` number a caller memoises on. The stored collections
+order and the pairing-verification records — all from one read, plus the
+**source identity** and the **revision** of the store that produced it, which
+are what a caller memoises on. The stored collections
 are views over the preferences value that read returned, so each one is stored
 once: the snapshot and the preferences behind it read the same storage.
 
@@ -936,17 +1064,24 @@ re-derives it. `agent::harness_catalog::HARNESS_MENU_LAST` sits next to it: a
 harness declares its own Spawn Menu position rather than the comparator
 special-casing one id, which is why Terminal sorts last.
 
-### The memo key is the generation plus the detection epoch
+### The memo key is the source identity, the revision and the detection epoch
 
-The memo is keyed on the pair (`preferences::generation`, the detection epoch).
-The generation bumps on each durable preference write (`save` / `update`), and a
+The memo is keyed on the triple (the preference source identity, the
+preferences revision, the detection epoch).
+The revision advances on each durable preference write (`save` / `update`), and a
 change reaches the rest of the app only once one of those lands — so a
 memoized menu is not older than the preferences cache the rest of the app
-reads. Generation handling matches `agent::launch_routing`: it only moves
-forward, so a derivation that sampled an older generation does not publish
+reads. Revision handling matches `agent::launch_routing`: it only moves
+forward, so a derivation that sampled an older revision does not publish
 over, or evict, a newer entry.
 
-The second half of the key is `agent::detection::DetectionSnapshot::epoch`. The
+The source identity is the other half of the preference part of the key,
+because a revision alone is not comparable across stores: two stores can sit
+at the same revision number while holding different preferences, and neither
+may serve the other's menu. The identity comes from the store that produced
+the snapshot, so a memo is scoped to the profile it was derived from.
+
+The third part of the key is `agent::detection::DetectionSnapshot::epoch`. The
 detection observation is the derivation's other input — the installed set it
 filters the harness profiles against — so it belongs in the key: a probe that
 observes a different set bumps the epoch, and the memoized menu is derived again
@@ -959,4 +1094,4 @@ The derivation's single log line is `debug`, not `info`: it carries the same
 wall-clock and Codex-probe attribution fields it always has, for reading next to a
 slow save-refresh, without ranking a per-poll line above the attention and
 lifecycle lines it used to bury. Its test drives the derivation directly, because
-the memo turns a second `available_providers()` call in one generation into a hit.
+the memo turns a second `available_providers()` call in one key into a hit.

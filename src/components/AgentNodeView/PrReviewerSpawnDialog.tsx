@@ -43,7 +43,7 @@ export function PrReviewerSpawnDialog({ nodeId, meshId, openPr, providers, onClo
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const handlePick = async (providerId: string, _altKey: boolean, configurationId?: string) => {
+  const handlePick = async (providerId: string, _altKey: boolean, configurationId?: string, loginId?: string) => {
     if (busy) return;
     setBusy(true);
     setError(null);
@@ -59,6 +59,7 @@ export function PrReviewerSpawnDialog({ nodeId, meshId, openPr, providers, onClo
         openPr.head_repo_clone_url,
         configurationId,
         true,
+        loginId,
       );
       // Bridge the fresh id into the store before grouping: `groupNodes` bails
       // unless both ids are present, and the `node-created` listener's fetch is

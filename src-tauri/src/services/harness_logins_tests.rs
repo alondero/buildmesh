@@ -99,45 +99,48 @@ fn two_logins_signed_in_as_the_same_person_point_at_each_other() {
 #[test]
 fn add_rename_and_remove_write_preferences_and_keep_the_folder() {
     let root = tempfile::tempdir().unwrap();
-    crate::preferences::init_for_tests(root.path().join("prefs"));
+    // The store is this test's own: the logins it writes are stored in *that*
+    // profile, never in an ambient one (issue #1482).
+    let store = crate::preferences::PreferencesStore::new(root.path().join("prefs"));
     let user_home = root.path().join("home");
     // `add_blocking` places the folder under the user's home; point it at the
     // temp directory for this thread.
     let default_home = root.path().join(".codex");
-    let added = add_in(&user_home, &default_home, "Work").unwrap();
+    let added = add_in_from(&store, &user_home, &default_home, "Work").unwrap();
     assert_eq!(added.id, "work");
     assert!(std::path::Path::new(&added.home).is_dir());
-    assert!(add_in(&user_home, &default_home, "work")
+    assert!(add_in_from(&store, &user_home, &default_home, "work")
         .unwrap_err()
         .contains("already exists"));
 
-    let renamed = rename_blocking("work", "Work Pro").unwrap();
+    let renamed = rename_blocking_from(&store, "work", "Work Pro").unwrap();
     assert_eq!(renamed.label, "Work Pro");
     assert_eq!(renamed.home, added.home, "renaming never moves the home");
 
     // A configuration pinned to the login is unpinned when it goes.
-    crate::preferences::storage::try_update(|prefs| {
-        prefs.spawn_configurations.push(
-            crate::preferences::spawn_configurations::SpawnConfiguration {
-                id: "launch/codex-work".into(),
-                name: "Work".into(),
-                spawn_option_id: "codex".into(),
-                login_id: Some("work".into()),
-                ..Default::default()
-            },
-        );
-        Ok(())
-    })
-    .unwrap();
-    remove_blocking("work").unwrap();
-    let prefs = crate::preferences::load().unwrap();
+    store
+        .try_update(|prefs| {
+            prefs.spawn_configurations.push(
+                crate::preferences::spawn_configurations::SpawnConfiguration {
+                    id: "launch/codex-work".into(),
+                    name: "Work".into(),
+                    spawn_option_id: "codex".into(),
+                    login_id: Some("work".into()),
+                    ..Default::default()
+                },
+            );
+            Ok(())
+        })
+        .unwrap();
+    remove_blocking_from(&store, "work").unwrap();
+    let prefs = store.load().unwrap();
     assert!(prefs.harness_logins.is_empty());
     assert_eq!(prefs.spawn_configurations[0].login_id, None);
     assert!(
         std::path::Path::new(&added.home).is_dir(),
         "removing a login keeps its folder and sessions"
     );
-    assert!(remove_blocking("work").is_err());
+    assert!(remove_blocking_from(&store, "work").is_err());
 }
 
 /// One person can hold a personal Pro subscription and a seat in a Team

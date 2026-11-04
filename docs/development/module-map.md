@@ -61,14 +61,14 @@ does.
 | `commands/` | Tauri IPC boundary. Thin adapters over services and `db/`. Every command registered in `lib.rs`. The git-owning exceptions are [seam debt](#seam-debt). |
 | `services/` | Business logic between the command boundary and DB/IO. Long-running workers live here too (`circuit_worker`, `pool_worker`). |
 | `db/` | SQLite pool, schema and migrations (`migrations.rs` owns evolution), plus domain query modules (`mesh`, `agent_node`, `warm_pool`, `circuit`). `db/mod.rs` owns the connection and `init` only; queries belong in a domain module. |
-| `db/circuit/` | Circuit persistence: `ledger.rs` owns the `commit_circuit_advance` transaction, `evidence.rs` the outcome/evidence writes and reads, plus `queue.rs`, `leases.rs`, and the recovery modules. |
+| `db/circuit/` | Circuit persistence: `ledger.rs` owns the `commit_circuit_advance` transaction, `evidence.rs` the outcome/evidence writes and reads, `context_store.rs` the logical context seam (a run's context as one thing, with the column/side-table split hidden inside it), plus `queue.rs`, `leases.rs`, and the recovery modules. |
 | `circuit/` | The circuit domain model and the pure decision core. `model.rs` is the graph AST; `stepper.rs` is `advance`; `vocabulary.rs` owns `RunState`/`StepStatus` strings; `capacity.rs` owns admission arithmetic. |
 | `agent/` | Harness adapters (`provider/adapters/<id>.rs`), detection, launch recipes (`spawn.rs`, `spawn_environment.rs`), process supervision (`process.rs`), session lifecycle. |
 | `git/` | New `git2` usage, plus the Git-domain coordination that belongs with it: `state.rs` (the capability-shaped reads — a `RepoState` at a named `Baseline`), `diff.rs` (the baseline tree and the diff walk), `status_stats.rs` (the one implementation of a changed file's line counts), `index.rs` (stage and revert), `branches.rs` (branch and worktree enumeration, branch deletion), `remote.rs` (repository identity and remote URLs), `tree.rs` (tree and blob plumbing), `sync_lock.rs` (per-Mesh fetch/sync lock), `fetch_freshness.rs` (per-Mesh fetch recency) and `sha.rs` (the crate's one SHA resolver, with an explicit source). `worktree/warm.rs` owns the pre-spawn pool's claim seam and the "usable warm worktree" rule. `git/` never imports `services/` — the dependency is one way (`services/` → `git/`). |
 | `pty/` | PTY creation, lifecycle, registry, output sink. |
 | `http/` | Loopback/LAN server: `server.rs`, `router.rs`, `auth.rs`, `tls/`, `ws.rs`, and `routes/` per resource. Routes are the second command boundary. |
 | `env/` | Windows vs WSL detection, host-path conversion (`host_path.rs`), mesh row reads. |
-| `preferences/` | Persisted user settings, loaded off the async pool. |
+| `preferences/` | Persisted user settings, loaded off the async pool. `store.rs` owns one profile's state — the cached value, its revision, its write coordination and its source identity; `storage.rs` is the disk adapter it composes. |
 | `models/` | The shared DTOs. Split by domain (`mesh.rs`, `agent.rs`, `circuit.rs`, `git.rs`); `mod.rs` re-exports every type so `crate::models::…` paths stay stable. Wire types derive `TS` here and are generated, never hand-edited. |
 | `sandbox/` | OS process confinement for agent PTY nodes — `restricted_token.rs`, `appcontainer.rs`, `acl.rs`, `conpty.rs`, and its own `spawn.rs`. |
 | `session_naming/` | Backend-only node auto-naming from agent output (`engine.rs` observes output/turn boundaries, `words.rs`/`slug.rs` build the name, `repository.rs` persists it). PTY-side `session-id` capture does not belong here or in a caller. |
@@ -90,6 +90,7 @@ Read the child that owns the operation before changing the facade.
 | Entrypoint | Implementation ownership |
 |---|---|
 | `services/agent_node.rs` | `agent_node/create.rs`: fresh/pending creation and launch snapshots; `discovery.rs`: import and resumable harness provenance; `lifecycle.rs`: close/delete/regenerate; `cleanup.rs`: durable removal queue, retry, and operator recovery. |
+| `agent/prompt_delivery.rs` | Readiness, guarded paste, settling and bounded Enter with explicit observation requirements; per-process bounded output lives in `agent/prompt_delivery/observation.rs`. Circuit callers retain payloads and own progression. |
 | `agent/process.rs` | Process handle and constructor; `process/input.rs`: incarnation stamps and bounded replay; `registry.rs`: registry claims and teardown; `commands.rs`: live input, interrupt, kill, and handover orchestration. Spawn arrangement remains in `agent/spawn/`. |
 | `agent/provider/adapters/codex.rs` | `AgentProvider` implementation; `codex/hooks.rs`: callbacks/config retirement; `install_cache.rs`: single-flight cache; `install_probe.rs`: bounded runtime probes; `profiles.rs`: proxy profiles; `runtime_files.rs`: native/WSL file access; `trust.rs`: project trust edits. |
 | `commands/pr.rs` | IPC DTOs and command/offload adapters; `services/github/feeds.rs`: feed queries and mergeability batching; `pr_workflow.rs`: source validation, create/open/merge workflows; `repository.rs`: GitHub origin identity. All reuse `github/prs.rs` and its `GitHubClient`; there is no second HTTP client. |
@@ -130,7 +131,6 @@ makes a move behaviour-preserving.
 | `circuit/model.rs` | 1,840 | The graph AST and its validation and serialisation. |
 | `commands/diff.rs` | 1,837 | The per-file diff view: hunk building and syntax highlighting. The git2 side lives in `git/diff.rs` and `git/state.rs`. |
 | `commands/build_run.rs` | 1,733 | Build and run command orchestration. |
-| `circuit/delivery.rs` | 940 | Delivering a step's prompt to a live agent. |
 
 The counts are measured, not estimated. Re-measure before quoting one: the
 numbers move as files are split, and a stale figure is worse than none.

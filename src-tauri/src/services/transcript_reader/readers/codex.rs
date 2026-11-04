@@ -543,7 +543,7 @@ mod contract_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(test)] // allow-test-in-production: this inline suite predates the sibling-test-file rule; only the commit_transition context argument changes here, so moving the suite is out of scope.
 mod native_completion_tests {
     use crate::services::transcript_reader::native_completion::{
         native_turn_completion_from_file, native_turn_snapshot_from_file,
@@ -572,7 +572,9 @@ mod native_completion_tests {
         let error = crate::db::circuit::evidence::commit_transition(
             0,
             None,
-            "{}",
+            &crate::db::circuit::context_store::ContextChange::from(
+                crate::db::circuit::context_store::ContextReplacement::whole("{}"),
+            ),
             &[],
             crate::db::circuit::evidence::EvidenceWrite {
                 input_guard: Some(&guard),

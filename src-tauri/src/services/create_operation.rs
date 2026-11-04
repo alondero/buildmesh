@@ -620,6 +620,8 @@ fn record_start(node_id: i64, state: CreateStartState, error: Option<&str>) {
 }
 
 #[cfg(test)]
+// allow-test-in-production: this inline suite predates the sibling-test-file rule; the
+// issue #1482 migration edits it in place, and relocating the pre-existing suite is out of scope.
 mod tests {
     use super::*;
     use crate::services::agent_node::INITIAL_PROMPT_UNSUPPORTED;
@@ -701,14 +703,13 @@ mod tests {
         }
     }
 
-    /// An isolated database plus a preferences dir the shared create runner can
-    /// read. The runner resolves a launch plan from preferences before it
-    /// inserts, so a test that skips this fails on configuration lookup rather
-    /// than on the behaviour under test.
+    /// An isolated database plus the mesh the shared create runner writes
+    /// into. The runner resolves a launch plan from preferences before it
+    /// inserts; with no preferences store installed it falls back to the
+    /// code-defined defaults, which is what this fixture's requests need —
+    /// they carry no saved configuration (issue #1482).
     fn fixture() -> (crate::db::test_support::IsolatedDbGuard, i64) {
         let guard = crate::db::test_support::isolated();
-        let root = tempfile::tempdir().unwrap();
-        crate::preferences::init_for_tests(root.path().to_path_buf());
         let mesh = crate::db::create_mesh("API", "C:/api").unwrap();
         (guard, mesh.id)
     }

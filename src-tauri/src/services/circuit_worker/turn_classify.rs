@@ -52,7 +52,10 @@ pub(super) struct MissingResult {
 impl readiness::Candidate {
     /// Finish interpretation against the current assistant turn. The live
     /// observation is deferred until a continuation actually needs it.
-    fn into_classified_turn(
+    ///
+    /// `pub(super)` so the sibling suite can drive the downgrade a stale
+    /// freshness observation causes (issue #1482).
+    pub(super) fn into_classified_turn(
         self,
         view: &RunView,
         node_id: &str,
@@ -163,6 +166,41 @@ pub(super) fn classify_step_turn(
     view: &RunView,
     node_id: &str,
 ) -> Option<ClassifiedTurn> {
+    match crate::preferences::ambient_store() {
+        Ok(store) => classify_step_turn_from(&store, active, view, node_id),
+        // No profile is known: the turn owes no result file and the classifier
+        // read fails, which is what the ambient path did before a profile was
+        // installed.
+        Err(_) => classify_step_turn_with(active, view, node_id, None),
+    }
+}
+
+/// [`classify_step_turn`] against an explicit store.
+///
+/// The caller owns the store, so the result file this turn owes and the
+/// classifier provider come from **that** profile rather than the ambient one
+/// (issue #1482).
+pub(super) fn classify_step_turn_from(
+    store: &crate::preferences::PreferencesStore,
+    active: &db::ActiveCircuitRun,
+    view: &RunView,
+    node_id: &str,
+) -> Option<ClassifiedTurn> {
+    classify_step_turn_with(active, view, node_id, Some(store))
+}
+
+/// The classification itself, over an optional store.
+///
+/// Without a store there is no profile to read the result marker or the
+/// classifier provider from, so the turn owes no result file and the
+/// classifier read fails — the same degradation the ambient path had before a
+/// profile was known.
+fn classify_step_turn_with(
+    active: &db::ActiveCircuitRun,
+    view: &RunView,
+    node_id: &str,
+    store: Option<&crate::preferences::PreferencesStore>,
+) -> Option<ClassifiedTurn> {
     use crate::circuit::evaluator;
     let step = view.step(node_id)?;
     let agent_node_id = step
@@ -197,7 +235,9 @@ pub(super) fn classify_step_turn(
     let lifecycle_blocker = db::agent_node::circuit_lifecycle_blocker(agent_node_id).unwrap_or(
         Some(crate::circuit::observation::CircuitObservationBlocker::LifecycleEvidenceUnavailable),
     );
-    let result_path = crate::circuit::handoff::expected_result(active.run.id, agent_node_id);
+    let result_path = store.and_then(|store| {
+        crate::circuit::handoff::expected_result_from(store, active.run.id, agent_node_id)
+    });
     let candidate = match readiness::prepare_with_lifecycle_veto(
         view,
         node_id,
@@ -322,7 +362,11 @@ pub(super) fn classify_step_turn(
     let classifier_error = std::cell::RefCell::new(None);
     let classify = |prompt: &str| {
         let result = (|| {
-            let preferences = crate::preferences::load()?;
+            let preferences = match store {
+                Some(store) => store.load()?,
+                // No profile is known: the ambient read reports why.
+                None => crate::preferences::load()?,
+            };
             let provider = classifier_provider(&preferences);
             let backend = crate::circuit::classifier::resolve(provider)
                 .map_err(|error| format!("{provider}: {error}"))?;
@@ -350,16 +394,55 @@ pub(super) fn classify_step_turn(
     }
     let mut classified =
         candidate.into_classified_turn(view, node_id, classification, readiness, stamp, || {
-            (
-                super::result_handoff::current_turn_revision(active.run.id, &agent),
-                crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id),
-            )
+            observe_turn(store, active.run.id, &agent, agent_node_id)
         });
     if classified.classification.is_none() {
         classified.classifier_error = classifier_error.into_inner();
     }
     tracing::info!("circuits: bound report classification for run {} step {node_id} agent {agent_node_id}: {:?}", active.run.id, classified.classification);
     Some(classified)
+}
+
+/// The freshness observation the classification makes about the turn it is
+/// about: the revision of that turn, and whether the agent is still alive.
+///
+/// The revision comes from the **profile the classification read** — see
+/// [`observe_turn_revision`]. This is the observation the classification
+/// passes to [`readiness::Candidate::into_classified_turn`], so it is the one
+/// place that decides whether a `Continue` is still fresh.
+///
+/// `pub(super)` so the sibling suite can drive the downgrade a stale freshness
+/// observation causes (issue #1482).
+pub(super) fn observe_turn(
+    store: Option<&crate::preferences::PreferencesStore>,
+    run_id: i64,
+    agent: &crate::models::AgentNode,
+    agent_node_id: i64,
+) -> (Option<String>, bool) {
+    (
+        observe_turn_revision(store, run_id, agent),
+        crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id),
+    )
+}
+
+/// The revision of the turn the classification is about.
+///
+/// The freshness check that decides whether a `Continue` is still fresh must
+/// read the **profile the classification read**: the owed result file was
+/// found through the caller's store, so a revision taken from the ambient
+/// store would compare a file-only continuation against a marker it cannot
+/// see, and downgrade a fresh `Continue` to `Working` — the circuit would
+/// then not recognise the continuation at all (issue #1482).
+fn observe_turn_revision(
+    store: Option<&crate::preferences::PreferencesStore>,
+    run_id: i64,
+    agent: &crate::models::AgentNode,
+) -> Option<String> {
+    match store {
+        Some(store) => super::result_handoff::current_turn_revision_from(store, run_id, agent),
+        // No profile is known: the ambient read is the only one there is.
+        None => super::result_handoff::current_turn_revision(run_id, agent),
+    }
 }
 
 pub(super) fn awaits_review_turn(view: &RunView, node_id: &str) -> bool {
@@ -887,7 +970,8 @@ pub(super) fn lost_turn_watchdog_pass(app: &AppHandle) -> Vec<QuietClassifierFai
         };
         let (Ok(graph), Ok(context)) = (
             CircuitGraph::from_json(&active.circuit_graph_json),
-            crate::db::circuit::artifacts::load_run_context(active.run.id),
+            crate::db::circuit::context_store::load_logical_run(active.run.id)
+                .map(|context| context.runtime()),
         ) else {
             continue;
         };
@@ -1640,6 +1724,8 @@ mod result_continuation_tests {
 }
 
 #[cfg(test)]
+// allow-test-in-production: this inline suite predates the sibling-test-file rule. Issue #1482
+// only moves the preferences fixture to its new module path; moving the suite is out of scope.
 mod classifier_selection_tests {
     use super::classifier_provider;
 
@@ -1652,9 +1738,15 @@ mod classifier_selection_tests {
         };
         assert_eq!(classifier_provider(&preferences), "claude");
         let directory = tempfile::tempdir().unwrap();
-        crate::preferences::storage::init_for_tests(directory.path().to_path_buf());
-        crate::preferences::save(preferences.clone()).unwrap();
-        let backend = crate::session_naming::naming_backend_env(classifier_provider(&preferences));
+        let store = crate::preferences::PreferencesStore::new(directory.path().to_path_buf());
+        store.save(preferences.clone()).unwrap();
+        let stored = store.load().unwrap();
+        assert_eq!(stored.default_provider.as_deref(), Some("codex"));
+        assert_eq!(stored.naming_provider.as_deref(), Some("claude:minimax"));
+        let backend = crate::session_naming::naming_backend_env_from(
+            &store,
+            classifier_provider(&preferences),
+        );
         assert!(
             backend.is_ok(),
             "Codex spawn defaults must not disable the Circuit classifier"

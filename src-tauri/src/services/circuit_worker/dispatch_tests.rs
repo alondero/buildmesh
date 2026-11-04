@@ -8,6 +8,7 @@ use crate::circuit::stepper::StepStatus;
 use crate::db::circuit::evidence::{EffectIntent, EffectKind, EvidenceWrite};
 use crate::db::CircuitStepOp;
 use crate::models::{EnvType, SessionStatus};
+use crate::services::circuit_worker::{persist_transition_checked, spawn};
 use rusqlite::OptionalExtension;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -24,6 +25,7 @@ pub struct FakeHost {
     pub pr_ready: RefCell<Vec<(i64, i64)>>,
     pub attention: RefCell<Vec<i64>>,
     pub spawn_error: RefCell<Option<String>>,
+    live_retry: RefCell<Option<LiveRetry>>,
     pub write_override: RefCell<Option<Result<bool, String>>>,
     pub alive: Cell<bool>,
     pub input_stamp_value: RefCell<Option<String>>,
@@ -39,6 +41,12 @@ pub struct RecordedPrompt {
     pub agent_id: i64,
     pub text: String,
     pub expected_input: Option<String>,
+}
+
+struct LiveRetry {
+    store: crate::preferences::PreferencesStore,
+    prompt: String,
+    turn: crate::circuit::handoff::HandoffTurn,
 }
 
 impl FakeHost {
@@ -71,13 +79,24 @@ impl EffectHost for FakeHost {
         &self,
         run_id: i64,
         mesh_id: i64,
-        _view: &mut RunView,
+        view: &mut RunView,
         node_id: &str,
     ) -> Result<(), String> {
         self.note_external();
         self.spawns
             .borrow_mut()
             .push((run_id, mesh_id, node_id.to_string()));
+        if let Some(retry) = self.live_retry.borrow().as_ref() {
+            return spawn::retry_live_agent(
+                Some(&retry.store),
+                run_id,
+                view,
+                node_id,
+                &retry.prompt,
+                Some(&retry.turn),
+                None,
+            );
+        }
         match self.spawn_error.borrow().clone() {
             Some(error) => Err(error),
             None => Ok(()),
@@ -92,6 +111,7 @@ impl EffectHost for FakeHost {
         &self,
         prepared: &PreparedPrompt,
         expected_input: Option<&str>,
+        _still_current: &dyn Fn() -> Result<bool, String>,
     ) -> Result<bool, String> {
         self.note_external();
         self.prompts.borrow_mut().push(RecordedPrompt {
@@ -143,6 +163,7 @@ struct World {
 impl Scratch {
     fn new() -> Self {
         let db = crate::db::test_support::isolated();
+        crate::db::test_support::seed_unique_circuit_run_ids();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_str().unwrap().to_string();
         let mesh = db::create_mesh(
@@ -211,7 +232,7 @@ impl Scratch {
         db::circuit::evidence::commit_transition(
             run_id,
             Some("running"),
-            &context.to_json().unwrap(),
+            &crate::db::circuit::context_store::ContextChange::from_context(&context),
             &steps,
             EvidenceWrite {
                 intents,
@@ -300,6 +321,20 @@ fn intent(node_id: &str, kind: EffectKind) -> EffectIntent {
 
 fn dispatch(world: &mut World, host: &FakeHost, effects: &[Effect]) -> DispatchedEffects {
     dispatch_effects(host, &world.active, &mut world.view, effects, None).expect("dispatch runs")
+}
+
+/// Dispatch a batch against the profile the test owns.
+///
+/// The prompts, turn markers and retained payloads land under *that* profile
+/// directory rather than the ambient one (issue #1482).
+fn dispatch_in(
+    world: &mut World,
+    host: &FakeHost,
+    effects: &[Effect],
+    store: &crate::preferences::PreferencesStore,
+) -> DispatchedEffects {
+    dispatch_effects_from(store, host, &world.active, &mut world.view, effects, None)
+        .expect("dispatch runs")
 }
 
 fn effect_state(run_id: i64, node_id: &str, kind: &str) -> Option<String> {
@@ -430,6 +465,84 @@ fn spawn_effect_claims_then_dispatches_once_and_a_closed_gate_does_neither() {
 }
 
 #[test]
+fn unacknowledged_live_agent_retry_retains_its_turn_and_parks_without_redispatch() {
+    use crate::agent::process::{testing::insert_standin, PROCESS_REGISTRY};
+    use crate::circuit::handoff::{agent_turn_from, HandoffTurn};
+    let scratch = Scratch::new();
+    let agent = scratch.agent();
+    db::update_agent_node_status(agent.id, SessionStatus::Ready).unwrap();
+    let store = crate::preferences::PreferencesStore::new(scratch.dir.path().join("profile"));
+    let mut world = scratch.start(
+        one_node("spawn", spawn_kind()),
+        vec![running_step("spawn", Some(agent.id))],
+        &[intent("spawn", EffectKind::Spawn)],
+        CircuitContext::new(),
+        None,
+    );
+    insert_standin(&PROCESS_REGISTRY, agent.id);
+    crate::circuit::evaluator::register_circuit(agent.id);
+    let turn = HandoffTurn {
+        node_id: "spawn".into(),
+        attempt: 1,
+    };
+    let host = FakeHost::default();
+    *host.live_retry.borrow_mut() = Some(LiveRetry {
+        store: store.clone(),
+        prompt: "retry this turn".into(),
+        turn: turn.clone(),
+    });
+    let effect = Effect::SpawnAgentNode {
+        node_id: "spawn".into(),
+    };
+    // Real retry service, DB writes and delivery operation; only the PTY is a
+    // stand-in. It emits no output, so none of the bounded Enters is acknowledged.
+    let pass = dispatch(&mut world, &host, std::slice::from_ref(&effect));
+    PROCESS_REGISTRY.kill_session(agent.id);
+    crate::circuit::evaluator::unregister(agent.id);
+    assert!(matches!(
+        &pass.outcomes[..],
+        [CircuitEvent::EffectUncertain { node_id, attempt: 1, reason }]
+            if node_id == "spawn" && reason.contains("acknowledgement")
+    ));
+    assert_eq!(
+        effect_state(world.run_id, "spawn", "spawn").as_deref(),
+        Some("possible_dispatch")
+    );
+    assert_eq!(
+        db::get_agent_node_by_id(agent.id).unwrap().status,
+        SessionStatus::Running
+    );
+    assert_eq!(agent_turn_from(&store, world.run_id, agent.id), Some(turn));
+    let transition = crate::circuit::stepper::advance(&mut world.view, &pass.outcomes[0]);
+    persist_transition_checked(world.run_id, &mut world.view, &transition).unwrap();
+    let step = db::list_circuit_run_steps(world.run_id).unwrap().remove(0);
+    assert_eq!(step.status, "unverified");
+    assert_eq!(step.agent_node_id, Some(agent.id));
+    let request = crate::db::circuit::evidence::prompt_delivery::CircuitPromptRequest {
+        run_id: world.run_id,
+        node_id: "spawn".into(),
+        attempt: 1,
+        expected_revision: world
+            .view
+            .context
+            .get("evidence.revision")
+            .unwrap()
+            .parse()
+            .unwrap(),
+    };
+    assert_eq!(
+        crate::services::circuit_prompt::payload_from(&store, &request).unwrap(),
+        "retry this turn"
+    );
+    assert!(dispatch(&mut world, &host, &[effect]).outcomes.is_empty());
+    assert_eq!(
+        host.spawns.borrow().len(),
+        1,
+        "uncertain input must not be dispatched again"
+    );
+}
+
+#[test]
 fn inject_pty_effect_claims_then_writes_the_prompt() {
     let graph = one_node(
         "inject",
@@ -538,7 +651,9 @@ fn inject_pty_effect_claims_then_writes_the_prompt() {
 fn inject_pty_asks_a_file_only_harness_for_a_result_file() {
     for (provider, owes_result) in [("freebuff", true), ("perch", true), ("grok", false)] {
         let scratch = Scratch::new();
-        crate::preferences::init_for_tests(scratch.dir.path().join("app-data"));
+        // The profile this case owns: the brief and the turn marker the
+        // dispatch path stages live under it (issue #1482).
+        let store = crate::preferences::PreferencesStore::new(scratch.dir.path().join("app-data"));
         let agent = scratch.agent_on(provider);
         db::update_agent_node_status(agent.id, SessionStatus::Ready).unwrap();
         let mut context = CircuitContext::new();
@@ -558,7 +673,7 @@ fn inject_pty_asks_a_file_only_harness_for_a_result_file() {
         );
         let host = FakeHost::default();
         *host.input_stamp_value.borrow_mut() = Some("stamp-1".into());
-        dispatch(
+        dispatch_in(
             &mut world,
             &host,
             &[Effect::InjectPty {
@@ -566,19 +681,19 @@ fn inject_pty_asks_a_file_only_harness_for_a_result_file() {
                 prompt: "follow up".into(),
                 target_node_id: Some("$source".into()),
             }],
+            &store,
         );
         assert_eq!(host.prompts.borrow().len(), 1, "{provider}");
-        let brief = std::fs::read_to_string(
-            crate::circuit::handoff::paths_in(
-                &crate::preferences::app_data_dir().expect("test app data dir"),
-                world.run_id,
-                "inject",
-                1,
+        let brief_path =
+            crate::circuit::handoff::paths_in(store.profile_dir(), world.run_id, "inject", 1)
+                .prompt;
+        let brief = std::fs::read_to_string(&brief_path).unwrap_or_else(|error| {
+            panic!(
+                "{provider}: the dispatch path must stage the brief under the store's profile \
+                 directory ({brief_path:?}): {error}"
             )
-            .prompt,
-        )
-        .unwrap();
-        let owed = crate::circuit::handoff::expected_result(world.run_id, agent.id);
+        });
+        let owed = crate::circuit::handoff::expected_result_from(&store, world.run_id, agent.id);
         assert_eq!(owed.is_some(), owes_result, "{provider}");
         assert_eq!(
             brief.contains("write your final report"),
@@ -593,7 +708,8 @@ fn inject_pty_asks_a_file_only_harness_for_a_result_file() {
                 "the fake host has no transcript"
             );
             assert_eq!(
-                crate::services::circuit_worker::result_handoff::current_turn_revision(
+                crate::services::circuit_worker::result_handoff::current_turn_revision_from(
+                    &store,
                     world.run_id,
                     &agent
                 ),

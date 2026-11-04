@@ -4,7 +4,7 @@
 //! only a short pointer is pasted. The files are also durable per-run evidence
 //! (issue #2134).
 
-use super::delivery::VISIBLE_PASTE_TEXT_LIMIT;
+use crate::agent::prompt_delivery::VISIBLE_PASTE_TEXT_LIMIT;
 use crate::models::EnvType;
 use std::path::{Path, PathBuf};
 
@@ -185,10 +185,21 @@ pub(crate) fn remove_orphan_run_dirs_in(
 pub(crate) fn remove_orphan_run_dirs(
     existing: impl FnOnce(&[i64]) -> Result<std::collections::HashSet<i64>, String>,
 ) -> Result<usize, String> {
-    match crate::preferences::app_data_dir() {
-        Some(root) => remove_orphan_run_dirs_in(&root, existing),
-        None => Ok(0),
+    match crate::preferences::ambient_store() {
+        Ok(store) => remove_orphan_run_dirs_from(&store, existing),
+        Err(_) => Ok(0),
     }
+}
+
+/// [`remove_orphan_run_dirs`] against an explicit store.
+///
+/// The caller owns the store, so the folders are the ones under **that**
+/// profile directory rather than the ambient one (issue #1482).
+pub(crate) fn remove_orphan_run_dirs_from(
+    store: &crate::preferences::PreferencesStore,
+    existing: impl FnOnce(&[i64]) -> Result<std::collections::HashSet<i64>, String>,
+) -> Result<usize, String> {
+    remove_orphan_run_dirs_in(store.profile_dir(), existing)
 }
 
 /// A step attempt whose prompt asked for a result file. The turn is what the
@@ -216,9 +227,9 @@ pub(crate) fn stage_prompt(
     full_prompt: &str,
     requests_result: bool,
 ) -> StagedPrompt {
-    match crate::preferences::app_data_dir() {
-        Some(root) => stage_prompt_in(
-            &root,
+    match crate::preferences::ambient_store() {
+        Ok(store) => stage_prompt_from(
+            &store,
             run_id,
             node_id,
             attempt,
@@ -226,7 +237,7 @@ pub(crate) fn stage_prompt(
             full_prompt,
             requests_result,
         ),
-        None => {
+        Err(_) => {
             tracing::warn!(
                 "circuits: run {run_id}: no app data dir, so the prompt for {node_id} attempt {attempt} is pasted inline without a result file"
             );
@@ -236,6 +247,30 @@ pub(crate) fn stage_prompt(
             }
         }
     }
+}
+
+/// [`stage_prompt`] against an explicit store.
+///
+/// The caller owns the store, so the prompt and result files land under **that**
+/// profile directory rather than the ambient one (issue #1482).
+pub(crate) fn stage_prompt_from(
+    store: &crate::preferences::PreferencesStore,
+    run_id: i64,
+    node_id: &str,
+    attempt: i32,
+    env: EnvType,
+    full_prompt: &str,
+    requests_result: bool,
+) -> StagedPrompt {
+    stage_prompt_in(
+        store.profile_dir(),
+        run_id,
+        node_id,
+        attempt,
+        env,
+        full_prompt,
+        requests_result,
+    )
 }
 
 /// `stage_prompt` under an explicit root. Any result file left by an earlier
@@ -305,13 +340,26 @@ pub(crate) fn agent_turn_marker_in(root: &Path, run_id: i64, agent_node_id: i64)
 /// Records which handoff the agent's current turn belongs to. `None` clears the
 /// marker, so a turn that expects no result file never inherits an older one.
 pub(crate) fn set_agent_turn(run_id: i64, agent_node_id: i64, turn: Option<&HandoffTurn>) {
-    match crate::preferences::app_data_dir() {
-        Some(root) => set_agent_turn_in(&root, run_id, agent_node_id, turn),
-        None if turn.is_some() => tracing::warn!(
+    match crate::preferences::ambient_store() {
+        Ok(store) => set_agent_turn_from(&store, run_id, agent_node_id, turn),
+        Err(_) if turn.is_some() => tracing::warn!(
             "circuits: run {run_id}: no app data dir, so the result file for agent {agent_node_id} is not expected"
         ),
-        None => {}
+        Err(_) => {}
     }
+}
+
+/// [`set_agent_turn`] against an explicit store.
+///
+/// The caller owns the store, so the marker is written under **that** profile
+/// directory rather than the ambient one (issue #1482).
+pub(crate) fn set_agent_turn_from(
+    store: &crate::preferences::PreferencesStore,
+    run_id: i64,
+    agent_node_id: i64,
+    turn: Option<&HandoffTurn>,
+) {
+    set_agent_turn_in(store.profile_dir(), run_id, agent_node_id, turn)
 }
 
 /// `set_agent_turn` under an explicit root.
@@ -351,8 +399,21 @@ fn remove_turn_marker(run_id: i64, agent_node_id: i64, marker: &Path) {
 /// The result file the agent's current turn owes, or `None` when the turn expects
 /// none, or its marker is unreadable.
 pub(crate) fn expected_result(run_id: i64, agent_node_id: i64) -> Option<PathBuf> {
-    crate::preferences::app_data_dir()
-        .and_then(|root| expected_result_in(&root, run_id, agent_node_id))
+    crate::preferences::ambient_store()
+        .ok()
+        .and_then(|store| expected_result_from(&store, run_id, agent_node_id))
+}
+
+/// [`expected_result`] against an explicit store.
+///
+/// The caller owns the store, so the result file is the one under **that**
+/// profile directory rather than the ambient one (issue #1482).
+pub(crate) fn expected_result_from(
+    store: &crate::preferences::PreferencesStore,
+    run_id: i64,
+    agent_node_id: i64,
+) -> Option<PathBuf> {
+    expected_result_in(store.profile_dir(), run_id, agent_node_id)
 }
 
 /// `expected_result` under an explicit root.
@@ -362,7 +423,21 @@ pub(crate) fn expected_result_in(root: &Path, run_id: i64, agent_node_id: i64) -
 }
 
 pub(crate) fn agent_turn(run_id: i64, agent_node_id: i64) -> Option<HandoffTurn> {
-    crate::preferences::app_data_dir().and_then(|root| agent_turn_in(&root, run_id, agent_node_id))
+    crate::preferences::ambient_store()
+        .ok()
+        .and_then(|store| agent_turn_from(&store, run_id, agent_node_id))
+}
+
+/// [`agent_turn`] against an explicit store.
+///
+/// The caller owns the store, so the marker is read from **that** profile
+/// directory rather than the ambient one (issue #1482).
+pub(crate) fn agent_turn_from(
+    store: &crate::preferences::PreferencesStore,
+    run_id: i64,
+    agent_node_id: i64,
+) -> Option<HandoffTurn> {
+    agent_turn_in(store.profile_dir(), run_id, agent_node_id)
 }
 
 fn agent_turn_in(root: &Path, run_id: i64, agent_node_id: i64) -> Option<HandoffTurn> {
@@ -413,10 +488,24 @@ pub(crate) fn prepare_continuation(
     env: EnvType,
     prompt: &str,
 ) -> String {
-    match crate::preferences::app_data_dir() {
-        Some(root) => prepare_continuation_in(&root, run_id, agent_node_id, env, prompt),
-        None => prompt.to_string(),
+    match crate::preferences::ambient_store() {
+        Ok(store) => prepare_continuation_from(&store, run_id, agent_node_id, env, prompt),
+        Err(_) => prompt.to_string(),
     }
+}
+
+/// [`prepare_continuation`] against an explicit store.
+///
+/// The caller owns the store, so the result file it archives is the one under
+/// **that** profile directory rather than the ambient one (issue #1482).
+pub(crate) fn prepare_continuation_from(
+    store: &crate::preferences::PreferencesStore,
+    run_id: i64,
+    agent_node_id: i64,
+    env: EnvType,
+    prompt: &str,
+) -> String {
+    prepare_continuation_in(store.profile_dir(), run_id, agent_node_id, env, prompt)
 }
 
 /// `prepare_continuation` under an explicit root. The turn marker is left alone:
@@ -479,7 +568,8 @@ fn superseded_result_path(result: &Path, k: u32) -> PathBuf {
 }
 
 #[cfg(test)]
-// allow-test-in-production: this suite predates the sibling-test-file rule; only the result-instruction wording assertion changes here, so moving the suite is out of scope.
+// allow-test-in-production: this suite predates the sibling-test-file rule; issue #1482 only adds the
+// store-scoped coverage, so moving the suite is out of scope.
 mod tests {
     use super::*;
     use std::ffi::OsStr;
@@ -1150,5 +1240,55 @@ mod tests {
         before.sort();
         assert_eq!(after, before);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The store-scoped twins resolve every handoff file under the store's
+    /// own profile directory, so a caller that owns its state sees the state
+    /// it set up (issue #1482).
+    #[test]
+    fn the_store_scoped_twins_use_the_stores_profile_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::preferences::PreferencesStore::new(directory.path().to_path_buf());
+
+        let staged = stage_prompt_from(
+            &store,
+            7,
+            "implement",
+            1,
+            EnvType::Windows,
+            "Do the work.",
+            true,
+        );
+        assert!(
+            staged.turn.is_some(),
+            "a requested result file opens a turn"
+        );
+        let brief =
+            std::fs::read_to_string(&paths_in(directory.path(), 7, "implement", 1).prompt).unwrap();
+        assert!(brief.contains("write your final report"), "{brief}");
+
+        let turn = HandoffTurn {
+            node_id: "implement".into(),
+            attempt: 1,
+        };
+        set_agent_turn_from(&store, 7, 42, Some(&turn));
+        assert_eq!(agent_turn_from(&store, 7, 42), Some(turn));
+        assert_eq!(agent_turn_from(&store, 7, 43), None);
+        let owed = expected_result_from(&store, 7, 42).expect("the turn owes a result file");
+        assert_eq!(owed, paths_in(directory.path(), 7, "implement", 1).result);
+        assert_eq!(expected_result_from(&store, 7, 43), None);
+
+        let continuation = prepare_continuation_from(&store, 7, 42, EnvType::Windows, "Continue.");
+        assert!(
+            continuation.contains("write your final report"),
+            "{continuation}"
+        );
+
+        // The orphan sweep reads the runs under the same profile directory.
+        let removed =
+            remove_orphan_run_dirs_from(&store, |_: &[i64]| Ok(std::collections::HashSet::new()))
+                .unwrap();
+        assert_eq!(removed, 1);
+        assert!(!run_dir_in(directory.path(), 7).exists());
     }
 }

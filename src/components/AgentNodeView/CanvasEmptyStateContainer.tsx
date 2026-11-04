@@ -38,7 +38,6 @@ import { useMemo } from 'react';
 import type { AgentNode } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { focusNode } from '../../lib/navigation';
-import { ReadinessSteps } from './ReadinessSteps';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useUIStore } from '../../stores/uiStore';
 import type { DerivedScope } from '../../lib/viewModes';
@@ -85,7 +84,6 @@ export function CanvasEmptyStateContainer({
       meshCount: meshesCount,
       totalNodeCount: agentNodes.length,
       scopedCount: scope.scopedNodeCount,
-      filteredCount: scope.visibleNodeCount,
       scope,
       harnessReady,
     }),
@@ -123,7 +121,6 @@ export function CanvasEmptyStateContainer({
       onClearFilters: resetGridControls,
       onOpenSetup: () => openAppSettings('providers'),
       onViewAll: () => setViewMode('all'),
-      onOpenHelp: () => useUIStore.getState().toggleCheatsheet(),
       onOpenTerminal: () => {
         const mesh = useMeshStore.getState().meshes.find(m => m.id === selectedMeshId) ?? useMeshStore.getState().meshes[0];
         if (!mesh) return;
@@ -136,12 +133,5 @@ export function CanvasEmptyStateContainer({
     [openCreateMesh, openCanvasSpawnMenu, resetGridControls, openAppSettings, setViewMode, selectedMeshId],
   );
 
-  if (meshesCount > 0 && scope.scopedNodeCount === 0 && scope.viewMode !== 'pinned') {
-    return <div className="flex-1 min-h-0 overflow-y-auto flex flex-col p-4">
-      <div className="m-auto w-full max-w-sm"><CanvasEmptyState input={input} callbacks={callbacks} />
-        <ReadinessSteps repositoryReady harnessReady={harnessReady} callbacks={callbacks} />
-      </div>
-    </div>;
-  }
   return <CanvasEmptyState input={input} callbacks={callbacks} />;
 }

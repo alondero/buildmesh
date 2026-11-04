@@ -4,7 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { AppSettingsModal } from '../../src/components/AppSettings/AppSettingsModal';
 import { GridControls } from '../../src/components/TitleBar/GridControls';
 import { AgentHistoryTab } from '../../src/components/Probe/AgentHistoryTab';
-import { ReadinessSteps } from '../../src/components/AgentNodeView/ReadinessSteps';
+import { EmptyStateActions } from '../../src/components/AgentNodeView/EmptyStateActions';
 import { CanvasEmptyStateContainer } from '../../src/components/AgentNodeView/CanvasEmptyStateContainer';
 import { deriveScope } from '../../src/lib/viewModes';
 import { useSettingsResources } from '../../src/components/AppSettings/useSettingsResources';
@@ -62,15 +62,14 @@ const emptyScope = (viewMode: ViewMode, selectedMeshId: number | null, agentNode
   deriveScope({ viewMode, lastNonSingleMode: viewMode === 'single' ? 'all' : viewMode, agentNodes, selectedMeshId, activeNodeId: null });
 
 describe('October desktop audit follow-up', () => {
-  it('a skipped guide stays optional on another empty repository while its Terminal and restore actions remain available', () => {
+  it('keeps Terminal actionable on another empty repository regardless of a legacy guide preference', () => {
     localStorage.setItem('buildmesh.readiness-dismissed', 'true');
     vi.mocked(invoke).mockReturnValue(new Promise(() => {}));
     const elsewhere = [node(20, 'Other repository work', 'running', 2)];
     render(<CanvasEmptyStateContainer selectedMeshId={1} agentNodes={elsewhere} scope={emptyScope('mesh', 1, elsewhere)} />);
     expect(screen.queryByRole('list', { name: 'Getting started' })).toBeNull();
     expect((screen.getByRole('button', { name: 'Start Terminal' }) as HTMLButtonElement).disabled).toBe(false);
-    fireEvent.click(screen.getByRole('button', { name: 'Show setup guide' }));
-    expect(within(screen.getByRole('list', { name: 'Getting started' })).getAllByRole('listitem')).toHaveLength(3);
+    expect(screen.queryByRole('button', { name: /setup guide/i })).toBeNull();
   });
   it('an initial history failure reports unavailable until Retry returns real rows', async () => {
     let reads = 0;
@@ -96,7 +95,7 @@ describe('October desktop audit follow-up', () => {
     render(<CanvasEmptyStateContainer selectedMeshId={1} agentNodes={elsewhere} scope={emptyScope('mesh', 1, elsewhere)} />);
     expect(screen.getByRole('button', { name: 'Start Terminal' })).toBeTruthy();
     expect(screen.getByRole('status').textContent).toContain('Checking available harnesses');
-    fireEvent.click(screen.getByRole('button', { name: 'Check runtime and login' }));
+    fireEvent.click(screen.getByTestId('canvas-empty-open-setup'));
     expect(useUIStore.getState()).toMatchObject({ appSettingsOpen: true, appSettingsTab: 'providers' });
     await act(async () => checks.reject(new Error('Runtime check failed')));
     expect((await screen.findByRole('alert')).textContent).toContain('Runtime check failed');
@@ -105,7 +104,7 @@ describe('October desktop audit follow-up', () => {
     expect((screen.getByRole('button', { name: 'Start Terminal' }) as HTMLButtonElement).disabled).toBe(false);
     await act(async () => retry.resolve([route]));
     await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
-    expect(screen.getByText(/A harness is available/)).toBeTruthy();
+    expect(screen.getByTestId('canvas-empty-spawn-agent')).toBeTruthy();
     expect(reads).toBe(2);
   });
 
@@ -308,17 +307,18 @@ describe('October desktop audit follow-up', () => {
     expect(JSON.parse(localStorage.getItem('buildmesh.grid-controls')!)).toEqual({ searchQuery: '', provider: null, status: null, sortBy: 'custom', sortDirection: 'asc' });
   });
 
-  it('the readiness guide can be skipped and restored, and Terminal stays actionable without a harness', async () => {
+  it('setup is a direct action before a repository exists, and Terminal remains available afterwards', async () => {
     vi.mocked(invoke).mockResolvedValue([]);
     const terminal = vi.fn(); const setup = vi.fn();
-    render(<ReadinessSteps repositoryReady harnessReady={false} callbacks={{ onCreateMesh: vi.fn(), onOpenSpawnMenu: vi.fn(), onClearFilters: vi.fn(), onOpenSetup: setup, onViewAll: vi.fn(), onOpenTerminal: terminal }} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Start Terminal' })); expect(terminal).toHaveBeenCalledOnce();
-    fireEvent.click(screen.getByRole('button', { name: 'Check runtime and login' })); expect(setup).toHaveBeenCalledOnce();
-    fireEvent.click(screen.getByRole('button', { name: 'Skip setup guide' }));
-    expect(screen.queryByRole('list', { name: 'Getting started' })).toBeNull();
-    expect(localStorage.getItem('buildmesh.readiness-dismissed')).toBe('true');
-    fireEvent.click(screen.getByRole('button', { name: 'Show setup guide' }));
-    expect(within(screen.getByRole('list', { name: 'Getting started' })).getAllByRole('listitem')).toHaveLength(3);
+    const callbacks = { onCreateMesh: vi.fn(), onOpenSpawnMenu: vi.fn(), onClearFilters: vi.fn(), onOpenSetup: setup, onViewAll: vi.fn(), onOpenTerminal: terminal };
+    const { rerender } = render(<EmptyStateActions repositoryReady={false} harnessReady={false} callbacks={callbacks} />);
+    expect(screen.queryByRole('button', { name: 'Start Terminal' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Agent settings' }));
+    expect(setup).toHaveBeenCalledOnce();
+    rerender(<EmptyStateActions repositoryReady harnessReady={false} callbacks={callbacks} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Start Terminal' }));
+    expect(terminal).toHaveBeenCalledOnce();
+    expect(screen.queryByRole('button', { name: 'Agent settings' })).toBeNull();
     await act(async () => {});
   });
 

@@ -340,8 +340,16 @@ fn readiness_history_retains_reason_without_duplicate_poll_entries() {
         serde_json::json!({"node.source.observation_blocker":"{\"kind\":\"input_uncertain\"}"})
             .to_string();
     for _ in 0..3 {
-        super::super::ledger::commit_circuit_advance_locked(&mut db, 1, None, Some(&waiting), &[])
-            .unwrap();
+        super::super::ledger::commit_circuit_advance_locked(
+            &mut db,
+            1,
+            None,
+            Some(&crate::db::circuit::context_store::ContextChange::from(
+                crate::db::circuit::context_store::ContextReplacement::whole(&waiting),
+            )),
+            &[],
+        )
+        .unwrap();
     }
     let history = history_inner(&db, 1).unwrap();
     assert_eq!(history.len(), 1);
@@ -351,8 +359,16 @@ fn readiness_history_retains_reason_without_duplicate_poll_entries() {
         .detail
         .contains("Terminal input tracking is uncertain"));
     let resolved = serde_json::json!({"node.source.observation_blocker":""}).to_string();
-    super::super::ledger::commit_circuit_advance_locked(&mut db, 1, None, Some(&resolved), &[])
-        .unwrap();
+    super::super::ledger::commit_circuit_advance_locked(
+        &mut db,
+        1,
+        None,
+        Some(&crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole(&resolved),
+        )),
+        &[],
+    )
+    .unwrap();
     let history = history_inner(&db, 1).unwrap();
     assert_eq!(history.len(), 2);
     assert_eq!(history[1].disposition.as_deref(), Some("resolved"));
@@ -384,7 +400,9 @@ fn circuit_continuation_history_retains_dispatch_uncertainty_without_replay() {
             &mut db,
             1,
             None,
-            Some(&context.to_string()),
+            Some(&crate::db::circuit::context_store::ContextChange::from(
+                crate::db::circuit::context_store::ContextReplacement::whole(context.to_string()),
+            )),
             &[],
         )
         .unwrap();
@@ -394,7 +412,9 @@ fn circuit_continuation_history_retains_dispatch_uncertainty_without_replay() {
         &mut db,
         1,
         None,
-        Some(&context.to_string()),
+        Some(&crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole(context.to_string()),
+        )),
         &[],
     )
     .unwrap();
@@ -456,10 +476,26 @@ fn circuit_queue_wait_history_records_reason_changes_without_poll_duplicates() {
     .unwrap();
     let context =
         serde_json::json!({"node.spawn.capacity_wait":"{\"agent_limit\":true}"}).to_string();
-    super::super::ledger::commit_circuit_advance_locked(&mut db, 1, None, Some(&context), &[])
-        .unwrap();
-    super::super::ledger::commit_circuit_advance_locked(&mut db, 1, None, Some(&context), &[])
-        .unwrap();
+    super::super::ledger::commit_circuit_advance_locked(
+        &mut db,
+        1,
+        None,
+        Some(&crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole(&context),
+        )),
+        &[],
+    )
+    .unwrap();
+    super::super::ledger::commit_circuit_advance_locked(
+        &mut db,
+        1,
+        None,
+        Some(&crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole(&context),
+        )),
+        &[],
+    )
+    .unwrap();
     let history = history_inner(&db, 1).unwrap();
     assert_eq!(history.len(), 3);
     assert_eq!(history[2].kind, "step_capacity_wait");
@@ -491,12 +527,28 @@ fn circuit_wait_history_records_resolution_when_capacity_and_evidence_clear() {
             INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status) VALUES(1,'spawn',1,'pending_slot');").unwrap();
     let parked =
         serde_json::json!({"node.spawn.capacity_wait":"{\"agent_limit\":true}"}).to_string();
-    super::super::ledger::commit_circuit_advance_locked(&mut db, 1, None, Some(&parked), &[])
-        .unwrap();
+    super::super::ledger::commit_circuit_advance_locked(
+        &mut db,
+        1,
+        None,
+        Some(&crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole(&parked),
+        )),
+        &[],
+    )
+    .unwrap();
     let freed =
         serde_json::json!({"node.spawn.capacity_wait":"{\"agent_limit\":false}"}).to_string();
-    super::super::ledger::commit_circuit_advance_locked(&mut db, 1, None, Some(&freed), &[])
-        .unwrap();
+    super::super::ledger::commit_circuit_advance_locked(
+        &mut db,
+        1,
+        None,
+        Some(&crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole(&freed),
+        )),
+        &[],
+    )
+    .unwrap();
     let history = history_inner(&db, 1).unwrap();
     assert_eq!(history.len(), 2);
     assert_eq!(history[0].kind, "step_capacity_wait");
@@ -515,15 +567,31 @@ fn circuit_wait_history_records_resolution_when_capacity_and_evidence_clear() {
             "node.spawn.capacity_wait":"{\"agent_limit\":false}",
             "node.spawn.wait.attempt":"1","node.spawn.wait.timeout_ms":"60000","node.spawn.wait.since_ms":"1000"
         }).to_string();
-    super::super::ledger::commit_circuit_advance_locked(&mut db, 1, None, Some(&waiting), &[])
-        .unwrap();
+    super::super::ledger::commit_circuit_advance_locked(
+        &mut db,
+        1,
+        None,
+        Some(&crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole(&waiting),
+        )),
+        &[],
+    )
+    .unwrap();
     let resolved = serde_json::json!({
         "node.spawn.capacity_wait":"{\"agent_limit\":false}",
         "node.spawn.wait.attempt":""
     })
     .to_string();
-    super::super::ledger::commit_circuit_advance_locked(&mut db, 1, None, Some(&resolved), &[])
-        .unwrap();
+    super::super::ledger::commit_circuit_advance_locked(
+        &mut db,
+        1,
+        None,
+        Some(&crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole(&resolved),
+        )),
+        &[],
+    )
+    .unwrap();
     let windows: Vec<CircuitHistoryEntry> = history_inner(&db, 1)
         .unwrap()
         .into_iter()
@@ -584,10 +652,26 @@ fn circuit_configuration_and_wait_history_is_atomic_deduplicated_and_retained() 
     next["node.spawn.wait.since_ms"] = "1000".into();
     next["node.spawn.wait.timeout_ms"] = "60000".into();
     let next = next.to_string();
-    super::super::ledger::commit_circuit_advance_locked(&mut db, 1, None, Some(&next), &[])
-        .unwrap();
-    super::super::ledger::commit_circuit_advance_locked(&mut db, 1, None, Some(&next), &[])
-        .unwrap();
+    super::super::ledger::commit_circuit_advance_locked(
+        &mut db,
+        1,
+        None,
+        Some(&crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole(&next),
+        )),
+        &[],
+    )
+    .unwrap();
+    super::super::ledger::commit_circuit_advance_locked(
+        &mut db,
+        1,
+        None,
+        Some(&crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole(&next),
+        )),
+        &[],
+    )
+    .unwrap();
     assert_eq!(history_inner(&db, 1).unwrap().len(), 2);
     db.execute_batch("CREATE TRIGGER fail_wait_history BEFORE INSERT ON circuit_run_history BEGIN SELECT RAISE(ABORT,'injected history failure'); END;").unwrap();
     let changed = next.replace("1000", "2000");
@@ -595,7 +679,9 @@ fn circuit_configuration_and_wait_history_is_atomic_deduplicated_and_retained() 
         &mut db,
         1,
         None,
-        Some(&changed),
+        Some(&crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole(&changed)
+        )),
         &[]
     )
     .is_err());
@@ -651,7 +737,9 @@ fn circuit_wait_capacity_and_configuration_history_survives_reopen_and_agrees_wi
         &mut db,
         1,
         Some("running"),
-        Some(&context),
+        Some(&crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole(&context),
+        )),
         &[],
     )
     .unwrap();
@@ -1472,7 +1560,9 @@ fn a_consumed_antigravity_gap_receipt_still_settles_the_step_from_stored_evidenc
             run_id: 1,
             state: RunState::from_db_str(&run.state),
             graph: CircuitGraph::from_json(&graph).unwrap(),
-            context: super::super::artifacts::load_context(db, 1).unwrap(),
+            context: super::super::context_store::load_logical(db, 1)
+                .unwrap()
+                .runtime(),
             steps: super::super::ledger::list_circuit_run_steps_inner(db, 1)
                 .unwrap()
                 .into_iter()
@@ -1495,7 +1585,7 @@ fn a_consumed_antigravity_gap_receipt_still_settles_the_step_from_stored_evidenc
             db,
             1,
             None,
-            Some(&view.context.to_json().unwrap()),
+            Some(&crate::db::circuit::context_store::ContextChange::from_context(&view.context)),
             &[crate::db::circuit::CircuitStepOp {
                 node_id: step.node_id.clone(),
                 status: step.status.as_db_str().into(),
@@ -1905,7 +1995,7 @@ fn recheck_retains_ownership_uncertainty_and_cannot_authorize_classifier_complet
         &mut db,
         1,
         None,
-        &view.context.to_json().unwrap(),
+        &crate::db::circuit::context_store::ContextChange::from_context(&view.context),
         &[super::super::CircuitStepOp {
             node_id: write.node_id.clone(),
             status: write.status.as_db_str().into(),
@@ -2011,7 +2101,9 @@ fn report_commit_rejects_lifecycle_blockers_present_at_commit() {
             &mut db,
             1,
             Some("completed"),
-            "{}",
+            &crate::db::circuit::context_store::ContextChange::from(
+                crate::db::circuit::context_store::ContextReplacement::whole("{}"),
+            ),
             &[],
             EvidenceWrite {
                 input_guard: Some(&guard),
@@ -2036,7 +2128,9 @@ fn report_commit_rejects_lifecycle_blockers_present_at_commit() {
             &mut db,
             1,
             None,
-            "{}",
+            &crate::db::circuit::context_store::ContextChange::from(
+                crate::db::circuit::context_store::ContextReplacement::whole("{}"),
+            ),
             &[],
             EvidenceWrite {
                 input_guard: Some(&guard),
@@ -2057,7 +2151,9 @@ fn report_commit_rejects_lifecycle_blockers_present_at_commit() {
         &mut db,
         1,
         Some("completed"),
-        "{}",
+        &crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole("{}"),
+        ),
         &[],
         EvidenceWrite {
             input_guard: Some(&guard),
@@ -2107,7 +2203,11 @@ fn receipt_commit_rejects_replaced_sessions_without_advancing_cursor_or_history(
             &mut db,
             1,
             None,
-            "{\"observer.receipt_cursor\":\"5\"}",
+            &crate::db::circuit::context_store::ContextChange::from(
+                crate::db::circuit::context_store::ContextReplacement::whole(
+                    "{\"observer.receipt_cursor\":\"5\"}"
+                )
+            ),
             &[],
             EvidenceWrite {
                 input_guard: Some(&guard),
@@ -2135,7 +2235,11 @@ fn receipt_commit_rejects_replaced_sessions_without_advancing_cursor_or_history(
         &mut db,
         1,
         None,
-        "{\"observer.receipt_cursor\":\"5\"}",
+        &crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole(
+                "{\"observer.receipt_cursor\":\"5\"}",
+            ),
+        ),
         &[],
         EvidenceWrite {
             input_guard: Some(&guard),
@@ -2214,7 +2318,11 @@ fn observation_projection_and_effect_intent_commit_atomically() {
         &mut db,
         1,
         None,
-        "{\"watermark\":\"source-1\"}",
+        &crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole(
+                "{\"watermark\":\"source-1\"}"
+            )
+        ),
         std::slice::from_ref(&op),
         write()
     )
@@ -2234,7 +2342,11 @@ fn observation_projection_and_effect_intent_commit_atomically() {
         &mut db,
         1,
         None,
-        "{\"watermark\":\"source-1\"}",
+        &crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole(
+                "{\"watermark\":\"source-1\"}",
+            ),
+        ),
         &[op],
         write(),
     )
@@ -2340,7 +2452,9 @@ fn set_node_status_and_step_commit_atomically_across_restart() {
         &mut db,
         1,
         None,
-        "{}",
+        &crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole("{}")
+        ),
         &steps,
         EvidenceWrite {
             agent_status_effects: &status_effects,
@@ -2371,7 +2485,9 @@ fn set_node_status_and_step_commit_atomically_across_restart() {
         &mut db,
         1,
         None,
-        "{}",
+        &crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole("{}"),
+        ),
         &steps,
         EvidenceWrite {
             agent_status_effects: &status_effects,
@@ -2498,7 +2614,9 @@ fn set_node_status_does_not_apply_after_circuit_run_is_cancelled_or_deleted() {
             &mut db,
             1,
             None,
-            "{}",
+            &crate::db::circuit::context_store::ContextChange::from(
+                crate::db::circuit::context_store::ContextReplacement::whole("{}")
+            ),
             &steps,
             EvidenceWrite {
                 agent_status_effects: &status_effects,
@@ -2523,7 +2641,9 @@ fn set_node_status_does_not_apply_after_circuit_run_is_cancelled_or_deleted() {
             &mut db,
             1,
             None,
-            "{}",
+            &crate::db::circuit::context_store::ContextChange::from(
+                crate::db::circuit::context_store::ContextReplacement::whole("{}")
+            ),
             &steps,
             EvidenceWrite {
                 agent_status_effects: &status_effects,
@@ -2665,7 +2785,7 @@ fn unknown_open_pr_checkpoint_offers_read_only_recheck_for_same_attempt() {
         &mut db,
         1,
         None,
-        &view.context.to_json().unwrap(),
+        &crate::db::circuit::context_store::ContextChange::from_context(&view.context),
         &writes,
         EvidenceWrite {
             expected: transition.expected.as_ref(),
@@ -2720,7 +2840,7 @@ fn unknown_open_pr_checkpoint_offers_read_only_recheck_for_same_attempt() {
         &mut db,
         1,
         result.run_state_changed.then_some(view.state.as_db_str()),
-        &view.context.to_json().unwrap(),
+        &crate::db::circuit::context_store::ContextChange::from_context(&view.context),
         &completion,
         EvidenceWrite {
             expected: result.expected.as_ref(),
@@ -3289,7 +3409,9 @@ fn operator_outcome_fences_retry_attempt_and_history() {
             &mut db,
             1,
             None,
-            "{}",
+            &crate::db::circuit::context_store::ContextChange::from(
+                crate::db::circuit::context_store::ContextReplacement::whole("{}")
+            ),
             &[],
             EvidenceWrite {
                 expected: Some(&stale),
@@ -3318,7 +3440,9 @@ fn operator_outcome_fences_retry_attempt_and_history() {
             &mut db,
             1,
             None,
-            "{}",
+            &crate::db::circuit::context_store::ContextChange::from(
+                crate::db::circuit::context_store::ContextReplacement::whole("{}")
+            ),
             &[],
             EvidenceWrite {
                 expected: Some(&stale),
@@ -3592,7 +3716,9 @@ fn effect_claim_survives_reopen_and_is_never_replayed() {
             &mut db,
             1,
             None,
-            "{}",
+            &crate::db::circuit::context_store::ContextChange::from(
+                crate::db::circuit::context_store::ContextReplacement::whole("{}"),
+            ),
             &[op],
             EvidenceWrite {
                 intents: std::slice::from_ref(&intent),
@@ -3773,7 +3899,7 @@ fn open_pr_recheck_completion_reconciles_the_unknown_effect() {
         &mut db,
         1,
         result.run_state_changed.then_some(view.state.as_db_str()),
-        &view.context.to_json().unwrap(),
+        &crate::db::circuit::context_store::ContextChange::from_context(&view.context),
         &writes,
         EvidenceWrite {
             reconciled_effects: std::slice::from_ref(&reconciled),
@@ -3886,7 +4012,9 @@ fn open_pr_recheck_after_not_performed_reconciles_without_losing_attestation() {
         &mut db,
         1,
         None,
-        "{}",
+        &crate::db::circuit::context_store::ContextChange::from(
+            crate::db::circuit::context_store::ContextReplacement::whole("{}"),
+        ),
         &[completion],
         EvidenceWrite {
             reconciled_effects: std::slice::from_ref(&reconciled),
@@ -4914,7 +5042,7 @@ fn operator_review_refuses_a_feedback_prompt_already_built_by_an_alternate_path(
             transition
                 .run_state_changed
                 .then_some(view.state.as_db_str()),
-            &view.context.to_json().unwrap(),
+            &crate::db::circuit::context_store::ContextChange::from_context(&view.context),
             &steps,
             EvidenceWrite {
                 expected: transition.expected.as_ref(),

@@ -864,10 +864,7 @@ pub(crate) fn prune_terminal_circuit_runs_before_inner(
     // CASCADE, but enforcement rides on the connection's `foreign_keys` pragma
     // — off by default for a system-libsqlite link — so the sweep deletes them
     // explicitly, in the same defensive order the steps use.
-    conn.execute(
-        &format!("DELETE FROM circuit_run_artifacts WHERE run_id IN ({sweepable})"),
-        params![cutoff],
-    )?;
+    super::context_store::delete_stored_values_for_runs(conn, &sweepable, params![cutoff])?;
     let deleted = conn.execute(
         &format!("DELETE FROM autopilot_circuit_runs WHERE id IN ({sweepable})"),
         params![cutoff],
@@ -891,11 +888,9 @@ pub(crate) fn prune_terminal_circuit_runs_before_inner(
     // emptying the column without them would keep the weight the compaction
     // exists to drop. The delete is independent of the `context_json <> '{}'`
     // guard, so a sweep that failed after the update still converges.
-    conn.execute(
-        &format!(
-            "DELETE FROM circuit_run_artifacts WHERE run_id IN \
-             (SELECT id FROM autopilot_circuit_runs WHERE {compactable})"
-        ),
+    super::context_store::delete_stored_values_for_runs(
+        conn,
+        &format!("SELECT id FROM autopilot_circuit_runs WHERE {compactable}"),
         params![cutoff],
     )?;
 

@@ -374,8 +374,11 @@ fn explicit_overrides_win_and_terminal_masks_unsupported_fields() {
 
 #[test]
 fn snapshot_survives_deleted_recipe_and_route_but_uses_current_account() {
+    // The credential vault is per thread: clear it so the rotated key this
+    // test writes cannot leak into another test on this thread.
+    crate::preferences::secrets::test_support::reset();
     let dir = tempfile::tempdir().unwrap();
-    super::super::init_for_tests(dir.path().into());
+    let store = super::super::store::PreferencesStore::new(dir.path().to_path_buf());
     let mut prefs = generated_preferences();
     reconcile(&mut prefs);
     prefs
@@ -389,15 +392,15 @@ fn snapshot_survives_deleted_recipe_and_route_but_uses_current_account() {
         .deleted_launch_configurations
         .push(plan.configuration_id.clone());
     prefs.provider_accounts[0].api_key = Some("rotated".into());
-    super::super::save(prefs.clone()).unwrap();
-    let resumed = resolve_snapshot(&plan, &Default::default()).unwrap();
+    store.save(prefs.clone()).unwrap();
+    let resumed = resolve_snapshot_from(&store, &plan, &Default::default()).unwrap();
     assert_eq!(resumed, plan);
     prefs.provider_accounts.clear();
-    super::super::save(prefs).unwrap();
-    assert!(resolve_snapshot(&plan, &Default::default())
+    store.save(prefs).unwrap();
+    assert!(resolve_snapshot_from(&store, &plan, &Default::default())
         .unwrap_err()
         .contains("account"));
-    super::super::reset_for_tests();
+    crate::preferences::secrets::test_support::reset();
 }
 
 #[test]

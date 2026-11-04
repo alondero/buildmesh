@@ -10,6 +10,7 @@ use crate::circuit::model::CircuitNodeKind;
 use crate::circuit::stepper::RunView;
 use crate::db;
 use crate::models::{EnvType, SessionStatus};
+use crate::preferences::PreferencesStore;
 use crate::session_naming::{
     agent_reviewer_node_name, disambiguate_node_name, issue_node_name, issue_reviewer_node_name,
     pr_node_name, pr_reviewer_node_name,
@@ -334,15 +335,26 @@ pub(super) fn circuit_spawn_intent(
     }
 }
 
-pub(super) fn deliver_circuit_initial_prompt(
+struct InitialPromptOwnership<'a> {
+    run_id: i64,
+    cancellation: &'a super::CircuitEffectBatchPermit,
+    fence: Option<&'a crate::services::circuit_prompt::InitialDeliveryFence>,
+}
+
+fn deliver_circuit_initial_prompt(
     app: &AppHandle,
     node_id: i64,
     prompt: &str,
     delivery: crate::agent::launch::InitialPromptDelivery,
     expected_input: Option<&str>,
-    fence: Option<&crate::services::circuit_prompt::InitialDeliveryFence>,
+    ownership: InitialPromptOwnership<'_>,
 ) {
     use crate::agent::launch::InitialPromptDelivery;
+    let InitialPromptOwnership {
+        run_id,
+        cancellation,
+        fence,
+    } = ownership;
 
     if let Some(fence) = fence {
         match crate::services::circuit_prompt::initial_pending(fence) {
@@ -360,25 +372,26 @@ pub(super) fn deliver_circuit_initial_prompt(
     }
 
     let result = match delivery {
-        InitialPromptDelivery::Prefill | InitialPromptDelivery::AutoSubmit => Ok(()),
-        InitialPromptDelivery::InjectAfterSpawn => {
-            crate::circuit::delivery::PreparedPrompt::prepare(node_id, prompt)
-                .map_err(|e| format!("Could not prepare initial prompt: {e}"))
-                .and_then(|prepared| {
-                    crate::circuit::delivery::write_prompt_to_pty_guarded(
-                        &crate::agent::process::PROCESS_REGISTRY,
-                        &prepared,
-                        app,
-                        expected_input,
-                    )
-                })
-                .and_then(|submitted| {
-                    submitted.then_some(()).ok_or_else(|| {
-                        "Input ownership changed before initial prompt submission completed".into()
-                    })
-                })
+        InitialPromptDelivery::Prefill | InitialPromptDelivery::InjectAfterSpawn
+            if expected_input.is_none() =>
+        {
+            Err("Initial prompt lost its process/input ownership before delivery".into())
         }
-        InitialPromptDelivery::Fresh => Ok(()),
+        InitialPromptDelivery::Prefill | InitialPromptDelivery::InjectAfterSpawn => {
+            let still_current = || initial_delivery_current(run_id, cancellation, fence);
+            deliver_existing_prompt(
+                node_id,
+                prompt,
+                if delivery == InitialPromptDelivery::Prefill {
+                    crate::agent::prompt_delivery::DeliveryMode::Prefilled
+                } else {
+                    crate::agent::prompt_delivery::DeliveryMode::VerifiedStartup
+                },
+                expected_input,
+                &still_current,
+            )
+        }
+        InitialPromptDelivery::AutoSubmit | InitialPromptDelivery::Fresh => Ok(()),
     };
 
     if let Err(error) = result {
@@ -407,16 +420,19 @@ pub(super) fn deliver_circuit_initial_prompt(
     }
 }
 
-pub(super) fn schedule_circuit_initial_prompt(
-    app: &AppHandle,
-    node_id: i64,
-    prompt: &str,
-    delivery: crate::agent::launch::InitialPromptDelivery,
-    fence: Option<crate::services::circuit_prompt::InitialDeliveryFence>,
-) {
-    if delivery == crate::agent::launch::InitialPromptDelivery::Prefill {
-        crate::circuit::launch::watch_and_submit_for_circuit(app.clone(), node_id, prompt, fence);
+pub(super) fn initial_delivery_current(
+    run_id: i64,
+    cancellation: &super::CircuitEffectBatchPermit,
+    fence: Option<&crate::services::circuit_prompt::InitialDeliveryFence>,
+) -> Result<bool, String> {
+    // Command-side cancellation happens before the durable terminal write:
+    // delivery must release its spawn permit while Cancel waits for quiescence.
+    if cancellation.is_cancelled() || !run_accepts_effects(run_id)? {
+        return Ok(false);
     }
+    fence
+        .map_or(Ok(true), crate::services::circuit_prompt::initial_pending)
+        .map_err(|error| error.to_string())
 }
 
 async fn run_accepts_effects_async(run_id: i64) -> bool {
@@ -428,50 +444,6 @@ async fn run_accepts_effects_async(run_id: i64) -> bool {
 async fn abort_circuit_spawn_async(run_id: i64, node_id: i64) {
     let _ =
         tauri::async_runtime::spawn_blocking(move || abort_circuit_spawn(run_id, node_id)).await;
-}
-
-async fn wait_for_initial_prompt(run_id: i64, node_id: i64) -> Result<Option<String>, String> {
-    let provider = tauri::async_runtime::spawn_blocking(move || {
-        db::get_agent_node_by_id(node_id)
-            .map(|node| crate::preferences::resolve_harness_provider(&node.provider))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())?;
-    let input = crate::agent::process::PROCESS_REGISTRY
-        .input_stamp(node_id)
-        .ok_or("Initial prompt deferred because the terminal input is already owned")?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
-    loop {
-        if !run_accepts_effects_async(run_id).await {
-            return Ok(None);
-        }
-        if !crate::agent::process::PROCESS_REGISTRY.is_alive(&node_id) {
-            return Err("Agent exited before accepting its initial prompt".into());
-        }
-        if crate::agent::process::PROCESS_REGISTRY
-            .input_stamp(node_id)
-            .as_ref()
-            != Some(&input)
-        {
-            return Err(
-                "Terminal input changed during startup; initial prompt was not sent".into(),
-            );
-        }
-        if provider
-            .adapter()
-            .ready_for_initial_prompt(&crate::circuit::evaluator::cleaned_tail(node_id))
-        {
-            return Ok(Some(input));
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err(
-                "Harness startup did not become ready for the initial prompt; inspect the terminal"
-                    .into(),
-            );
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    }
 }
 
 /// Inputs the background spawn task needs. Bundled into one struct so the
@@ -501,6 +473,7 @@ pub(super) fn spawn_circuit_agent_in_background(
         delivery,
     } = spawn;
     let app_for_spawn = app.clone();
+    let cancellation = super::begin_circuit_effect_batch(run_id);
     let delivery_fence = crate::services::circuit_prompt::initial_fence(node_id)
         .map_err(|e| format!("Could not capture initial delivery identity: {e}"))?;
     tauri::async_runtime::spawn(async move {
@@ -512,7 +485,7 @@ pub(super) fn spawn_circuit_agent_in_background(
         // durable run state inside the task as well as in the worker effect
         // loop: cancellation may have won while the task was waiting for a
         // runtime worker. A cancelled run must never start a new process.
-        if !run_accepts_effects_async(run_id).await {
+        if cancellation.is_cancelled() || !run_accepts_effects_async(run_id).await {
             abort_circuit_spawn_async(run_id, node_id).await;
             return;
         }
@@ -537,44 +510,17 @@ pub(super) fn spawn_circuit_agent_in_background(
         // if the durable state flipped while the async spawn was in flight.
         // This compensating check also handles a ledger deletion that raced
         // before the task acquired the DB row.
-        if !run_accepts_effects_async(run_id).await {
+        if cancellation.is_cancelled() || !run_accepts_effects_async(run_id).await {
             abort_circuit_spawn_async(run_id, node_id).await;
             return;
         }
-        let expected_input =
-            if delivery == crate::agent::launch::InitialPromptDelivery::InjectAfterSpawn {
-                match wait_for_initial_prompt(run_id, node_id).await {
-                    Ok(Some(input)) => Some(input),
-                    Ok(None) => {
-                        abort_circuit_spawn_async(run_id, node_id).await;
-                        return;
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            "circuits: initial prompt for agent {node_id} was not sent: {error}"
-                        );
-                        let attention_app = app_for_spawn.clone();
-                        let _ = tauri::async_runtime::spawn_blocking(move || {
-                            crate::services::circuit_prompt::initial_delivery_uncertain(
-                                &attention_app,
-                                delivery_fence.as_ref(),
-                                &error,
-                            );
-                        })
-                        .await;
-                        return;
-                    }
-                }
-            } else {
-                None
-            };
-        schedule_circuit_initial_prompt(
-            &app_for_spawn,
-            node_id,
-            &prompt,
-            delivery,
-            delivery_fence.clone(),
-        );
+        // Capture before scheduling blocking delivery: replacement or input while
+        // the task waits for a worker must invalidate this launch's request.
+        let expected_input = crate::agent::process::PROCESS_REGISTRY
+            .get(&node_id)
+            .map(|process| {
+                crate::agent::process::InputStamp::at_process_start(process.generation).encode()
+            });
         if !run_accepts_effects_async(run_id).await {
             abort_circuit_spawn_async(run_id, node_id).await;
             return;
@@ -587,11 +533,18 @@ pub(super) fn spawn_circuit_agent_in_background(
                     &prompt,
                     delivery,
                     expected_input.as_deref(),
-                    delivery_fence.as_ref(),
+                    InitialPromptOwnership {
+                        run_id,
+                        cancellation: &cancellation,
+                        fence: delivery_fence.as_ref(),
+                    },
                 );
             }
         })
         .await;
+        if !run_accepts_effects_async(run_id).await {
+            abort_circuit_spawn_async(run_id, node_id).await;
+        }
     });
     Ok(())
 }
@@ -659,7 +612,95 @@ fn staging_env(existing: Option<EnvType>, mesh_path: &str) -> EnvType {
     existing.unwrap_or_else(|| EnvType::from(crate::env::env_for_path(Path::new(mesh_path))))
 }
 
+/// Stages this step's prompt against the profile the spawn owns.
+///
+/// Without a store there is no profile directory to stage in, so the prompt is
+/// pasted inline — the degradation the ambient path had before a profile was
+/// known.
+fn stage_prompt_for(
+    store: Option<&PreferencesStore>,
+    run_id: i64,
+    node_id: &str,
+    attempt: i32,
+    env: EnvType,
+    full_prompt: &str,
+    requests_result: bool,
+) -> crate::circuit::handoff::StagedPrompt {
+    match store {
+        Some(store) => crate::circuit::handoff::stage_prompt_from(
+            store,
+            run_id,
+            node_id,
+            attempt,
+            env,
+            full_prompt,
+            requests_result,
+        ),
+        None => crate::circuit::handoff::stage_prompt(
+            run_id,
+            node_id,
+            attempt,
+            env,
+            full_prompt,
+            requests_result,
+        ),
+    }
+}
+
+/// Records which handoff the agent's current turn belongs to.
+fn set_agent_turn_for(
+    store: Option<&PreferencesStore>,
+    run_id: i64,
+    agent_node_id: i64,
+    turn: Option<&crate::circuit::handoff::HandoffTurn>,
+) {
+    match store {
+        Some(store) => {
+            crate::circuit::handoff::set_agent_turn_from(store, run_id, agent_node_id, turn)
+        }
+        None => crate::circuit::handoff::set_agent_turn(run_id, agent_node_id, turn),
+    }
+}
+
+/// Spawn the step's agent and stage the prompt it opens with.
 pub(super) fn spawn_step_agent(
+    app: &AppHandle,
+    run_id: i64,
+    mesh_id: i64,
+    view: &mut RunView,
+    node_id: &str,
+) -> Result<(), String> {
+    // The store installed at startup. Without one there is no profile
+    // directory to stage the prompt in, so the spawn degrades exactly as it
+    // did before a profile was known.
+    match crate::preferences::ambient_store() {
+        Ok(store) => spawn_step_agent_from(&store, app, run_id, mesh_id, view, node_id),
+        Err(_) => spawn_step_agent_with(None, app, run_id, mesh_id, view, node_id),
+    }
+}
+
+/// [`spawn_step_agent`] against an explicit store.
+///
+/// The caller owns the store, so the prompt, the turn marker and the retained
+/// payload this spawn writes land under **that** profile directory rather than
+/// the ambient one (issue #1482).
+pub(super) fn spawn_step_agent_from(
+    store: &PreferencesStore,
+    app: &AppHandle,
+    run_id: i64,
+    mesh_id: i64,
+    view: &mut RunView,
+    node_id: &str,
+) -> Result<(), String> {
+    spawn_step_agent_with(Some(store), app, run_id, mesh_id, view, node_id)
+}
+
+/// The spawn itself, over an optional store.
+///
+/// `None` means no profile is known: every handoff degrades to the inline
+/// fallback the ambient path had before a profile was installed.
+fn spawn_step_agent_with(
+    store: Option<&PreferencesStore>,
     app: &AppHandle,
     run_id: i64,
     mesh_id: i64,
@@ -784,7 +825,8 @@ pub(super) fn spawn_step_agent(
             .and_then(|id| db::get_agent_node_by_id(id).ok())
             .map(|node| node.env);
         let env = staging_env(existing_env, &mesh.path);
-        let staged = crate::circuit::handoff::stage_prompt(
+        let staged = stage_prompt_for(
+            store,
             run_id,
             node_id,
             attempt,
@@ -837,31 +879,15 @@ pub(super) fn spawn_step_agent(
                 node_id,
                 run_id
             );
-            let _ = db::update_agent_node_status(existing_agent_id, SessionStatus::Running);
-            crate::circuit::evaluator::note_turn_start(existing_agent_id);
-            crate::circuit::handoff::set_agent_turn(
-                run_id,
-                existing_agent_id,
-                handoff_turn.as_ref(),
-            );
-            retain_initial_prompt(
+            return retry_live_agent(
+                store,
                 run_id,
                 view,
                 node_id,
-                existing_agent_id,
                 &resolved_prompt,
                 handoff_turn.as_ref(),
-            )?;
-            crate::circuit::delivery::write_prompt_to_pty(existing_agent_id, &resolved_prompt, app)
-                .map_err(|e| format!("PTY write failed on retry: {}", e))?;
-            attach_spawned_agent(
-                run_id,
-                view,
-                node_id,
-                existing_agent_id,
                 parent_agent_node_id,
-            )?;
-            return Ok(());
+            );
         }
 
         // Process is dead/exited: reuse its worktree path/branch to spawn a fresh process
@@ -931,8 +957,9 @@ pub(super) fn spawn_step_agent(
                 "node-created",
                 crate::commands::agent::NodeCreatedPayload { id: new_node.id },
             );
-            crate::circuit::handoff::set_agent_turn(run_id, new_node.id, handoff_turn.as_ref());
+            set_agent_turn_for(store, run_id, new_node.id, handoff_turn.as_ref());
             retain_initial_prompt(
+                store,
                 run_id,
                 view,
                 node_id,
@@ -1025,8 +1052,9 @@ pub(super) fn spawn_step_agent(
     // uses prefill when supported and otherwise is injected after spawn.
     // Issue #1358: per-step model / effort / extra_args ride the explicit
     // layer through to `spawn_with_intent`, where capability masking occurs.
-    crate::circuit::handoff::set_agent_turn(run_id, node.id, handoff_turn.as_ref());
+    set_agent_turn_for(store, run_id, node.id, handoff_turn.as_ref());
     retain_initial_prompt(
+        store,
         run_id,
         view,
         node_id,
@@ -1050,7 +1078,39 @@ pub(super) fn spawn_step_agent(
     Ok(())
 }
 
+/// A retry on a live agent waits for acknowledgement before acknowledging its
+/// attachment. If delivery is uncertain, dispatch parks the step; the retained
+/// payload, turn identity and Running status describe input that may have landed.
+pub(super) fn retry_live_agent(
+    store: Option<&PreferencesStore>,
+    run_id: i64,
+    view: &mut RunView,
+    node_id: &str,
+    prompt: &str,
+    turn: Option<&crate::circuit::handoff::HandoffTurn>,
+    parent_agent_node_id: Option<i64>,
+) -> Result<(), String> {
+    let agent_id = view
+        .step(node_id)
+        .and_then(|step| step.agent_node_id)
+        .ok_or("Retry step has no existing agent")?;
+    let _ = db::update_agent_node_status(agent_id, SessionStatus::Running);
+    crate::circuit::evaluator::note_turn_start(agent_id);
+    set_agent_turn_for(store, run_id, agent_id, turn);
+    retain_initial_prompt(store, run_id, view, node_id, agent_id, prompt, turn)?;
+    deliver_existing_prompt(
+        agent_id,
+        prompt,
+        crate::agent::prompt_delivery::DeliveryMode::LaterTurn,
+        None,
+        &|| run_accepts_effects(run_id),
+    )
+    .map_err(|error| format!("Prompt delivery failed on retry: {error}"))?;
+    attach_spawned_agent(run_id, view, node_id, agent_id, parent_agent_node_id)
+}
+
 fn retain_initial_prompt(
+    store: Option<&PreferencesStore>,
     run_id: i64,
     view: &mut RunView,
     node_id: &str,
@@ -1061,18 +1121,58 @@ fn retain_initial_prompt(
     if text.trim().is_empty() {
         return Ok(());
     }
-    let prepared = crate::circuit::delivery::PreparedPrompt::prepare(agent, text)?;
-    let revision = crate::services::circuit_prompt::retain(
-        run_id,
-        node_id,
-        view.step(node_id).map_or(1, |s| s.attempt),
-        &prepared,
-        crate::services::circuit_prompt::DeliveryKind::Initial,
-        turn,
-    )
+    let prepared = crate::agent::prompt_delivery::PreparedPrompt::prepare(agent, text)?;
+    // Without a store the submission is recorded without a payload file,
+    // exactly as a failed write is.
+    let revision = match store {
+        Some(store) => crate::services::circuit_prompt::retain_from(
+            store,
+            run_id,
+            node_id,
+            view.step(node_id).map_or(1, |s| s.attempt),
+            &prepared,
+            crate::services::circuit_prompt::DeliveryKind::Initial,
+            turn,
+        ),
+        None => crate::services::circuit_prompt::retain(
+            run_id,
+            node_id,
+            view.step(node_id).map_or(1, |s| s.attempt),
+            &prepared,
+            crate::services::circuit_prompt::DeliveryKind::Initial,
+            turn,
+        ),
+    }
     .map_err(|e| e.to_string())?;
     view.context.set("evidence.revision", revision.to_string());
     Ok(())
+}
+
+fn deliver_existing_prompt(
+    node_id: i64,
+    text: &str,
+    mode: crate::agent::prompt_delivery::DeliveryMode,
+    expected_input: Option<&str>,
+    still_current: &dyn Fn() -> Result<bool, String>,
+) -> Result<(), String> {
+    use crate::agent::prompt_delivery::{
+        self, DeliveryRequest, ObservationRequirement, PreparedPrompt,
+    };
+    let prepared = PreparedPrompt::prepare(node_id, text)?;
+    let node = db::get_agent_node_by_id(node_id).map_err(|error| error.to_string())?;
+    let provider = crate::preferences::resolve_harness_provider(&node.provider);
+    prompt_delivery::deliver(
+        &crate::agent::process::PROCESS_REGISTRY,
+        provider.adapter(),
+        DeliveryRequest {
+            prompt: &prepared,
+            mode,
+            observation: ObservationRequirement::Required,
+            expected_input,
+            still_current,
+        },
+    )
+    .require_acknowledgement()
 }
 
 #[cfg(test)]
