@@ -336,7 +336,7 @@ pub struct CreatedNode {
 /// every entry point has the exact same shape (issue #1658 step 5).
 ///
 /// Mirrors the `*_blocking` convention established by
-/// [`regenerate_load_blocking`] / [`regenerate_apply_blocking`] /
+/// [`regenerate_load_blocking`] / [`regenerate_apply_prepared_blocking`] /
 /// [`regenerate_reload_blocking`] (see also `regenerate_agent_node`):
 /// pure sync, returns [`AgentNodeError`], the caller wraps a single
 /// `crate::commands::run_blocking` around the call. The offload

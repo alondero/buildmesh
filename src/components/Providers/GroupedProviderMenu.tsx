@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type ReactNode } from 'react';
+import { useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { SpawnOption } from '../../lib/groups';
 import { ProviderIcon } from './ProviderIcon';
 import { groupByHarness } from '../../lib/groups';
@@ -30,22 +30,34 @@ export interface GroupedProviderMenuProps {
    * repurpose `onSelect` because Escape is a dismiss, not a row pick.
    */
   onClose?: () => void;
-  configurationsEnabled?: boolean;
-  /** Offer the Codex login submenu when more than one login is configured.
-   *  Only spawn surfaces that pass the login on to node creation set this. */
-  loginsEnabled?: boolean;
+  /** Spawn selects a login; saved settings pin logins through configurations;
+   * resume keeps the node's frozen login and offers resumable routes. */
+  mode?: 'spawn' | 'settings' | 'resume';
+  /** Continue a harness choice made by another adapter, such as the palette. */
+  initialProviderId?: string;
   /** Optional footer rendered below the rows (e.g. a worktree-gated
    *  modifier hint). Omitted when undefined. */
   footer?: ReactNode;
+  /** Context-owned action before the shared harness choices (e.g. Current). */
+  leadingAction?: {
+    id: string;
+    option?: SpawnOption;
+    current?: boolean;
+    label: string;
+    title?: string;
+    testId?: string;
+    onSelect: () => void;
+  };
 }
 
 /** Harness-grouped Spawn Menu. Parent rows launch defaults; their disclosure
  * opens capability-driven saved configurations. Pointer and keyboard share
  * the same active parent row. */
-export function GroupedProviderMenu({ providers, onSelect, filter, decorate, className, onClose, configurationsEnabled = true, loginsEnabled = false, footer }: GroupedProviderMenuProps) {
+export function GroupedProviderMenu({ providers, onSelect, filter, decorate, className, onClose, mode = 'spawn', footer, leadingAction, initialProviderId }: GroupedProviderMenuProps) {
   const [submenu, setSubmenu] = useState<{ option: SpawnOption; anchor: HTMLElement; keyboard: boolean } | null>(null);
   const editing = useRef(false);
-  const logins = useHarnessLogins(loginsEnabled && configurationsEnabled);
+  const configurationsEnabled = mode !== 'resume';
+  const logins = useHarnessLogins(mode === 'spawn');
   // The login submenu replaces the configuration submenu on the native Codex
   // row; a single login keeps the menu exactly as it was.
   const choosesLogin = (option: SpawnOption) => logins.length > 1 && !option.is_proxied
@@ -105,7 +117,7 @@ export function GroupedProviderMenu({ providers, onSelect, filter, decorate, cla
   // two rows.
   useAriaMenu({
     rootRef: menuRef,
-    itemCount: flatItems.length,
+    itemCount: flatItems.length + (leadingAction ? 1 : 0),
     itemSelector: '[data-spawn-id]',
     activeIndex,
     setActiveIndex,
@@ -125,17 +137,44 @@ export function GroupedProviderMenu({ providers, onSelect, filter, decorate, cla
   // row, since the wire contract pairs `id = harness_id[:provider_id]`).
   const flatIndexById = useMemo(() => {
     const map = new Map<string, number>();
-    flatItems.forEach((it, i) => map.set(it.id, i));
+    flatItems.forEach((it, i) => map.set(it.id, i + (leadingAction ? 1 : 0)));
     return map;
-  }, [flatItems]);
+  }, [flatItems, leadingAction]);
   const submenuHarnessId = submenu?.option.harness_id;
   const configurationRows = useMemo(
     () => submenuHarnessId ? providers.filter((row) => row.configuration && row.harness_id === submenuHarnessId) : [],
     [providers, submenuHarnessId],
   );
+  const initialOption = flatItems.find(option => option.id === initialProviderId);
+  const canOpenInitial = initialOption ? configurable(initialOption) : false;
+  const openedInitial = useRef(false);
+  useLayoutEffect(() => {
+    if (openedInitial.current || !initialOption) return;
+    const anchor = Array.from(menuRef.current?.querySelectorAll<HTMLElement>('[data-spawn-id]') ?? [])
+      .find(row => row.dataset.spawnId === initialOption.id && !row.dataset.isCurrent);
+    if (!anchor) return;
+    openedInitial.current = true;
+    anchor.focus({ preventScroll: true });
+    if (canOpenInitial) setSubmenu({ option: initialOption, anchor, keyboard: true });
+  }, [initialOption, canOpenInitial]);
 
   return (
     <div ref={menuRef} className={className} role="menu" aria-label="Select a provider">
+      {leadingAction && <div role="presentation" data-regenerate-section={leadingAction.current ? 'current' : undefined} className="border-b border-border-subtle">
+        <button type="button" role="menuitem" tabIndex={activeIndex === 0 ? 0 : -1}
+          data-spawn-id={leadingAction.id} data-spawn-harness={leadingAction.option?.harness_id}
+          data-is-current={leadingAction.current ? 'true' : undefined} data-testid={leadingAction.testId}
+          disabled={Boolean(leadingAction.option?.unavailable_reason)} title={leadingAction.title}
+          onClick={leadingAction.onSelect}
+          onMouseEnter={(event) => { setSubmenu(null); event.currentTarget.focus({ preventScroll: true }); }}
+          onFocus={() => setActiveIndex(0)}
+          className={`w-full text-left px-3 py-1.5 text-xs text-text-primary font-medium focus:outline-none flex items-center gap-2 ${activeIndex === 0 ? 'bg-bg-selection' : ''}`}
+        >
+          {leadingAction.option && <ProviderIcon providerId={leadingAction.option.provider_id ?? leadingAction.option.harness_id} className="h-3.5 w-3.5 shrink-0" />}
+          <span className="flex-1 truncate">{leadingAction.label}</span>
+          {leadingAction.current && <span className="text-2xs uppercase tracking-wider text-text-secondary">current</span>}
+        </button>
+      </div>}
       {groups.map(([groupKey, options]) => (
         <div key={groupKey} role="presentation" data-spawn-group={groupKey} className="border-b border-border-subtle last:border-b-0">
           {options.map((option) => (
@@ -171,7 +210,7 @@ export function GroupedProviderMenu({ providers, onSelect, filter, decorate, cla
                   }
                 }}
                 className={`min-w-0 flex-1 text-left py-1.5 pr-3 text-xs focus:outline-none flex items-center gap-2 ${option.is_proxied ? 'pl-7' : 'pl-3'} ${
-                  flatItems[activeIndex]?.id === option.id ? 'bg-bg-selection text-text-primary' : option.is_proxied ? 'text-text-secondary' : 'text-text-primary'
+                  flatIndexById.get(option.id) === activeIndex ? 'bg-bg-selection text-text-primary' : option.is_proxied ? 'text-text-secondary' : 'text-text-primary'
                 }`}
               >
                 <ProviderIcon providerId={option.provider_id ?? option.harness_id} className="h-3.5 w-3.5 shrink-0" />

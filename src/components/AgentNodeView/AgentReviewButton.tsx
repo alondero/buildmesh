@@ -11,11 +11,15 @@ import type { CircuitGraph } from '../../types/generated/CircuitGraph';
 import { GroupedProviderMenu } from '../Providers/GroupedProviderMenu';
 import { Modal } from '../shared/Modal';
 import { CircuitsIcon } from '../Probe/probeIcons';
+import { useHarnessLogins } from '../../hooks/useHarnessLogins';
 
 /** A reviewer must be an agent, and Terminal is a plain shell — the backend
  *  refuses it too (`validate_reviewer_provider_id`), so it never reaches the
  *  picker. */
 const excludeTerminal = (provider: SpawnOption) => provider.harness_id !== 'terminal';
+const reviewOption = (provider: SpawnOption): SpawnOption => blocksReviewCircuit(provider.harness_id) && !provider.unavailable_reason
+  ? { ...provider, unavailable_reason: `${provider.label} cannot be used as the reviewer: it has no turn-completion signal.` }
+  : provider;
 
 /** `label` is visible text beside the icon; the accessible name stays fixed. */
 export function AgentReviewButton({ node, providerList, label }: { node: AgentNode; providerList: SpawnOption[]; label?: string }) {
@@ -26,6 +30,8 @@ export function AgentReviewButton({ node, providerList, label }: { node: AgentNo
   const [circuits, setCircuits] = useState<AutopilotCircuit[]>([]);
   const [circuitId, setCircuitId] = useState<number | null>(null);
   const [reviewerProvider, setReviewerProvider] = useState('');
+  const [reviewerLoginId, setReviewerLoginId] = useState<string | undefined>();
+  const selectedLogin = useHarnessLogins(Boolean(reviewerLoginId)).find(login => login.id === reviewerLoginId);
   // The very Spawn Menu every other surface renders (ADR-0016): harness parents
   // with their saved Launch Configurations in the disclosure. Terminal is not an
   // agent, so it is dropped before bucketing — the backend enforces the same
@@ -33,9 +39,7 @@ export function AgentReviewButton({ node, providerList, label }: { node: AgentNo
   // unavailable* so the gap is discoverable rather than a silently missing row.
   const reviewOptions = useMemo(() => providerList
     .filter(excludeTerminal)
-    .map(provider => blocksReviewCircuit(provider.harness_id) && !provider.unavailable_reason
-      ? { ...provider, unavailable_reason: `${provider.label} cannot be used as the reviewer: it has no turn-completion signal.` }
-      : provider), [providerList]);
+    .map(reviewOption), [providerList]);
   // The stored selection is a Spawn Option id or a Launch Configuration id
   // (`launch/…`) — both are what the backend resolves — so the label beside the
   // heading is looked up from the same list, standing in for the value a native
@@ -101,8 +105,9 @@ export function AgentReviewButton({ node, providerList, label }: { node: AgentNo
   // explicit model/effort in `resolve_review_spawn_inputs`; that layer is the
   // preset's own, not the picked configuration.) The menu hands both halves
   // back, so prefer the configuration when one was opened.
-  function pickReviewer(providerId: string, _altKey: boolean, configurationId?: string) {
+  function pickReviewer(providerId: string, _altKey: boolean, configurationId?: string, loginId?: string) {
     setReviewerProvider(configurationId ?? providerId);
+    setReviewerLoginId(loginId);
   }
 
   async function start() {
@@ -114,6 +119,7 @@ export function AgentReviewButton({ node, providerList, label }: { node: AgentNo
         circuitId,
         rounds,
         circuitId === null ? reviewerProvider || null : null,
+        circuitId === null ? reviewerLoginId : undefined,
       );
       setOpen(false);
       showRun();
@@ -143,7 +149,7 @@ export function AgentReviewButton({ node, providerList, label }: { node: AgentNo
       aria-label="Start review or circuit"
       title={!activeOwnership && !eligible ? blockedReason ?? 'Resume this agent before starting a review.' : 'Start review or circuit'}
       disabled={!activeOwnership && !eligible}
-      onClick={() => { setReviewerProvider(''); setOpen(true); }}
+      onClick={() => { setReviewerProvider(''); setReviewerLoginId(undefined); setOpen(true); }}
       className={`inline-flex h-6 min-w-6 items-center justify-center gap-1 rounded-md text-accent-violet hover:bg-accent-violet/15 disabled:opacity-40 ${label ? 'px-1.5 text-xs font-medium' : 'p-1'}`}
     ><CircuitsIcon className="h-4 w-4 shrink-0" />{label}</button>
     {open && createPortal(
@@ -178,18 +184,15 @@ export function AgentReviewButton({ node, providerList, label }: { node: AgentNo
         <div className="mb-4">
           <div className="flex items-baseline justify-between mb-1">
             <span className="text-xs">Reviewer launch configuration</span>
-            <span className="text-2xs text-text-muted" data-testid="reviewer-provider-selection">{reviewerLabel ?? 'Default'}</span>
+            <span className="text-2xs text-text-muted" data-testid="reviewer-provider-selection">{reviewerLabel ?? 'Default'}{selectedLogin ? ` · ${selectedLogin.label}` : ''}</span>
           </div>
           {/* The shared Spawn Menu, rendered inline the way the canvas spawn
               dialog renders it — no `onClose`, so its Tab/Escape handling can't
               tear down this modal (the parent Modal owns both). */}
           <div className="border border-border-subtle rounded-md bg-bg-overlay max-h-64 overflow-y-auto">
-            <button type="button" onClick={() => setReviewerProvider('')}
-              aria-pressed={reviewerProvider === ''}
-              data-testid="reviewer-provider-default"
-              className="w-full text-left px-3 py-1.5 text-xs text-text-primary border-b border-border-subtle"
-            >Default (app Reviewer provider or this agent)</button>
-            <GroupedProviderMenu providers={reviewOptions} onSelect={pickReviewer} />
+            <GroupedProviderMenu providers={reviewOptions} decorate={reviewOption} onSelect={pickReviewer}
+              leadingAction={{ id: '__default', label: 'Default (app Reviewer provider or this agent)',
+                testId: 'reviewer-provider-default', onSelect: () => { setReviewerProvider(''); setReviewerLoginId(undefined); } }} />
           </div>
         </div>
         <p className="text-xs text-text-secondary mb-3">

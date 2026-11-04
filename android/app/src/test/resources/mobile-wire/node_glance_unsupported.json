@@ -1,0 +1,10 @@
+{
+  "created_at_ms": 1793786000000,
+  "node_id": 8,
+  "observed_at_ms": 1793793600000,
+  "session_started_at_ms": null,
+  "status": "ready",
+  "status_since_ms": 1793793300000,
+  "transcript": null,
+  "transcript_unavailable": "unsupported"
+}

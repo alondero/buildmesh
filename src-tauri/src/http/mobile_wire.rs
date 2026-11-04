@@ -374,6 +374,51 @@ fn gh_auth() -> crate::http::routes::git::GitHubAuthStatus {
 
 /// Every fixture the Android client reads, in the order the routes are
 /// documented.
+/// A running node's glance (the transcript layer present) and a terminal
+/// node's (no transcript, with its reason), so the phone reads both shapes.
+fn node_glances() -> [crate::services::node_glance::NodeGlance; 2] {
+    use crate::services::node_glance::NodeGlance;
+    use crate::services::transcript_reader::glance::GlanceActivity;
+    use crate::services::transcript_reader::{TranscriptGlance, UnavailableReason};
+    let running = NodeGlance {
+        node_id: 7,
+        status: crate::models::SessionStatus::Running,
+        observed_at_ms: 1_793_793_600_000,
+        status_since_ms: Some(1_793_792_880_000),
+        session_started_at_ms: Some(1_793_786_400_000),
+        created_at_ms: 1_793_786_000_000,
+        transcript: Some(TranscriptGlance {
+            last_prompt: Some("Fix the login redirect".to_string()),
+            last_message: Some("The redirect drops the query string; fixing it now.".to_string()),
+            message_after_prompt: true,
+            activity: vec![
+                GlanceActivity {
+                    tool: "Edit".to_string(),
+                    target: Some("src/auth/redirect.ts".to_string()),
+                },
+                GlanceActivity {
+                    tool: "Bash".to_string(),
+                    target: Some("npm test".to_string()),
+                },
+            ],
+            tool_calls_since_prompt: 14,
+            updated_at_ms: Some(1_793_793_592_000),
+        }),
+        transcript_unavailable: None,
+    };
+    let unsupported = NodeGlance {
+        node_id: 8,
+        status: crate::models::SessionStatus::Ready,
+        observed_at_ms: 1_793_793_600_000,
+        status_since_ms: Some(1_793_793_300_000),
+        session_started_at_ms: None,
+        created_at_ms: 1_793_786_000_000,
+        transcript: None,
+        transcript_unavailable: Some(UnavailableReason::Unsupported),
+    };
+    [running, unsupported]
+}
+
 fn fixtures() -> Vec<Fixture> {
     vec![
         // ----- responses -------------------------------------------------
@@ -411,6 +456,8 @@ fn fixtures() -> Vec<Fixture> {
             }],
         ),
         fixture("agent_node", &agent_node()),
+        fixture("node_glance", &node_glances()[0]),
+        fixture("node_glance_unsupported", &node_glances()[1]),
         fixture("issues_feed", &issues_feed()),
         fixture("pulls_feed", &pulls_feed()),
         fixture("pulls_feed_empty", &pulls_feed_empty()),

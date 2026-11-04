@@ -58,7 +58,6 @@ export function NodeCreationForm({
       menuFooter={mesh.use_worktree ? `${modifierKey} spawns in mesh root` : undefined}
       onToggleDropdown={() => onToggleDropdown(mesh)}
       onSpawnDefault={handleSpawnDefault}
-      loginsEnabled
       onSelectProvider={(providerId, altKey, configurationId, loginId) =>
         onSelectProvider(mesh, providerId, altKey ? false : undefined, configurationId, loginId)
       }

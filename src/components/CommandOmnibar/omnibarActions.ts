@@ -228,24 +228,10 @@ export function executeOmnibarItem(id: string, ctx: OmnibarActionContext): void 
     const option = ctx.spawnOptions.find((o) => o.id === optionId);
     const mesh = ctx.meshes.find((m) => m.id === meshId);
     if (!option || !mesh) return;
-    // Route through the same store action the sidebar spawn menu uses
-    // (#283 invariant: create → activate → select mesh, atomically).
-    // The optional initial prompt is the Omnibar's first-turn prefill
-    // (issue #1413) — omitted / empty means a Fresh spawn.
-    void useAgentNodeStore
-      .getState()
-      .selectProviderForMesh(
-        mesh.id,
-        mesh.name,
-        mesh.path,
-        option.id,
-        undefined,
-        ctx.initialPrompt,
-      )
-      .then(node => focusNode(node.id))
-      .catch(() => {
-        // Spawn failures already toast via the store's error surface.
-      });
+    useUIStore.getState().openCanvasSpawnMenu(mesh.id, {
+      providerId: option.harness_id,
+      initialPrompt: ctx.initialPrompt,
+    });
     return;
   }
   if (id.startsWith('probe-in-mesh:')) {
@@ -298,19 +284,11 @@ export function executeOmnibarItem(id: string, ctx: OmnibarActionContext): void 
   }
 }
 
-/**
- * The harness menu for the spawn domain. The provider list has no store —
- * every surface (Sidebar, Probe tabs, Settings) fetches `listProviders()`
- * on demand — so the palette fetches it fresh on EVERY open (issue #1411
- * review): one IPC per open keeps providers added in Settings (or newly
- * installed harnesses) appearing without an app restart, and there is no
- * module-level cache to invalidate. A failed fetch resolves to `[]` (the
- * spawn domain simply shows nothing).
- */
+/** Harness discovery for the palette; picking one continues in the shared menu. */
 export async function loadSpawnOptions(): Promise<SpawnOption[]> {
   try {
     const backend = await api.listProviders();
-    if (Array.isArray(backend)) return mapBackendProviders(backend);
+    if (Array.isArray(backend)) return mapBackendProviders(backend).filter(option => !option.is_proxied && !option.configuration);
   } catch {
     // Provider list unavailable (backend not ready, test env) — empty menu.
   }

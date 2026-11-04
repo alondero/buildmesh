@@ -108,6 +108,37 @@ mod tests {
         assert_eq!(history[0].session_started_at, Some(1792884381722));
     }
 
+    /// The Node Glance reads one node's timings. Absence must stay a typed
+    /// no-row error so the route can answer 404 rather than a failed read.
+    #[test]
+    fn one_history_entry_carries_its_timings_and_a_missing_node_is_no_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id,name,path) VALUES (1,'API','C:/api')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_nodes (id,mesh_id,name,path,status,created_at,status_changed_at,session_started_at)
+             VALUES (7,1,'n','C:/api','running','2026-10-24 23:26:21','2026-10-25 14:00:00', 1792884381722)",
+            [],
+        )
+        .unwrap();
+
+        let entry = crate::db::get_agent_history_entry_inner(&conn, 7).unwrap();
+        assert_eq!(entry.node.id, 7);
+        assert_eq!(
+            entry.status_changed_at.map(|at| at.to_rfc3339()),
+            Some("2026-10-25T14:00:00+00:00".to_string())
+        );
+        assert_eq!(entry.session_started_at, Some(1792884381722));
+        assert!(matches!(
+            crate::db::get_agent_history_entry_inner(&conn, 8),
+            Err(rusqlite::Error::QueryReturnedNoRows)
+        ));
+    }
+
     /// The v14 backfill and column DEFAULT write SQLite's zone-less
     /// `YYYY-MM-DD HH:MM:SS` (UTC). Shipped verbatim, a browser parses it as
     /// local time, which reads "just now" west of UTC. The wire must carry the

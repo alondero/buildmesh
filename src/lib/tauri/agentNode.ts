@@ -1,6 +1,7 @@
 import { _invoke } from './_invoke';
 import type { AgentNode } from '../../types/generated/AgentNode';
 import type { ArchivedAgentNode } from '../../types/generated/ArchivedAgentNode';
+import type { NodeGlance } from '../../types/generated/NodeGlance';
 import type { WorktreeCloseSafety } from '../worktreeClose';
 
 // Agent Node — renamed from `*Session` to `*AgentNode` in issue #490.
@@ -19,6 +20,10 @@ export const listAgentNodes = () =>
 
 export const getAgentNode = (nodeId: number) =>
   _invoke<AgentNode>('get_agent_node', { nodeId });
+
+/** What the node is doing, read on demand for the node being looked at. */
+export const getNodeGlance = (nodeId: number) =>
+  _invoke<NodeGlance>('get_node_glance', { nodeId });
 
 export const getWorktreeCloseSafety = (nodeId: number) =>
   _invoke<WorktreeCloseSafety>('get_worktree_close_safety', { nodeId });

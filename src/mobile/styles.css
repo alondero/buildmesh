@@ -1050,6 +1050,50 @@ button:disabled {
   }
 }
 
+.node-glance {
+  padding: 16px;
+  margin: 16px 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.node-glance h2 {
+  font-size: 14px;
+  margin: 0 0 6px;
+}
+.node-glance h3 {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  margin: 12px 0 4px;
+}
+.node-glance p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.node-glance-timing {
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.node-glance .node-glance-activity {
+  margin-top: 8px;
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", "Consolas", monospace;
+  font-size: 13px;
+}
+.node-glance-earlier {
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", "Consolas", monospace;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.node-glance-text {
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 8;
+  overflow: hidden;
+}
 .agent-request {
   padding: 16px;
   margin: 16px 0;
