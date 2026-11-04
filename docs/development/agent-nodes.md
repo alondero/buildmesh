@@ -251,7 +251,10 @@ The `branch` field on `AgentNode` (see Rust doc comment at `src-tauri/src/models
 ### Automated prompt delivery (issue #2674)
 
 `agent::prompt_delivery::deliver` owns automated prompt readiness, guarded
-staging, paste settling and bounded Enter attempts. Callers supply prepared
+staging, paste settling and bounded Enter attempts. After a submit without a native receipt, `reinforce_submission` waits 4s;
+if PTY output has then been quiet for 2s (a draft stuck in the composer, e.g. Codex
+treating Enter as a newline), it sends one more Enter. A running turn keeps
+the PTY busy, and Enter on an empty composer is a no-op. Callers supply prepared
 text, delivery mode, a process/input stamp and an explicit observation
 requirement. A caller can also supply its durable ownership check; delivery
 rechecks ownership before queue retries and Enter retries. Process replacement
