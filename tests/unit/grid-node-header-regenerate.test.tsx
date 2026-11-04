@@ -2,8 +2,6 @@
  * Issue #1502 — in-place node regeneration + Regenerate action on the Node toolbar.
  *
  * Pins:
- *  - shared `splitRegenerateTargets` partition of the full provider list
- *    into current (kick-start) + alternates;
  *  - the shared `RegenerateProviderMenu` pins `Current (<label>)` on top;
  *  - `GridNodeHeader` renders an inline Regenerate toolbar button at
  *    wide/xl/medium tiers whose picker includes the current provider;
@@ -26,12 +24,12 @@ import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useUIStore } from '../../src/stores/uiStore';
 import { __resetProviderCachesForTests } from '../../src/lib/tauri';
 import { __resetSharedProviderListForTests } from '../../src/hooks/useProviderList';
-import { splitRegenerateTargets } from '../../src/lib/regenerate';
 import { RegenerateProviderMenu } from '../../src/components/Providers/RegenerateProviderMenu';
 import type { ProviderInfo } from '../../src/types/generated/ProviderInfo';
 import type { SpawnOption } from '../../src/lib/groups';
 import { colorClassForProvider } from '../../src/lib/groups';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
+import { __resetHarnessLoginsForTests, publishHarnessLogins } from '../../src/hooks/useHarnessLogins';
 
 // ----- Fake ResizeObserver (mirrors grid-node-header-responsive.test.tsx) -----
 type ROCallback = (entries: Array<Pick<ResizeObserverEntry, 'contentRect'>>) => void;
@@ -148,6 +146,7 @@ function setupState(node: AgentNode = NODE) {
 }
 
 beforeEach(() => {
+  __resetHarnessLoginsForTests();
   roCallbacks.clear();
   vi.stubGlobal('ResizeObserver', FakeResizeObserver);
   __resetProviderCachesForTests();
@@ -180,20 +179,6 @@ function makeSpawnOption(id: string, label = id): SpawnOption {
   };
 }
 
-describe('lib/regenerate helpers (issue #1502)', () => {
-  it('partitions current from alternates preserving order', () => {
-    const list = [makeSpawnOption('claude'), makeSpawnOption('codex'), makeSpawnOption('kimi')];
-    const { current, others } = splitRegenerateTargets(list, 'codex');
-    expect(current?.id).toBe('codex');
-    expect(others.map((o) => o.id)).toEqual(['claude', 'kimi']);
-  });
-  it('returns undefined current when the provider left the list', () => {
-    const { current, others } = splitRegenerateTargets([makeSpawnOption('codex')], 'claude');
-    expect(current).toBeUndefined();
-    expect(others.map((o) => o.id)).toEqual(['codex']);
-  });
-});
-
 describe('RegenerateProviderMenu (issue #1502)', () => {
   it('pins Current (<label>) on top with data-is-current', () => {
     render(
@@ -211,11 +196,8 @@ describe('RegenerateProviderMenu (issue #1502)', () => {
     expect(current.getAttribute('data-spawn-id')).toBe('claude');
   });
 
-  it('paints no caret and no CSS hover paint before any row holds focus', () => {
-    // Issue #1720 follow-up — single-caret picker. The caret IS focus:
-    // nothing is lit until a row is hovered or focused (both hosts move
-    // real focus, so the paint follows). The Current row keeps its
-    // identity badge, not a persistent highlight.
+  it('focuses Current on open with a single shared caret', () => {
+    // The shared menu focuses the first row on open.
     render(
       <div role="menu">
         <RegenerateProviderMenu
@@ -231,7 +213,7 @@ describe('RegenerateProviderMenu (issue #1502)', () => {
       expect(classes).not.toContain('hover:bg-bg-card');
       expect(classes).not.toContain('hover:bg-bg-card-hover');
       expect(classes).not.toContain('bg-bg-card');
-      expect(classes).not.toContain('bg-bg-selection');
+      expect(classes.includes('bg-bg-selection')).toBe(row === document.activeElement);
     }
     // Identity badge is intact.
     expect(screen.getByTestId('regenerate-submenu-current').getAttribute('data-is-current')).toBe('true');
@@ -274,7 +256,7 @@ describe('RegenerateProviderMenu (issue #1502)', () => {
       </div>,
     );
     const rows = screen.getAllByRole('menuitem');
-    expect(rows).toHaveLength(3);
+    expect(rows).toHaveLength(4);
     // act-wrapped: real focus (what the host walk does) + state flush.
     act(() => { rows[2].focus(); });
     const lit = rows.filter((row) => row.className.split(/\s+/).includes('bg-bg-selection'));
@@ -283,6 +265,26 @@ describe('RegenerateProviderMenu (issue #1502)', () => {
 });
 
 describe('GridNodeHeader Regenerate toolbar (issue #1502)', () => {
+  it('retains the selected login through the running-node confirmation', async () => {
+    mockProviders();
+    setupState({ ...NODE, provider: 'codex', status: 'running' });
+    publishHarnessLogins(['default', 'work'].map(id => ({
+      id, harness_id: 'codex', label: id === 'work' ? 'Work' : 'Default',
+      home: 'C:/codex/' + id, is_default: id === 'default', signed_in: true,
+      email: null, plan: null, same_account_as: null, sign_in: null,
+    })));
+    render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
+    fireResize(screen.getByTestId('grid-node-header'), 600);
+    await userEvent.click(screen.getByLabelText('Agent node actions'));
+    await userEvent.click(await screen.findByTestId('grid-regenerate-trigger'));
+    await userEvent.click(screen.getByRole('button', { name: 'Codex logins' }));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Work' }));
+    expect(useAgentNodeStore.getState().regenerateAgentNode).not.toHaveBeenCalled();
+    await userEvent.click(await screen.findByRole('button', { name: 'Regenerate' }));
+    expect(useAgentNodeStore.getState().regenerateAgentNode).toHaveBeenCalledWith(NODE.id, 'codex', {
+      configurationId: undefined, loginId: 'work', replaceSelection: true,
+    });
+  });
   it('keeps additional native configurations and blocks unavailable choices', () => {
     const pick = vi.fn();
     const rows = ['Current recipe', 'Second native', 'Unavailable'].map((label, index) => ({
@@ -291,7 +293,7 @@ describe('GridNodeHeader Regenerate toolbar (issue #1502)', () => {
     }));
     render(<div role="menu"><RegenerateProviderMenu providers={rows} currentProviderId="launch/0" onPick={pick} /></div>);
     fireEvent.click(screen.getByRole('menuitem', { name: /Second native/ }));
-    expect(pick).toHaveBeenCalledWith('launch/1', 'Second native');
+    expect(pick).toHaveBeenCalledWith('launch/1', 'Second native', expect.objectContaining({ replaceSelection: true }));
     pick.mockClear();
     fireEvent.click(screen.getByRole('menuitem', { name: /Unavailable/ }));
     expect(pick).not.toHaveBeenCalled();
@@ -309,6 +311,7 @@ describe('GridNodeHeader Regenerate toolbar (issue #1502)', () => {
     const submenu = await screen.findByTestId('grid-regenerate-submenu');
     expect(submenu).toBeTruthy();
     const current = await screen.findByTestId('grid-regenerate-submenu-current');
+    expect(screen.getAllByRole('menu')).toHaveLength(2);
     expect(current.textContent).toMatch(/Current \(Claude Code\)/);
   });
 

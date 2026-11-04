@@ -288,90 +288,115 @@ pub fn regenerate_load_blocking(node_id: i64) -> Result<(String, bool), AgentNod
     ))
 }
 
-/// Sync helper for steps 4–6 of the regenerate orchestrator: write the
-/// new `provider` column, reload the row, and return whether the new
-/// spawn should resume the existing session (same-harness with a
-/// captured `cli_session_id`) or start fresh.
-///
-/// Takes `&str` references — the caller owns the strings and the
-/// helper does NOT need to capture them into a `'static` closure.
-/// `decide_resume` owns the cross-harness rejection rule.
-pub fn regenerate_apply_blocking(
-    node_id: i64,
-    old_provider: &str,
-    new_provider: &str,
-) -> Result<bool, AgentNodeError> {
-    match crate::preferences::default_store() {
-        Some(store) => regenerate_apply_blocking_from(&store, node_id, old_provider, new_provider),
-        // A build with **no** store installed (a test that never installed one)
-        // reads the code-defined defaults, so a caller that does not depend on
-        // stored preferences keeps working (issue #1482).
-        None => regenerate_apply_blocking_with(
-            crate::preferences::AppPreferences::default(),
-            node_id,
-            old_provider,
-            new_provider,
-        ),
-    }
+pub struct PreparedRegenerate {
+    configuration: crate::preferences::spawn_configurations::SpawnConfiguration,
+    runtime: crate::models::EnvType,
+    resume: bool,
 }
 
-/// [`regenerate_apply_blocking`] against an explicit store.
-///
-/// The caller owns the store, so the saved configurations and the provider
-/// pairings this regenerate resolves are the ones the caller set up
-/// (issue #1482).
-pub fn regenerate_apply_blocking_from(
-    store: &crate::preferences::PreferencesStore,
+/// Validate and freeze the complete replacement before interrupting the current
+/// process. Replacing the recipe preserves a same-harness transcript only when
+/// the replacement still uses the home that holds that transcript.
+pub fn regenerate_prepare_selection(
+    prefs: &crate::preferences::AppPreferences,
     node_id: i64,
     old_provider: &str,
     new_provider: &str,
-) -> Result<bool, AgentNodeError> {
-    let prefs = store.load().map_err(AgentNodeError::Backend)?;
-    regenerate_apply_blocking_with(prefs, node_id, old_provider, new_provider)
-}
-
-/// The apply itself, with the preferences already read.
-fn regenerate_apply_blocking_with(
-    prefs: crate::preferences::AppPreferences,
-    node_id: i64,
-    old_provider: &str,
-    new_provider: &str,
-) -> Result<bool, AgentNodeError> {
+    configuration_id: Option<&str>,
+    login_id: Option<&str>,
+    replace_selection: bool,
+) -> Result<PreparedRegenerate, AgentNodeError> {
     let node = db::get_agent_node_by_id(node_id)?;
-    let mut plan = crate::preferences::launch_configurations::resolve(
-        &prefs,
+    let previous_configuration = db::node_spawn_configuration(node_id, old_provider)
+        .map_err(|error| AgentNodeError::Backend(error.to_string()))?;
+    let replaces_plan = replace_selection || configuration_id.is_some() || login_id.is_some();
+    if !replaces_plan && old_provider == new_provider {
+        if let Some(configuration) = previous_configuration
+            .as_ref()
+            .filter(|configuration| configuration.resolved.is_some())
+        {
+            return Ok(PreparedRegenerate {
+                configuration: configuration.clone(),
+                runtime: node.env,
+                resume: decide_resume(old_provider, old_provider, node.cli_session_id.as_deref())
+                    .is_some(),
+            });
+        }
+    }
+    let mut launch_preferences = prefs.clone();
+    let configuration = crate::preferences::spawn_configurations::resolve_menu_selection(
+        prefs,
         new_provider,
+        configuration_id,
+        login_id,
+    )
+    .map_err(AgentNodeError::InvalidConfiguration)?;
+    let selection = if let Some(mut configuration) = configuration {
+        let id = configuration.id.clone();
+        if let Some(plan) = &configuration.resolved {
+            configuration.login_id = plan.harness_login.as_ref().map(|login| login.id.clone());
+        }
+        launch_preferences
+            .spawn_configurations
+            .retain(|c| c.id != id);
+        launch_preferences.spawn_configurations.push(configuration);
+        id
+    } else {
+        new_provider.to_string()
+    };
+    let mut plan = crate::preferences::launch_configurations::resolve(
+        &launch_preferences,
+        &selection,
         &Default::default(),
     )
     .map_err(AgentNodeError::InvalidConfiguration)?;
-    let resume = decide_resume(
+    let same_harness_session = decide_resume(
         old_provider,
         &plan.spawn_option_id,
         node.cli_session_id.as_deref(),
     )
     .is_some();
-    // A resumed session lives in the home of the Harness Login that started
-    // it, so a native resume keeps that login rather than the new plan's:
-    // an additional login, or `None` for the Default login. A node with no
-    // frozen plan has no recorded login, so the new plan's stands.
-    if resume && plan.route.is_none() {
-        if let Some(previous) = db::node_spawn_configuration(node_id, old_provider)
-            .map_err(|error| AgentNodeError::Backend(error.to_string()))?
-            .and_then(|value| value.resolved)
-        {
-            plan.harness_login = previous.harness_login;
+    let previous_plan = previous_configuration
+        .as_ref()
+        .and_then(|configuration| configuration.resolved.as_ref());
+    // Legacy provider-only calls keep the home of their existing transcript.
+    // An explicit replacement keeps its selected login; it must never have that
+    // choice overwritten by the previous plan.
+    if !replaces_plan && same_harness_session && plan.route.is_none() {
+        if let Some(previous) = previous_plan {
+            plan.harness_login = previous.harness_login.clone();
         }
     }
     let runtime = plan.harness.runtime.unwrap_or_else(|| {
         crate::env::resolve_raw_path(&crate::env::node_working_path(&node).raw_path).env_type
     });
-    db::replace_node_launch(
-        node_id,
-        &crate::preferences::launch_configurations::snapshot(plan),
+    if let Some(login) = plan.harness_login.as_ref().filter(|_| replaces_plan) {
+        if let Some(reason) = crate::preferences::harness_logins::runtime_refusal(login, runtime) {
+            return Err(AgentNodeError::InvalidConfiguration(reason));
+        }
+    }
+    // A login's id or label can change without moving its sessions. Conversely,
+    // reusing an id for a different home cannot make the old transcript available.
+    // Compare the frozen homes after resolving Default to the absent login.
+    let previous_home = previous_plan
+        .and_then(|plan| plan.harness_login.as_ref())
+        .map(|login| login.home.as_str());
+    let selected_home = plan.harness_login.as_ref().map(|login| login.home.as_str());
+    let resume = same_harness_session && runtime == node.env && previous_home == selected_home;
+    Ok(PreparedRegenerate {
+        configuration: crate::preferences::launch_configurations::snapshot(plan),
         runtime,
-    )
-    .map_err(|error| AgentNodeError::Backend(error.to_string()))?;
-    Ok(resume)
+        resume,
+    })
+}
+
+pub fn regenerate_apply_prepared_blocking(
+    node_id: i64,
+    prepared: PreparedRegenerate,
+) -> Result<bool, AgentNodeError> {
+    db::replace_node_launch(node_id, &prepared.configuration, prepared.runtime)
+        .map_err(|error| AgentNodeError::Backend(error.to_string()))?;
+    Ok(prepared.resume)
 }
 
 /// Sync helper for step 8 of [`regenerate`]: reload the node row

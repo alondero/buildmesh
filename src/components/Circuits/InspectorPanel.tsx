@@ -32,9 +32,9 @@
  *      serialises into a circuit the new harness can't honour.
  */
 
-import { useEffect, useMemo, useState } from 'react';
-import { listProviders } from '../../lib/tauri/provider';
-import type { ProviderInfo } from '../../types/generated/ProviderInfo';
+import { useMemo, useState } from 'react';
+import { useProviderList } from '../../hooks/useProviderList';
+import { SpawnOptionPicker } from '../Providers/SpawnOptionPicker';
 import type { CircuitGraph } from '../../types/generated/CircuitGraph';
 import type { CircuitNode } from '../../types/generated/CircuitNode';
 import type { CircuitNodeKind } from '../../types/generated/CircuitNodeKind';
@@ -59,19 +59,11 @@ import {
 import {
   effortAllowedFor,
   getCapabilitiesFor,
-  HARNESS_IDS,
   HARNESS_LABEL,
   HARNESS_PROFILE_ALIASES,
   type InspectorHarnessId,
 } from './harnessCapabilities';
 
-/**
- * Every built-in adapter, in `Provider::all()` order. Derived from the
- * generated catalog so a new harness appears here without a frontend edit.
- */
-const HARNESS_OPTIONS: { value: InspectorHarnessId; label: string }[] = HARNESS_IDS.map(
-  (value) => ({ value, label: HARNESS_LABEL[value] }),
-);
 
 interface InspectorPanelProps {
   node: CircuitNode | null;
@@ -111,15 +103,6 @@ function harnessIdFromProvider(provider: string | null | undefined): InspectorHa
   return null;
 }
 
-/**
- * Inverse of `harnessIdFromProvider` for the wire payload — keep the
- * user's id canonical. The backend's `Provider::from_db_str` accepts
- * both `codex` and `agy` (so does the inspector dropdown), so this
- * just maps back to the wire shape the AST serialises.
- */
-function providerStringFromHarnessId(id: InspectorHarnessId): string {
-  return id;
-}
 
 const inputClass =
   'w-full px-2 py-1 bg-bg-input border border-border-subtle rounded-md text-xs text-text-primary focus:outline-none focus:border-border-active';
@@ -781,14 +764,7 @@ function SpawnAgentNodeFields({
   isReviewerSpawn: boolean;
 }) {
   const harnessId = harnessIdFromProvider(kind.provider);
-  const [configurations, setConfigurations] = useState<ProviderInfo[] | null>(null);
-  useEffect(() => {
-    let active = true;
-    void listProviders().then((rows) => {
-      if (active && Array.isArray(rows)) setConfigurations(rows);
-    }).catch(() => { /* Preserve the legacy editor when the backend is offline. */ });
-    return () => { active = false; };
-  }, []);
+  const configurations = useProviderList();
   const selected = configurations?.find((row) => row.id === kind.provider);
   const caps = selected?.capabilities ?? getCapabilitiesFor(harnessId);
 
@@ -821,60 +797,14 @@ function SpawnAgentNodeFields({
             : 'Provider override'
         }
       >
-        <select
-          value={configurations ? (kind.provider ?? '') : (harnessId ?? kind.provider ?? '')}
-          aria-label="Provider"
-          data-testid="inspector-provider-select"
-          onChange={(e) => {
-            const v = e.target.value;
-            // Issue #1362 review (PR #1362): when the user switches
-            // provider, the previously-authored `model` / `effort` /
-            // `extra_args` may no longer be honoured by the new
-            // harness's capability contract. Clear them so the AST
-            // doesn't serialise dangling configuration that the
-            // resolver would silently drop at spawn time — the next
-            // edit re-populates them. The `provider` itself is the
-            // one field that legitimately persists across switches.
-            //
-            // `timeout_seconds` is NOT cleared here: it's orchestrator
-            // policy (the future step-level watchdog is builtmesh-wide,
-            // not harness-specific), so it persists across harness
-            // switches. No harness has yet advertised it does NOT
-            // support timeout, and the field is hidden behind a
-            // `Provider: Some(_)` selector only by historical accident
-            // (#1219 review).
-            const next: Partial<typeof kind> =
-              v === ''
-                ? { provider: null }
-                : { provider: configurations ? v : providerStringFromHarnessId(v as InspectorHarnessId) };
-            onChange({
-              ...kind,
-              ...next,
-              model: null,
-              effort: null,
-              extra_args: null,
-            });
-          }}
-          className={inputClass}
-        >
-          <option value="">
-            {isReviewerSpawn
-              ? 'Default (Reviewer provider/source agent)'
-              : 'Default (mesh provider)'}
-          </option>
-          {configurations && kind.provider && !selected && (
-            <option value={kind.provider}>{kind.provider} (saved selection)</option>
-          )}
-          {configurations ? configurations.map((row) => (
-            <option key={row.id} value={row.id} disabled={!!row.unavailable_reason}>
-              {row.label}{row.unavailable_reason ? ` — ${row.unavailable_reason}` : ''}
-            </option>
-          )) : HARNESS_OPTIONS.map((opt) => (
-            <option key={opt.value} value={opt.value}>
-              {opt.label}
-            </option>
-          ))}
-        </select>
+        <SpawnOptionPicker
+          ariaLabel="Provider"
+          providers={configurations ?? []}
+          value={kind.provider}
+          unsetValue={null}
+          unsetLabel={isReviewerSpawn ? 'Default (Reviewer provider/source agent)' : 'Default (mesh provider)'}
+          onSelect={(provider) => onChange({ ...kind, provider, model: null, effort: null, extra_args: null })}
+        />
       </Field>
 
       {/* Capability-gated overrides — rendered only when a harness is

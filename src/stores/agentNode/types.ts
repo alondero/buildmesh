@@ -1,3 +1,4 @@
+import type { RegenerateSelection } from '../../lib/regenerate';
 import type { StoreApi } from 'zustand';
 import type { AgentNode } from '../../types/generated/AgentNode';
 import type { CircuitAgentOwnership } from '../../types/generated/CircuitAgentOwnership';
@@ -135,7 +136,7 @@ export interface AgentNodeState {
   /// returned `AgentNode` reflects the post-swap state (the backend has
   /// already updated the row), so the caller can patch the local entry
   /// without an extra `fetchAgentNodes` round-trip on the happy path.
-  regenerateAgentNode: (nodeId: number, newProviderId: string) => Promise<AgentNode>;
+  regenerateAgentNode: (nodeId: number, newProviderId: string, selection?: RegenerateSelection) => Promise<AgentNode>;
   /// Issue #1306 — "Start Fresh" escape hatch. Discards the stale
   /// `cli_session_id` and boots a new session in the same existing worktree.
   /// Invokes `spawnAgent` with `options.fresh: true` (passing `resume: null`

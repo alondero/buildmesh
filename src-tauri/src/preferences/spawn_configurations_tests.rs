@@ -169,3 +169,48 @@ fn spawn_configurations_cannot_cross_pairings_or_silently_fall_back_when_deleted
         .unwrap_err()
         .contains("no longer exists"));
 }
+
+#[test]
+fn menu_selection_freezes_a_login_for_defaults_and_recipes_and_rejects_stale_picks() {
+    let mut prefs = AppPreferences::default();
+    prefs
+        .harness_logins
+        .push(super::super::harness_logins::HarnessLogin {
+            id: "work".into(),
+            harness_id: "codex".into(),
+            label: "Work".into(),
+            home: "C:/Users/u/.codex-accounts/work".into(),
+        });
+    prefs.spawn_configurations.push(SpawnConfiguration {
+        id: "launch/codex-high".into(),
+        name: "High".into(),
+        spawn_option_id: "codex".into(),
+        effort: Some("high".into()),
+        login_id: Some("work".into()),
+        ..Default::default()
+    });
+    for recipe in [None, Some("launch/codex-high")] {
+        let picked = resolve_menu_selection(&prefs, "codex", recipe, Some("work"))
+            .unwrap()
+            .unwrap();
+        let plan = picked.resolved.unwrap();
+        assert_eq!(plan.harness_login.unwrap().id, "work");
+        assert_eq!(plan.effort.as_deref(), recipe.map(|_| "high"));
+        assert!(resolve_menu_selection(&prefs, "codex", recipe, Some("deleted")).is_err());
+    }
+    let default =
+        resolve_menu_selection(&prefs, "codex", Some("launch/codex-high"), Some("default"))
+            .unwrap()
+            .unwrap();
+    assert!(
+        default.resolved.unwrap().harness_login.is_none(),
+        "the explicit default pick overrides a pin"
+    );
+    assert_eq!(
+        prefs.spawn_configurations[0].login_id.as_deref(),
+        Some("work"),
+        "menu selection never edits the recipe"
+    );
+    assert!(resolve_menu_selection(&prefs, "claude", None, Some("work")).is_err());
+    assert!(resolve_menu_selection(&prefs, "codex", Some("launch/deleted"), Some("work")).is_err());
+}

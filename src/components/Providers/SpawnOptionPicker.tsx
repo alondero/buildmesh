@@ -20,7 +20,6 @@
  */
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import type { ProviderInfo } from '../../types/generated/ProviderInfo';
 import { mapBackendProviders, type SpawnOption } from '../../lib/groups';
 import { listSpawnConfigurations } from '../../lib/tauri/provider';
 import { GroupedProviderMenu } from './GroupedProviderMenu';
@@ -36,7 +35,7 @@ import { GroupedProviderMenu } from './GroupedProviderMenu';
  * falls back to `listSpawnConfigurations()` for `launch/`-prefixed ids.
  * Returns `null` when the id cannot be resolved (caller decides the fallback).
  */
-export function useSpawnOptionLabel(providers: ProviderInfo[], id: string | null): string | null {
+export function useSpawnOptionLabel(providers: SpawnOption[], id: string | null): string | null {
   const options = useMemo(() => mapBackendProviders(providers), [providers]);
   const fromOptions = id ? options.find((option) => option.id === id)?.label : undefined;
   const [fetchedName, setFetchedName] = useState<string | null>(null);
@@ -69,7 +68,7 @@ export interface SpawnOptionPickerProps {
   ariaLabel: string;
   /** Raw backend rows (`listProviders()` / `useProviderList`) — mapped
    *  internally to the frontend `SpawnOption` shape. */
-  providers: ProviderInfo[];
+  providers: SpawnOption[];
   /** Current selection id, or `null` for "inherit / unset". */
   value: string | null;
   /** Label shown when `value` is `null`. */
@@ -170,11 +169,6 @@ export function SpawnOptionPicker({
     size === 'md'
       ? 'w-full flex items-center justify-between gap-2 bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50'
       : 'w-full flex items-center justify-between gap-2 bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50';
-  const unsetClass =
-    size === 'md'
-      ? 'w-full px-4 py-2.5 text-left text-base text-text-primary hover:bg-bg-selection focus:bg-bg-selection focus:outline-none'
-      : 'w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-selection focus:bg-bg-selection focus:outline-none';
-
   return (
     <div className={className}>
       <button
@@ -223,25 +217,15 @@ export function SpawnOptionPicker({
               close();
             }}
           >
-            <div role="menu" aria-label={ariaLabel}>
-              <button
-                type="button"
-                role="menuitem"
-                className={unsetClass}
-                onClick={() => pick(unsetValue)}
-              >
-                {unsetLabel}
-              </button>
-            </div>
-            <div className="border-t border-border-subtle">
               <GroupedProviderMenu
+                mode="settings"
                 providers={options}
+                leadingAction={{ id: '__inherit', label: unsetLabel, onSelect: () => pick(unsetValue) }}
                 filter={filter}
                 decorate={decorate}
                 onSelect={(providerId, _altKey, configurationId) => pick(configurationId ?? providerId)}
                 onClose={close}
               />
-            </div>
           </div>,
           triggerRef.current?.closest('[role="dialog"]') ?? document.body,
         )}

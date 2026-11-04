@@ -7,6 +7,7 @@ import { useWsEvents } from "../useWsEvents";
 import { NodePullRequest } from './PullRequests';
 import { NodeCircuitRunPanel } from './CircuitRun';
 import { StartReview } from './StartReview';
+import { NodeGlancePanel } from '../components/NodeGlancePanel';
 
 export default function NodeOverview({
   node: initial,
@@ -196,6 +197,7 @@ export default function NodeOverview({
             </p>
           </section>
         )}
+        {!missing && <NodeGlancePanel nodeId={node.id} onAuthFailed={onAuthFailed} />}
         {isSignalHealthProblem(node.signal_health) && (
           <p className="health-note">
             {signalHealthNote(node.signal_health)}

@@ -152,7 +152,7 @@ describe('NodeItem running-node confirm dialog (issue #778)', () => {
 
       // IPC fired once with the right args — no dialog gate for these statuses.
       expect(useAgentNodeStore.getState().regenerateAgentNode).toHaveBeenCalledTimes(1);
-      expect(useAgentNodeStore.getState().regenerateAgentNode).toHaveBeenCalledWith(21, 'claude');
+      expect(useAgentNodeStore.getState().regenerateAgentNode).toHaveBeenCalledWith(21, 'claude', expect.objectContaining({ replaceSelection: true }));
       // No dialog rendered (the picker closed after the click, and no modal took its place).
       expect(screen.queryByRole('dialog')).toBeNull();
     },
@@ -214,7 +214,7 @@ describe('NodeItem running-node confirm dialog (issue #778)', () => {
     await waitFor(() => {
       expect(useAgentNodeStore.getState().regenerateAgentNode).toHaveBeenCalledTimes(1);
     });
-    expect(useAgentNodeStore.getState().regenerateAgentNode).toHaveBeenCalledWith(33, 'claude');
+    expect(useAgentNodeStore.getState().regenerateAgentNode).toHaveBeenCalledWith(33, 'claude', expect.objectContaining({ replaceSelection: true }));
     await waitFor(() => {
       expect(screen.queryByRole('dialog')).toBeNull();
     });

@@ -191,7 +191,13 @@ describe('test tree guards (#2534)', () => {
     expect(files.length).toBeGreaterThan(50);
   });
 
-  it('each module specifier in tests/ resolves to a file that exists', () => {
+  // The two scans below read every file under `tests/` and resolve every
+  // module specifier they find, so their runtime is the machine's, not the
+  // code's: under a loaded box one of them has been seen to take 41s against
+  // vitest's 30s default and fail as a timeout rather than as a guard. The
+  // explicit timeout keeps the failure meaning "the tree is broken" instead
+  // of "the box was busy".
+  it('each module specifier in tests/ resolves to a file that exists', { timeout: 120_000 }, () => {
     const unresolved = findUnresolvedImports(files, repoCompilerOptions());
     if (unresolved.length > 0) {
       const report = unresolved
@@ -208,7 +214,7 @@ describe('test tree guards (#2534)', () => {
     }
   });
 
-  it('no file in tests/ asserts a tautology', () => {
+  it('no file in tests/ asserts a tautology', { timeout: 120_000 }, () => {
     const tautologies = findTautologies(files);
     if (tautologies.length > 0) {
       const report = tautologies

@@ -198,8 +198,14 @@ pub(super) fn append_naming_turns(out: &mut Vec<Turn>, turns: Vec<Turn>) {
 /// Why a transcript could not be read. Typed so the Coordinator can tell a
 /// genuinely-quiet node from a degraded rich layer (ADR-0008 §3) — never a
 /// panic, never a silent empty result.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(
+    export,
+    rename = "TranscriptUnavailableReason",
+    rename_all = "snake_case",
+    export_to = "TranscriptUnavailableReason.ts"
+)]
 pub enum UnavailableReason {
     /// The provider doesn't produce a readable transcript at all (capability
     /// flag off — e.g. OpenCode, Agy, Terminal). Distinct from `NoSession` so a

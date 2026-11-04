@@ -49,7 +49,7 @@ const proxied = (harnessId: string, providerId: string): ProviderInfo => ({
 // deliberately still exposes direct Provider Routes. Spawn-mode hiding is
 // covered by launch-configuration-spawn-menu.test.tsx.
 const GroupedProviderMenu = (props: ComponentProps<typeof Menu>) =>
-  <Menu configurationsEnabled={false} {...props} />;
+  <Menu mode="resume" {...props} />;
 
 afterEach(() => cleanup());
 

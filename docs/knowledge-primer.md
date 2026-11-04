@@ -54,6 +54,7 @@ Supporting detail that is a current contract rather than architecture: the
 [circuit effect recovery](development/circuit-effect-recovery.md),
 [circuits from Agent Nodes](development/agent-node-circuits.md),
 [node status observation](development/node-status-observation.md),
+[Node Glance](development/node-glance.md),
 [coordinator read API](development/coordinator-read-api.md),
 [Android client](development/android.md), and the
 [Probe UI checklist](development/probe-ui-checklist.md).

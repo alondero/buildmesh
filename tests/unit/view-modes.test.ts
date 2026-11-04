@@ -6,6 +6,8 @@
  * contracts here are the seam that ticket builds on.
  */
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
   deriveScope,
   isMeshScopedView,
@@ -358,4 +360,69 @@ describe('search within the chosen scope (#2683)', () => {
     });
     expect(result.visibleNodes.map(node => node.id)).toEqual(expected);
   });
+});
+
+/**
+ * `visibleNodes` is never the store's own node array, and the doc comment on
+ * `DerivedScope.visibleNodes` says so.
+ *
+ * The comment used to claim the opposite: that the 'all' view mode "hands
+ * back the shared derived node array unchanged". `scopeNodesForMode('all')`
+ * does return the shared array, but `deriveScope` narrows every scope with
+ * `filter`, so `visibleNodes` is a copy in every mode. A comment that
+ * promises identity sends the next caller to reach for `===` or to use the
+ * array as a memo key against a guarantee the code does not keep.
+ *
+ * These assertions pin the behaviour the comment states, not the words the
+ * comment uses. An earlier version searched the comment for the words
+ * "unchanged" or "shared" and asserted against the result of that search: a
+ * comment that made the same false promise in other words left the search
+ * false, so the assertion compared `true` with itself and the guard passed.
+ * Asserting that the array is not the caller's own cannot be fooled by
+ * wording — if the implementation ever hands the input array back, these
+ * assertions fail and the comment has to be re-read alongside them.
+ *
+ * What is NOT pinned is the array's identity ACROSS calls. The comment says
+ * callers must not rely on that identity, which is a prohibition on the
+ * caller rather than a guarantee about the implementation: a memoised
+ * derivation would still hand back a copy of the store's array and would
+ * still satisfy every promise the comment makes. An assertion that two
+ * calls return different objects would forbid that optimisation, and no
+ * caller needs it, so it is not here.
+ *
+ * The comment is checked for presence only. Nothing here can read whether
+ * its wording is true; what keeps it true is the behaviour asserted below.
+ */
+describe('DerivedScope.visibleNodes is never the store\'s own array', () => {
+  const SOURCE = readFileSync(resolve(__dirname, '../../src/lib/viewModes.ts'), 'utf8');
+
+  /** The doc comment the source carries for one interface member. */
+  function docCommentFor(member: string): string {
+    const at = SOURCE.indexOf(`${member}:`);
+    expect(at, `${member} is missing from src/lib/viewModes.ts`).toBeGreaterThan(-1);
+    const start = SOURCE.lastIndexOf('/**', at);
+    const end = SOURCE.indexOf('*/', start);
+    expect(start, `${member} carries no doc comment`).toBeGreaterThan(-1);
+    expect(end, `${member} carries no doc comment`).toBeLessThan(at);
+    expect(SOURCE.slice(end + 2, at).trim(), `${member} carries no doc comment`).toBe('');
+    return SOURCE.slice(start + 3, end);
+  }
+
+  it('keeps the promise documented', () => {
+    expect(docCommentFor('visibleNodes')).not.toBe('');
+  });
+
+  it.each([
+    ['all', 'all', null],
+    ['pinned', 'pinned', null],
+    ['mesh', 'mesh', 10],
+    ['single', 'all', null],
+  ] as const)('hands back a copy in the %s scope, never the caller\'s own',
+    (viewMode, lastNonSingleMode, selectedMeshId) => {
+      const scope = deriveScope({
+        viewMode, lastNonSingleMode, agentNodes: NODES,
+        selectedMeshId, activeNodeId: null,
+      });
+      expect(scope.visibleNodes).not.toBe(NODES);
+    });
 });

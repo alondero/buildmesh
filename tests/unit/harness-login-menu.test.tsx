@@ -10,6 +10,7 @@ import * as api from '../../src/lib/tauri/provider';
 import type { HarnessLoginStatus } from '../../src/types/generated/HarnessLoginStatus';
 import type { SpawnConfiguration } from '../../src/types/generated/SpawnConfiguration';
 import { HARNESS_CAPABILITIES } from '../../src/types/generated/HarnessCapabilitiesTable';
+import { RegenerateProviderMenu } from '../../src/components/Providers/RegenerateProviderMenu';
 
 vi.mock('../../src/lib/tauri/provider', () => ({
   listSpawnConfigurations: vi.fn(),
@@ -54,8 +55,39 @@ async function openLogins() {
 }
 
 describe('the Codex login submenu', () => {
+  it('uses the same login and configuration ladder for regenerate alternatives', async () => {
+    const onPick = vi.fn();
+    render(<RegenerateProviderMenu providers={[codex]} currentProviderId="codex" onPick={onPick} />);
+    await userEvent.click(screen.getByTestId('regenerate-submenu-current'));
+    expect(onPick).toHaveBeenLastCalledWith('codex', 'Codex');
+    await openLogins();
+    await userEvent.click(screen.getByRole('button', { name: 'Work configurations' }));
+    await userEvent.click(await screen.findByRole('menuitem', { name: 'Any login' }));
+    expect(onPick).toHaveBeenLastCalledWith('codex', 'Codex', {
+      configurationId: 'launch/any', loginId: 'work', replaceSelection: true,
+    });
+  });
+
+  it('keeps Current available when its frozen recipe was deleted from the catalogue', async () => {
+    const onPick = vi.fn();
+    render(<RegenerateProviderMenu providers={[codex]} currentProviderId="launch/removed"
+      currentConfiguration={configuration('launch/removed', 'Old work recipe', { login_id: 'work' })} onPick={onPick} />);
+    await userEvent.click(screen.getByRole('menuitem', { name: /Current \(Old work recipe\)/ }));
+    expect(onPick).toHaveBeenCalledWith('codex', 'Old work recipe');
+  });
+
+  it('does not bypass an unavailable harness by picking a login', async () => {
+    const onSelect = vi.fn();
+    render(<GroupedProviderMenu providers={[{ ...codex, unavailable_reason: 'Harness unavailable' }]} onSelect={onSelect} />);
+    const menu = await openLogins();
+    const work = within(menu).getByRole('menuitem', { name: /Work/ });
+    expect(work.getAttribute('aria-disabled')).toBe('true');
+    await userEvent.click(work);
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
   it('lists every login between the harness row and its configurations', async () => {
-    render(<GroupedProviderMenu providers={[codex]} onSelect={vi.fn()} loginsEnabled />);
+    render(<GroupedProviderMenu providers={[codex]} onSelect={vi.fn()} />);
     const menu = await openLogins();
     const rows = within(menu).getAllByRole('menuitem');
     expect(rows.map((row) => row.textContent)).toEqual([
@@ -68,7 +100,7 @@ describe('the Codex login submenu', () => {
 
   it('spawns the defaults with the picked login', async () => {
     const onSelect = vi.fn();
-    render(<GroupedProviderMenu providers={[codex]} onSelect={onSelect} loginsEnabled />);
+    render(<GroupedProviderMenu providers={[codex]} onSelect={onSelect} />);
     const menu = await openLogins();
     await userEvent.click(within(menu).getByRole('menuitem', { name: /^Work/ }));
     expect(onSelect).toHaveBeenCalledWith('codex', false, undefined, 'work');
@@ -76,7 +108,7 @@ describe('the Codex login submenu', () => {
 
   it("offers unpinned configurations and the login's own pins, and launches them with that login", async () => {
     const onSelect = vi.fn();
-    render(<GroupedProviderMenu providers={[codex]} onSelect={onSelect} loginsEnabled />);
+    render(<GroupedProviderMenu providers={[codex]} onSelect={onSelect} />);
     const menu = await openLogins();
     await userEvent.click(within(menu).getByRole('button', { name: 'Work configurations' }));
     const configurations = await screen.findByRole('menu', { name: 'Codex Work configurations' });
@@ -91,7 +123,7 @@ describe('the Codex login submenu', () => {
   });
 
   it('hides a configuration pinned to another login from the Default login', async () => {
-    render(<GroupedProviderMenu providers={[codex]} onSelect={vi.fn()} loginsEnabled />);
+    render(<GroupedProviderMenu providers={[codex]} onSelect={vi.fn()} />);
     const menu = await openLogins();
     await userEvent.click(within(menu).getByRole('button', { name: 'Default configurations' }));
     const configurations = await screen.findByRole('menu', { name: 'Codex Default configurations' });
@@ -104,7 +136,7 @@ describe('the Codex login submenu', () => {
       configuration('launch/any', 'Any login'),
       configuration('launch/minimax', 'MiniMax route', { spawn_option_id: 'codex:minimax', provider_route_id: 'minimax' }),
     ]);
-    render(<GroupedProviderMenu providers={[codex]} onSelect={vi.fn()} loginsEnabled />);
+    render(<GroupedProviderMenu providers={[codex]} onSelect={vi.fn()} />);
     const menu = await openLogins();
     await userEvent.click(within(menu).getByRole('button', { name: 'Work configurations' }));
     const work = await screen.findByRole('menu', { name: 'Codex Work configurations' });
@@ -118,7 +150,7 @@ describe('the Codex login submenu', () => {
   it('keeps an additional login that is not signed in out of reach', async () => {
     vi.mocked(api.listHarnessLogins).mockResolvedValue([DEFAULT, login('spare', 'Spare', { signed_in: false })]);
     const onSelect = vi.fn();
-    render(<GroupedProviderMenu providers={[codex]} onSelect={onSelect} loginsEnabled />);
+    render(<GroupedProviderMenu providers={[codex]} onSelect={onSelect} />);
     const menu = await openLogins();
     const spare = within(menu).getByRole('menuitem', { name: /^Spare/ });
     expect(spare.getAttribute('aria-disabled')).toBe('true');
@@ -131,13 +163,13 @@ describe('the Codex login submenu', () => {
 
   it('flags a login signed in to the same ChatGPT account as another', async () => {
     vi.mocked(api.listHarnessLogins).mockResolvedValue([DEFAULT, { ...WORK, same_account_as: 'Default' }]);
-    render(<GroupedProviderMenu providers={[codex]} onSelect={vi.fn()} loginsEnabled />);
+    render(<GroupedProviderMenu providers={[codex]} onSelect={vi.fn()} />);
     const menu = await openLogins();
     expect(within(menu).getByRole('menuitem', { name: /^Work/ }).textContent).toContain('Same ChatGPT account as Default');
   });
 
   it('walks in and out with the arrow keys', async () => {
-    render(<GroupedProviderMenu providers={[codex]} onSelect={vi.fn()} loginsEnabled />);
+    render(<GroupedProviderMenu providers={[codex]} onSelect={vi.fn()} />);
     await screen.findByRole('button', { name: 'Codex logins' });
     const harnessRow = screen.getByRole('menuitem', { name: 'Codex' });
     harnessRow.focus();
@@ -158,7 +190,7 @@ describe('the Codex login submenu', () => {
   });
 
   it('lets the keyboard close a configuration submenu opened by hovering a login', async () => {
-    render(<GroupedProviderMenu providers={[codex]} onSelect={vi.fn()} loginsEnabled />);
+    render(<GroupedProviderMenu providers={[codex]} onSelect={vi.fn()} />);
     const menu = await openLogins();
     await userEvent.hover(within(menu).getByRole('menuitem', { name: /^Default/ }));
     await screen.findByRole('menu', { name: 'Codex Default configurations' });
@@ -172,15 +204,15 @@ describe('the Codex login submenu', () => {
 
   it('leaves the menu unchanged with a single login', async () => {
     vi.mocked(api.listHarnessLogins).mockResolvedValue([DEFAULT]);
-    render(<GroupedProviderMenu providers={[codex]} onSelect={vi.fn()} loginsEnabled />);
+    render(<GroupedProviderMenu providers={[codex]} onSelect={vi.fn()} />);
     await waitFor(() => expect(api.listHarnessLogins).toHaveBeenCalled());
     await userEvent.click(await screen.findByRole('button', { name: 'Codex configurations' }));
     expect(await screen.findByRole('menu', { name: 'Codex configurations' })).toBeTruthy();
     expect(screen.queryByRole('menu', { name: 'Codex logins' })).toBeNull();
   });
 
-  it('never offers a login on a surface that cannot pass it on', async () => {
-    render(<GroupedProviderMenu providers={[codex]} onSelect={vi.fn()} />);
+  it('offers saved configurations without transient login picks for settings', async () => {
+    render(<GroupedProviderMenu providers={[codex]} onSelect={vi.fn()} mode="settings" />);
     await userEvent.click(await screen.findByRole('button', { name: 'Codex configurations' }));
     expect(await screen.findByRole('menu', { name: 'Codex configurations' })).toBeTruthy();
     expect(api.listHarnessLogins).not.toHaveBeenCalled();

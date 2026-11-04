@@ -165,6 +165,7 @@ pub fn create_node_circuit_run(
             max_rounds,
             reviewer_provider,
             &crate::preferences::AppPreferences::default(),
+            None,
         ),
     }
 }
@@ -188,6 +189,31 @@ pub fn create_node_circuit_run_from(
         max_rounds,
         reviewer_provider,
         &preferences,
+        None,
+    )
+}
+
+/// Start a review with the login chosen from the common Spawn Menu. The
+/// selection is frozen in each reviewer launch, never persisted as a preference.
+pub fn create_node_circuit_run_with_login(
+    store: Option<&crate::preferences::PreferencesStore>,
+    node_id: i64,
+    selected_circuit_id: Option<i64>,
+    max_rounds: i32,
+    reviewer_provider: Option<String>,
+    reviewer_login_id: Option<String>,
+) -> Result<i64, DbError> {
+    let preferences = match store {
+        Some(store) => store.load()?,
+        None => crate::preferences::AppPreferences::default(),
+    };
+    create_node_circuit_run_with_preferences(
+        node_id,
+        selected_circuit_id,
+        max_rounds,
+        reviewer_provider,
+        &preferences,
+        reviewer_login_id,
     )
 }
 
@@ -198,6 +224,7 @@ fn create_node_circuit_run_with_preferences(
     max_rounds: i32,
     reviewer_provider: Option<String>,
     preferences: &crate::preferences::AppPreferences,
+    reviewer_login_id: Option<String>,
 ) -> Result<i64, DbError> {
     // First-writer-wins dedupe (#1660) on the process-global reader so the
     // writer mutex is not held for a pure read.
@@ -214,7 +241,7 @@ fn create_node_circuit_run_with_preferences(
         node_id,
         selected_circuit_id,
         max_rounds,
-        (reviewer_provider, Some(preferences)),
+        (reviewer_provider, Some(preferences), reviewer_login_id),
         None,
     )
 }
@@ -233,6 +260,7 @@ fn create_node_circuit_run_with_preferences(
 /// filesystem I/O and the writer mutex cannot be released mid-call (issue
 /// #1228).
 #[cfg(test)]
+// allow-test-in-production: existing helper is shared by sibling circuit suites using private databases.
 pub(crate) fn create_node_circuit_run_locked(
     db: &mut Connection,
     node_id: i64,
@@ -246,7 +274,7 @@ pub(crate) fn create_node_circuit_run_locked(
         node_id,
         selected_circuit_id,
         max_rounds,
-        (reviewer_provider, Some(&preferences)),
+        (reviewer_provider, Some(&preferences), None),
         None,
     )
 }
@@ -273,7 +301,7 @@ pub fn create_node_circuit_run_locked_from(
         node_id,
         selected_circuit_id,
         max_rounds,
-        (reviewer_provider, Some(&preferences)),
+        (reviewer_provider, Some(&preferences), None),
         None,
     )
 }
@@ -302,7 +330,7 @@ pub(crate) fn create_node_circuit_run_recovery_locked(
         recovery.source_id,
         None,
         max_rounds,
-        (None, None),
+        (None, None, None),
         Some(recovery),
     )
 }
@@ -333,11 +361,15 @@ fn create_node_circuit_run_with_recovery_locked(
     node_id: i64,
     selected_circuit_id: Option<i64>,
     max_rounds: i32,
-    reviewer: (Option<String>, Option<&crate::preferences::AppPreferences>),
+    reviewer: (
+        Option<String>,
+        Option<&crate::preferences::AppPreferences>,
+        Option<String>,
+    ),
     recovery: Option<super::recovery::ReviewRecovery>,
 ) -> Result<i64, DbError> {
     let continued_from = recovery.as_ref().map(|recovery| recovery.run_id);
-    let (reviewer_provider, preferences) = reviewer;
+    let (reviewer_provider, preferences, reviewer_login_id) = reviewer;
     let app_reviewer = preferences.and_then(|p| p.reviewer_provider.clone());
     let reviewer_override = if selected_circuit_id.is_none() && recovery.is_none() {
         resolve_preset_reviewer(
@@ -474,6 +506,12 @@ fn create_node_circuit_run_with_recovery_locked(
     if selected_circuit_id.is_none() && recovery.is_none() {
         if let Some(provider) = reviewer_override.as_deref() {
             context.set("review.provider", provider);
+        }
+        if let Some(login_id) = reviewer_login_id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+        {
+            context.set("review.login_id", login_id);
         }
         context.set("source.review_preset", "1");
         context.set(
@@ -657,7 +695,14 @@ fn pin_review_launches(
                 launch_preferences.provider_pairings.push(route.clone());
             }
         }
-        let plan = capture(&launch_preferences, selection, &overrides)?;
+        let mut plan = capture(&launch_preferences, selection, &overrides)?;
+        if preset {
+            crate::preferences::launch_configurations::apply_login_pick(
+                &launch_preferences,
+                &mut plan,
+                context.get("review.login_id"),
+            )?;
+        }
         let key = format!("review.launch.{}", node.id);
         context.set(&key, serde_json::to_string(&snapshot(plan))?);
     }
@@ -2476,7 +2521,7 @@ mod reviewer_tests {
                 source.id,
                 None,
                 2,
-                (None, Some(&prefs)),
+                (None, Some(&prefs), None),
                 None,
             )
             .unwrap();
@@ -2650,7 +2695,7 @@ mod reviewer_tests {
             source.id,
             None,
             2,
-            (None, Some(&preferences)),
+            (None, Some(&preferences), None),
             None,
         )
         .unwrap();
@@ -2735,7 +2780,7 @@ mod reviewer_tests {
             source.id,
             None,
             2,
-            (None, Some(&preferences)),
+            (None, Some(&preferences), None),
             None,
         )
         .unwrap();
@@ -2799,7 +2844,7 @@ mod reviewer_tests {
             source.id,
             None,
             2,
-            (None, Some(&preferences)),
+            (None, Some(&preferences), None),
             None,
         )
         .unwrap();

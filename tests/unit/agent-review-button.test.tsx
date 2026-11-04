@@ -7,6 +7,7 @@ import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeSto
 import { useMeshStore } from '../../src/stores/meshStore';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
 import { useUIStore } from '../../src/stores/uiStore';
+import { __resetHarnessLoginsForTests, publishHarnessLogins } from '../../src/hooks/useHarnessLogins';
 
 const { trigger, list, isRunning } = vi.hoisted(() => ({ trigger: vi.fn(), list: vi.fn(), isRunning: vi.fn() }));
 vi.mock('../../src/lib/tauri', async importOriginal => ({
@@ -73,6 +74,7 @@ const node = { id: 42, mesh_id: 7, name: 'Fix parser', provider: 'claude', statu
 
 describe('agent workflow title-bar control', () => {
   beforeEach(() => {
+    __resetHarnessLoginsForTests();
     trigger.mockReset().mockResolvedValue(91);
     list.mockReset().mockResolvedValue([]);
     // Default: no live agent process. Existing tests use status: 'ready' so
@@ -83,6 +85,21 @@ describe('agent workflow title-bar control', () => {
     seedAgentNodes([node]);
     useAgentNodeStore.setState({ circuitOwnerships: {} });
     useUIStore.setState({ probeOpen: false, pendingCircuitRunFocus: null });
+  });
+
+  it('carries the chosen Harness Login into the review request and selection label', async () => {
+    publishHarnessLogins(['default', 'work'].map(id => ({
+      id, harness_id: 'codex', label: id === 'work' ? 'Work' : 'Default',
+      home: `C:/codex/${id}`, is_default: id === 'default', signed_in: true,
+      email: null, plan: null, same_account_as: null, sign_in: null,
+    })));
+    render(<AgentReviewButton node={node} providerList={PROVIDERS} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Codex logins' }));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Work' }));
+    expect(screen.getByTestId('reviewer-provider-selection').textContent).toContain('Codex · Work');
+    await userEvent.click(screen.getByRole('button', { name: 'Start review' }));
+    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'codex', 'work'));
   });
 
   function renderButton(value: AgentNode = node, providers: SpawnOption[] = PROVIDERS) {
@@ -153,7 +170,7 @@ describe('agent workflow title-bar control', () => {
     expect(screen.getByRole('heading', { name: 'Review or circuit for Fix parser' })).toBeTruthy();
     fireEvent.change(screen.getByLabelText('Maximum review rounds'), { target: { value: '5' } });
     fireEvent.click(screen.getByRole('button', { name: 'Start review' }));
-    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 5, null));
+    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 5, null, undefined));
     await waitFor(() => expect(useUIStore.getState().probeTab).toBe('circuits'));
     expect(useMeshStore.getState().selectedMeshId).toBe(7);
     expect(useAgentNodeStore.getState().activeNodeId).toBe(42);
@@ -164,7 +181,7 @@ describe('agent workflow title-bar control', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
     fireEvent.click(screen.getByRole('menuitem', { name: /Codex/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Start review' }));
-    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'codex'));
+    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'codex', undefined));
   });
 
   it.each(['0', '11', '1.5', ''])('refuses an invalid review round limit %p', value => {
@@ -209,7 +226,7 @@ describe('agent workflow title-bar control', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
     const menu = screen.getByRole('menu', { name: 'Select a provider' });
     expect(within(menu).getAllByRole('menuitem').map(item => item.getAttribute('data-spawn-id')))
-      .toEqual(['claude', 'codex']);
+      .toEqual(['__default', 'claude', 'codex']);
     await userEvent.click(screen.getByRole('button', { name: 'Claude Code configurations' }));
     await userEvent.click(await screen.findByRole('menuitem', { name: 'MiniMax' }));
     // The configuration id is what reaches the backend, where it becomes the
@@ -218,7 +235,7 @@ describe('agent workflow title-bar control', () => {
     // by the Rust test `native_configuration_resolves_selected_values_before_defaults`).
     expect(screen.getByTestId('reviewer-provider-selection').textContent).toBe('MiniMax');
     fireEvent.click(screen.getByRole('button', { name: 'Start review' }));
-    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'launch/claude:minimax'));
+    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'launch/claude:minimax', undefined));
   });
 
   it('sends a cross-harness pick without warning about the model', async () => {
@@ -231,7 +248,7 @@ describe('agent workflow title-bar control', () => {
     expect(screen.queryByText(/#1690/)).toBeNull();
     fireEvent.click(screen.getByRole('menuitem', { name: /Codex/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Start review' }));
-    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'codex'));
+    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'codex', undefined));
   });
 
   it('resets the reviewer provider when the dialog is reopened', async () => {
@@ -241,9 +258,9 @@ describe('agent workflow title-bar control', () => {
     expect(screen.getByTestId('reviewer-provider-selection').textContent).toBe('Codex');
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
-    expect(screen.getByTestId('reviewer-provider-default').getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByTestId('reviewer-provider-selection').textContent).toBe('Default');
     fireEvent.click(screen.getByRole('button', { name: 'Start review' }));
-    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, null));
+    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, null, undefined));
   });
 
   it('offers saved manual Circuits and passes the selected id', async () => {
@@ -261,7 +278,7 @@ describe('agent workflow title-bar control', () => {
     // not that the control is hidden.
     expect(screen.queryByRole('menu', { name: 'Select a provider' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Start Circuit' }));
-    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, 3, 3, null));
+    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, 3, 3, null, undefined));
   });
 
   it('keeps an actionable backend error in the dialog', async () => {
