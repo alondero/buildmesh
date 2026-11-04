@@ -415,7 +415,7 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
             className="px-4 py-3 text-2xs text-text-muted"
             data-testid="command-omnibar-prompt-hint"
           >
-            Enter to spawn · Esc to go back
+            Enter to choose launch options · Esc to go back
           </div>
         ) : results.length > 0 ? (
           <ul

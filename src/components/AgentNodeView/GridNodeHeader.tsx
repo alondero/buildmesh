@@ -1,3 +1,4 @@
+import type { RegenerateSelection } from '../../lib/regenerate';
 import { useRef, useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { useAgentNodeStore, type AgentNode } from '../../stores/agentNodeStore';
@@ -317,7 +318,7 @@ interface KebabActionsProps {
   providerList: SpawnOption[];
   isRegenerateDisabled: boolean;
   hasRegenerateTargets: boolean;
-  onPickRegenerate: (providerId: string, providerLabel: string) => void;
+  onPickRegenerate: (providerId: string, providerLabel: string, selection?: RegenerateSelection) => void;
   /** Circuit-owned row: the run to open in the Circuits Probe, or null. */
   circuitRun: { label: string; title: string; className: string; runId: number } | null;
   /** Opens `circuitRun` in the Circuits Probe, scoped to this node's mesh. */
@@ -363,10 +364,10 @@ function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerL
     setOpen((o) => !o);
   };
 
-  const handleRegenPick = (providerId: string, providerLabel: string) => {
+  const handleRegenPick = (providerId: string, providerLabel: string, selection?: RegenerateSelection) => {
     regenSubmenu.closeSubmenu();
     closeAndReturnFocus();
-    onPickRegenerate(providerId, providerLabel);
+    onPickRegenerate(providerId, providerLabel, selection);
   };
 
   // Issue #814 — converged on the shared `useClickOutside` hook
@@ -387,7 +388,7 @@ function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerL
     activeIndex,
     setActiveIndex,
     onClose: closeAndReturnFocus,
-    enabled: open,
+    enabled: open && !regenSubmenu.submenuOpen,
     itemSelector: '[data-aria-menu-item]',
     skipDisabled: true,
   });
@@ -415,8 +416,6 @@ function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerL
         if (trigger) focusWithoutScroll(trigger);
         return;
       }
-      if (inSubmenu && e.key === 'ArrowDown') { e.preventDefault(); regenSubmenu.stepSubmenuFocus(1); return; }
-      if (inSubmenu && e.key === 'ArrowUp') { e.preventDefault(); regenSubmenu.stepSubmenuFocus(-1); return; }
     };
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
@@ -513,8 +512,6 @@ function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerL
             {regenSubmenu.submenuOpen && (
               <div
                 ref={regenSubmenu.submenuRef}
-                role="menu"
-                aria-label="Pick target provider"
                 data-testid="grid-regenerate-submenu"
                 data-dropdown-for={menuId}
                 // PR #1796 — wider overlap (`-mr-2`, 8 px) absorbs a
@@ -530,6 +527,8 @@ function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerL
                 <RegenerateProviderMenu
                   providers={providerList}
                   currentProviderId={node.launch_configuration?.id ?? node.provider}
+                  currentConfiguration={node.launch_configuration}
+                  onClose={closeAndReturnFocus}
                   onPick={handleRegenPick}
                   submenuTestId="grid-regenerate-submenu"
                 />

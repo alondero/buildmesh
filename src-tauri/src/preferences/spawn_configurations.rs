@@ -167,14 +167,51 @@ pub fn with_login_pick(
     let Some(login) = login.map(str::trim).filter(|id| !id.is_empty()) else {
         return Ok(configuration);
     };
-    if let Some(mut value) = configuration {
+    let mut selected_preferences = prefs.clone();
+    let selection = if let Some(mut value) = configuration {
         value.login_id = Some(login.to_string());
         value.resolved = None;
-        return Ok(Some(value));
-    }
-    let mut plan = super::launch_configurations::resolve(prefs, option, &Default::default())?;
+        let id = value.id.clone();
+        selected_preferences
+            .spawn_configurations
+            .retain(|c| c.id != id);
+        selected_preferences.spawn_configurations.push(value);
+        id
+    } else {
+        option.to_string()
+    };
+    let mut plan = super::launch_configurations::capture(
+        &selected_preferences,
+        &selection,
+        &Default::default(),
+    )?;
     super::launch_configurations::apply_login_pick(prefs, &mut plan, Some(login))?;
     Ok(Some(super::launch_configurations::snapshot(plan)))
+}
+
+/// Resolve the selection emitted by every Spawn Menu against one preferences
+/// snapshot. The login pick wins over a saved configuration's pin.
+pub fn resolve_menu_selection(
+    prefs: &AppPreferences,
+    option: &str,
+    configuration_id: Option<&str>,
+    login_id: Option<&str>,
+) -> Result<Option<SpawnConfiguration>, String> {
+    let configuration = resolve(prefs, option, configuration_id)?;
+    with_login_pick(prefs, option, configuration, login_id)
+}
+
+pub fn resolve_menu_selection_from(
+    store: Option<&super::store::PreferencesStore>,
+    option: &str,
+    configuration_id: Option<&str>,
+    login_id: Option<&str>,
+) -> Result<Option<SpawnConfiguration>, String> {
+    let prefs = match store {
+        Some(store) => store.load()?,
+        None => AppPreferences::default(),
+    };
+    resolve_menu_selection(&prefs, option, configuration_id, login_id)
 }
 
 #[tauri::command]

@@ -54,7 +54,7 @@ export type SpawnOption = Pick<
  * `(is_terminal, rank_of(harness_id))` order — see `order_providers`),
  * so the harness-grouped render keeps its stable header-first grouping.
  */
-export function mapBackendProviders(backend: ProviderInfo[]): SpawnOption[] {
+export function mapBackendProviders(backend: SpawnOption[]): SpawnOption[] {
   return backend.map((p) => ({
     id: p.id,
     runtime: p.runtime,

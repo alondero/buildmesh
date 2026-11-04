@@ -555,7 +555,7 @@ describe('CommandOmnibar — command execution routing', () => {
     expect(openProbeTab).not.toHaveBeenCalled();
   });
 
-  it('routes a spawn item through selectProviderForMesh with the right mesh and option', () => {
+  it('continues a palette harness choice in the shared Spawn Menu', () => {
     const spy = vi
       .spyOn(useAgentNodeStore.getState(), 'selectProviderForMesh')
       .mockResolvedValue(node);
@@ -565,18 +565,13 @@ describe('CommandOmnibar — command execution routing', () => {
       setViewMode: vi.fn(),
       openProbeTab: vi.fn(),
     });
-    expect(spy).toHaveBeenCalledWith(
-      mesh.id,
-      mesh.name,
-      mesh.path,
-      spawnOption.id,
-      undefined,
-      undefined,
-    );
+    expect(spy).not.toHaveBeenCalled();
+    expect(useUIStore.getState().canvasSpawnMenuMeshId).toBe(mesh.id);
+    expect(useUIStore.getState().canvasSpawnMenuOptions).toEqual({ providerId: spawnOption.harness_id, initialPrompt: undefined });
     spy.mockRestore();
   });
 
-  it('forwards an initial prompt turn to selectProviderForMesh (issue #1413)', () => {
+  it('retains the initial prompt while opening the shared Spawn Menu', () => {
     const spy = vi
       .spyOn(useAgentNodeStore.getState(), 'selectProviderForMesh')
       .mockResolvedValue(node);
@@ -587,14 +582,9 @@ describe('CommandOmnibar — command execution routing', () => {
       openProbeTab: vi.fn(),
       initialPrompt: 'fix the flaky test',
     });
-    expect(spy).toHaveBeenCalledWith(
-      mesh.id,
-      mesh.name,
-      mesh.path,
-      spawnOption.id,
-      undefined,
-      'fix the flaky test',
-    );
+    expect(spy).not.toHaveBeenCalled();
+    expect(useUIStore.getState().canvasSpawnMenuMeshId).toBe(mesh.id);
+    expect(useUIStore.getState().canvasSpawnMenuOptions).toEqual({ providerId: spawnOption.harness_id, initialPrompt: 'fix the flaky test' });
     spy.mockRestore();
   });
 
@@ -967,14 +957,9 @@ describe('CommandOmnibar — quick spawn prompt mode (issue #1413)', () => {
     fireEvent.keyDown(input, { key: 'Tab' });
     fireEvent.change(input, { target: { value: 'fix the flaky test' } });
     fireEvent.keyDown(input, { key: 'Enter' });
-    expect(spy).toHaveBeenCalledWith(
-      mesh.id,
-      mesh.name,
-      mesh.path,
-      spawnOption.id,
-      undefined,
-      'fix the flaky test',
-    );
+    expect(spy).not.toHaveBeenCalled();
+    expect(useUIStore.getState().canvasSpawnMenuMeshId).toBe(mesh.id);
+    expect(useUIStore.getState().canvasSpawnMenuOptions).toEqual({ providerId: spawnOption.harness_id, initialPrompt: 'fix the flaky test' });
     expect(useUIStore.getState().omnibarOpen).toBe(false);
     spy.mockRestore();
   });
@@ -985,14 +970,9 @@ describe('CommandOmnibar — quick spawn prompt mode (issue #1413)', () => {
       .mockResolvedValue(node);
     const input = await openSpawnResults();
     fireEvent.keyDown(input, { key: 'Enter' });
-    expect(spy).toHaveBeenCalledWith(
-      mesh.id,
-      mesh.name,
-      mesh.path,
-      spawnOption.id,
-      undefined,
-      undefined,
-    );
+    expect(spy).not.toHaveBeenCalled();
+    expect(useUIStore.getState().canvasSpawnMenuMeshId).toBe(mesh.id);
+    expect(useUIStore.getState().canvasSpawnMenuOptions).toEqual({ providerId: spawnOption.harness_id, initialPrompt: undefined });
     expect(useUIStore.getState().omnibarOpen).toBe(false);
     spy.mockRestore();
   });

@@ -897,13 +897,17 @@ pub fn trigger_circuit_from_node(
     circuit_id: Option<i64>,
     max_rounds: i32,
     reviewer_provider: Option<String>,
+    reviewer_login_id: Option<String>,
 ) -> Result<i64, String> {
-    trigger_circuit_from_node_now(
+    let store = crate::preferences::default_store();
+    trigger_circuit_from_node_now_with(
+        store.as_ref(),
         Some(&app),
         node_id,
         circuit_id,
         max_rounds,
         reviewer_provider,
+        reviewer_login_id,
     )
 }
 
@@ -932,6 +936,7 @@ pub(crate) fn trigger_circuit_from_node_now(
             circuit_id,
             max_rounds,
             reviewer_provider,
+            None,
         ),
     }
 }
@@ -956,6 +961,7 @@ pub(crate) fn trigger_circuit_from_node_now_from(
         circuit_id,
         max_rounds,
         reviewer_provider,
+        None,
     )
 }
 
@@ -967,6 +973,7 @@ fn trigger_circuit_from_node_now_with(
     circuit_id: Option<i64>,
     max_rounds: i32,
     reviewer_provider: Option<String>,
+    reviewer_login_id: Option<String>,
 ) -> Result<i64, String> {
     if !(1..=10).contains(&max_rounds) {
         return Err("Review rounds must be between 1 and 10.".into());
@@ -982,18 +989,14 @@ fn trigger_circuit_from_node_now_with(
     if crate::circuit::compatibility::reviewer_harness_reason(source.harness_id()).is_some() {
         return Err("This agent's harness has no turn-completion signal. Start the review from an agent with a supported turn hook, transcript watcher or result-file handoff.".into());
     }
-    let run_id = match store {
-        Some(store) => crate::db::create_node_circuit_run_from(
-            store,
-            node_id,
-            circuit_id,
-            max_rounds,
-            reviewer_provider,
-        )?,
-        None => {
-            crate::db::create_node_circuit_run(node_id, circuit_id, max_rounds, reviewer_provider)?
-        }
-    };
+    let run_id = crate::db::create_node_circuit_run_with_login(
+        store,
+        node_id,
+        circuit_id,
+        max_rounds,
+        reviewer_provider,
+        reviewer_login_id,
+    )?;
     crate::circuit::evaluator::register_circuit(node_id);
     let state = crate::db::get_circuit_run(run_id)
         .map_err(|e| e.to_string())?

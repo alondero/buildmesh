@@ -63,6 +63,7 @@ export function CanvasSpawnMenu({ meshId }: CanvasSpawnMenuProps) {
   const targetMesh = useMeshStore((s) => s.meshesById.get(meshId) ?? null);
   const selectProviderForMesh = useAgentNodeStore((s) => s.selectProviderForMesh);
   const providerList = useProviderList();
+  const options = useUIStore(s => s.canvasSpawnMenuOptions);
 
   // The mesh disappeared between open request and render (delete /
   // refetch race). Reset the store flag and bail — the next open
@@ -97,7 +98,7 @@ export function CanvasSpawnMenu({ meshId }: CanvasSpawnMenuProps) {
         targetMesh.path,
         providerId,
         useWorktree,
-        undefined,
+        options?.initialPrompt,
         configurationId,
         loginId,
       );
@@ -148,8 +149,8 @@ export function CanvasSpawnMenu({ meshId }: CanvasSpawnMenuProps) {
       )}
       <GroupedProviderMenu
         providers={providerList}
+        initialProviderId={options?.providerId}
         onSelect={handleSelect}
-        loginsEnabled
         // Don't pass `onClose` here. `GroupedProviderMenu`'s
         // `useAriaMenu` hook (issue #837) binds Escape AND Tab to
         // `onClose` — Tab-in-menu would UNMOUNT THE WHOLE modal

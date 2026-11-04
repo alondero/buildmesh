@@ -819,6 +819,33 @@ For scoped project launch directories, use `env::node_working_path`; checkout
 ownership and Git watcher identity use separate helpers. See
 [Agent Node worktree support](agent-nodes.md#worktree-support-git2-based).
 
+### Desktop Spawn Menu ownership
+
+`GroupedProviderMenu` owns harness ordering, keyboard navigation, availability,
+Harness Login selection and saved Launch Configuration flyouts. Its default
+`spawn` mode offers logins wherever the shared menu is used. Context adapters
+own placement and the action performed after a pick:
+
+| Context | Adapter | Shared menu behavior |
+|---|---|---|
+| Mesh sidebar, Issues and Pull Requests Probes | `SpawnButtonCluster` / `ProviderDropdown` | Harness → login → configuration; forwards configuration and login to node creation |
+| Canvas, command palette and PR reviewer dialog | `CanvasSpawnMenu`, `PrReviewerSpawnDialog` | Same selection ladder in a dialog |
+| Automated review loop | `AgentReviewButton` | Same ladder; excludes Terminal and decorates incompatible reviewers, including loaded recipes |
+| Regenerate in sidebar or node header | `RegenerateProviderMenu` | Adds Current to the shared navigation; explicit alternatives replace the launch plan |
+| App/Mesh defaults and Circuit editor | `SpawnOptionPicker` (`settings` mode) | Persists a harness or saved configuration id; a saved configuration can pin a login |
+| Archived resume | `SpawnButtonCluster` (`resume` mode) | Offers resumable native/provider routes; keeps the node's frozen login |
+
+Current regenerates using the node's frozen configuration and login, including
+when the original saved recipe was deleted. Selecting an alternative replaces the launch plan; regeneration forks the
+conversation when the harness and login home are compatible, and starts fresh
+when either changes. The replacement is validated before interrupting the process. `spawn_configurations::resolve_menu_selection` owns saved
+configuration and login resolution for node creation and explicit replacement.
+Review circuits freeze the chosen login into their reviewer launch snapshot,
+so subsequent review rounds retain it.
+
+Mobile web and Android retain their touch/native render adapters over the same
+backend catalogue; they do not offer a separate Harness Login pick.
+
 ## Harness Logins (more than one Codex subscription)
 
 Codex keeps one signed-in ChatGPT account per `CODEX_HOME` and writes refreshed
@@ -849,9 +876,10 @@ configurations (`HarnessLoginMenu`); a pick reaches `create_agent_node` as
 `loginId`, and `spawn_configurations::with_login_pick` folds it into the
 configuration (or, for defaults, a frozen default plan). A Launch Configuration
 can also pin `login_id`; a pinned configuration appears only under its own
-login, and an unpinned one under every login. Surfaces that create nodes through
-another path (issue and pull request spawns, archived resume, mobile) do not
-offer the submenu and launch with the configuration's pin or the default.
+login, and an unpinned one under every login. Desktop spawn surfaces share this
+submenu, including issue and pull request spawns, regenerate alternatives and
+review circuits. Archived resume retains the frozen login; mobile uses the
+configuration's pin or the default.
 `launch_configurations::resolve_plan` freezes the choice on
 `ResolvedLaunchPlan.harness_login` (id, label and home), so resume keeps the
 same account after the login is renamed. `launch_routing::prepare_snapshot`
