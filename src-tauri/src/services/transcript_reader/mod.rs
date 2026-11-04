@@ -13,6 +13,7 @@ pub(crate) mod readers;
 // Existing lifecycle and session-discovery consumers retain their import paths.
 pub(crate) use readers as adapters;
 mod file;
+pub(crate) mod glance;
 mod native_completion;
 pub(crate) mod report_snapshot;
 #[cfg(test)]
@@ -21,6 +22,7 @@ pub(crate) mod types;
 
 use file::assistant_revision;
 pub(crate) use file::same_assistant_revision;
+pub use glance::{GlanceActivity, TranscriptGlance};
 pub(crate) use native_completion::{
     read_native_turn_completion, NativeTurnCompletion, NativeTurnSnapshot,
 };
@@ -32,7 +34,7 @@ pub use types::{TranscriptTail, Turn, UnavailableReason};
 pub use types::ToolCall;
 
 /// A wired on-disk transcript format, selected from the resolved harness id.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TranscriptFormat {
     ClaudeCode,
     Cursor,
@@ -278,6 +280,123 @@ pub fn read_last_assistant_message_from_file(
     result(reader(format).last_assistant_message(path, ""), true)
 }
 
+/// Read a node's [`TranscriptGlance`] through the reader that owns its
+/// harness's store. Repeated reads of an unchanged store are answered from a
+/// small cache, so a client re-reading the glance of the node it is looking at
+/// costs a metadata check rather than a parse.
+pub(crate) fn read_glance(
+    format: TranscriptFormat,
+    session_id: Option<&str>,
+    node_path: &str,
+) -> Result<TranscriptGlance, UnavailableReason> {
+    let (path, session_id) = resolve(format, session_id, node_path)?;
+    read_glance_at(format, &path, session_id)
+}
+
+fn read_glance_at(
+    format: TranscriptFormat,
+    path: &Path,
+    session_id: &str,
+) -> Result<TranscriptGlance, UnavailableReason> {
+    let stamp = glance_cache::Stamp::of(path);
+    let key = (format, path.to_path_buf(), session_id.to_string());
+    if let Some(cached) = glance_cache::get(&key, &stamp) {
+        return Ok(cached);
+    }
+    let reader = reader(format);
+    let parsed = reader.glance_window(path, session_id)?;
+    if parsed.turns.is_empty() {
+        return Err(types::empty_or_shape_changed(parsed.saw_malformed));
+    }
+    let glance = glance::from_parsed(&parsed, stamp.updated_at_ms(), |call| {
+        reader.describe_tool_call(call)
+    });
+    glance_cache::put(key, stamp, glance.clone());
+    Ok(glance)
+}
+
+/// The glance cache. A store's change stamp is its length and modification
+/// time, plus its SQLite write-ahead log when it has one (a database that has
+/// not checkpointed only grows its `-wal`). Entries also expire, so a store
+/// whose stamp cannot change on this filesystem still refreshes.
+mod glance_cache {
+    use super::{TranscriptFormat, TranscriptGlance};
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{LazyLock, Mutex};
+    use std::time::{Duration, Instant, SystemTime};
+
+    const CAPACITY: usize = 64;
+    const MAX_AGE: Duration = Duration::from_secs(30);
+
+    pub(super) type Key = (TranscriptFormat, PathBuf, String);
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(super) struct Stamp(Vec<Option<(u64, SystemTime)>>);
+
+    impl Stamp {
+        pub(super) fn of(path: &Path) -> Self {
+            let mut wal = path.as_os_str().to_owned();
+            wal.push("-wal");
+            Self(
+                [path, Path::new(&wal)]
+                    .into_iter()
+                    .map(|file| {
+                        let meta = std::fs::metadata(file).ok()?;
+                        Some((meta.len(), meta.modified().ok()?))
+                    })
+                    .collect(),
+            )
+        }
+
+        /// The latest write to the store, in epoch milliseconds.
+        pub(super) fn updated_at_ms(&self) -> Option<i64> {
+            self.0
+                .iter()
+                .flatten()
+                .filter_map(|(_, modified)| modified.duration_since(SystemTime::UNIX_EPOCH).ok())
+                .map(|since| since.as_millis() as i64)
+                .max()
+        }
+    }
+
+    struct Entry {
+        stamp: Stamp,
+        stored: Instant,
+        glance: TranscriptGlance,
+    }
+
+    static CACHE: LazyLock<Mutex<HashMap<Key, Entry>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub(super) fn get(key: &Key, stamp: &Stamp) -> Option<TranscriptGlance> {
+        let cache = CACHE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entry = cache.get(key)?;
+        (entry.stamp == *stamp && entry.stored.elapsed() < MAX_AGE).then(|| entry.glance.clone())
+    }
+
+    pub(super) fn put(key: Key, stamp: Stamp, glance: TranscriptGlance) {
+        let mut cache = CACHE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if cache.len() >= CAPACITY && !cache.contains_key(&key) {
+            // Glances are read for the node someone is looking at, so a full
+            // cache is mostly stale; starting over keeps it bounded simply.
+            cache.clear();
+        }
+        cache.insert(
+            key,
+            Entry {
+                stamp,
+                stored: Instant::now(),
+                glance,
+            },
+        );
+    }
+}
+
 /// Circuit reports retain full text and a content-and-position revision.
 pub(crate) fn read_assistant_report(
     format: TranscriptFormat,
@@ -437,3 +556,7 @@ mod tests {
 
 #[cfg(test)]
 mod background_task_tests;
+
+#[cfg(test)]
+#[path = "glance_read_tests.rs"]
+mod glance_read_tests;

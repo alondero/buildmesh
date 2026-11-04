@@ -40,6 +40,15 @@ impl TranscriptAdapter for OpenCode2Adapter {
             .ok_or(UnavailableReason::Unreadable)?;
         Ok(parse_messages(&rows, keep, MAX_TURN_TEXT))
     }
+    fn glance_window(&self, path: &Path, session_id: &str) -> Result<Parsed, UnavailableReason> {
+        // Not a JSONL tail: take the same bounded read as a log tail.
+        self.read_tail(
+            path,
+            session_id,
+            crate::services::transcript_reader::glance::GLANCE_TURNS,
+        )
+    }
+
     fn last_assistant_message(
         &self,
         path: &Path,

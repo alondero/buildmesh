@@ -264,6 +264,22 @@ pub async fn reopen_agent_node(node_id: i64) -> Result<AgentNode, String> {
     .await
 }
 
+/// What one agent node is doing, read on demand: its timings plus the
+/// transcript layer when its harness has a readable transcript. Shares
+/// `services::node_glance` with `GET /api/nodes/{id}/glance`.
+#[command]
+pub async fn get_node_glance(
+    node_id: i64,
+) -> Result<crate::services::node_glance::NodeGlance, String> {
+    crate::commands::run_blocking("get_node_glance", move || {
+        crate::services::node_glance::read_blocking(node_id).map_err(|error| match error {
+            crate::read_outcome::Unavailable::Absent => format!("Agent node {node_id} not found"),
+            other => other.to_string(),
+        })
+    })
+    .await
+}
+
 /// Get agent node by ID
 #[command]
 pub async fn get_agent_node(node_id: i64) -> Result<AgentNode, String> {

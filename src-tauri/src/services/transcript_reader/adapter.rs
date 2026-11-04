@@ -96,6 +96,22 @@ pub(crate) trait TranscriptReader: Send + Sync {
         super::file::last_assistant_message(self, path)
     }
 
+    /// Read the bounded window a Node Glance is shaped from: recent turns
+    /// with their tool calls, plus the latest assistant text. JSONL readers
+    /// share a byte-bounded tail; a store rewritten as one document, or a
+    /// database, overrides this with its own bounded query.
+    fn glance_window(&self, path: &Path, _session_id: &str) -> Result<Parsed, UnavailableReason> {
+        super::file::glance_window(self, path)
+    }
+
+    /// Name one tool call for a Node Glance activity line. The default reads
+    /// the common input fields every wired harness uses (`command`, `cmd`,
+    /// `file_path`, `path`, `pattern`, …); a harness whose tools carry their
+    /// subject elsewhere overrides it.
+    fn describe_tool_call(&self, call: &super::ToolCall) -> super::glance::GlanceActivity {
+        super::glance::describe_tool_call(call)
+    }
+
     /// Read the current assistant report from this reader's own store.
     fn assistant_report(&self, path: &Path, _session_id: &str) -> Option<AssistantReport> {
         super::file::assistant_report(self, path)

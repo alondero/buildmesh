@@ -1600,6 +1600,35 @@ pub(crate) fn list_agent_history_inner(
     rows.collect()
 }
 
+/// One node's [`AgentHistoryEntry`]: the row plus the two timestamps the
+/// Node Glance reports (how long in this state, how long this session has run).
+/// A missing node is `QueryReturnedNoRows`, so the caller can tell absence from
+/// a failed read.
+pub fn get_agent_history_entry(id: i64) -> SqlResult<crate::models::AgentHistoryEntry> {
+    let conn = read_conn()?;
+    get_agent_history_entry_inner(&conn, id)
+}
+
+pub(crate) fn get_agent_history_entry_inner(
+    conn: &Connection,
+    id: i64,
+) -> SqlResult<crate::models::AgentHistoryEntry> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {}, session_started_at FROM agent_nodes WHERE id = ?1",
+        AGENT_NODE_COLUMNS
+    ))?;
+    stmt.query_row(params![id], |row| {
+        let node = map_agent_node_row(row)?;
+        Ok(crate::models::AgentHistoryEntry {
+            status_changed_at: row
+                .get::<_, Option<String>>("status_changed_at")?
+                .map(|raw| parse_db_timestamp(&raw)),
+            session_started_at: row.get::<_, Option<i64>>("session_started_at")?,
+            node,
+        })
+    })
+}
+
 pub fn reopen_agent_node(id: i64) -> SqlResult<AgentNode> {
     reopen_agent_node_inner(&write_conn(), id)
 }

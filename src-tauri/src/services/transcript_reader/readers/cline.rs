@@ -109,6 +109,19 @@ impl TranscriptAdapter for ClineAdapter {
         parse_cline_messages(lines, keep, max_text)
     }
 
+    fn glance_window(
+        &self,
+        path: &Path,
+        session_id: &str,
+    ) -> Result<Parsed, super::super::UnavailableReason> {
+        // Not a JSONL tail: take the same bounded read as a log tail.
+        self.read_tail(
+            path,
+            session_id,
+            crate::services::transcript_reader::glance::GLANCE_TURNS,
+        )
+    }
+
     fn last_assistant_message(
         &self,
         path: &Path,

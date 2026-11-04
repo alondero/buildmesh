@@ -52,3 +52,5 @@ Use the next numeric filename and include:
 - [0052: Probe scope uses progressive disclosure](0052-probe-scope-progressive-disclosure.md) (proposed)
 
 - [0053: Retire the Filtered view mode; search narrows the chosen scope](0053-retire-filtered-view-mode.md)
+
+- [0054: The Node Glance is read on demand from the transcript readers](0054-node-glance-on-demand.md)

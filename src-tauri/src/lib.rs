@@ -250,6 +250,7 @@ pub fn run() {
             commands::agent_node::create_agent_node,
             commands::agent_node::list_agent_nodes,
             commands::agent_node::list_agent_history,
+            commands::agent_node::get_node_glance,
             commands::agent_node::reopen_agent_node,
             commands::agent_node::get_agent_node,
             commands::agent_node::delete_agent_node,
