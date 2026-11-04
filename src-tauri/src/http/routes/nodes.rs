@@ -42,6 +42,10 @@ pub async fn close(req: &ParsedRequest) -> Response {
 #[path = "nodes_close_tests.rs"]
 mod close_tests;
 
+#[cfg(test)]
+#[path = "nodes_glance_tests.rs"]
+mod glance_tests;
+
 /// The authoritative agent-node inventory as a JSON body.
 ///
 /// Issue #2330: this ended in `Err(_) => "[]"`, and a failed query was
@@ -383,6 +387,23 @@ pub(crate) const INPUT_BODY_MAX_BYTES: usize = 1024;
 /// now carries the typed disposition and a refusal is a distinct status
 /// (issue #1530). A backpressured write is *transient*: the same bytes can be
 /// re-sent, and `Retry-After` says so.
+/// `GET /api/nodes/{id}/glance`: what the node is doing, for the phone's node
+/// screen. Read only for the node being looked at, never on the list poll. A
+/// missing node is `404`, a failed row read `503`, and a transcript that cannot
+/// be read is a `200` glance that names why.
+pub async fn glance(req: &ParsedRequest) -> Response {
+    let node_id = req.id0();
+    let glance =
+        crate::commands::run_blocking_typed::<_, Unavailable, _>("http_node_glance", move || {
+            crate::services::node_glance::read_blocking(node_id)
+        })
+        .await;
+    match glance {
+        Ok(glance) => serialized_or_500("200 OK", &glance),
+        Err(failure) => read_response(&failure, "Node not found"),
+    }
+}
+
 pub async fn post_input(req: &ParsedRequest) -> Response {
     let node_id = req.id0();
 

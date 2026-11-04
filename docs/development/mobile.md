@@ -19,6 +19,17 @@ retry from the page. A last-known provider reading retains its own timestamp,
 independent of the time the phone requested it. Older desktops need updating
 to supply this route.
 
+## Node Glance on the phone
+
+Both phone clients open a node with a **Right now** summary of what the agent
+is doing, read from `GET /api/nodes/{id}/glance` every five seconds while that
+screen is visible and never on the node-list poll. On Android it leads the node
+screen, except for a node waiting on a person, whose request and reply stay
+first. Elapsed times count from the desktop's `observed_at_ms`, so the phone's
+clock is never compared with the desktop's. A desktop without the route answers
+`404`, and the card says the desktop may need updating while the rest of the
+screen works. See [Node Glance](node-glance.md).
+
 ## Create PR is node-scoped
 
 A pull request the phone creates comes from an **agent node's worktree**, never from

@@ -86,7 +86,7 @@ Legend: ✅ advertised, ❌ not advertised. Column shorthand:
 
 - **Attn hook** — `requires_attention_hook`; spawn installs a native attention hook.
 - **Watcher** — `supports_passive_turn_watcher`; a transcript watcher supplies turn signals instead.
-- **Transcript** — `produces_readable_transcript`; the transcript reader can parse this harness (Coordinator Node Digest, archive picker).
+- **Transcript** — `produces_readable_transcript`; the transcript reader can parse this harness (Coordinator Node Digest, [Node Glance](../development/node-glance.md), archive picker).
 - **Archive** — the derived `resumable` flag (`resume` **and** `transcript`); surfaces the harness in the archived-node resume picker.
 - **Model** — `supports_model_override` (`--model` or equivalent).
 - **Effort** — `supports_effort_override` (see [Effort control vocabulary](#effort-control-vocabulary)).

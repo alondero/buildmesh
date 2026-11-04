@@ -381,6 +381,24 @@ operating system is set to reduce motion, the comet stays still at the top of th
 ring instead of circling. On a card title bar, click the mark to open that run in
 the Circuits tab.
 
+## See what an agent is doing
+
+Rest the mouse on a node in the sidebar for a moment to see what it is doing
+without opening its terminal: how long it has been in its current state and in
+its session, when it last did anything, its latest tool call (**Now:** while it
+is running, **Last:** otherwise), the last message it wrote, and the task it was
+given. Move the pointer away to close it; the card stays open while the pointer
+is over it.
+
+The same summary leads an agent's page on your phone, under **Right now**. It
+refreshes every few seconds while the page is open.
+
+It is read from the harness's own transcript. A harness without one that
+Buildmesh can read (Terminal, Kimi Code, Freebuff, DeepSeek Harness, Perch)
+shows the times and says so; open the terminal for those. The summary shows
+what the harness has recorded, so a harness that records a turn only when it
+ends shows the previous activity until then.
+
 ## Understand a circuit checkpoint
 
 An **Unverified Checkpoint** means Buildmesh cannot currently establish the
@@ -1334,7 +1352,8 @@ the draft. If the connection drops during launch, check the mesh's agents before
 the desktop may have accepted the request. Drafts are local to the browser,
 are not a desktop backlog, and disappear when site data is cleared.
 
-Tapping an agent opens **Work details**, with current status, base reference,
+Tapping an agent opens **Work details**, with current status, a **Right now**
+summary of what it is doing ([see what an agent is doing](#see-what-an-agent-is-doing)), base reference,
 **Review changes**, **Open terminal**, and a reply field. Replies send text
 and Enter to an idle or waiting agent; delivery confirmation means the text
 reached the terminal, not that the agent completed the request. Inspect the
