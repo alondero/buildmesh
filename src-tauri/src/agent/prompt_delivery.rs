@@ -478,6 +478,52 @@ fn submit(
     Err(DeliveryStop::Unverified("No acknowledgement followed the bounded Enter attempts; inspect the existing draft before retrying".into()))
 }
 
+/// Defend against an Enter that only inserted a newline into the composer
+/// (seen with Codex; a redraw from the newline also looks like activity, so
+/// the acknowledgement above cannot catch it). A turn that started keeps the
+/// PTY busy (spinner, streaming); a draft sitting in the composer goes quiet.
+/// So once the confirmation window passes without a native receipt, a still
+/// quiet terminal gets exactly one more Enter. Enter on an empty composer is
+/// a no-op, so a prompt that was in fact accepted is not duplicated.
+/// Best effort: ownership loss or a refused write ends the check silently,
+/// because the prompt was already submitted.
+fn reinforce_submission(
+    io: &impl DeliveryIo,
+    request: &DeliveryRequest<'_>,
+    stamp: &mut String,
+    progress: &mut DeliveryProgress,
+) {
+    if matches!(progress, DeliveryProgress::AcceptanceObserved { .. }) {
+        return;
+    }
+    let deadline = io.now() + SUBMIT_CONFIRM_WINDOW;
+    loop {
+        if check_owner(io, request, stamp).is_err() {
+            return;
+        }
+        if io.receipt_accepted() == Some(true) {
+            return;
+        }
+        if io.now() >= deadline {
+            break;
+        }
+        io.sleep(SUBMIT_POLL.min(deadline.saturating_duration_since(io.now())));
+    }
+    let busy = io
+        .activity()
+        .quiet
+        .is_some_and(|quiet| quiet < SUBMIT_BUSY_QUIET);
+    if busy {
+        return;
+    }
+    if write_owned(io, request, stamp, b"\r").is_ok() {
+        tracing::info!(
+            node_id = request.prompt.node_id(),
+            "No activity after Enter; sent one defensive Enter"
+        );
+    }
+}
+
 fn execute(
     io: &impl DeliveryIo,
     adapter: &dyn AgentProvider,
@@ -515,7 +561,9 @@ fn execute(
         } else {
             progress = DeliveryProgress::TextStaged;
         }
-        submit(io, request, &mut stamp, &mut progress, ENTER_ACK_WINDOW)
+        submit(io, request, &mut stamp, &mut progress, ENTER_ACK_WINDOW)?;
+        reinforce_submission(io, request, &mut stamp, &mut progress);
+        Ok(())
     })();
     DeliveryOutcome {
         progress,
@@ -572,6 +620,14 @@ const MAX_PASTE_MATCH_STATES: usize = 16_384;
 /// After an Enter keystroke, PTY output must appear within this window for
 /// the submit to count as acknowledged.
 const ENTER_ACK_WINDOW: Duration = Duration::from_secs(6);
+
+/// How long after Enter the terminal is given to show a turn starting before
+/// one defensive Enter is considered.
+const SUBMIT_CONFIRM_WINDOW: Duration = Duration::from_secs(4);
+
+/// Output quieter than this at the end of the confirmation window means no
+/// turn is running (a working harness redraws continuously).
+const SUBMIT_BUSY_QUIET: Duration = Duration::from_secs(2);
 
 /// Enter keystrokes attempted before the watcher gives up and surfaces the
 /// node for human attention.

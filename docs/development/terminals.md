@@ -95,7 +95,8 @@ for a manual paste. Other harnesses keep their line endings as given, but any pr
 containing CR or LF is treated as multiline: bracketed by `injection_payload` and
 subject to the adapter's rendered-paste gate (such as Codex and Muse) when
 the caller explicitly requires observation. Ordinary prompts retain their
-timed settling and single unobserved Enter. Raw `write_to_agent` stays on its
+timed settling and one Enter, plus the defensive Enter described in
+[automated prompt delivery](agent-nodes.md#automated-prompt-delivery-issue-2674). Raw `write_to_agent` stays on its
 direct bounded queue path; it never enters readiness/submission coordination.
 See [automated prompt delivery](agent-nodes.md#automated-prompt-delivery-issue-2674)
 for delivery modes and typed outcomes. See the
