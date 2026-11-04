@@ -383,7 +383,7 @@ export function ArchivedNodesTab({ meshId, meshPath }: { meshId?: number; meshPa
                         dropdownKey={dropdownId('session', session.session_id)}
                         isOpen={openDropdown === session.session_id}
                         primaryLabel="Resume"
-                        configurationsEnabled={false}
+                        mode="resume"
                         busyLabel="Resuming…"
                         primaryAriaLabel="Resume session"
                         onToggleDropdown={() =>

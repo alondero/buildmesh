@@ -386,7 +386,8 @@ interface UIState extends GridControls {
   // (`AgentNodeView.onOpenSpawnMenu`) resolves the target mesh id
   // before opening; `null` here means "closed" and nothing else.
   canvasSpawnMenuMeshId: number | null;
-  openCanvasSpawnMenu: (meshId: number) => void;
+  canvasSpawnMenuOptions: { providerId?: string; initialPrompt?: string } | null;
+  openCanvasSpawnMenu: (meshId: number, options?: { providerId?: string; initialPrompt?: string }) => void;
   closeCanvasSpawnMenu: () => void;
 
   // Agent node currently under an OS file-drag, or null. Drives the terminal
@@ -620,8 +621,9 @@ export const useUIStore = create<UIState>((set, get) => {
     },
 
     canvasSpawnMenuMeshId: null,
-    openCanvasSpawnMenu: (meshId) => set({ canvasSpawnMenuMeshId: meshId }),
-    closeCanvasSpawnMenu: () => set({ canvasSpawnMenuMeshId: null }),
+    canvasSpawnMenuOptions: null,
+    openCanvasSpawnMenu: (meshId, options) => set({ canvasSpawnMenuMeshId: meshId, canvasSpawnMenuOptions: options ?? null }),
+    closeCanvasSpawnMenu: () => set({ canvasSpawnMenuMeshId: null, canvasSpawnMenuOptions: null }),
 
     createMeshOpen: false,
     openCreateMesh: () => set({ createMeshOpen: true }),

@@ -138,6 +138,7 @@ pub async fn spawn(req: &ParsedRequest) -> Response {
                     head_repo_owner: body.head_repo_owner,
                     head_repo_clone_url: body.head_repo_clone_url,
                     configuration_id: body.configuration_id,
+                    login_id: None,
                     reviewer: None,
                 },
             )

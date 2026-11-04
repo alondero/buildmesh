@@ -72,6 +72,16 @@ beforeEach(() => {
 });
 
 describe('SpawnOptionPicker', () => {
+  it('includes the inherited choice in the shared keyboard navigation', async () => {
+    const onSelect = vi.fn();
+    const user = userEvent.setup();
+    render(<SpawnOptionPicker ariaLabel="Default provider" providers={PROVIDERS} value="codex"
+      unsetLabel="Inherit" unsetValue={null} onSelect={onSelect} />);
+    await user.click(screen.getByRole('button', { name: 'Default provider' }));
+    expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Inherit' }));
+    await user.keyboard('{ArrowDown}{Home}{Enter}');
+    expect(onSelect).toHaveBeenCalledWith(null);
+  });
   it('shows the unset label when no value is selected', () => {
     render(
       <SpawnOptionPicker

@@ -129,8 +129,9 @@ export const triggerCircuitFromNode = (
   circuitId: number | null,
   maxRounds: number,
   reviewerProvider: string | null = null,
+  reviewerLoginId?: string,
 ) =>
-  _invoke<number>('trigger_circuit_from_node', { nodeId, circuitId, maxRounds, reviewerProvider });
+  _invoke<number>('trigger_circuit_from_node', { nodeId, circuitId, maxRounds, reviewerProvider, ...(reviewerLoginId ? { reviewerLoginId } : {}) });
 
 /** Graceful pause: the graph stops advancing; current steps finish (#1207). */
 export const pauseCircuitRun = (runId: number) =>

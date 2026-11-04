@@ -188,10 +188,16 @@ fn the_menu_pick_freezes_defaults_and_overrides_a_pin() {
         spawn_configurations::with_login_pick(&prefs, "codex", Some(pinned.clone()), Some("work"))
             .unwrap()
             .unwrap();
-    assert_eq!(picked.login_id.as_deref(), Some("work"));
-    assert!(
-        picked.resolved.is_none(),
-        "node creation resolves the edited copy"
+    let picked_plan = picked
+        .resolved
+        .expect("the picked login is frozen in the plan");
+    assert_eq!(picked_plan.configuration_id, pinned.id);
+    let picked_login = picked_plan.harness_login.expect("the plan selects Work");
+    assert_eq!(picked_login.id, "work");
+    assert_eq!(picked_login.home, r"C:\Users\u\.codex-accounts\work");
+    assert_eq!(
+        prefs.spawn_configurations[0], pinned,
+        "the saved Home pin is unchanged"
     );
 
     // No pick leaves the configuration exactly as saved.

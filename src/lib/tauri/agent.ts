@@ -1,3 +1,4 @@
+import type { RegenerateSelection } from '../regenerate';
 import { Channel } from '@tauri-apps/api/core';
 import { _invoke } from './_invoke';
 import { TerminalInputQueue, type InputStall } from '../terminalInputQueue';
@@ -12,8 +13,8 @@ export const spawnAgent = (request: SpawnAgentRequest) =>
 // Issue #774 / #775 — swap a node's Model Provider. The worktree,
 // branch, name, and position are preserved; only `provider` changes. The
 // backend decides resume vs fresh from the new provider's harness.
-export const regenerateAgentNode = (nodeId: number, newProviderId: string) =>
-  _invoke<AgentNode>('regenerate_agent_node', { nodeId, newProviderId });
+export const regenerateAgentNode = (nodeId: number, newProviderId: string, selection?: RegenerateSelection) =>
+  _invoke<AgentNode>('regenerate_agent_node', { nodeId, newProviderId, ...selection });
 
 export const killAgent = (sessionId: number) =>
   _invoke('kill_agent', { sessionId });

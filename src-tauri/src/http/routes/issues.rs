@@ -145,6 +145,7 @@ pub async fn spawn(req: &ParsedRequest) -> Response {
                 body.title,
                 body.provider,
                 body.configuration_id,
+                None,
             )
             .map(|draft| draft.node)
         })

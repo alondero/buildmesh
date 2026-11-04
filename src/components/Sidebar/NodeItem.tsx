@@ -1,3 +1,4 @@
+import type { RegenerateSelection } from '../../lib/regenerate';
 import { memo, useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import type { AgentNode } from '../../stores/agentNodeStore';
@@ -203,10 +204,10 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
   // provider and close the menu. The disabled gate mirrors the trigger
   // so a programmatic `.click()` can't bypass it; the confirm state
   // machine and IPC dispatch live in `useRegenerateAction`.
-  const pickProvider = (providerId: string, providerLabel: string) => {
+  const pickProvider = (providerId: string, providerLabel: string, selection?: RegenerateSelection) => {
     if (isRegenerateDisabled || !hasRegenerateTargets) return;
     closeContextMenu();
-    regen.pickRegenerateProvider(providerId, providerLabel);
+    regen.pickRegenerateProvider(providerId, providerLabel, selection);
   };
 
   // Node Glance: hovering a row for a moment shows what the agent is doing
@@ -287,6 +288,8 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
         closeContextMenu();
         return;
       }
+      // The shared Spawn Menu owns vertical navigation inside its picker.
+      if (inSubmenu && e.key !== 'ArrowLeft') return;
       // Issue #774 — submenu navigation via the shared `useSubmenu`
       // hook. ArrowRight on a submenu trigger opens the picker and
       // moves focus to the first provider (deterministic post-commit
@@ -674,8 +677,6 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
             {regenSubmenu.submenuOpen && (
               <div
                 ref={regenSubmenu.submenuRef}
-                role="menu"
-                aria-label="Pick target provider"
                 data-testid="regenerate-submenu"
                 // Issue #814 — same scoped attribute as the parent menu
                 // so `useClickOutside` treats clicks inside the
@@ -691,6 +692,8 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
                 <RegenerateProviderMenu
                   providers={providerList ?? []}
                   currentProviderId={node.launch_configuration?.id ?? node.provider}
+                  currentConfiguration={node.launch_configuration}
+                  onClose={closeContextMenu}
                   onPick={pickProvider}
                 />
               </div>

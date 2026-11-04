@@ -189,24 +189,12 @@ pub(crate) fn create_agent_node_with_login_blocking_from(
     login_id: Option<&str>,
 ) -> Result<AgentNode, String> {
     let option = provider.unwrap_or("anthropic");
-    let configuration = crate::preferences::spawn_configurations::resolve_saved_from(
-        store,
+    let configuration = crate::preferences::spawn_configurations::resolve_menu_selection_from(
+        Some(store),
         option,
-        configuration_id.filter(|id| !id.trim().is_empty()),
-    )
-    .map_err(|error| error.to_string())?;
-    let configuration = match login_id.map(str::trim).filter(|id| !id.is_empty()) {
-        Some(login) => {
-            let prefs = store.load()?;
-            crate::preferences::spawn_configurations::with_login_pick(
-                &prefs,
-                option,
-                configuration,
-                Some(login),
-            )?
-        }
-        None => configuration,
-    };
+        configuration_id,
+        login_id,
+    )?;
     services::agent_node::create_blocking_configured_from(
         store,
         services::agent_node::NodeCreateParams {
@@ -632,8 +620,7 @@ pub async fn toggle_node_pinned(node_id: i64) -> Result<AgentNode, String> {
 ///
 /// # Architecture (issue #1380 review round-2 feedback 1)
 ///
-/// The three sync helpers (`regenerate_load_blocking`,
-/// `regenerate_apply_blocking`, `regenerate_reload_blocking`) and the
+/// The synchronous load, prepare, apply and reload helpers and the
 /// two unavoidable async hops (`kill_agent`, `spawn_with_intent`) live
 /// inline in this command — not behind a service-level async
 /// orchestrator — so the offload boundary (each
@@ -646,13 +633,17 @@ pub async fn toggle_node_pinned(node_id: i64) -> Result<AgentNode, String> {
 pub async fn regenerate_agent_node(
     node_id: i64,
     new_provider_id: String,
+    configuration_id: Option<String>,
+    login_id: Option<String>,
+    replace_selection: Option<bool>,
     app: tauri::AppHandle,
 ) -> Result<crate::models::AgentNode, String> {
     use crate::agent::spawn::{
         spawn_with_intent, ResumeCause, SpawnIntent, SpawnRequest, TerminalSize,
     };
     use crate::services::agent_node::{
-        regenerate_apply_blocking, regenerate_load_blocking, regenerate_reload_blocking,
+        regenerate_apply_prepared_blocking, regenerate_load_blocking, regenerate_prepare_selection,
+        regenerate_reload_blocking,
     };
 
     // 1–2. Load + validate off-thread. `regenerate_load_blocking` is
@@ -661,9 +652,25 @@ pub async fn regenerate_agent_node(
     // the inner `AgentNodeError` to a `String` so `run_blocking`'s
     // `Result<T, String>` signature matches; `T` is inferred as the
     // helper's return tuple, so `.await?` unwraps once.
-    let (old_provider, skip_kill) =
+    let (prepared, skip_kill) =
         crate::commands::run_blocking("regenerate_agent_node_load", move || {
-            regenerate_load_blocking(node_id).map_err(|e| e.to_string())
+            let (old_provider, skip_kill) =
+                regenerate_load_blocking(node_id).map_err(|e| e.to_string())?;
+            let prefs = match crate::preferences::default_store() {
+                Some(store) => store.load()?,
+                None => crate::preferences::AppPreferences::default(),
+            };
+            let prepared = regenerate_prepare_selection(
+                &prefs,
+                node_id,
+                &old_provider,
+                &new_provider_id,
+                configuration_id.as_deref(),
+                login_id.as_deref(),
+                replace_selection.unwrap_or(false),
+            )
+            .map_err(|e| e.to_string())?;
+            Ok((prepared, skip_kill))
         })
         .await?;
 
@@ -680,10 +687,8 @@ pub async fn regenerate_agent_node(
     // spawn pipeline reads `node.provider` for backend env resolution
     // and preflight (spawn.rs:1399), so the write must land BEFORE
     // `spawn_with_intent`.
-    let new_provider_for_apply = new_provider_id;
     let resume = crate::commands::run_blocking("regenerate_agent_node_apply", move || {
-        regenerate_apply_blocking(node_id, &old_provider, &new_provider_for_apply)
-            .map_err(|e| e.to_string())
+        regenerate_apply_prepared_blocking(node_id, prepared).map_err(|e| e.to_string())
     })
     .await?;
 

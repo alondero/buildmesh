@@ -436,6 +436,7 @@ describe('PrPill reviewer spawn', () => {
         OPEN_PR.head_repo_clone_url,
         undefined,
         true,
+          undefined,
       );
     });
 

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useAgentNodeStore, type AgentNode } from '../stores/agentNodeStore';
-import { REGENERATE_DISABLED_STATUSES } from '../lib/regenerate';
+import { REGENERATE_DISABLED_STATUSES, type RegenerateSelection } from '../lib/regenerate';
 import { addToast } from '../stores/toastStore';
 import { formatError } from '../lib/errorUtils';
 import type { SpawnOption } from '../lib/groups';
@@ -8,6 +8,7 @@ import type { SpawnOption } from '../lib/groups';
 export interface PendingRegenerate {
   providerId: string;
   providerLabel: string;
+  selection?: RegenerateSelection;
 }
 
 /**
@@ -40,29 +41,32 @@ export function useRegenerateAction(
   // enable the action — only a completely empty list disables it.
   const hasRegenerateTargets = (providerList ?? []).length > 0;
 
-  const fireRegenerate = (providerId: string) => {
+  const fireRegenerate = (providerId: string, selection?: RegenerateSelection) => {
     if (!node) return;
-    regenerateAgentNode(node.id, providerId).catch((err) => {
+    const request = selection
+      ? regenerateAgentNode(node.id, providerId, selection)
+      : regenerateAgentNode(node.id, providerId);
+    request.catch((err) => {
       addToast('Regenerate failed', formatError(err), 'error');
     });
   };
 
-  const pickRegenerateProvider = (providerId: string, providerLabel: string) => {
+  const pickRegenerateProvider = (providerId: string, providerLabel: string, selection?: RegenerateSelection) => {
     if (!node || isRegenerateDisabled || !hasRegenerateTargets) return;
     if (node.status === 'running') {
-      setPendingRegenerate({ providerId, providerLabel });
+      setPendingRegenerate({ providerId, providerLabel, selection });
       return;
     }
-    fireRegenerate(providerId);
+    fireRegenerate(providerId, selection);
   };
 
   const cancelRegenerate = () => setPendingRegenerate(null);
 
   const confirmRegenerate = () => {
     if (!node || !pendingRegenerate) return;
-    const { providerId } = pendingRegenerate;
+    const { providerId, selection } = pendingRegenerate;
     setPendingRegenerate(null);
-    fireRegenerate(providerId);
+    fireRegenerate(providerId, selection);
   };
 
   return {
