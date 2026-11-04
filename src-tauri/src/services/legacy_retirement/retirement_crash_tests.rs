@@ -26,18 +26,22 @@
 //! singleton at a fixture the test later deletes, and a "restart" would be
 //! indistinguishable from a continued pass. A child gives each phase its own
 //! singleton, an empty process registry — the state a relaunch actually
-//! starts from — and a real `std::process::abort()` rather than a modelled
-//! one. The parent only ever opens a plain read/write `Connection`, so these
+//! starts from — and a real process kill rather than a modelled one. The
+//! parent only ever opens a plain read/write `Connection`, so these
 //! scenarios stay parallel-safe alongside the rest of the suite.
 //!
 //! What is forced, and what is not:
 //!
-//! * Real process kill. Every crash phase ends in `abort()` at a boundary
+//! * Real process kill. Crash phases end in [`forced_crash`] at a boundary
 //!   between durable steps: before the cleanup intent, after it, between the
 //!   owned-process kill and its acknowledgement, and after the acknowledgement.
 //!   A crash is only accepted as covered when the child records that it reached
-//!   the abort: a failed assertion also exits nonzero, so the status alone
-//!   proves nothing.
+//!   the kill: a failed assertion also exits nonzero, so the status alone does
+//!   not identify the boundary. The kill is `TerminateProcess`, not
+//!   `std::process::abort`. Both skip destructors, so a kill-on-close job and
+//!   an open SQLite transaction still see a sudden death. `abort` is
+//!   `__fastfail`, and Windows records that as Application Error `0xc0000409`
+//!   for this test executable.
 //! * Injected statement abort. The two boundaries that live *inside* a single
 //!   transaction (the cleanup intent and the acknowledgement) are forced with a
 //!   `RAISE(ABORT)` trigger, the idiom the existing retirement tests use. A
@@ -78,6 +82,11 @@ const CHILD_TEST: &str = "retirement_crash_child";
 /// exit — the reason a crash phase needs positive evidence instead of relying
 /// on the status alone.
 const PANIC_EXIT: i32 = 101;
+
+/// Exit status of a forced crash. A plain status, not an NTSTATUS: Windows
+/// Error Reporting records `std::process::abort` (`__fastfail`) as Application
+/// Error `0xc0000409`, which Rust reports as `Some(-1073740791)`.
+const FORCED_CRASH_EXIT: i32 = 3;
 
 /// How long the fixture waits for the operating system to stop holding the
 /// SQLite files a killed child left behind. Bounded so a database that is
@@ -218,7 +227,7 @@ impl LegacyFixture {
     /// and on Windows the first process to map that file *truncates it to
     /// zero* before rebuilding it — SQLite's `winLockSharedMemory`, reached
     /// from `winShmMap` on a connection's first read. The child this module
-    /// kills with `abort()`, and any real-time scanner that opened the files
+    /// kills without running destructors, and any real-time scanner that opened the files
     /// it had just written, can still be holding that file when the parent
     /// gets here. The OS then refuses the resize, and statements on that
     /// connection fail with `SQLITE_IOERR_TRUNCATE` (`extended_code: 1546`,
@@ -329,9 +338,16 @@ impl LegacyFixture {
             phase.as_str(),
             self.report(phase, &status)
         );
+        assert_eq!(
+            status.code(),
+            Some(FORCED_CRASH_EXIT),
+            "the {} child must die by the quiet forced kill, not a Windows fail-fast ({})",
+            phase.as_str(),
+            self.report(phase, &status)
+        );
     }
 
-    /// What the crash child recorded immediately before `abort()`. A nonzero
+    /// What the crash child recorded immediately before the forced kill. A nonzero
     /// exit is not evidence of a crash — a failed assertion exits nonzero too —
     /// so the scenario only counts a boundary as covered when the child says it
     /// got there.
@@ -828,9 +844,37 @@ fn retirement_crash_child() {
 /// process that wrote it is gone.
 fn forced_crash(phase: Phase, db: &str) -> ! {
     let marker = format!("{db}.reached-{}", phase.as_str());
-    std::fs::write(&marker, phase.as_str())
-        .expect("record that the child reached the forced abort");
-    std::process::abort();
+    std::fs::write(&marker, phase.as_str()).expect("record that the child reached the forced kill");
+    end_process_without_a_windows_fault(FORCED_CRASH_EXIT as u32);
+}
+
+/// End this process without running destructors and without a Windows fail-fast.
+///
+/// `TerminateProcess` on the current process does not run Rust destructors or
+/// `DLL_PROCESS_DETACH`. The operating system still closes the process's
+/// handles, which is what fires a kill-on-close job. The exit code is a plain
+/// status ([`FORCED_CRASH_EXIT`]), so Windows Error Reporting does not record
+/// Application Error `0xc0000409`.
+fn end_process_without_a_windows_fault(code: u32) -> ! {
+    use std::os::raw::c_void;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcess() -> *mut c_void;
+        fn TerminateProcess(process: *mut c_void, exit_code: u32) -> i32;
+    }
+
+    // SAFETY: the handle is the current process, and `code` is a normal exit
+    // status. `TerminateProcess` does not return once the kernel accepts it.
+    let terminated = unsafe { TerminateProcess(GetCurrentProcess(), code) };
+    if terminated == 0 {
+        // The quiet kill was refused. A fail-fast is still a sudden death, and
+        // it is the only path that must not unwind through the fixture.
+        std::process::abort();
+    }
+    loop {
+        std::thread::park();
+    }
 }
 
 /// A child test harness reports its own panic on stdout, so the whole log is
