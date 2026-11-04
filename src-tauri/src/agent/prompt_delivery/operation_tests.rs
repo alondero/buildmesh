@@ -148,6 +148,7 @@ fn startup_handover_and_later_turn_transform_the_same_text_once() {
             *io.writes.borrow(),
             vec![
                 b"\x1b[200~first\rsecond\rthird\rfourth\x1b[201~".to_vec(),
+                b"\r".to_vec(),
                 b"\r".to_vec()
             ]
         );
@@ -192,7 +193,7 @@ fn automatic_prefill_sends_no_enter_and_staged_prefill_requires_echo_and_quiet()
         .progress,
         DeliveryProgress::EnterAcknowledged { attempts: 1 }
     );
-    assert_eq!(*io.writes.borrow(), vec![b"\r".to_vec()]);
+    assert_eq!(*io.writes.borrow(), vec![b"\r".to_vec(), b"\r".to_vec()]);
     assert!(io.elapsed.get() >= Duration::from_millis(6_500));
 }
 
@@ -270,7 +271,7 @@ fn backpressure_retries_only_refused_bytes_and_checks_ownership_again() {
         .stop,
         None
     );
-    assert_eq!(io.writes.borrow().len(), 2);
+    assert_eq!(io.writes.borrow().len(), 3);
     let io = ScriptedIo::new(vec![(40, Event::HumanInput)]);
     io.refusals
         .borrow_mut()
@@ -363,8 +364,14 @@ fn ordinary_startup_stages_once_after_the_last_output_is_quiet() {
         );
         assert_eq!(result.stop, None);
         assert_eq!(result.progress, DeliveryProgress::EnterSent { attempts: 1 });
-        assert_eq!(io.elapsed.get(), Duration::from_millis(finished_at));
-        assert_eq!(*io.writes.borrow(), vec![b"work".to_vec(), b"\r".to_vec()]);
+        assert_eq!(
+            io.elapsed.get(),
+            Duration::from_millis(finished_at) + SUBMIT_CONFIRM_WINDOW
+        );
+        assert_eq!(
+            *io.writes.borrow(),
+            vec![b"work".to_vec(), b"\r".to_vec(), b"\r".to_vec()]
+        );
     }
 }
 
@@ -380,7 +387,10 @@ fn ordinary_deadline_is_best_effort_and_circuit_deadline_remains_unverified() {
     );
     assert_eq!(result.progress, DeliveryProgress::EnterSent { attempts: 1 });
     assert_eq!(result.stop, None);
-    assert_eq!(ordinary.elapsed.get(), Duration::from_secs(46));
+    assert_eq!(
+        ordinary.elapsed.get(),
+        Duration::from_secs(46) + SUBMIT_CONFIRM_WINDOW
+    );
     let circuit = ScriptedIo::new(vec![]);
     let result = circuit.run(
         &CODEX,
@@ -441,6 +451,7 @@ fn codex_canonical_controls_transport_sanitation_and_composer_evidence_stay_boun
         *io.writes.borrow(),
         vec![
             b"\x1b[200~start red\rnext\rlast\rend\x1b[201~".to_vec(),
+            b"\r".to_vec(),
             b"\r".to_vec()
         ]
     );
@@ -467,7 +478,7 @@ fn midsize_codex_and_muse_pastes_wait_for_the_tail_through_the_operation() {
         );
         assert_eq!(result.stop, None);
         assert!(io.elapsed.get() >= Duration::from_secs(11));
-        assert_eq!(io.writes.borrow().len(), 2);
+        assert_eq!(io.writes.borrow().len(), 3);
     }
 }
 
@@ -628,7 +639,10 @@ fn split_paste_matching_uses_the_delivery_clock_and_stops_at_its_deadline() {
         DeliveryProgress::EnterAcknowledged { attempts: 1 }
     );
     assert_eq!(result.stop, None);
-    assert_eq!(io.elapsed.get(), Duration::from_millis(1_250));
+    assert_eq!(
+        io.elapsed.get(),
+        Duration::from_millis(1_250) + SUBMIT_CONFIRM_WINDOW
+    );
     let deadline = io.now() + Duration::from_secs(1);
     let now = || io.now();
     let rendered = RenderedPastePrompt::new(prompt.text());
@@ -722,4 +736,57 @@ fn redraw_acknowledgement_does_not_claim_native_acceptance() {
         DeliveryProgress::EnterAcknowledged { attempts: 1 }
     );
     assert_eq!(result.stop, None);
+}
+
+#[test]
+fn a_quiet_terminal_after_enter_gets_one_defensive_enter() {
+    // Enter only added a newline: the redraw acknowledges it, then silence.
+    let prompt = PreparedPrompt::for_adapter(1, &CODEX, "work");
+    for observation in [
+        ObservationRequirement::Unobserved,
+        ObservationRequirement::Required,
+    ] {
+        let io = ScriptedIo::new(vec![]);
+        io.acknowledge.set(true);
+        let result = io.run(&CODEX, &prompt, DeliveryMode::LaterTurn, observation);
+        assert_eq!(result.stop, None);
+        assert_eq!(
+            *io.writes.borrow(),
+            vec![b"work".to_vec(), b"\r".to_vec(), b"\r".to_vec()],
+            "{observation:?}"
+        );
+    }
+}
+
+#[test]
+fn a_busy_terminal_or_native_receipt_gets_no_defensive_enter() {
+    let prompt = PreparedPrompt::for_adapter(1, &CODEX, "work");
+    // A running turn keeps redrawing through the confirmation window.
+    let io = ScriptedIo::new(
+        (1..=40)
+            .map(|i| (i * 250, Event::Output("spinner".into())))
+            .collect(),
+    );
+    io.acknowledge.set(true);
+    io.run(
+        &CODEX,
+        &prompt,
+        DeliveryMode::LaterTurn,
+        ObservationRequirement::Unobserved,
+    );
+    assert_eq!(*io.writes.borrow(), vec![b"work".to_vec(), b"\r".to_vec()]);
+
+    let muse = PreparedPrompt::for_adapter(1, &MUSE, "review");
+    let io = ScriptedIo::new(vec![]);
+    io.receipt.set(Some(true));
+    io.run(
+        &MUSE,
+        &muse,
+        DeliveryMode::LaterTurn,
+        ObservationRequirement::Required,
+    );
+    assert_eq!(
+        *io.writes.borrow(),
+        vec![b"review".to_vec(), b"\r".to_vec()]
+    );
 }
