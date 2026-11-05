@@ -278,7 +278,37 @@ action; a report from before the new process incarnation cannot authorize
 handoff. Newer activity, unknown message roles, pending human requests and known
 unfinished work still block review.
 
+## An agent stops on capacity or connection errors
+
+For a live Codex or MiniMax Code node, Buildmesh detects supported native
+provider failures and shows a retry notice. Capacity and connection failures
+get up to three continuation attempts, waiting 30 seconds, 2 minutes, then
+5 minutes. MiniMax token-plan exhaustion waits 15, 30, then 60 minutes instead.
+The limit covers the current process/session, including repeated failures.
+Typing in the terminal cancels a pending attempt. If delivery cannot be
+confirmed or the retry limit is reached, inspect the terminal and continue
+manually when the provider is available.
+
+The continuation asks the agent to check what already completed before
+continuing the task. It keeps the selected model, account, permissions and
+spending settings. It does not buy credits or enable automatic consumption.
+
+A Codex Daybreak message is a provider safety-policy rejection, not a tool
+activation. Buildmesh explains the interruption and leaves it for inspection;
+it does not automatically retry or route around the rejection. Follow the
+provider's access/review process if you believe the rejection is incorrect.
+Unknown failures also need manual inspection.
+
+This recovery covers supported structured failure records in live sessions.
+It does not restart exited processes, override questions or approvals, or
+compete with an active Circuit or retained failed reviewer. Completed Circuit
+hand-backs can recover normally. If no retry notice appears, retain the node
+ID, harness version, failure time and redacted provider error for diagnosis.
+
 ## An Agent Node will not resume
+
+If the process is still open but its turn stopped with a provider error, see
+[automatic continuation after provider errors](#an-agent-stops-on-capacity-or-connection-errors).
 
 Terminal nodes and agents that have not captured a session id are
 non-resumable. For a resumable node:

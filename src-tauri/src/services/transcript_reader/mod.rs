@@ -14,6 +14,7 @@ pub(crate) mod readers;
 pub(crate) use readers as adapters;
 mod file;
 pub(crate) mod glance;
+pub(crate) mod interruption;
 mod native_completion;
 pub(crate) mod report_snapshot;
 #[cfg(test)]

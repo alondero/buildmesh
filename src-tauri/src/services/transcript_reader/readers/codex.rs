@@ -27,6 +27,10 @@ use crate::services::transcript_reader::types::{
 /// Drop-in [`TranscriptAdapter`] for Codex.
 pub(crate) struct CodexAdapter;
 
+#[cfg(test)]
+#[path = "codex_failure_tests.rs"]
+mod failure_tests;
+
 impl TranscriptAdapter for CodexAdapter {
     fn id(&self) -> &'static str {
         "codex"
@@ -71,6 +75,10 @@ impl TranscriptAdapter for CodexAdapter {
                     completion = None;
                 }
                 (Some("event_msg"), Some("task_complete")) => {
+                    if payload.get("error").is_some_and(|error| !error.is_null()) {
+                        completion = None;
+                        continue;
+                    }
                     let turn_id = payload["turn_id"].as_str().filter(|id| {
                         !id.is_empty()
                             && started_turn.as_deref().is_none_or(|started| started == *id)

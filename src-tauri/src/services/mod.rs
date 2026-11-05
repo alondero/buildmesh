@@ -17,6 +17,7 @@ pub mod gh_auth_cache;
 pub mod github;
 pub mod harness_logins;
 pub(crate) mod http_client;
+pub(crate) mod interruption_recovery;
 pub mod legacy_retirement;
 pub mod mcode_session;
 pub mod mesh;

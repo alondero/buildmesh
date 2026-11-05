@@ -271,6 +271,12 @@ changes.
 
 ## Find agents that need attention
 
+Live Codex and MiniMax Code nodes can automatically continue after supported
+temporary provider failures. Their status explains the retry delay; typing
+cancels a pending attempt. Policy rejections and unknown failures need manual
+inspection. See [provider-error recovery](troubleshooting.md#an-agent-stops-on-capacity-or-connection-errors)
+for retry limits and exceptions.
+
 An agent that needs you is marked where it lives. In the sidebar, a mesh whose
 agent is waiting on input, has failed, was lost, or is paused opens itself, so
 that agent is on screen without a click, and its status mark says which state
