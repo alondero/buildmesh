@@ -1044,6 +1044,7 @@ fn run_profile_startup(
 
     // Retry one-way retirement of historical legacy runs; never launch new agents.
     services::legacy_retirement::start_retirement_worker();
+    services::interruption_recovery::start();
 
     // Autopilot Circuits worker (spec #1205 / walking skeleton
     // #1206). Dedicated OS thread with a fast tick + condvar

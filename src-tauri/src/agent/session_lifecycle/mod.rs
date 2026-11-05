@@ -1404,6 +1404,11 @@ pub fn on_turn_completed(
     )
 }
 
+mod native_interruption;
+pub(crate) use native_interruption::{
+    interruption_eligible, native_interruption_notice, on_native_interruption,
+};
+
 pub(crate) struct CircuitTurnRecovery<'a> {
     pub stamp: &'a str,
     pub input: &'a str,

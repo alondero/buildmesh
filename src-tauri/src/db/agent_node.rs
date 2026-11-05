@@ -2014,7 +2014,15 @@ pub(crate) struct AgentStatusObservation {
 }
 
 pub(crate) fn agent_status_observation(id: i64) -> SqlResult<AgentStatusObservation> {
-    read_conn()?.query_row("SELECT status,session_started_at,cli_session_id,status_changed_at FROM agent_nodes WHERE id=?1", [id], |row| {
+    let conn = read_conn()?;
+    agent_status_observation_inner(&conn, id)
+}
+
+pub(crate) fn agent_status_observation_inner(
+    conn: &Connection,
+    id: i64,
+) -> SqlResult<AgentStatusObservation> {
+    conn.query_row("SELECT status,session_started_at,cli_session_id,status_changed_at FROM agent_nodes WHERE id=?1", [id], |row| {
         let status: String = row.get(0)?;
         let incarnation: Option<i64> = row.get(1)?;
         let session_id: Option<String> = row.get(2)?;

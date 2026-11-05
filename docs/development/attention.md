@@ -9,6 +9,52 @@ sync when a harness's hook target or payload changes.
 
 ## Attention System
 
+### Native interruption recovery
+
+The `services::interruption_recovery` worker observes live Codex and MiniMax
+Code sessions every five seconds. `transcript_reader::interruption` reads
+structured failures: Codex's latest `task_complete.error`, or MiniMax's
+session-bound `local_runtime_sessions` and `local_runtime_session_agent_state`
+rows with no accepted/newer ingress turn. It does not classify terminal output
+or assistant prose. A failed Codex `task_complete` cannot satisfy native
+successful-completion evidence.
+
+MiniMax reads one SQLite snapshot, anchors ingress at the failed turn's primary
+key, and uses its native partial indexes for accepted turns and newer sequences.
+At most 1,025 newer ingress rows are inspected; more than 1,024 unrelated newer
+turns makes the evidence unavailable. Missing indexes also defer recovery; the
+observer never creates indexes in the provider's database. Query-plan tests pin
+the indexed access paths.
+
+Codex `server_overloaded` and observed MiniMax `50113` connection/internal-500
+failures permit three continuation attempts, delayed 30 seconds, 2 minutes,
+and 5 minutes. MiniMax `42212` token-plan exhaustion uses 15, 30, and 60 minutes.
+The budget is shared across failures in one live process/session incarnation;
+an uncertain delivery consumes an attempt and is not replayed. The worker
+never changes the model, account, permission policy, plan or spending settings.
+Codex `cyber_policy` (the Daybreak access message) and unknown failures require
+inspection and never schedule a continuation.
+
+`SessionLifecycle` publishes the failure as an Error observation in
+AwaitingInput, including the retry delay or manual action. It rechecks
+eligibility under the database transaction and process input guard. Each retry
+rechecks the native failure, process/session incarnation, lifecycle revision,
+and input version; typing, permission/question waits, explicit interruption,
+new work, process exit, or changed ownership cancels it. Unavailable native
+storage defers a pending retry instead of treating it as completion. Delivery
+uses `prompt_delivery` with unobserved submission and its existing bounded
+Enter reinforcement; submission is not a claim of harness acceptance.
+Guarded notices expose cancellation and delivery outcome.
+
+Active or retained failed Circuit agents stay under Circuit control; completed
+and cancelled hand-backs can participate. Dead processes are not restarted by
+this worker, and pre-launch errors are not replayed after resume. Native
+schema changes fail closed. Reproduction evidence from November 5, 2026:
+node 6559 recorded `cyber_policy` at 00:40 UTC and `server_overloaded` at 08:30
+UTC. Recent MiniMax runtime rows additionally showed token-plan exhaustion,
+connection/internal-server failures, and explicit local-runtime interruptions;
+the last category is not automatically replayed.
+
 ### How It Works
 Agents signal they need user input via Claude Code hooks configured in `.claude/settings.local.json` (written by `inject_attention_hook` in `agent/spawn.rs`): a catch-all `Notification` hook (permission prompts, idle prompts, elicitations) plus a `Stop` hook (turn ended). Both run the same curl command, which forwards the hook's **stdin JSON** as the POST body (issue #878):
 
