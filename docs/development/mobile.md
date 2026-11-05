@@ -445,17 +445,34 @@ would sit behind the sheet's backdrop.
 
 ## The phone's Spawn Menu
 
-One backend list, and no client re-sorts it (ADR-0016). `GET /api/providers`
-is the Spawn Menu the clients read — the desktop groups it by harness, the
-phone renders it flat. The phone narrows it to the rows that can take a first
-prompt and resolves each row into the pair the spawn routes take
-(`src/mobile/spawnMenu.ts`):
+`GET /api/providers` carries the backend's ordered Spawn Menu. Its native
+harness rows also carry selection-only `logins` metadata (id, label, default
+and signed-in state); login homes and OAuth details are excluded. The response
+remains an array so older phone clients can ignore the additive field.
 
-| Menu row | Sent to the route |
+`src/mobile/spawnMenu.ts` projects that catalogue for the launch context.
+Sheets show scrollable harness/login sections with full-width touch targets;
+Capture and built-in review forms use grouped native HTML selects. The shared
+`launchSelection::offeredUnderLogin` rule also serves desktop menus: unpinned
+configurations follow the selected login, pinned ones appear under their owner,
+and provider routes appear under Default. Unsigned additional logins remain
+visible with a disabled row and desktop sign-in guidance. A single login keeps
+the existing configuration-pin/default behavior.
+
+| Choice | Request fields |
 |---|---|
-| Mesh default | nothing — the backend resolves its own default chain |
-| Spawn Option | `provider` |
-| Saved Launch Configuration | `provider` (the row's `spawn_option_id`) and `configuration_id` |
+| Mesh default | No provider, configuration or login; backend resolves its default chain |
+| Spawn Option | `provider`, plus `login_id` when explicitly selected |
+| Saved Launch Configuration | Its `spawn_option_id` as `provider`, `configuration_id`, and selected `login_id` |
+
+The create, issue and PR adapters forward these fields through the desktop
+selection resolver. Create-operation retry identity includes an explicit login,
+while requests without a login retain their existing retry identity. Capture's
+stored and mesh-card preset choice includes login identity; unavailable stored
+choices require another explicit selection. Built-in review sends the selected
+configuration/provider as `reviewer_provider` and the login as
+`reviewer_login_id`; saved Circuits keep their configured reviewer. Archived
+resume keeps its provenance-based executor and does not offer replacement logins.
 
 The menu reaches the phone through three surfaces, each a split button
 (`src/mobile/components/SpawnSplitButton.tsx`):

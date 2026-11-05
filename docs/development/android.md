@@ -306,12 +306,23 @@ Mesh cards, issue cards and the mesh's open pull requests carry the same split
 button as the desktop spawn cluster (`SpawnSplitButton`). Issue and pull request
 buttons name the mesh's pinned default, or read **Mesh default** when the app-wide
 default applies, which the phone cannot see. The mesh list uses a compact **+** instead,
-with that default name in its accessibility description. The chevron lists the backend menu in its
-own order, saved configurations included, without unavailable rows. On a mesh
+with that default name in its accessibility description. The chevron opens a
+Material modal bottom sheet with scrollable harness/login groups and saved
+configurations, preserving backend order. Capture and built-in reviewer forms
+reuse that picker with a selected indicator and an explicit default choice.
+Rows have at least 48dp touch targets; Cancel, Android Back and sheet gestures
+respect pending-action ownership. Unavailable rows retain their reason, and an
+unsigned additional login directs the user to desktop Settings. On a mesh
 card both halves open Capture with that mesh and launch already selected, because
 Capture is where the first prompt is written; an empty prompt opens a plain
-session. Capture keeps an explicit choice that cannot take a prompt and explains
-why, instead of silently switching to another harness. On an issue or pull
+session. Capture keeps an explicit choice that cannot take a prompt, or one that became
+unavailable, and explains why; submission requires a compatible choice or an
+explicit Mesh default selection. The selected row identity includes its login,
+so recreation, Capture presets and retry keys retain that account. Create,
+issue and PR bodies send `login_id` alongside the provider/configuration pair.
+Built-in reviews send `reviewer_login_id`; saved Circuits own their reviewer.
+The API catalogue carries only login selection metadata, excluding login homes
+and OAuth state. On an issue or pull
 request the menu offers only prompt-capable rows, and a tap starts the agent at
 once, as on the desktop. `POST /api/meshes/{id}/issues/{n}/spawn` and
 `POST /api/meshes/{id}/pulls/{n}/spawn` run the desktop probes'
@@ -319,8 +330,8 @@ once, as on the desktop. `POST /api/meshes/{id}/issues/{n}/spawn` and
 away, and its status reports the background worktree and process start. The
 backend renders the issue or review prompt from the user's template, so the
 phone sends only a title hint and, for a pull request, the head fields from the
-feed. Archive resume accepts a Spawn Option only, so its picker offers no saved
-configurations and requires a resumable option.
+feed. Archive resume accepts a Spawn Option only, so its **Resume with** picker offers
+no saved configurations or replacement logins and requires a resumable option.
 Archive HTTP 207 dismisses the launch dialog and reports the imported node and
 launch failure, so a user can inspect the mesh page before attempting another import.
 Pull requests are created from an Agent Node, because the create route requires

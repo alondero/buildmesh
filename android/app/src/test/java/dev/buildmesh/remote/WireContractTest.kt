@@ -91,8 +91,8 @@ class WireContractTest {
     // Issue and PR spawns always carry the backend-built prompt, so they offer
     // only rows that can take one; Capture can also open a plain session.
     @Test fun spawnMenusKeepBackendOrderAndOfferSavedConfigurations() {
-        assertEquals(listOf("launch/405f11ec", "claude:minimax"), launchOptions(menu, needsPrompt = true).map { it.text("id") })
-        assertEquals(listOf("terminal", "launch/405f11ec", "claude:minimax"), launchOptions(menu, needsPrompt = false).map { it.text("id") })
+        assertEquals(listOf("launch/405f11ec"), launchOptions(menu, needsPrompt = true).map { it.text("id") })
+        assertEquals(listOf("terminal", "launch/405f11ec"), launchOptions(menu, needsPrompt = false).map { it.text("id") })
     }
 
     // A harness without startup prefill still takes a prompt (the desktop types

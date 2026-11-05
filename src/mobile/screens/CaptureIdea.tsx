@@ -8,6 +8,8 @@ import {
   newOperationKey,
 } from "../api";
 
+import { launchChoices, launchFields, launchGroups } from "../spawnMenu";
+
 const DRAFT_KEY = "buildmesh_mobile_idea";
 const DESTINATION_KEY = "buildmesh_mobile_idea_destination";
 /**
@@ -167,18 +169,13 @@ export default function CaptureIdea({
       setStored(false);
     }
   }, [text, meshId, providerId]);
-  const choices = providers.filter(
-    (p) =>
-      p.capabilities?.accepts_initial_prompt &&
-      !p.unavailable_reason &&
-      (!p.is_proxied || p.configuration),
-  );
+  const choices = launchChoices(providers, { includeUnavailable: true });
   const selectedMesh = meshId || String(meshes[0]?.id ?? "");
   // `null` means the user has not chosen an agent yet, so the first available
   // one is used; `""` is the mesh default, which names no provider at all and
   // lets the backend resolve its own default chain (issue #2385).
   const selectedProvider =
-    providerId === null ? (choices[0]?.id ?? "") : providerId;
+    providerId === null ? (choices.find((choice) => !choice.unavailableReason)?.id ?? "") : providerId;
   // A named agent that is no longer on offer — kept visible so the user sees
   // what happened instead of silently landing on a different agent.
   const staleProvider =
@@ -190,7 +187,7 @@ export default function CaptureIdea({
     text.trim().length > 0 &&
     bytes <= 16000 &&
     meshes.some((m) => String(m.id) === selectedMesh) &&
-    (selectedProvider === "" || choices.some((p) => p.id === selectedProvider));
+    (selectedProvider === "" || choices.some((p) => p.id === selectedProvider && !p.unavailableReason));
 
   async function start() {
     if (!valid || submitting.current) return;
@@ -216,13 +213,7 @@ export default function CaptureIdea({
 
       const outcome = await createNode({
         mesh_id: Number(selectedMesh),
-        ...(provider
-          ? {
-              provider:
-                provider.configuration?.spawn_option_id ?? provider.id,
-              configuration_id: provider.configuration?.id,
-            }
-          : {}),
+        ...launchFields(provider),
         prompt: text,
         operation_key: operationKey,
       });
@@ -346,11 +337,11 @@ export default function CaptureIdea({
             </option>
           )}
           <option value="">Mesh default</option>
-          {choices.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.configuration?.name ?? p.label}
-            </option>
-          ))}
+          {launchGroups(choices).map(({ id, label, choices: rows }) => <optgroup key={id} label={label}>
+            {rows.map((p) => <option key={p.id} value={p.id} disabled={!!p.unavailableReason}>
+              {p.label}{p.unavailableReason ? ` — ${p.unavailableReason}` : ''}
+            </option>)}
+          </optgroup>)}
         </select>
         {!choices.length && (
           <p className="field-hint">

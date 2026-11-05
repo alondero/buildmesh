@@ -113,14 +113,11 @@ fun TaskScreen(state: RemoteState, vm: BuildmeshViewModel, selectedMesh: Long, s
             operationFor = submission
         }
     }
-    val options = launchOptions(state.providers, needsPrompt = false)
+    val options = launchOptions(state.providers, needsPrompt = false, includeUnavailable = true)
     val chosen = options.firstOrNull { it.text("id") == launch }
     val mesh = state.meshes.firstOrNull { it.number("id") == selectedMesh }
     val defaultName = meshDefaultName(mesh, state.providers)
     LaunchedEffect(state.meshes) { if (mesh == null && state.meshes.isNotEmpty()) selectMesh(state.meshes.first().number("id")) }
-    // A row that left the menu (harness removed, now unavailable) falls back
-    // to the mesh default rather than launching something else.
-    LaunchedEffect(options, launch) { if (launch.isNotEmpty() && chosen == null && state.providers.isNotEmpty()) selectLaunch("") }
     // An explicit choice is kept even when it cannot take the prompt, so the
     // user sees why instead of the selection silently changing under them.
     val promptRejected = prompt.isNotBlank() && chosen != null && !supportsPrompt(chosen)
@@ -155,12 +152,15 @@ fun TaskScreen(state: RemoteState, vm: BuildmeshViewModel, selectedMesh: Long, s
             },
         )
         speechError?.let { Text(it, color = MeshColors.amber) }
-        Selector("Launch configuration", listOf("" to (defaultName?.let { "Mesh default ($it)" } ?: "Mesh default")) + options.map { it.text("id") to it.text("label") }, launch, selectLaunch, enabled = !state.busy)
+        LaunchPicker("Launch configuration", options, launch, selectLaunch, enabled = !state.busy,
+            defaultLabel = defaultName?.let { "Mesh default ($it)" } ?: "Mesh default")
+        val unavailable = if (launch.isNotEmpty() && chosen == null) "Previous launch unavailable. Choose another launch or Mesh default." else chosen?.text("unavailable_reason").orEmpty()
+        if (unavailable.isNotEmpty()) Text(unavailable, color = MeshColors.amber)
         if (options.isEmpty()) Text("No launch configuration is available. Configure an agent harness on the desktop.", color = MeshColors.amber)
         if (promptRejected) Text("${chosen?.text("label")} can't take an initial prompt. Clear the prompt to open a plain session, or choose another launch configuration.", color = MeshColors.amber)
         val fits = prompt.toByteArray(Charsets.UTF_8).size <= 16_000
         if (!fits) Text("The prompt must be at most 16000 bytes.", color = MeshColors.amber)
-        Button(shape = MaterialTheme.shapes.small, enabled = !state.busy && speechNamespace == null && mesh != null && options.isNotEmpty() && !promptRejected && fits, onClick = {
+        Button(shape = MaterialTheme.shapes.small, enabled = !state.busy && speechNamespace == null && mesh != null && unavailable.isEmpty() && !promptRejected && fits, onClick = {
             val key = operationKey.ifEmpty { newOperationKey() }
             operationKey = key
             vm.action { api ->

@@ -139,7 +139,7 @@ private fun OwnedPullRequestsPanel(api: BuildmeshApi, meshId: Long, vm: Buildmes
         }
     }
     val prs = feed?.let { if (nodeId == null) it.items else nodePulls(it, branch) }.orEmpty()
-    val options = launchOptions(state.providers, needsPrompt = true)
+    val options = launchOptions(state.providers, needsPrompt = true, includeUnavailable = true)
     val defaultName = meshDefaultName(state.meshes.firstOrNull { it.number("id") == meshId }, state.providers)
     // The desktop PR probe's `+`: the agent starts on the PR head with the
     // review prompt the desktop renders from its template.

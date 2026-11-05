@@ -157,6 +157,26 @@
     "id": "codex",
     "is_proxied": false,
     "label": "Unavailable agent",
+    "logins": [
+      {
+        "id": "default",
+        "is_default": true,
+        "label": "Default",
+        "signed_in": false
+      },
+      {
+        "id": "work",
+        "is_default": false,
+        "label": "Work",
+        "signed_in": true
+      },
+      {
+        "id": "guest",
+        "is_default": false,
+        "label": "Guest",
+        "signed_in": false
+      }
+    ],
     "provider_id": null,
     "resumable": true,
     "unavailable_reason": "Missing executable"

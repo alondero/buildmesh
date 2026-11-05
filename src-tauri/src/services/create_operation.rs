@@ -142,6 +142,7 @@ pub struct CreateAndStartRequest {
     /// Already resolved against the mesh default and saved configuration.
     pub provider: String,
     pub configuration_id: Option<String>,
+    pub login_id: Option<String>,
     /// The saved configuration resolved by the caller (preferences are read
     /// off the async worker by the transport, so resolution stays there).
     pub configuration: Option<crate::preferences::spawn_configurations::SpawnConfiguration>,
@@ -351,12 +352,22 @@ pub async fn create_and_start<R: BlockingWork>(
     work: &R,
 ) -> Result<CreateNodeOutcome, CreateRejection> {
     let operation_key = request.operation_key.clone();
-    let fingerprint = request_fingerprint(
+    let mut fingerprint = request_fingerprint(
         request.mesh_id,
         &request.provider,
         request.configuration_id.as_deref(),
         request.prompt.as_deref(),
     );
+
+    // Preserve legacy retry identities when no login was explicitly selected.
+    if let Some(login) = request
+        .login_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        fingerprint = hex::encode(Sha256::digest(format!("{fingerprint}\0login:{login}")));
+    }
 
     // --- Phase 1: claim -------------------------------------------------
     // A retry that finds a committed operation returns the recorded node
@@ -695,6 +706,7 @@ mod tests {
             mesh_id,
             provider: "anthropic".to_string(),
             configuration_id: None,
+            login_id: None,
             configuration: None,
             prompt: Some("do the thing".to_string()),
             rows: 24,
@@ -850,6 +862,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn changing_the_explicit_login_cannot_replay_another_accounts_node() {
+        let (_db, mesh_id) = fixture();
+        let start = ScriptedStart::unready();
+        let mut first = request(mesh_id, Some("login-retry"));
+        first.provider = "codex".into();
+        first.login_id = Some("default".into());
+        let mut changed = first.clone();
+        changed.login_id = Some("work".into());
+        let node = run(first.clone(), &start).await.unwrap().node().id;
+        assert_eq!(run(first, &start).await.unwrap().node().id, node);
+        assert!(matches!(
+            run(changed, &start).await,
+            Err(CreateRejection::KeyConflict { .. })
+        ));
+        assert_eq!(node_count(), 1);
+    }
+
+    #[tokio::test]
     async fn concurrent_same_key_requests_cannot_insert_duplicate_nodes() {
         // The two claims race on the unique `operation_key`: exactly one node
         // row may exist, and both callers must see that same id.
@@ -976,6 +1006,7 @@ mod tests {
                 mesh_id,
                 provider: "terminal".to_string(),
                 configuration_id: None,
+                login_id: None,
                 configuration: None,
                 prompt: Some("ship the prompt".to_string()),
                 rows: 24,

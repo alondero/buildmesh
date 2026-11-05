@@ -9,6 +9,55 @@ use crate::read_outcome::Unavailable;
 use crate::services::usage::ProviderMeters;
 use tauri::Manager;
 
+/// Selection metadata only: phone clients do not need login homes or OAuth state.
+#[derive(Clone, serde::Serialize, ts_rs::TS)]
+#[ts(export, export_to = "MobileHarnessLogin.ts")]
+pub struct MobileHarnessLogin {
+    pub id: String,
+    pub label: String,
+    pub is_default: bool,
+    pub signed_in: bool,
+}
+
+#[derive(serde::Serialize, ts_rs::TS)]
+#[ts(export, export_to = "MobileSpawnOption.ts")]
+pub struct MobileSpawnOption {
+    #[serde(flatten)]
+    pub provider: crate::agent::provider::ProviderInfo,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub logins: Option<Vec<MobileHarnessLogin>>,
+}
+
+pub(crate) fn phone_menu(
+    providers: Vec<crate::agent::provider::ProviderInfo>,
+    logins: Vec<crate::services::harness_logins::HarnessLoginStatus>,
+) -> Vec<MobileSpawnOption> {
+    providers
+        .into_iter()
+        .map(|provider| {
+            let choices: Vec<_> = if !provider.is_proxied && provider.configuration.is_none() {
+                logins
+                    .iter()
+                    .filter(|login| login.harness_id == provider.harness_id)
+                    .map(|login| MobileHarnessLogin {
+                        id: login.id.clone(),
+                        label: login.label.clone(),
+                        is_default: login.is_default,
+                        signed_in: login.signed_in,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            MobileSpawnOption {
+                provider,
+                logins: (!choices.is_empty()).then_some(choices),
+            }
+        })
+        .collect()
+}
+
 /// Read-only account identity and usage. ProviderAccount itself contains secrets.
 #[derive(serde::Serialize, ts_rs::TS)]
 #[ts(export, export_to = "MobileProviderUsage.ts")]
@@ -82,7 +131,9 @@ pub async fn list(_req: &ParsedRequest) -> Response {
 pub async fn list_json() -> Result<Response, Unavailable> {
     let providers =
         crate::commands::run_blocking_typed::<_, Unavailable, _>("http_list_providers", || {
-            Ok(available_providers())
+            let logins =
+                crate::services::harness_logins::list_blocking().map_err(Unavailable::Read)?;
+            Ok(phone_menu(available_providers(), logins))
         })
         .await?;
 

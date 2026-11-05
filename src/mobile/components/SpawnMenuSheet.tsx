@@ -7,6 +7,7 @@
  */
 import { Sheet } from "../ui";
 import type { LaunchChoice } from "../spawnMenu";
+import { launchGroups } from "../spawnMenu";
 
 export function SpawnMenuSheet({
   label,
@@ -51,6 +52,7 @@ export function SpawnMenuSheet({
   return (
     <Sheet label={label} testId={testId} onClose={onClose} dismissible={dismissible}>
       <h3>{label}</h3>
+      <button type="button" className="btn-ghost" disabled={!dismissible} onClick={onClose}>Cancel</button>
       {notice && <p role="alert" className="inline-error">{notice}</p>}
       {choices === null && !error && (
         <p role="status">Loading launch configurations…</p>
@@ -70,18 +72,22 @@ export function SpawnMenuSheet({
       )}
       {choices !== null && choices.length > 0 && (
         <div className="spawn-menu">
-          {choices.map((choice) => (
+          {launchGroups(choices).map(({ id, label: group, choices: rows }) => <section key={id} aria-label={group}>
+            <h4>{group}</h4>
+            {rows.map((choice) => (
             <button
               key={choice.id}
               type="button"
               className="spawn-menu-item"
               data-testid={`${testId}-${choice.id}`}
-              disabled={!dismissible}
+              disabled={!dismissible || !!choice.unavailableReason}
               onClick={() => onChoose(choice)}
             >
               {choice.label}
+              {choice.unavailableReason && <small>{choice.unavailableReason}</small>}
+              {choice.warning && <small>{choice.warning}</small>}
             </button>
-          ))}
+          ))}</section>)}
         </div>
       )}
     </Sheet>

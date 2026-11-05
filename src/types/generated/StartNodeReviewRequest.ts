@@ -4,4 +4,4 @@ export type StartNodeReviewRequest = { circuit_id: number | null, max_rounds: nu
 /**
  * Spawn Option or saved Launch Configuration for the built-in review only.
  */
-reviewer_provider?: string, };
+reviewer_provider?: string, reviewer_login_id?: string, };

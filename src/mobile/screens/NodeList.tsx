@@ -146,7 +146,7 @@ export default function NodeList({
   });
   // The Spawn Menu the mesh card's chevron offers (issue #2385) — the same
   // backend list the issue and pull request surfaces use.
-  const spawnMenuChoices = useMemo(() => launchChoices(providers), [providers]);
+  const spawnMenuChoices = useMemo(() => launchChoices(providers, { includeUnavailable: true }), [providers]);
 
   // Triage card chips (issue #1377, post-review rewrite). The HTTP
   // `/api/nodes/{id}/input` route returns 200 OK with `{"ok":true}` only
@@ -194,6 +194,7 @@ export default function NodeList({
     meshId: number,
     providerId: string,
     configurationId?: string,
+    loginId?: string,
   ) => {
     setPickerMeshId(null);
     setCreating(meshId);
@@ -205,7 +206,7 @@ export default function NodeList({
     // submission identity is the mesh/harness/configuration triple; a different
     // triple is a different submission and must mint a fresh key (the server
     // rejects a key reused with different content as a conflict).
-    const submission = `${meshId}|${providerId}|${configurationId ?? ""}`;
+    const submission = JSON.stringify([meshId, providerId, configurationId, loginId]);
     const keyRef = quickCreateKey.current;
     const operationKey = keyRef?.submission === submission ? keyRef.key : newOperationKey();
     quickCreateKey.current = { submission, key: operationKey };
@@ -214,6 +215,7 @@ export default function NodeList({
         mesh_id: meshId,
         provider: providerId,
         configuration_id: configurationId,
+        login_id: loginId,
         operation_key: operationKey,
       });
       if (!mountedRef.current) return;
@@ -551,8 +553,8 @@ export default function NodeList({
               .then(setProviders)
               .catch((e: unknown) => setError(String(e)));
           }}
-          onPick={(providerId, configurationId) =>
-            handleCreate(pickerMeshId, providerId, configurationId)
+          onPick={(providerId, configurationId, loginId) =>
+            handleCreate(pickerMeshId, providerId, configurationId, loginId)
           }
           onCancel={() => setPickerMeshId(null)}
         />

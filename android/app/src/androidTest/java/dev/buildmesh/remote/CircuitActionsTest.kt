@@ -84,7 +84,7 @@ class CircuitActionsTest {
             when {
                 request.path == "/api/nodes/17/reviews" && request.method == "POST" -> MockResponse().setBody("""{"ok":true,"run_id":7}""")
                 request.path == "/api/nodes/17/reviews" -> MockResponse().setBody("""[{"circuit_id":null,"name":"Built-in Review Blueprint"},{"circuit_id":9,"name":"Team review"}]""")
-                request.path == "/api/providers" -> MockResponse().setBody("""[{"id":"launch/reviewer","harness_id":"codex","configuration":{"id":"launch/reviewer","name":"Careful reviewer"},"capabilities":{"supports_passive_turn_watcher":true}}]""")
+                request.path == "/api/providers" -> MockResponse().setBody("""[{"id":"launch/reviewer","label":"Careful reviewer","harness_id":"codex","group_key":"codex","configuration":{"id":"launch/reviewer","name":"Careful reviewer","spawn_option_id":"codex"},"capabilities":{"supports_passive_turn_watcher":true}}]""")
                 else -> MockResponse().setBody("[]")
             }
         }) { vm, requests ->
@@ -94,21 +94,21 @@ class CircuitActionsTest {
             compose.setContent { BuildmeshTheme { StartReviewButton(17, vm) } }
             compose.onNodeWithText("Start review…").performClick()
             compose.waitUntil(10000) { compose.onAllNodesWithText("Built-in Review Blueprint", substring = true).fetchSemanticsNodes().isNotEmpty() }
-            compose.onNodeWithText("Reviewer launch configuration:", substring = true).performScrollTo().performClick()
+            compose.onNodeWithContentDescription("Reviewer launch configuration:", substring = true).performScrollTo().performClick()
             compose.onNodeWithText("Careful reviewer").performClick()
-            compose.onNodeWithText("Reviewer launch configuration: Careful reviewer").assertIsDisplayed()
+            compose.onNodeWithContentDescription("Reviewer launch configuration: Careful reviewer").assertIsDisplayed()
             compose.onNode(hasText("Start review") and hasClickAction()).performClick()
             compose.waitUntil(10000) { reviewPosts().size == 1 && !vm.state.value.busy }
             val builtIn = reviewPosts().single()
             assertEquals("launch/reviewer", Json.parseToJsonElement(builtIn.body.readUtf8()).jsonObject.getValue("reviewer_provider").jsonPrimitive.content)
-            compose.onNodeWithText("Reviewer launch configuration:", substring = true).assertDoesNotExist()
+            compose.onNodeWithContentDescription("Reviewer launch configuration:", substring = true).assertDoesNotExist()
             compose.onNodeWithText("Start review…").performClick()
             compose.waitUntil(10000) { compose.onAllNodesWithText("Built-in Review Blueprint", substring = true).fetchSemanticsNodes().isNotEmpty() }
-            compose.onNodeWithText("Reviewer launch configuration:", substring = true).performScrollTo().performClick()
+            compose.onNodeWithContentDescription("Reviewer launch configuration:", substring = true).performScrollTo().performClick()
             compose.onNodeWithText("Careful reviewer").performClick()
             compose.onNodeWithText("Review Circuit:", substring = true).performScrollTo().performClick()
             compose.onNodeWithText("Team review").performClick()
-            compose.onNodeWithText("Reviewer launch configuration:", substring = true).assertDoesNotExist()
+            compose.onNodeWithContentDescription("Reviewer launch configuration:", substring = true).assertDoesNotExist()
             compose.onNode(hasText("Start review") and hasClickAction()).performClick()
             compose.waitUntil(10000) { reviewPosts().size == 2 && !vm.state.value.busy }
             val saved = reviewPosts().last()

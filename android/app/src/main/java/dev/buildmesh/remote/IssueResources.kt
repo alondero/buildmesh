@@ -66,7 +66,7 @@ fun IssuesResourceScreen(api: BuildmeshApi, meshId: Long, state: RemoteState, vm
     var filter by rememberSaveable(state.draftNamespace, meshId) { mutableStateOf("") }
     var expanded by rememberSaveable(state.draftNamespace, meshId) { mutableStateOf<Long?>(null) }
     var editing by remember(state.draftNamespace, meshId) { mutableStateOf<JsonObject?>(null) }
-    val options = launchOptions(state.providers, needsPrompt = true)
+    val options = launchOptions(state.providers, needsPrompt = true, includeUnavailable = true)
     val defaultName = meshDefaultName(state.meshes.firstOrNull { it.number("id") == meshId }, state.providers)
     // Like the desktop Issues probe, choosing a launch starts it: the node row
     // is committed at once and its status reports the background start.

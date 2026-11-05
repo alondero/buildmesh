@@ -268,10 +268,14 @@ fun readCreateNodeOutcome(body: JsonObject): CreateNodeOutcome = when (val outco
     else -> error("Unsupported create outcome '$outcome'; update the app.")
 }
 
+fun launchProviderId(option: JsonObject): String = option.objectAt("configuration")?.text("spawn_option_id")
+    ?: option.text("selection_provider").ifEmpty { option.text("id") }
+
 fun JsonObjectBuilder.putLaunch(option: JsonObject?) {
     val configuration = option?.objectAt("configuration")
-    option?.let { put("provider", configuration?.text("spawn_option_id") ?: it.text("id")) }
+    option?.let { put("provider", launchProviderId(it)) }
     configuration?.let { put("configuration_id", it.text("id")) }
+    option?.text("login_id")?.takeIf { it.isNotEmpty() }?.let { put("login_id", it) }
 }
 
 // Archive resume accepts a Spawn Option only; it has no field that could carry
@@ -288,8 +292,31 @@ fun supportsPrompt(option: JsonObject): Boolean {
 
 // The backend menu in its own order (ADR-0016: no client re-sorts it), minus
 // rows that cannot launch now. Issue and PR spawns always carry a prompt.
-fun launchOptions(providers: List<JsonObject>, needsPrompt: Boolean) = providers.filter {
-    it.text("unavailable_reason").isEmpty() && (!needsPrompt || supportsPrompt(it))
+fun launchOptions(providers: List<JsonObject>, needsPrompt: Boolean, includeUnavailable: Boolean = false): List<JsonObject> = providers
+    .filter { (includeUnavailable || it.text("unavailable_reason").isEmpty()) && (!needsPrompt || supportsPrompt(it)) &&
+        (!it.flag("is_proxied") || it.objectAt("configuration") != null) }
+    .flatMap { row ->
+        val configuration = row.objectAt("configuration")
+        val native = providers.firstOrNull { it.text("harness_id") == row.text("harness_id") &&
+            !it.flag("is_proxied") && it.objectAt("configuration") == null }
+        val logins = (native?.get("logins") as? JsonArray)?.map { it.obj() }.orEmpty()
+        if (logins.size < 2) listOf(row) else logins.filter { login ->
+            configuration == null || offeredUnderLogin(configuration, login.text("id"))
+        }.map { login -> buildJsonObject {
+            row.forEach { (key, value) -> put(key, value) }
+            put("id", JsonArray(listOf(JsonPrimitive(row.text("id")), JsonPrimitive(login.text("id")))).toString())
+            put("selection_provider", row.text("id"))
+            put("login_id", login.text("id")); put("login_label", login.text("label"))
+            put("label", "${row.text("label")} · ${login.text("label")}")
+            if (!login.flag("is_default") && !login.flag("signed_in")) {
+                put("unavailable_reason", "Not signed in. Sign in from desktop Settings.")
+            }
+        } }
+    }
+
+fun offeredUnderLogin(configuration: JsonObject, login: String): Boolean {
+    val routed = configuration.text("provider_route_id").isNotEmpty() || configuration.text("spawn_option_id").contains(':')
+    return if (routed) login == "default" else configuration.text("login_id").let { it.isEmpty() || it == login }
 }
 
 // The row a mesh pins as its default, if the menu has it. Without one the

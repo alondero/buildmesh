@@ -81,9 +81,9 @@ describe('phone issue triage', () => {
     const onSpawned = await openIssue();
     fireEvent.click(screen.getByTestId('issue-spawn-42-menu'));
     const dialog = await screen.findByRole('dialog', { name: 'Choose a launch configuration' });
-    await within(dialog).findByText('Claude Code');
+    await within(dialog).findByRole('button', { name: 'Claude Code', exact: true });
     expect(within(dialog).queryByText('Terminal')).toBeNull();
-    expect(within(dialog).queryByText('Missing')).toBeNull();
+    expect((within(dialog).getByRole('button', { name: /Missing/ }) as HTMLButtonElement).disabled).toBe(true);
     expect(within(dialog).getByText('Saved recipe')).toBeTruthy();
     expect(writes).toEqual([]);
     fireEvent.click(within(dialog).getByText('Saved recipe'));
@@ -98,8 +98,8 @@ describe('phone issue triage', () => {
     const onSpawned = await openIssue();
     fireEvent.click(screen.getByTestId('issue-spawn-42-menu'));
     const dialog = await screen.findByRole('dialog');
-    await within(dialog).findByText('Claude Code');
-    fireEvent.click(within(dialog).getByText('Claude Code'));
+    await within(dialog).findByRole('button', { name: 'Claude Code', exact: true });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Claude Code', exact: true }));
     // The sheet stays open so the user can pick again, so the failure has to
     // be reported inside it — behind the backdrop the screen's own error
     // line would be unreadable.
@@ -112,7 +112,7 @@ describe('phone issue triage', () => {
     await openIssue();
     fireEvent.click(screen.getByTestId('issue-spawn-42-menu'));
     const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByText('Claude Code')).toBeTruthy();
+    expect(within(dialog).getByRole('button', { name: 'Claude Code', exact: true })).toBeTruthy();
     fireEvent.click(screen.getByTestId('issue-launch-menu-backdrop'));
     expect(writes).toEqual([]);
     expect(screen.queryByRole('dialog')).toBeNull();
@@ -160,7 +160,7 @@ describe('phone issue triage', () => {
     fireEvent.click(await screen.findByTestId('issue-42'));
     fireEvent.click(screen.getByTestId('issue-spawn-42-menu'));
     const dialog = await screen.findByRole('dialog');
-    fireEvent.click(within(dialog).getByText('Claude Code'));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Claude Code', exact: true }));
     await waitFor(() => expect(writes).toHaveLength(1));
     expect(backHandlerRef.current?.()).toBe(true);
     fireEvent.click(screen.getByTestId('issue-launch-menu-backdrop'));

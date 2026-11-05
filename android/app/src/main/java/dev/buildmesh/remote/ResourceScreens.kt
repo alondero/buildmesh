@@ -96,8 +96,8 @@ private fun ArchiveResourceScreen(api: BuildmeshApi, meshId: Long, state: Remote
         }
     }
     selected?.let { item ->
-        AlertDialog(onDismissRequest = { if (!state.busy) selected = null }, title = { Text("Choose a launch configuration") },
-            text = { Selector("Launch configuration", options.map { it.text("id") to it.text("label") }, provider, { provider = it }, enabled = !state.busy) },
+        AlertDialog(onDismissRequest = { if (!state.busy) selected = null }, title = { Text("Resume with") },
+            text = { Selector("Resume with", options.map { it.text("id") to it.text("label") }, provider, { provider = it }, enabled = !state.busy) },
             confirmButton = { TextButton(enabled = !state.busy && provider.isNotEmpty(), onClick = {
                 vm.action { client ->
                     val node = try { client.post("/api/meshes/$meshId/agent-nodes/import-and-resume", buildJsonObject {

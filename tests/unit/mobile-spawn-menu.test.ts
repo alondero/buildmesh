@@ -256,7 +256,7 @@ describe("the phone's Spawn Menu (issue #2385)", () => {
     it("resolves a saved Launch Configuration row to the pair the routes take", () => {
       const [choice] = launchChoices([savedConfiguration] as Provider[]);
 
-      expect(choice).toEqual({
+      expect(choice).toMatchObject({
         id: "launch/saved-review",
         label: "Saved review",
         provider: "claude",

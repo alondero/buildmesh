@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { isAuthError, listNodeReviews, listProviders, startNodeReview, type Provider } from '../api';
 import type { NodeReviewOption } from '../../types/generated/NodeReviewOption';
 import { blocksReviewCircuit } from '../../components/Circuits/harnessCapabilities';
-import { groupByHarness } from '../../lib/groups';
+import { launchChoices, launchGroups } from '../spawnMenu';
 import { Sheet } from '../ui';
 
 export function StartReview({ nodeId, onAuthFailed, onBusyChange }: { nodeId: number; onAuthFailed: () => void; onBusyChange?: (busy: boolean) => void }) {
@@ -56,12 +56,11 @@ export function StartReview({ nodeId, onAuthFailed, onBusyChange }: { nodeId: nu
     return () => controller.abort();
   }, [open, menuRetry]);
 
-  const reviewerGroups = groupByHarness((providers ?? []).filter((row) =>
-    row.harness_id !== 'terminal' && (!row.is_proxied || row.configuration),
-  ));
-  const reviewerAvailable = !reviewer || reviewerGroups.some(([, rows]) => rows.some((row) =>
-    (row.configuration?.id ?? row.id) === reviewer && !row.unavailable_reason && !blocksReviewCircuit(row.harness_id),
-  ));
+  const reviewerChoices = launchChoices((providers ?? []).filter((row) =>
+    row.harness_id !== 'terminal' && !blocksReviewCircuit(row.harness_id)),
+    { needsPrompt: false, includeUnavailable: true });
+  const selectedReviewer = reviewerChoices.find((row) => row.id === reviewer);
+  const reviewerAvailable = !reviewer || (!!selectedReviewer && !selectedReviewer.unavailableReason);
 
   async function start() {
     if (sending.current) return;
@@ -73,7 +72,7 @@ export function StartReview({ nodeId, onAuthFailed, onBusyChange }: { nodeId: nu
       await startNodeReview(nodeId, {
         circuit_id: choice === '' ? null : Number(choice),
         max_rounds: choice === '' ? rounds : 3,
-        ...(choice === '' && reviewer ? { reviewer_provider: reviewer } : {}),
+        ...(choice === '' && selectedReviewer ? { reviewer_provider: selectedReviewer.configurationId ?? selectedReviewer.provider, reviewer_login_id: selectedReviewer.loginId } : {}),
       });
       if (!active.current) return;
       setOpen(false);
@@ -101,13 +100,11 @@ export function StartReview({ nodeId, onAuthFailed, onBusyChange }: { nodeId: nu
         {choice === '' && <>
           <label>Reviewer launch configuration<select className="field" value={reviewer} disabled={busy || providers === null} onChange={(e) => setReviewer(e.target.value)}>
             <option value="">Default (desktop reviewer settings or this agent)</option>
-            {reviewerGroups.map(([harness, rows]) => <optgroup key={harness} label={rows.find((row) => !row.configuration)?.label ?? harness}>
-              {rows.map((row) => {
-                const reason = row.unavailable_reason || (blocksReviewCircuit(row.harness_id) ? 'No turn-completion signal' : '');
-                return <option key={row.id} value={row.configuration?.id ?? row.id} disabled={!!reason}>
-                  {row.configuration?.name ?? row.label}{reason ? ` — ${reason}` : ''}
-                </option>;
-              })}
+            {reviewer && !selectedReviewer && <option value={reviewer} disabled>Previous reviewer unavailable</option>}
+            {launchGroups(reviewerChoices).map(({ id, label, choices: rows }) => <optgroup key={id} label={label}>
+              {rows.map((row) => <option key={row.id} value={row.id} disabled={!!row.unavailableReason}>
+                {row.label}{row.unavailableReason ? ` — ${row.unavailableReason}` : ''}
+              </option>)}
             </optgroup>)}
           </select></label>
           {providers === null && !providerError && <p role="status">Loading launch configurations…</p>}
