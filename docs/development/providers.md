@@ -844,7 +844,10 @@ Review circuits freeze the chosen login into their reviewer launch snapshot,
 so subsequent review rounds retain it.
 
 Mobile web and Android retain their touch/native render adapters over the same
-backend catalogue; they do not offer a separate Harness Login pick.
+backend catalogue. Their sheets group choices by harness and login; forms use
+platform selection controls. The HTTP adapters forward explicit login choices
+through the desktop resolver. See [the phone Spawn Menu](mobile.md#the-phones-spawn-menu)
+and [Android screens](android.md#screens-and-ownership).
 
 ## Harness Logins (more than one Codex subscription)
 
@@ -878,7 +881,8 @@ configuration (or, for defaults, a frozen default plan). A Launch Configuration
 can also pin `login_id`; a pinned configuration appears only under its own
 login, and an unpinned one under every login. Desktop spawn surfaces share this
 submenu, including issue and pull request spawns, regenerate alternatives and
-review circuits. Archived resume retains the frozen login; mobile uses the
+review circuits. Archived resume retains the frozen login. Mobile fresh launches
+and built-in reviewers support explicit logins; without a pick, they use the
 configuration's pin or the default.
 `launch_configurations::resolve_plan` freezes the choice on
 `ResolvedLaunchPlan.harness_login` (id, label and home), so resume keeps the

@@ -13,14 +13,14 @@ const TOKEN_STORAGE_KEY = "buildmesh_token";
 // but the type now states the full wire shape, so a missing or renamed field
 // becomes a compile error instead of a blank page (#360). NodeStatus is kept
 // as an alias of the generated SessionStatus so existing mobile call sites
-// keep working. `Provider` is kept as an alias of the generated `ProviderInfo`
+// keep working. `Provider` is kept as an alias of the generated `MobileSpawnOption`
 // (issue #406) so `listProviders(): Promise<Provider[]>` and
 // `import { Provider } from "../api"` call sites keep compiling — distinct
 // from the generated `Provider` string union scoped inside `AgentNode.ts`
 // (the provider-id enum, e.g. "anthropic"/"minimax").
 import type { Mesh } from "../types/generated/Mesh";
 import type { AgentNode } from "../types/generated/AgentNode";
-import type { ProviderInfo as Provider } from "../types/generated/ProviderInfo";
+import type { MobileSpawnOption as Provider } from "../types/generated/MobileSpawnOption";
 import type { SessionStatus } from "../types/generated/SessionStatus";
 export type { Mesh, AgentNode, Provider };
 export type NodeStatus = SessionStatus;

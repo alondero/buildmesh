@@ -139,6 +139,8 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/http/mobile_wire_tests.rs': 'http::mobile_wire::tests',
   'src-tauri/src/http/router_tests.rs': 'http::router::tests',
   'src-tauri/src/http/routes/providers_tests.rs': 'http::routes::providers::usage_tests',
+  'src-tauri/src/http/routes/issues_tests.rs': 'http::routes::issues::tests',
+  'src-tauri/src/http/routes/pr_tests.rs': 'http::routes::pr::tests',
   'src-tauri/src/http/routes/circuit_tests.rs': 'http::routes::circuit::tests',
   'src-tauri/src/http/routes/nodes_close_tests.rs': 'http::routes::nodes::close_tests',
   'src-tauri/src/http/routes/nodes_glance_tests.rs': 'http::routes::nodes::glance_tests',

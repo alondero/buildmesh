@@ -397,7 +397,7 @@ private fun MeshDirectory(
                     }
                     // Both halves open Capture pre-filled, where the first
                     // prompt is written; an empty prompt opens a plain session.
-                    SpawnSplitButton(meshDefaultName(mesh, state.providers), launchOptions(state.providers, needsPrompt = false),
+                    SpawnSplitButton(meshDefaultName(mesh, state.providers), launchOptions(state.providers, needsPrompt = false, includeUnavailable = true),
                         "a task in ${mesh.text("name")}", true,
                         { openCapture(id, "") }, { openCapture(id, it.text("id")) }, compact = true)
                 }

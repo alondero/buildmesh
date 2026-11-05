@@ -911,62 +911,8 @@ pub fn trigger_circuit_from_node(
     )
 }
 
-pub(crate) fn trigger_circuit_from_node_now(
-    app: Option<&AppHandle>,
-    node_id: i64,
-    circuit_id: Option<i64>,
-    max_rounds: i32,
-    reviewer_provider: Option<String>,
-) -> Result<i64, String> {
-    match crate::preferences::default_store() {
-        Some(store) => trigger_circuit_from_node_now_from(
-            &store,
-            app,
-            node_id,
-            circuit_id,
-            max_rounds,
-            reviewer_provider,
-        ),
-        // A build with **no** store installed (a test that never installed one)
-        // reads the code-defined defaults (issue #1482).
-        None => trigger_circuit_from_node_now_with(
-            None,
-            app,
-            node_id,
-            circuit_id,
-            max_rounds,
-            reviewer_provider,
-            None,
-        ),
-    }
-}
-
-/// [`trigger_circuit_from_node_now`] against an explicit store.
-///
-/// The caller owns the store, so the reviewer provider and the launch
-/// configurations this run freezes are the ones the caller set up
-/// (issue #1482).
-pub(crate) fn trigger_circuit_from_node_now_from(
-    store: &crate::preferences::PreferencesStore,
-    app: Option<&AppHandle>,
-    node_id: i64,
-    circuit_id: Option<i64>,
-    max_rounds: i32,
-    reviewer_provider: Option<String>,
-) -> Result<i64, String> {
-    trigger_circuit_from_node_now_with(
-        Some(store),
-        app,
-        node_id,
-        circuit_id,
-        max_rounds,
-        reviewer_provider,
-        None,
-    )
-}
-
 /// The trigger itself, over the store the caller resolved.
-fn trigger_circuit_from_node_now_with(
+pub(crate) fn trigger_circuit_from_node_now_with(
     store: Option<&crate::preferences::PreferencesStore>,
     app: Option<&AppHandle>,
     node_id: i64,

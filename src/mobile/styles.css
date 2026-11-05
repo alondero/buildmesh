@@ -306,6 +306,11 @@ button {
   margin-top: 12px;
 }
 .spawn-menu-item {
+  display: block;
+  width: 100%;
+  min-height: 48px;
+  margin-bottom: 8px;
+  overflow-wrap: anywhere;
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -315,6 +320,11 @@ button {
   text-align: left;
   cursor: pointer;
 }
+.spawn-menu-item small { display: block; color: var(--text-dim); margin-top: 4px; }
+.spawn-menu section { min-width: 0; }
+.spawn-menu h4 { color: var(--text-dim); font-size: 13px; margin: 12px 0 8px; }
+.spawn-menu-item:disabled { cursor: default; }
+.spawn-menu-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .spawn-menu-item:active:not(:disabled) {
   background: var(--surface-3);
 }

@@ -1,8 +1,8 @@
 /**
  * Mobile spawn picker (`src/mobile/components/nodeList/ProviderPicker.tsx`).
  *
- * Spawn choices are harness parents, with saved Launch Configurations inside
- * touch disclosures. Raw Provider Routes stay out of the spawn picker even
+ * Spawn choices are harness parents, with saved Launch Configurations in
+ * harness/login sections. Raw Provider Routes stay out of the spawn picker even
  * when the last saved configuration is deleted. Native harness avatar glyphs
  * still come from the live `listProviders()` row.
  *
@@ -143,12 +143,12 @@ describe("mobile ProviderPicker fallback glyphs (issue #1086)", () => {
     vi.unstubAllGlobals();
   });
 
-  it("sends the selected saved configuration from its harness submenu", async () => {
+  it("sends the selected saved configuration from its harness group", async () => {
     const recipe = { id: "proxy-max", name: "Proxy Max", spawn_option_id: "claude:custom-account", model: "some-model", effort: "max", extra_args: null };
     const fetch = mockApi([...PROVIDERS, provider({ id: recipe.id, label: recipe.name, provider_id: "custom-account", is_proxied: true, configuration: recipe })]);
     await openPicker();
     expect(screen.queryByTestId("provider-claude:custom-account")).toBeNull();
-    fireEvent.click(screen.getByText("Claude Code configurations"));
+    expect(screen.getByRole("region", { name: "Claude Code" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Proxy Max" }));
     await waitFor(() => {
       const call = fetch.mock.calls.find(([url]) => String(url).includes("/api/nodes/create"));
@@ -171,7 +171,7 @@ describe("mobile ProviderPicker fallback glyphs (issue #1086)", () => {
     fireEvent.click(screen.getByTestId("new-node-1"));
     await screen.findByTestId("provider-claude");
     expect(screen.queryByTestId("provider-claude:kimi")).toBeNull();
-    fireEvent.click(screen.getByText("Claude Code configurations"));
+    expect(screen.getByRole("region", { name: "Claude Code" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Kimi via Claude" }));
     await waitFor(() => {
       const call = fetch.mock.calls.find(([url]) => String(url).includes("/api/nodes/create"));
@@ -196,7 +196,6 @@ describe("mobile ProviderPicker fallback glyphs (issue #1086)", () => {
     await screen.findByTestId("provider-picker");
     expect(screen.queryByTestId("provider-only-recipe")).toBeNull();
     expect(screen.getByRole("heading", { name: "codex" })).toBeTruthy();
-    fireEvent.click(screen.getByText("codex configurations"));
     fireEvent.click(await screen.findByRole("button", { name: "Codex Sol" }));
     await waitFor(() => {
       const call = fetch.mock.calls.find(([url]) => String(url).includes("/api/nodes/create"));

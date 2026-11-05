@@ -45,6 +45,9 @@ pub struct StartNodeReviewRequest {
     #[serde(default)]
     #[ts(optional)]
     pub reviewer_provider: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub reviewer_login_id: Option<String>,
 }
 
 fn review_options_core(node_id: i64) -> Result<Vec<NodeReviewOption>, ActError> {
@@ -132,25 +135,21 @@ fn start_review_core_with(
             "Select a Review Circuit from this agent's Mesh.".into(),
         ));
     }
-    match store {
-        Some(store) => crate::commands::circuit::trigger_circuit_from_node_now_from(
-            store,
-            state::app_handle(),
-            node_id,
-            request.circuit_id,
-            request.max_rounds,
-            request.reviewer_provider,
-        )
-        .map_err(ActError::Refused),
-        None => crate::commands::circuit::trigger_circuit_from_node_now(
-            state::app_handle(),
-            node_id,
-            request.circuit_id,
-            request.max_rounds,
-            request.reviewer_provider,
-        )
-        .map_err(ActError::Refused),
-    }
+    let default_store = if store.is_none() {
+        crate::preferences::default_store()
+    } else {
+        None
+    };
+    crate::commands::circuit::trigger_circuit_from_node_now_with(
+        store.or(default_store.as_ref()),
+        state::app_handle(),
+        node_id,
+        request.circuit_id,
+        request.max_rounds,
+        request.reviewer_provider,
+        request.reviewer_login_id,
+    )
+    .map_err(ActError::Refused)
 }
 
 pub async fn start_review(req: &ParsedRequest) -> Response {

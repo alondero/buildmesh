@@ -83,6 +83,12 @@ export function Sheet({
   // Contain Tab within the sheet. Without this, Tab walks off into the
   // obscured page behind the backdrop.
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === "Escape" && dismissible) {
+      e.preventDefault();
+      e.stopPropagation();
+      onClose();
+      return;
+    }
     if (e.key !== "Tab") return;
     const panel = panelRef.current;
     if (!panel) return;

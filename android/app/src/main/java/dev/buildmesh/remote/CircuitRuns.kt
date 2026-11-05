@@ -149,10 +149,11 @@ fun reviewerLaunchOptions(providers: List<JsonObject>) = launchOptions(providers
             capabilities?.flag("supports_result_file_handoff") == true)
 }
 
-fun startReviewRequest(circuitId: Long?, rounds: Long, reviewer: String) = StartNodeReviewRequest(
+fun startReviewRequest(circuitId: Long?, rounds: Long, reviewer: String, login: String? = null) = StartNodeReviewRequest(
     circuit_id = circuitId,
     max_rounds = if (circuitId == null) rounds else 3,
     reviewer_provider = reviewer.takeIf { circuitId == null && it.isNotBlank() },
+    reviewer_login_id = login?.takeIf { circuitId == null && reviewer.isNotBlank() },
 )
 
 @Composable
@@ -164,7 +165,9 @@ fun StartReviewButton(nodeId: Long, vm: BuildmeshViewModel) {
     var rounds by remember(nodeId) { mutableLongStateOf(3L) }
     var reviewer by remember(nodeId) { mutableStateOf("") }
     val reviewers = reviewerLaunchOptions(state.providers)
-    val reviewerAvailable = reviewer.isEmpty() || reviewers.any { (it.objectAt("configuration")?.text("id") ?: it.text("id")) == reviewer }
+    val selectedReviewer = reviewers.firstOrNull { it.text("id") == reviewer }
+    val reviewerProvider = selectedReviewer?.let { it.objectAt("configuration")?.text("id") ?: launchProviderId(it) } ?: reviewer
+    val reviewerAvailable = reviewer.isEmpty() || (selectedReviewer != null && selectedReviewer.text("unavailable_reason").isEmpty())
     var readError by remember(nodeId) { mutableStateOf("") }
     LaunchedEffect(open, nodeId, state.resourceRevision) {
         if (!open) return@LaunchedEffect
@@ -186,10 +189,8 @@ fun StartReviewButton(nodeId: Long, vm: BuildmeshViewModel) {
             else {
                 Selector("Review Circuit", options!!.map { it.circuit_id to it.name }, selected, { selected = it }, enabled = !state.busy)
                 if (selected == null) {
-                    Selector("Reviewer launch configuration", listOf("" to "Default (desktop reviewer settings or this agent)") + reviewers.map {
-                        val configuration = it.objectAt("configuration")
-                        (configuration?.text("id") ?: it.text("id")) to (configuration?.text("name") ?: it.text("label"))
-                    }, reviewer, { reviewer = it }, enabled = !state.busy)
+                    LaunchPicker("Reviewer launch configuration", reviewers, reviewer, { reviewer = it },
+                        enabled = !state.busy, defaultLabel = "Default (desktop reviewer settings or this agent)")
                     Selector("Review rounds", (1L..10L).map { it to "$it" }, rounds, { rounds = it }, enabled = !state.busy)
                     if (!reviewerAvailable) Text("This reviewer is no longer available. Choose another launch configuration or Default.", color = MeshColors.amber)
                 }
@@ -199,7 +200,8 @@ fun StartReviewButton(nodeId: Long, vm: BuildmeshViewModel) {
         } },
         confirmButton = { TextButton(enabled = !state.busy && (selected != null || reviewerAvailable) && options?.any { it.circuit_id == selected } == true, onClick = {
             vm.action { api ->
-                api.post("/api/nodes/$nodeId/reviews", startReviewRequest(selected, rounds, reviewer).toJson())
+                api.post("/api/nodes/$nodeId/reviews", startReviewRequest(selected, rounds, reviewerProvider,
+                    selectedReviewer?.text("login_id")?.takeIf { it.isNotEmpty() }).toJson())
                 open = false
                 vm.notice("Review started. An existing live run is kept.")
             }

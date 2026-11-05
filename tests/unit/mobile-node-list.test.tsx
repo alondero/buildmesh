@@ -2011,8 +2011,7 @@ describe("NodeList", () => {
     expect(screen.getByTestId("provider-claude")).toBeTruthy();
 
     // Harness grouping: the recipe is discoverable inside the parent.
-    expect(screen.getByTestId("spawn-group-claude")).toBeTruthy();
-    fireEvent.click(screen.getByText("Claude Code configurations"));
+    expect(screen.getByRole("region", { name: "Claude Code" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "MiniMax Pro Account" })).toBeTruthy();
   });
 
