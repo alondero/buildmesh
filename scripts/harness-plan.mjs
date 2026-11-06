@@ -92,8 +92,10 @@ export function planGates(paths, { full = false } = {}) {
   let frontend = full;
   let rust = full;
   for (const path of paths) {
-    if (isHarnessPath(path)) continue;
     const category = categorisePath(path);
+    // Audited Rust tooling must retain product coverage even when it is also
+    // harness infrastructure. Other harness-only paths keep their fast plan.
+    if (isHarnessPath(path) && category !== 'both') continue;
     frontend ||= category === 'frontend' || category === 'both';
     rust ||= category === 'rust' || category === 'both';
   }

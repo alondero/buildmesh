@@ -99,6 +99,14 @@ or resending prompts. Removing an agent, or a confirmed agent error, terminates 
 waiting run so queued runs can use its capacity. Ambiguous GitHub actions and prompt
 deliveries retain their existing manual reconciliation controls.
 
+Closing an Agent Node from desktop or mobile cancels every live Circuit Run
+that borrows it as a source or references it in its step ledger, including a run
+waiting for confirmation. Cancellation releases the run's capacity before the
+node is deleted and retires its other helpers; a borrowed source stays open
+unless it is the node being closed. The selected worktree removal option applies
+to the node being closed. Circuit-driven automatic closes use the retirement
+path directly so a successful wrap-up does not cancel its own run.
+
 Issue-driven review runs request an explicit final result from the implementation,
 wrap-up and feedback phases: `BUILDMESH_HANDOFF_V1: READY` or `BLOCKED`. A valid
 result advances its matching report gate without calling the Circuit classifier,

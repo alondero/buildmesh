@@ -15,7 +15,7 @@
 // docs, or bundle-budget failure.
 //
 // Classification is deliberately conservative: a path that is not clearly
-// documentation and not clearly one graph runs BOTH graphs. Under-testing is
+// documentation, tooling, or clearly one graph runs BOTH graphs. Under-testing is
 // a worse failure than a wasted runner-minute.
 //
 // Usage:
@@ -43,6 +43,25 @@ const FRONTEND_FILES = /^(?:index\.html|package(?:-lock)?\.json|vite\.config\.ts
 const DOCS_PREFIXES = ['docs/', '.claude/', '.agents/', '.opencode/'];
 const DOCS_FILES = /^(?:[^/]+\.md|LICENSE|NOTICE(?:\.[^/]+)?|\.gitignore|\.gitattributes)$/;
 
+// Ordinary tooling keeps frontend/contract coverage without compiling Rust.
+// These exact paths can change Rust gate selection, execution, or build inputs:
+const RUST_TOOLING_FILES = new Set([
+  'scripts/harness.mjs', // Executes gates and decides which results are accepted.
+  'scripts/harness-plan.mjs', // Selects gates, commands and their input sets.
+  'scripts/harness-check.mjs', // Selects the fast Rust module tests.
+  'scripts/harness-lanes.mjs', // Schedules gates and propagates their outcomes.
+  'scripts/harness-state.mjs', // Reads Git scope and persists verification state.
+  'scripts/agent-tests.mjs', // Runs contract tests that exercise the Rust runners.
+  'scripts/ci/changed-scope.mjs', // Selects CI's Rust graph.
+  'scripts/ci/run-guarded.mjs', // Supervises CI and local Rust processes.
+  'scripts/rust-test-shards.mjs', // Compiles and executes the Rust test targets.
+  'scripts/ci/rust-shards.mjs', // Supplies the unit-test filters to that runner.
+  'scripts/check-rust-shard-coverage.mjs', // Checks those filters against libtest.
+  'scripts/harness-test-failures.mjs', // Parses Rust failures and accepts reruns.
+  'scripts/prepare-conpty.mjs', // build.rs runs it to stage the Windows runtime.
+  'scripts/conpty-LICENSE.txt', // Input copied by prepare-conpty during the build.
+]);
+
 // Returns 'rust' | 'frontend' | 'both' | 'docs' for one repository path.
 export function categorisePath(rawPath) {
   const path = String(rawPath).replaceAll('\\', '/').replace(/^\.\//, '').trim();
@@ -56,8 +75,11 @@ export function categorisePath(rawPath) {
   if (path.startsWith('src/types/generated/')) return 'both';
   // Native checks run in the Android workflow/harness; bundled terminal assets use the frontend dependencies.
   if (path.startsWith('android/') || /^scripts\/check-android(?:-live)?\.mjs$/.test(path) || path === '.github/workflows/android.yml') return 'frontend';
+  if (RUST_TOOLING_FILES.has(path)) return 'both';
+  // The Android wire generator writes Kotlin under android/, not src-tauri/.
+  if (path.startsWith('scripts/') || path.startsWith('.github/')) return 'frontend';
   if (FRONTEND_PREFIXES.some((prefix) => path.startsWith(prefix)) || FRONTEND_FILES.test(path)) return 'frontend';
-  // .github/, scripts/, and anything unknown: gate-relevant, run everything.
+  // Anything still unknown: gate-relevant, run everything.
   return 'both';
 }
 

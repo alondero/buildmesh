@@ -48,7 +48,25 @@ pub fn get_worktree_close_safety(session_id: i64) -> Result<WorktreeCloseSafety,
     Ok(worktree::close_safety(&worktree_path))
 }
 
-/// Close an agent node (Phase 1 — fast and authoritative).
+/// Close an Agent Node at the operator's request. Cancel its circuits before
+/// deletion can erase their ownership references. Internal Circuit effects use
+/// [`delete`] directly so successful wrap-up does not cancel its own run.
+pub fn close(session_id: i64, remove_worktree: bool) -> Result<(), AgentNodeError> {
+    for run_id in db::live_circuit_runs_for_agent(session_id)? {
+        crate::commands::circuit::cancel_circuit_run_for_agent_close(
+            crate::http::app_handle(),
+            run_id,
+            session_id,
+        )
+        .map_err(|error| match error {
+            db::DbError::Sql(error) => AgentNodeError::Db(error),
+            error => AgentNodeError::Backend(error.to_string()),
+        })?;
+    }
+    delete(session_id, remove_worktree)
+}
+
+/// Retire an agent node (Phase 1 — fast and authoritative).
 ///
 /// This kills the agent process tree and removes the node from the database
 /// immediately, but deliberately does **not** delete the worktree directory:

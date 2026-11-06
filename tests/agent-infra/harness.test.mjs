@@ -247,6 +247,27 @@ test('editing the advisory self-review script does not select product verificati
   assert.ok(ids.includes('agent-tests'), 'the agent-infra tests still run');
 });
 
+test('ordinary tooling changes skip Rust gates while Rust verification scripts retain them', () => {
+  const rustIds = ['rust-format', 'rust-clippy', 'rust-tests', 'binding-drift'];
+  const ordinary = ['scripts/idle-animation-probe.mjs', 'scripts/ui-mock/hub-fixtures.mjs', 'scripts/generate-android-circuit-wire.mjs', '.github/workflows/verify.yml'];
+  for (const paths of [...ordinary.map(path => [path]), ordinary, [...ordinary, 'src/owner.ts']]) {
+    const ids = planGates(paths).map(gate => gate.id);
+    for (const id of rustIds) assert.ok(!ids.includes(id), `${paths}: ${id}`);
+    assert.ok(ids.includes('agent-tests'));
+    assert.ok(ids.includes('frontend-tests'));
+  }
+  // These paths used to be swallowed by the local infrastructure-only override.
+  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-check.mjs', 'scripts/harness-lanes.mjs', 'scripts/agent-tests.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) {
+    const ids = planGates([path]).map(gate => gate.id);
+    for (const id of rustIds) assert.ok(ids.includes(id), `${path}: ${id}`);
+  }
+  for (const paths of [[...ordinary, 'src-tauri/src/lib.rs'], [...ordinary, 'src/types/generated/Example.ts']]) {
+    const ids = planGates(paths).map(gate => gate.id);
+    for (const id of rustIds) assert.ok(ids.includes(id), `${paths}: ${id}`);
+  }
+  for (const id of rustIds) assert.ok(planGates(ordinary, { full: true }).some(gate => gate.id === id), `--full: ${id}`);
+});
+
 test('uncached ConPTY checks its network prerequisite before compilation; cached packages work offline', async t => {
   const fixture = repo(t);
   const unavailable = await conptyPrerequisite(fixture.cwd, async () => { throw new Error('offline'); });

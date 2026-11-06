@@ -2246,6 +2246,168 @@ fn close_phase1_then_phase2_is_idempotent_for_both_worktree_modes() {
     }
 }
 
+fn close_circuit_fixture(state: &str) -> (i64, i64, i64, i64) {
+    db::test_support::seed_unique_circuit_run_ids();
+    let mesh_id = fresh_mesh();
+    let (source, helper, run_id) = {
+        let conn = db::write_conn();
+        let make_node = |name| {
+            conn.execute(
+                        "INSERT INTO agent_nodes(mesh_id,name,path,status) VALUES(?1,?2,'/tmp/close-circuit','ready')",
+                        rusqlite::params![mesh_id, name],
+                    ).unwrap();
+            conn.last_insert_rowid()
+        };
+        let source = make_node("source");
+        let helper = make_node("helper");
+        conn.execute("UPDATE agent_nodes SET use_worktree=1, worktree_path='/tmp/close-circuit/helper' WHERE id=?1", [helper]).unwrap();
+        conn.execute(
+            "INSERT INTO autopilot_circuits(mesh_id,name) VALUES(?1,'close-circuit')",
+            [mesh_id],
+        )
+        .unwrap();
+        let circuit = conn.last_insert_rowid();
+        conn.execute("INSERT INTO autopilot_circuit_runs(circuit_id,mesh_id,state,source_agent_node_id) VALUES(?1,?2,?3,?4)", rusqlite::params![circuit, mesh_id, state, source]).unwrap();
+        let run = conn.last_insert_rowid();
+        // The source can be waiting for confirmation without a step
+        // referring to it, as in the reported run 823.
+        conn.execute("INSERT INTO autopilot_circuit_run_steps(run_id,node_id,status,agent_node_id,parent_agent_node_id) VALUES(?1,'reviewer','completed',?2,?3)", rusqlite::params![run, helper, source]).unwrap();
+        conn.execute("INSERT INTO autopilot_circuit_run_steps(run_id,node_id,status) VALUES(?1,'confirm_publish','blocked')", [run]).unwrap();
+        (source, helper, run)
+    };
+    (mesh_id, source, helper, run_id)
+}
+
+#[test]
+fn operator_close_cancels_attached_circuits_and_releases_their_slots() {
+    for state in ["pending", "running", "paused"] {
+        for closing_source in [true, false] {
+            let _db = db::test_support::isolated();
+            let (mesh_id, source, helper, run_id) = close_circuit_fixture(state);
+            assert!(db::reserve_circuit_agent_slots(run_id, 2).unwrap());
+            let closing = if closing_source { source } else { helper };
+            get_worktree_close_safety(closing).unwrap();
+            close(closing, false).unwrap();
+            assert_eq!(
+                db::get_circuit_run(run_id).unwrap().unwrap().state,
+                "cancelled",
+                "closing_source={closing_source}, state={state}"
+            );
+            assert_eq!(db::count_active_circuit_runs(mesh_id).unwrap(), 0);
+            assert_eq!(db::circuit_agent_slots_reserved(run_id).unwrap(), 0);
+            assert!(db::list_circuit_run_steps(run_id)
+                .unwrap()
+                .iter()
+                .all(|step| step.status != "blocked"));
+            assert!(matches!(
+                db::get_agent_node_by_id(closing),
+                Err(rusqlite::Error::QueryReturnedNoRows)
+            ));
+            if !closing_source {
+                assert!(
+                    db::get_agent_node_by_id(source).is_ok(),
+                    "cancellation must preserve the borrowed source"
+                );
+                assert!(
+                    db::list_pending_worktree_removals().unwrap().is_empty(),
+                    "keep worktree must apply to the helper being closed"
+                );
+            }
+            assert!(matches!(
+                db::get_agent_node_by_id(helper),
+                Err(rusqlite::Error::QueryReturnedNoRows)
+            ));
+            close(closing, false).expect("a repeated close is harmless");
+        }
+    }
+}
+
+#[test]
+fn operator_close_leaves_terminal_and_unrelated_runs_unchanged() {
+    for state in ["completed", "failed", "cancelled"] {
+        let _db = db::test_support::isolated();
+        let (_, source, helper, run) = close_circuit_fixture(state);
+        close(source, false).unwrap();
+        assert_eq!(db::get_circuit_run(run).unwrap().unwrap().state, state);
+        assert!(db::get_agent_node_by_id(helper).is_ok());
+    }
+    let _db = db::test_support::isolated();
+    let (mesh_id, source, helper, run) = close_circuit_fixture("running");
+    let unrelated = {
+        let conn = db::write_conn();
+        conn.execute(
+            "INSERT INTO agent_nodes(mesh_id,name,path) VALUES(?1,'unrelated','/tmp/unrelated')",
+            [mesh_id],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    };
+    close(unrelated, false).unwrap();
+    assert_eq!(db::get_circuit_run(run).unwrap().unwrap().state, "running");
+    assert!(db::get_agent_node_by_id(source).is_ok());
+    assert!(db::get_agent_node_by_id(helper).is_ok());
+}
+
+#[test]
+fn automatic_circuit_retirement_does_not_cancel_its_run() {
+    let _db = db::test_support::isolated();
+    let (_, source, _, run) = close_circuit_fixture("running");
+    delete(source, false).unwrap();
+    assert_eq!(db::get_circuit_run(run).unwrap().unwrap().state, "running");
+}
+
+#[test]
+fn operator_close_preserves_ownership_when_cancellation_cannot_commit() {
+    let _db = db::test_support::isolated();
+    let (_, source, _, run) = close_circuit_fixture("running");
+    db::write_conn().execute_batch("CREATE TRIGGER reject_cancel BEFORE UPDATE OF state ON autopilot_circuit_runs BEGIN SELECT RAISE(ABORT, 'cancel unavailable'); END;").unwrap();
+    assert!(close(source, false)
+        .unwrap_err()
+        .to_string()
+        .contains("cancel unavailable"));
+    assert_eq!(db::get_circuit_run(run).unwrap().unwrap().state, "running");
+    assert_eq!(
+        db::get_circuit_run(run)
+            .unwrap()
+            .unwrap()
+            .source_agent_node_id,
+        Some(source)
+    );
+    assert!(db::get_agent_node_by_id(source).is_ok());
+}
+
+#[test]
+fn operator_close_keeps_worktree_out_of_cleanup_when_node_delete_fails() {
+    for cleanup_already_requested in [false, true] {
+        let _db = db::test_support::isolated();
+        let (_, source, helper, run) = close_circuit_fixture("running");
+        if cleanup_already_requested {
+            db::write_conn().execute("INSERT INTO agent_node_lifecycle_leases(node_id,cleanup_requested) VALUES(?1,1)", [helper]).unwrap();
+        }
+        db::write_conn().execute_batch("CREATE TRIGGER reject_close BEFORE DELETE ON agent_nodes BEGIN SELECT RAISE(ABORT, 'close unavailable'); END;").unwrap();
+        assert!(close(helper, false)
+            .unwrap_err()
+            .to_string()
+            .contains("close unavailable"));
+        assert_eq!(
+            db::get_circuit_run(run).unwrap().unwrap().state,
+            "cancelled"
+        );
+        assert_eq!(db::circuit_agent_slots_reserved(run).unwrap(), 0);
+        assert!(db::get_agent_node_by_id(source).is_ok());
+        assert!(db::get_agent_node_by_id(helper).is_ok());
+        assert!(db::list_pending_worktree_removals().unwrap().is_empty());
+        // A subsequent cleanup sweep must not reclaim the worktree the operator
+        // chose to keep, including when the close itself needs a retry.
+        assert!(db::claim_circuit_agent_cleanup(helper).unwrap().is_none());
+        db::write_conn()
+            .execute_batch("DROP TRIGGER reject_close")
+            .unwrap();
+        close(helper, false).unwrap();
+        assert!(db::list_pending_worktree_removals().unwrap().is_empty());
+    }
+}
+
 /// A close retires the node's PTY fanout channel, and it does so *after* the
 /// row delete commits — because the retirement records a tombstone that
 /// refuses future channel creation, so doing it while the row could still
