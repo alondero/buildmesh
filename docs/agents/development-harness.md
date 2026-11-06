@@ -323,6 +323,17 @@ npm run harness -- update --spec .tmp/progress.json
 npm run harness -- finish
 ```
 
+The Claude `Bash|PowerShell` PreToolUse
+[waiting guard](../../.claude/hooks/guard-waiting.mjs) refuses `Start-Sleep` /
+`sleep` paired with common process/job probes, harness status checks, or reads
+of `.harness` artifacts and `.log` / `.out` files. This includes a single
+sleep followed by a check, as well as loops. For other background work, block
+until the task completes and read its output once (the task tool's blocking
+completion option, shell `wait`, or PowerShell `Wait-Process` / `Wait-Job`).
+Bounded delays without these polls remain allowed. The guard is a heuristic:
+quoted scripts and computed commands are outside its scope. The same blocking
+workflow applies to agents whose tool hooks do not run this guard.
+
 `wait` blocks until no harness operation holds `.harness/lock` (a verify holds it
 for its whole run), then prints the receipt summary: the outcome line, then each
 nonpassing gate with its reason and log path, in at most about 20 lines. It exits
