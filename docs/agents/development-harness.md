@@ -516,6 +516,13 @@ installed as missing.
 Committed, staged, unstaged, deleted and untracked paths determine scope.
 Unknown paths select both product layers; generated wire types always select
 both. Executable hooks and harness tests still run infrastructure gates.
+Ordinary `scripts/` and `.github/` edits select frontend coverage without the
+Rust graph. The exact Rust tooling exceptions and their per-file rationale live
+in `scripts/ci/changed-scope.mjs`: gate selection/execution, Rust shard coverage
+and failure handling, and ConPTY build inputs retain both graphs, including in
+the local harness. The Android Circuit wire generator writes Kotlin under
+`android/` and does not select Rust. Add a script to the exceptions when it
+controls Rust verification or supplies an input to the Rust build.
 Adding only harness package scripts, or the exact `.harness` ESLint ignore,
 keeps infrastructure scope; dependency/build/rule changes retain product gates.
 
