@@ -189,6 +189,10 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/services/harness_logins_tests.rs': 'services::harness_logins::tests',
   'src-tauri/src/services/usage/logins_tests.rs': 'services::usage::logins::tests',
   'src-tauri/src/commands/preferences_tests.rs': 'commands::preferences::preferences_tests',
+  // The webview user-data folder (issue #2469). The sibling is included by
+  // `startup/webview_data.rs`, so the tests run under
+  // `startup::webview_data::tests`, not under a module named after the file.
+  'src-tauri/src/startup/webview_data_tests.rs': 'startup::webview_data::tests',
 };
 
 // A Rust production file whose tests live in a sibling `<stem>_tests` module
