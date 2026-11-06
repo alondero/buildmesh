@@ -69,7 +69,7 @@ pub(crate) use queue::{
     reorder_queued_circuit_runs_locked,
 };
 
-use crate::db::SqlResult;
+use crate::db::DbError;
 use crate::models::{AutopilotCircuit, AutopilotCircuitRun};
 
 type CircuitProbeLedger = Vec<(AutopilotCircuit, Vec<ledger::CircuitRunLedger>)>;
@@ -80,10 +80,12 @@ type QueuedCircuitRun = Vec<(AutopilotCircuitRun, String)>;
 pub fn list_circuit_probe(
     mesh_id: i64,
     runs_per_circuit: i64,
-) -> SqlResult<(CircuitProbeLedger, QueuedCircuitRun)> {
+) -> Result<(CircuitProbeLedger, QueuedCircuitRun), DbError> {
     ledger::ensure_review_blueprint(mesh_id)?;
     let db = crate::db::read_conn()?;
-    let circuits = ledger::list_circuits_with_recent_runs_inner(&db, mesh_id, runs_per_circuit)?;
-    let queued = queue::list_queued_circuit_runs_inner(&db, mesh_id)?;
+    let tx = db.unchecked_transaction()?;
+    let circuits = ledger::list_circuits_with_recent_runs_inner(&tx, mesh_id, runs_per_circuit)?;
+    let queued = queue::list_queued_circuit_runs_inner(&tx, mesh_id)?;
+    tx.commit()?;
     Ok((circuits, queued))
 }

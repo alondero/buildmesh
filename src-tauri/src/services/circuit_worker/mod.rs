@@ -553,7 +553,7 @@ fn run_pass(app: &AppHandle) {
                     let stored = db::circuit::context_store::StoredContext::of_column(
                         &active.run.context_json,
                     );
-                    stored.get("review.extended") == Some("1")
+                    crate::circuit::lineage::RunLineage::is_extended(|key| stored.get(key))
                         || stored.get("operator.recovered") == Some("1")
                 },
             )

@@ -446,8 +446,8 @@ fn observe_turn_revision(
 }
 
 pub(super) fn awaits_review_turn(view: &RunView, node_id: &str) -> bool {
-    if view.context.get("source.review_preset") != Some("1")
-        && view.context.get("recovery.from_run_id").is_none()
+    if !crate::circuit::lineage::RunLineage::decode(|key| view.context.get(key))
+        .uses_borrowed_review_turns()
     {
         return false;
     }

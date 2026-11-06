@@ -321,9 +321,10 @@ fn review_progress(
         CircuitNodeKind::RetryLimit { max_retries } => Some(max_retries),
         _ => None,
     });
-    let context_limit = (context.get("source.review_preset") == Some("1"))
-        .then(|| context.get("retry.max_retries")?.parse::<i32>().ok())
-        .flatten();
+    let context_limit = (crate::circuit::lineage::RunLineage::decode(|key| context.get(key))
+        .is_local_preset())
+    .then(|| context.get("retry.max_retries")?.parse::<i32>().ok())
+    .flatten();
     let override_limit = context
         .get("review.round_limit")
         .and_then(|value| value.parse::<i32>().ok());

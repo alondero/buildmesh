@@ -3782,8 +3782,8 @@ fn feedback_scheduler_context(run: &RunView) -> CircuitContext {
     if let Some(agent_id) = run.context.source_agent_id() {
         context.set("source.agent_id", agent_id.to_string());
     }
-    if run.context.get("source.review_preset") == Some("1") {
-        context.set("source.review_preset", "1");
+    if crate::circuit::lineage::RunLineage::decode(|key| run.context.get(key)).is_local_preset() {
+        crate::circuit::lineage::RunLineage::mark_local_preset(&mut context);
     }
     for key in ["retry.max_retries", "retry.attempt", "review.round_limit"] {
         if let Some(value) = run
@@ -4596,15 +4596,18 @@ fn retry_gate_max(run: &RunView, gate_id: &str) -> Option<i32> {
             return Some(limit);
         }
     }
-    Some(if run.context.get("source.review_preset") == Some("1") {
-        run.context
-            .get("retry.max_retries")
-            .and_then(|value| value.parse::<i32>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(max_retries)
-    } else {
-        max_retries
-    })
+    Some(
+        if crate::circuit::lineage::RunLineage::decode(|key| run.context.get(key)).is_local_preset()
+        {
+            run.context
+                .get("retry.max_retries")
+                .and_then(|value| value.parse::<i32>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(max_retries)
+        } else {
+            max_retries
+        },
+    )
 }
 
 fn step_attempt(run: &RunView, node_id: &str) -> i32 {

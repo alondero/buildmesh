@@ -36,6 +36,10 @@ pub struct CircuitRunDetail {
     #[ts(optional)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub review_round_limit: Option<i32>,
+    /// Absent on older servers; clients cannot infer permission from context.
+    #[ts(optional)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_continuation: Option<crate::circuit::review_continuation::ReviewContinuation>,
 }
 
 #[command]
@@ -326,6 +330,7 @@ fn map_circuit_rows(
                     run: ledger.run,
                     steps: ledger.steps,
                     review_round_limit: ledger.review_round_limit,
+                    review_continuation: Some(ledger.review_continuation),
                 })
                 .collect(),
         })
@@ -960,25 +965,29 @@ pub fn list_circuit_runs(
     limit: Option<i64>,
 ) -> Result<Vec<CircuitRunDetail>, String> {
     let limit = limit.unwrap_or(20).clamp(1, 100);
-    let runs = crate::db::list_circuit_runs(circuit_id, limit).map_err(|e| e.to_string())?;
-    runs.into_iter()
+    let db = crate::db::read_conn().map_err(|e| e.to_string())?;
+    let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let runs = crate::db::circuit::ledger::list_circuit_runs_inner(&tx, circuit_id, limit)
+        .map_err(|e| e.to_string())?;
+    let continuation = crate::db::circuit::recovery::ReviewContinuationReader::new(&tx);
+    let details = runs
+        .into_iter()
         .map(|run| {
-            let steps = crate::db::list_circuit_run_steps(run.id).map_err(|e| e.to_string())?;
-            let review_round_limit = {
-                // The reader checkout is fallible (issue #1533): a saturated
-                // pool is a transient shortage, not a broken command, so the
-                // error carries the retryable copy instead of panicking.
-                let db = crate::db::read_conn().map_err(|e| e.to_string())?;
-                crate::db::circuit::review_rounds::current_limit(&db, &run)
-                    .map_err(|e| e.to_string())?
-            };
+            let steps = crate::db::circuit::ledger::list_circuit_run_steps_inner(&tx, run.id)?;
+            let review_round_limit = crate::db::circuit::review_rounds::current_limit(&tx, &run)?;
+            let review_continuation = Some(continuation.project(&run, &steps)?);
             Ok(CircuitRunDetail {
                 run,
                 steps,
                 review_round_limit,
+                review_continuation,
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>, DbError>>()
+        .map_err(|e| e.to_string())?;
+    drop(continuation);
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(details)
 }
 
 // ---------------------------------------------------------------------------

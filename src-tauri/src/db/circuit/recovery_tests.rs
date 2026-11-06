@@ -12,6 +12,242 @@ fn exhausted_review() -> Connection {
     db
 }
 
+fn projection(db: &Connection, id: i64) -> ReviewContinuation {
+    let run = super::super::ledger::get_circuit_run_inner(db, id)
+        .unwrap()
+        .unwrap();
+    let steps = super::super::ledger::list_circuit_run_steps_inner(db, id).unwrap();
+    review_continuation_inner(db, &run, &steps).unwrap()
+}
+
+fn seed_successor(db: &Connection, issue_origin: bool) {
+    if issue_origin {
+        let graph = CircuitGraph::issue_driven_autopilot_review("work");
+        db.execute(
+            "UPDATE circuit_run_snapshots SET graph_json=?1 WHERE run_id=1",
+            [graph.to_json().unwrap()],
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE autopilot_circuit_runs SET context_json='{}' WHERE id=1",
+            [],
+        )
+        .unwrap();
+    }
+    db.execute_batch("INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,source_agent_node_id,state,context_json)
+        VALUES(2,1,1,9,'failed','{\"recovery.from_run_id\":\"1\"}');
+        INSERT INTO circuit_run_snapshots(run_id,graph_json,behavior_revision)
+        SELECT 2,graph_json,behavior_revision FROM circuit_run_snapshots WHERE run_id=1;
+        INSERT INTO autopilot_circuit_run_steps(run_id,node_id,status,attempt,outcome,agent_node_id,parent_agent_node_id)
+        SELECT 2,node_id,status,attempt,outcome,agent_node_id,parent_agent_node_id FROM autopilot_circuit_run_steps WHERE run_id=1;").unwrap();
+    db.execute(
+        "UPDATE circuit_run_snapshots SET graph_json=?1 WHERE run_id=2",
+        [CircuitGraph::agent_review(None, None, 3).to_json().unwrap()],
+    )
+    .unwrap();
+}
+
+#[test]
+fn recovery_origin_is_stable_across_active_terminal_and_refused_successors() {
+    use crate::circuit::lineage::ReviewOrigin;
+    for issue in [false, true] {
+        for state in [
+            "pending",
+            "running",
+            "paused",
+            "failed",
+            "completed",
+            "cancelled",
+        ] {
+            let db = exhausted_review();
+            seed_successor(&db, issue);
+            db.execute(
+                "UPDATE autopilot_circuit_runs SET state=?1 WHERE id=2",
+                [state],
+            )
+            .unwrap();
+            let expected = if issue {
+                ReviewOrigin::IssueDriven
+            } else {
+                ReviewOrigin::LocalPreset
+            };
+            assert_eq!(
+                projection(&db, 2).lineage.review_origin,
+                expected,
+                "{state}"
+            );
+            db.execute(
+                "INSERT INTO agent_node_lifecycle_leases(node_id,cleanup_requested) VALUES(10,1)",
+                [],
+            )
+            .unwrap();
+            assert_eq!(
+                projection(&db, 2).lineage.review_origin,
+                expected,
+                "refused {state}"
+            );
+        }
+    }
+}
+
+#[test]
+fn unreadable_ancestor_graph_does_not_reject_a_valid_successor() {
+    let mut db = exhausted_review();
+    seed_successor(&db, false);
+    db.execute(
+        "UPDATE circuit_run_snapshots SET graph_json='invalid' WHERE run_id=1",
+        [],
+    )
+    .unwrap();
+    let view = projection(&db, 2);
+    assert!(view.available && view.supported);
+    assert_eq!(
+        view.lineage.review_origin,
+        crate::circuit::lineage::ReviewOrigin::LocalPreset
+    );
+    assert_eq!(extend_failed_review_locked(&mut db, 2, 1).unwrap(), 2);
+}
+
+#[test]
+fn historical_issue_review_snapshots_keep_their_continuation_contract() {
+    for graph in [
+        crate::circuit::test_support::publication_flow_issue_review(),
+        crate::circuit::test_support::pre_publication_issue_review(),
+    ] {
+        let mut db = exhausted_review();
+        db.execute(
+            "UPDATE circuit_run_snapshots SET graph_json=?1 WHERE run_id=1",
+            [graph.to_json().unwrap()],
+        )
+        .unwrap();
+        db.execute_batch("UPDATE autopilot_circuit_runs SET source_agent_node_id=NULL, context_json='{}' WHERE id=1;
+            UPDATE autopilot_circuit_run_steps SET node_id='review_classifier' WHERE node_id='verdict';
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,status,agent_node_id) VALUES(1,'implementer','completed',9);").unwrap();
+        assert!(projection(&db, 1).supported);
+        assert!(projection(&db, 1).available);
+        assert_eq!(extend_failed_review_locked(&mut db, 1, 1).unwrap(), 1);
+        assert!(super::super::evidence::run_graph(&db, 1)
+            .unwrap()
+            .has_local_review_contract());
+    }
+}
+
+#[test]
+fn projection_and_extension_agree_on_retained_and_legacy_reviewers() {
+    for retained in [true, false] {
+        let mut db = exhausted_review();
+        if !retained {
+            db.execute("UPDATE agent_nodes SET status='archived' WHERE id=10", [])
+                .unwrap();
+        }
+        let view = projection(&db, 1);
+        assert!(view.supported && view.available);
+        assert_eq!(view.target_run_id, Some(1));
+        assert_eq!(view.source_agent_node_id, Some(9));
+        assert_eq!(view.reviewer_agent_node_id, retained.then_some(10));
+        assert_eq!(view.refusal_reason, None);
+        assert_eq!(extend_failed_review_locked(&mut db, 1, 1).unwrap(), 1);
+        let active = projection(&db, 1);
+        assert!(active.supported && !active.available);
+        assert_eq!(active.refusal_reason, Some(Refusal::RunNotFailed));
+        assert!(active.lineage.extended);
+        // Repeating a request returns the already-queued run without extending twice.
+        assert_eq!(extend_failed_review_locked(&mut db, 1, 1).unwrap(), 1);
+    }
+}
+
+#[test]
+fn projection_refusals_are_the_same_decisions_the_transaction_rechecks() {
+    let cases = [
+        ("DELETE FROM agent_nodes WHERE id=9", Refusal::SourceMissing),
+        ("INSERT INTO meshes(id,name,path) VALUES(2,'other','/other'); UPDATE agent_nodes SET mesh_id=2 WHERE id=9", Refusal::SourceWrongMesh),
+        ("DELETE FROM autopilot_circuit_run_steps WHERE node_id='verdict'", Refusal::BeforeReview),
+        ("INSERT INTO agent_node_lifecycle_leases(node_id,cleanup_requested) VALUES(10,1)", Refusal::ReviewerStopping),
+        ("INSERT INTO agent_node_lifecycle_leases(node_id,cleanup_generation) VALUES(9,1)", Refusal::SourceStopping),
+        ("INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,source_agent_node_id,state) VALUES(2,1,1,10,'pending')", Refusal::ReviewerControlledElsewhere),
+        ("UPDATE autopilot_circuit_runs SET context_json='{\"recovery.from_run_id\":\"invalid\"}' WHERE id=1", Refusal::InvalidAncestry),
+        ("UPDATE autopilot_circuit_runs SET context_json='{\"recovery.from_run_id\":\"999\"}' WHERE id=1", Refusal::MissingAncestor),
+        ("UPDATE autopilot_circuit_runs SET context_json='{\"review.round_limit\":\"10000\"}' WHERE id=1", Refusal::RoundLimitReached),
+        ("UPDATE circuit_run_snapshots SET graph_json='invalid' WHERE run_id=1", Refusal::InvalidGraph),
+        ("UPDATE autopilot_circuit_runs SET context_json='invalid' WHERE id=1", Refusal::InvalidContext),
+    ];
+    for (sql, reason) in cases {
+        let mut db = exhausted_review();
+        // A previously displayed action is never authorization for the write.
+        assert!(projection(&db, 1).available);
+        db.execute_batch(sql).unwrap();
+        let view = projection(&db, 1);
+        assert!(!view.available, "{sql}");
+        assert_eq!(view.refusal_reason, Some(reason), "{sql}");
+        let before = super::super::ledger::list_circuit_run_steps_inner(&db, 1).unwrap();
+        assert_eq!(
+            extend_failed_review_locked(&mut db, 1, 1)
+                .unwrap_err()
+                .to_string(),
+            view.refusal_message.unwrap(),
+            "{sql}"
+        );
+        assert_eq!(
+            super::super::ledger::list_circuit_run_steps_inner(&db, 1).unwrap(),
+            before
+        );
+        assert_eq!(
+            super::super::ledger::get_circuit_run_inner(&db, 1)
+                .unwrap()
+                .unwrap()
+                .state,
+            "failed"
+        );
+    }
+}
+
+#[test]
+fn active_guidance_uses_graph_support_without_authorizing_continuation() {
+    for state in ["pending", "running", "paused", "cancelled", "completed"] {
+        let mut db = exhausted_review();
+        db.execute(
+            "UPDATE autopilot_circuit_runs SET state=?1 WHERE id=1",
+            [state],
+        )
+        .unwrap();
+        let view = projection(&db, 1);
+        assert!(view.supported);
+        assert!(!view.available);
+        assert_eq!(view.refusal_reason, Some(Refusal::RunNotFailed));
+        assert!(extend_failed_review_locked(&mut db, 1, 1).is_err());
+    }
+}
+
+#[test]
+fn custom_node_names_are_projected_but_do_not_claim_the_stock_contract() {
+    let mut db = exhausted_review();
+    let mut graph = super::super::evidence::run_graph(&db, 1).unwrap();
+    graph
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "verdict")
+        .unwrap()
+        .id = "custom_verdict".into();
+    for edge in &mut graph.edges {
+        if edge.from == "verdict" {
+            edge.from = "custom_verdict".into();
+        }
+        if edge.to == "verdict" {
+            edge.to = "custom_verdict".into();
+        }
+    }
+    db.execute(
+        "UPDATE circuit_run_snapshots SET graph_json=?1 WHERE run_id=1",
+        [graph.to_json().unwrap()],
+    )
+    .unwrap();
+    let view = projection(&db, 1);
+    assert!(!view.supported && !view.available);
+    assert_eq!(view.refusal_reason, Some(Refusal::UnsupportedGraph));
+    assert_eq!(view.review_nodes.unwrap().verdict_node_id, "custom_verdict");
+    assert!(extend_failed_review_locked(&mut db, 1, 1).is_err());
+}
+
 fn seed_exhausted_review(db: &mut Connection) {
     crate::db::init_schema(db).unwrap();
     let graph = CircuitGraph::agent_review(None, None, 3).to_json().unwrap();

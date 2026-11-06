@@ -18,10 +18,12 @@
 pub(crate) mod blueprints;
 pub mod capacity;
 pub mod context;
+pub mod lineage;
 pub mod model;
 pub mod model_node_review;
 pub mod observation;
 pub(crate) mod report_admission;
+pub mod review_continuation;
 pub mod stepper;
 pub(crate) mod stored_graph;
 pub mod strategy;
