@@ -207,7 +207,8 @@ pub fn claude_direct_recipe(platform: Platform) -> SpawnRecipe {
 /// inherited from buildmesh's own process environment (e.g. an `ANTHROPIC_*`
 /// override exported in the shell that launched the app) can't leak into the
 /// agent — reproducing the clean slate cwrap gave each session. Mirrors the
-/// `unset ...` block in `~/.local/bin/cwrap`. See [`AgentProvider::resets_backend_env`].
+/// `unset ...` block in `~/.local/bin/cwrap`. Anthropic's
+/// [`AgentProvider::prepare_launch`] expands this list into concrete removals.
 ///
 /// `MINIMAX_API_KEY` is included even though Claude Code itself does not read
 /// it: a value exported in the user's shell still propagates to the spawn

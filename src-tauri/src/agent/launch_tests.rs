@@ -106,7 +106,6 @@ fn default_prepare_empty_input_equals_base_recipe_for_terminal() {
         prepared.recipe.base_args,
         prepared.recipe.trailing_args
     );
-    assert!(!prepared.environment.resets_backend_env);
     assert!(prepared.environment.env_remove.is_empty());
 }
 
@@ -576,7 +575,6 @@ fn default_prepare_forwards_codex_inline_effort() {
 #[test]
 fn environment_policy_none_is_inert() {
     let p = HarnessEnvironmentPolicy::default();
-    assert!(!p.resets_backend_env);
     assert!(p.env_remove.is_empty());
     assert!(p.env_set.is_empty());
 }

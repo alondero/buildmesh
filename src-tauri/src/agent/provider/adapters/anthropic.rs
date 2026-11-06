@@ -21,7 +21,11 @@ impl AgentProvider for AnthropicAdapter {
         input: crate::agent::launch::HarnessLaunchInput<'_>,
     ) -> crate::agent::launch::PreparedHarnessLaunch {
         let mut prepared = crate::agent::launch::default_prepare(self, input);
-        prepared.environment.resets_backend_env = true;
+        prepared.environment.env_remove.extend(
+            crate::agent::provider::CLAUDE_BACKEND_ENV_VARS
+                .iter()
+                .map(|key| key.to_string()),
+        );
         prepared
     }
 

@@ -90,11 +90,6 @@ pub struct HarnessLaunchInput<'a> {
 /// `env_set` is for harness-specific child env injections.
 #[derive(Default)]
 pub struct HarnessEnvironmentPolicy {
-    /// Reset the cwrap unset list (`CLAUDE_BACKEND_ENV_VARS`) before the
-    /// spawn path injects the per-profile backend env. True for the
-    /// Claude-backed `anthropic` adapter; false for native-binary
-    /// providers (Codex, OpenCode, Agy) that never went through cwrap.
-    pub resets_backend_env: bool,
     /// Keys to strip from the child env (e.g. Codex Proxy strips generic
     /// `OPENAI_API_KEY` / `OPENAI_BASE_URL` so the pairing-scoped
     /// credential reference is the only OpenAI auth path).

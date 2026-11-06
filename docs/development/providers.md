@@ -452,6 +452,8 @@ Production calls `AgentProvider::prepare_launch` through the selected adapter.
 Adapters reuse private shared option assembly and own harness-specific routing
 arguments and environment changes. Routing resolves the pairing, credentials,
 executable and runtime; `spawn_environment::wrap` owns OS process arrangement.
+Launch output carries concrete environment removals and assignments, including
+Anthropic's shared backend-reset list.
 Codex's adapter supplies its profile flags, fallback model, scoped credential
 and login home. Session preparation remains adapter behavior, including OpenCode
 2's native session/fork API and Cline's self-assigned identities.

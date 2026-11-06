@@ -1,7 +1,7 @@
 use super::intent::ResumeCause;
 use super::reader::SessionIdMode;
 use crate::agent::launch::{HarnessLaunchInput, SessionIdModeRef};
-use crate::agent::provider::{Platform, CLAUDE_BACKEND_ENV_VARS};
+use crate::agent::provider::Platform;
 use crate::agent::spawn_environment;
 use crate::env;
 use crate::models::{EnvType, Provider};
@@ -118,15 +118,7 @@ pub(super) fn build_spawn_command_with_adapter(
         sandbox,
     )?;
 
-    // Apply the harness's environment policy (CLAUDE_BACKEND_ENV_VARS
-    // reset + per-harness env_remove + env_set). The adapter owns this —
-    // the Claude-backed anthropic adapter sets the reset, Codex sets
-    // OPENAI_* strip, Command Code sets TERM_PROGRAM=vscode.
-    if prepared.environment.resets_backend_env {
-        for k in CLAUDE_BACKEND_ENV_VARS {
-            cmd.env_remove(k);
-        }
-    }
+    // Apply the concrete environment contribution from the selected adapter.
     for k in &prepared.environment.env_remove {
         cmd.env_remove(k);
     }

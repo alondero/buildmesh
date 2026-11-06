@@ -100,6 +100,7 @@ use crate::preferences::HarnessConfigValue;
 
 /// Exact argv and environment policy before OS wrapping, across every adapter
 /// and launch mode. The fixture was captured before the descriptor migration.
+/// The old backend-reset flag is expanded into its effective removal keys.
 #[test]
 fn harness_launch_contract_preserves_all_adapter_recipes() {
     let _env = crate::env::ENV_LOCK
@@ -145,7 +146,6 @@ fn harness_launch_contract_preserves_all_adapter_recipes() {
                     "binary": prepared.recipe.binary,
                     "args": prepared.recipe.base_args,
                     "trailing": prepared.recipe.trailing_args,
-                    "reset": prepared.environment.resets_backend_env,
                     "remove": prepared.environment.env_remove,
                     "set": prepared.environment.env_set,
                 }));
