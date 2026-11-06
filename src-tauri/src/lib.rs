@@ -153,6 +153,20 @@ pub fn run() {
         }
     }));
 
+    // Issue #2469 — the webview keeps `localStorage`, IndexedDB and cookies in
+    // one folder, and on Windows that folder defaults to the per-identifier
+    // local data directory, so the dev builds shared one folder between them: a
+    // fresh worktree started with an empty database and still showed the
+    // previous worktree's notifications and window layout. The folder is part
+    // of the app-data profile, so it moves with `BUILDMESH_PROFILE_DIR` — and
+    // a shipped release build, which names no profile, keeps the platform
+    // default.
+    //
+    // This has to happen before the app is built: Tauri creates the window
+    // (and with it the WebView2 environment) from the config it is handed.
+    let mut context = tauri::generate_context!();
+    startup::webview_data::apply(context.config_mut());
+
     tauri::Builder::default()
         .manage(crate::companion::CompanionState::default()).manage(crate::services::gh_auth_cache::GhAuthCache::new())
         // Durable last-known Usage Meter readings (ADR-0037). Resolves the app
@@ -611,7 +625,7 @@ pub fn run() {
             commands::opencode_oauth::get_opencode_console_status,
             commands::opencode_oauth::set_opencode_console_workspace,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building tauri application")
         .run(|_app_handle, event| {
             match &event {
