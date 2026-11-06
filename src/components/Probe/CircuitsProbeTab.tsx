@@ -1191,7 +1191,7 @@ export function CircuitsProbeTab() {
                           key={detail.run.id}
                           detail={detail}
                           context={context}
-                          reviewCircuit={reviewCircuitForRun(detail, reviewCircuit, context)}
+                          reviewCircuit={reviewCircuitForRun(detail, reviewCircuit)}
                           nodeIndex={nodeIndex}
                           agentName={agentName}
                           onFocusAgent={handleFocusAgent}

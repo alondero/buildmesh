@@ -11,6 +11,7 @@
  */
 
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
+import { reviewContinuation } from './helpers/reviewContinuation';
 import { preloadProbeTabs } from './helpers/preloadProbeTabs';
 import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -299,7 +300,7 @@ describe('CircuitsProbeTab', () => {
 
   it.each([1, 3, 10])('adds %i rounds to a failed review and focuses the same run', async (additionalRounds) => {
     const graph = { version: 3, nodes: [{ id: 'verdict', type: { type: 'review_verdict', target_node_id: 'reviewer' } }], edges: [] };
-    const failed = { run: { ...RUN_DONE.run, state: 'failed', source_agent_node_id: 42, context_json: '{"source.review_preset":"1"}' },
+    const failed = { review_continuation: reviewContinuation(), run: { ...RUN_DONE.run, state: 'failed', source_agent_node_id: 42, context_json: '{}' },
       steps: [{ ...RUN_DONE.steps[0], node_id: 'verdict', status: 'completed', outcome: 'working' }] };
     const circuits = [{ ...CIRCUIT, graph_json: JSON.stringify(graph) }];
     mockBackend({ circuits, runs: [failed] });
@@ -317,7 +318,7 @@ describe('CircuitsProbeTab', () => {
     expect(invoke).toHaveBeenCalledWith('continue_circuit_review', { runId: 11, additionalRounds });
     expect(screen.getByTestId('run-continue-review-11').hasAttribute('disabled')).toBe(true);
     expect(screen.getByLabelText('Additional review rounds').hasAttribute('disabled')).toBe(true);
-    mockBackend({ circuits, runs: [{ run: { ...failed.run, state: 'running', context_json: '{"source.review_preset":"1","review.extended":"1","retry.attempt":"4","retry.max_retries":"4"}' }, steps: [] }] });
+    mockBackend({ circuits, runs: [{ review_continuation: reviewContinuation({ available: false, refusal_reason: 'run_not_failed', lineage: { review_origin: 'local_preset', extended: true, recovery: { kind: 'none' } } }), run: { ...failed.run, state: 'running', context_json: '{"source.review_preset":"1","review.extended":"1","retry.attempt":"4","retry.max_retries":"4"}' }, steps: [] }] });
     await act(async () => { finish(11); });
     await waitFor(() => expect(screen.getByTestId('circuits-view-activity').getAttribute('aria-selected')).toBe('true'));
     expect(screen.getByTestId('run-card-11').getAttribute('data-run-focused')).toBe('true');
@@ -327,7 +328,8 @@ describe('CircuitsProbeTab', () => {
   it('keeps failed review evidence and shows a recovery error when the saved agent is unavailable', async () => {
     const graph = { version: 3, nodes: [{ id: 'verdict', type: { type: 'review_verdict', target_node_id: 'reviewer' } }], edges: [] };
     mockBackend({ circuits: [{ ...CIRCUIT, graph_json: JSON.stringify(graph) }], runs: [{
-      run: { ...RUN_DONE.run, state: 'failed', source_agent_node_id: 42, context_json: '{"source.review_preset":"1"}' },
+      review_continuation: reviewContinuation(),
+      run: { ...RUN_DONE.run, state: 'failed', source_agent_node_id: 42, context_json: '{}' },
       steps: [{ ...RUN_DONE.steps[0], node_id: 'verdict', outcome: 'working', error_message: 'Review requires changes' }],
     }] });
     const fallback = vi.mocked(invoke).getMockImplementation();

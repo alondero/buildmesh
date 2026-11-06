@@ -1,10 +1,62 @@
 //! Review extensions borrow the retained implementation agent and reuse its
 //! Circuit Run. Earlier findings and replaced graph snapshots remain archived.
 
+use crate::circuit::lineage::{
+    RecoveryAncestry, RunLineage, RECOVERY_PARENT_KEY, REVIEW_EXTENDED_KEY,
+};
 use crate::circuit::model::{CircuitGraph, CircuitNodeKind};
+use crate::circuit::review_continuation::{
+    ReviewContinuation, ReviewContinuationRefusal as Refusal, ReviewRunNodes,
+};
 use crate::circuit::stepper::{resolve_target_agent, StepStatus, StepView};
 use crate::db::DbError;
 use rusqlite::{params, Connection, OptionalExtension};
+
+#[derive(Debug)]
+enum EligibilityError {
+    Refused(Refusal),
+    Database(DbError),
+}
+impl From<Refusal> for EligibilityError {
+    fn from(value: Refusal) -> Self {
+        Self::Refused(value)
+    }
+}
+impl From<DbError> for EligibilityError {
+    fn from(value: DbError) -> Self {
+        Self::Database(value)
+    }
+}
+impl From<rusqlite::Error> for EligibilityError {
+    fn from(value: rusqlite::Error) -> Self {
+        Self::Database(value.into())
+    }
+}
+impl From<String> for EligibilityError {
+    fn from(_: String) -> Self {
+        Self::Refused(Refusal::InvalidGraph)
+    }
+}
+impl From<EligibilityError> for DbError {
+    fn from(value: EligibilityError) -> Self {
+        match value {
+            EligibilityError::Database(error) => error,
+            EligibilityError::Refused(reason) => match reason {
+                Refusal::RunMissing | Refusal::SourceMissing => {
+                    DbError::not_found(reason.message())
+                }
+                Refusal::RunNotFailed
+                | Refusal::UnsupportedGraph
+                | Refusal::BeforeReview
+                | Refusal::ReviewerDefinitionMissing
+                | Refusal::RoundLimitMissing
+                | Refusal::InvalidGraph
+                | Refusal::InvalidContext => DbError::invalid(reason.message()),
+                _ => DbError::conflict(reason.message()),
+            },
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct ReviewRecovery {
@@ -60,10 +112,10 @@ pub fn review_recovery_reviewer(run_id: i64) -> Result<Option<i64>, DbError> {
         ContinuationTarget::Existing(_) => return Ok(None),
         ContinuationTarget::Failed(id) => id,
     };
-    retained_reviewer_inner(&db, target)
+    retained_reviewer_inner(&db, target).map_err(Into::into)
 }
 
-fn retained_reviewer_inner(db: &Connection, run_id: i64) -> Result<Option<i64>, DbError> {
+fn retained_reviewer_inner(db: &Connection, run_id: i64) -> Result<Option<i64>, EligibilityError> {
     let reviewer: Option<(i64, bool)> = db
         .query_row(
             "SELECT a.id, COALESCE(l.cleanup_requested,0) = 1 OR l.cleanup_generation IS NOT NULL
@@ -75,9 +127,7 @@ fn retained_reviewer_inner(db: &Connection, run_id: i64) -> Result<Option<i64>, 
         )
         .optional()?;
     match reviewer {
-        Some((_, true)) => Err(DbError::conflict(
-            "The previous reviewer is still being cleaned up. Try Review again in a moment.",
-        )),
+        Some((_, true)) => Err(Refusal::ReviewerStopping.into()),
         Some((id, false)) => {
             let piloted_elsewhere: bool = db.query_row(
                 "SELECT EXISTS(SELECT 1 FROM autopilot_circuit_runs r
@@ -86,7 +136,7 @@ fn retained_reviewer_inner(db: &Connection, run_id: i64) -> Result<Option<i64>, 
                        WHERE s.run_id=r.id AND s.agent_node_id=?2)))",
                 params![run_id, id], |row| row.get(0))?;
             if piloted_elsewhere {
-                return Err(DbError::conflict("The reviewer is controlled by another active Circuit Run. Finish or cancel that run before continuing this review."));
+                return Err(Refusal::ReviewerControlledElsewhere.into());
             }
             Ok(Some(id))
         }
@@ -95,9 +145,9 @@ fn retained_reviewer_inner(db: &Connection, run_id: i64) -> Result<Option<i64>, 
 }
 
 fn is_review_extension(state: &str, context_json: &str) -> bool {
+    let stored = super::context_store::StoredContext::of_column(context_json);
     matches!(state, "pending" | "running" | "paused" | "completed")
-        && super::context_store::StoredContext::of_column(context_json).get("review.extended")
-            == Some("1")
+        && RunLineage::is_extended(|key| stored.get(key))
 }
 
 pub fn existing_review_target(run_id: i64) -> Result<Option<i64>, DbError> {
@@ -113,32 +163,84 @@ pub fn existing_review_target(run_id: i64) -> Result<Option<i64>, DbError> {
     })
 }
 
+/// One snapshot batches the compatibility ancestry lookup for every displayed
+/// run. Only extracted parent identities are read, not whole run contexts.
+pub(crate) struct ReviewContinuationReader<'a> {
+    db: &'a Connection,
+    successors: std::cell::RefCell<Option<std::collections::HashMap<String, (i64, String)>>>,
+}
+impl<'a> ReviewContinuationReader<'a> {
+    pub(crate) fn new(db: &'a Connection) -> Self {
+        Self {
+            db,
+            successors: std::cell::RefCell::new(None),
+        }
+    }
+
+    fn successor(&self, parent: i64) -> Result<Option<(i64, String)>, EligibilityError> {
+        if self.successors.borrow().is_none() {
+            let mut stmt = self.db.prepare(
+                "SELECT id,state,json_extract(context_json,?1)
+                FROM autopilot_circuit_runs WHERE json_valid(context_json)
+                AND json_type(context_json,?1)='text' ORDER BY id",
+            )?;
+            let rows = stmt.query_map([format!("$.\"{RECOVERY_PARENT_KEY}\"")], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            let mut successors = std::collections::HashMap::new();
+            for row in rows {
+                let (id, state, parent) = row?;
+                // Preserve the durable operation's first-successor selection.
+                successors.entry(parent).or_insert((id, state));
+            }
+            *self.successors.borrow_mut() = Some(successors);
+        }
+        Ok(self
+            .successors
+            .borrow()
+            .as_ref()
+            .and_then(|rows| rows.get(&parent.to_string()).cloned()))
+    }
+
+    pub(crate) fn project(
+        &self,
+        run: &crate::models::AutopilotCircuitRun,
+        steps: &[crate::models::AutopilotCircuitRunStep],
+    ) -> Result<ReviewContinuation, DbError> {
+        project_continuation(self, run, steps)
+    }
+}
+
 /// Follow recorded generations under the caller's connection. Repeated
 /// requests for an older failure must never create a sibling review.
 pub(crate) fn continuation_target_inner(
     db: &Connection,
     run_id: i64,
 ) -> Result<ContinuationTarget, DbError> {
+    continuation_target_checked(&ReviewContinuationReader::new(db), run_id).map_err(Into::into)
+}
+
+fn continuation_target_checked(
+    reader: &ReviewContinuationReader<'_>,
+    run_id: i64,
+) -> Result<ContinuationTarget, EligibilityError> {
+    let db = reader.db;
     let original = super::ledger::get_circuit_run_inner(db, run_id)?
-        .ok_or_else(|| DbError::not_found("This run no longer exists."))?;
+        .ok_or_else(|| EligibilityError::Refused(Refusal::RunMissing))?;
     if original.state != "failed" {
-        return Err(DbError::invalid(
-            "Only failed reviews can be continued. Cancelled reviews require a fresh review.",
-        ));
+        return Err(Refusal::RunNotFailed.into());
     }
     let mut current = run_id;
     let mut visited = std::collections::HashSet::new();
     loop {
         if !visited.insert(current) {
-            return Err(DbError::conflict(
-                "Review lineage is inconsistent. Start a fresh review.",
-            ));
+            return Err(Refusal::InvalidAncestry.into());
         }
-        let next: Option<(i64,String)> = db.query_row(
-            "SELECT id,state FROM autopilot_circuit_runs
-             WHERE json_extract(CASE WHEN json_valid(context_json) THEN context_json ELSE '{}' END, '$.\"recovery.from_run_id\"')=?1
-             ORDER BY id LIMIT 1", [current.to_string()], |row| Ok((row.get(0)?,row.get(1)?)))
-            .optional()?;
+        let next = reader.successor(current)?;
         match next {
             None => return Ok(ContinuationTarget::Failed(current)),
             Some((id, state)) if state == "failed" => current = id,
@@ -150,11 +252,7 @@ pub(crate) fn continuation_target_inner(
             {
                 return Ok(ContinuationTarget::Existing(id))
             }
-            Some(_) => {
-                return Err(DbError::conflict(
-                    "The continued review was cancelled. Start a fresh review.",
-                ))
-            }
+            Some(_) => return Err(Refusal::CancelledSuccessor.into()),
         }
     }
 }
@@ -164,33 +262,35 @@ pub(crate) fn review_recovery_inner(
     run_id: i64,
     rounds: i32,
 ) -> Result<ReviewRecovery, DbError> {
+    review_recovery_checked(db, run_id, rounds).map_err(Into::into)
+}
+
+fn review_recovery_checked(
+    db: &Connection,
+    run_id: i64,
+    rounds: i32,
+) -> Result<ReviewRecovery, EligibilityError> {
     if !(1..=10000).contains(&rounds) {
-        return Err(DbError::conflict("Review round limit reached."));
+        return Err(Refusal::RoundLimitReached.into());
     }
     let run = super::ledger::get_circuit_run_inner(db, run_id)?
-        .ok_or_else(|| DbError::not_found("This run no longer exists."))?;
+        .ok_or_else(|| EligibilityError::Refused(Refusal::RunMissing))?;
     if run.state != "failed" {
-        return Err(DbError::invalid(
-            "Only failed reviews can be continued. Open the active run to resume or cancel it.",
-        ));
+        return Err(Refusal::RunNotFailed.into());
     }
     let context = super::context_store::load_logical(db, run_id)?.runtime();
     let original = super::evidence::run_graph(db, run_id)?;
     let steps = super::ledger::list_circuit_run_steps_inner(db, run_id)?;
     let (source_id, local) = review_source_id(&run, &original, &steps)?;
-    let source = crate::db::agent_node::get_agent_node_by_id_inner(db, source_id).map_err(|_| {
-        DbError::not_found(
-            "The implementation agent is no longer retained. Recover from the PR branch and start a new review.",
-        )
-    })?;
+    let source = crate::db::agent_node::get_agent_node_by_id_inner(db, source_id)
+        .optional()?
+        .ok_or(Refusal::SourceMissing)?;
     if source.mesh_id != run.mesh_id {
-        return Err(DbError::conflict(
-            "The implementation agent no longer belongs to this Mesh.",
-        ));
+        return Err(Refusal::SourceWrongMesh.into());
     }
     let mut reviewer = original
         .node("reviewer")
-        .ok_or_else(|| DbError::invalid("The reviewer definition is unavailable."))?
+        .ok_or_else(|| EligibilityError::Refused(Refusal::ReviewerDefinitionMissing))?
         .kind
         .clone();
     let CircuitNodeKind::SpawnAgentNode {
@@ -201,7 +301,7 @@ pub(crate) fn review_recovery_inner(
         ..
     } = &mut reviewer
     else {
-        return Err(DbError::invalid("The reviewer definition is unavailable."));
+        return Err(Refusal::ReviewerDefinitionMissing.into());
     };
     // Freeze the original review scope, including PR comment instructions and
     // custom reviewer prompts. Do not replay implementation or publish steps.
@@ -216,7 +316,7 @@ pub(crate) fn review_recovery_inner(
         prompt_context.set(key, format!("{{{{{key}}}}}"));
     }
     *prompt = prompt_context.resolve(prompt);
-    if context.get("source.review_preset") == Some("1") {
+    if crate::circuit::lineage::RunLineage::decode(|key| context.get(key)).is_local_preset() {
         *model = None;
         *effort = None;
         *provider = None;
@@ -262,9 +362,7 @@ pub(crate) fn review_recovery_inner(
             *next_prompt = prompt_context.resolve(prompt);
         }
     } else {
-        return Err(DbError::conflict(
-            "The review feedback step has changed. Open the implementation agent to recover this custom circuit.",
-        ));
+        return Err(Refusal::FeedbackChanged.into());
     }
     graph.validate()?;
     let frozen_launches = context
@@ -282,64 +380,81 @@ pub(crate) fn review_recovery_inner(
 
 /// Whether Review again accepts this graph.
 ///
-/// A node review still needs its source agent. The issue-review blueprint
-/// does not. The failed-state check and the later recovery checks stay in
-/// [`review_source_id`]. Last-round guidance is shown while the run is still
-/// going, so it uses this contract.
+/// This is graph support only. Retained agents and current state are checked
+/// by the shared extension preparation. Last-round guidance can use support
+/// while the run is still going without claiming it can execute yet.
 pub(crate) fn review_continuation_supported(
     run: &crate::models::AutopilotCircuitRun,
     graph: &CircuitGraph,
 ) -> bool {
-    (run.source_agent_node_id.is_some() && graph.has_local_review_contract())
-        || graph.is_issue_driven_autopilot_review()
+    if graph.has_local_review_contract() {
+        // A borrowed-source graph needs its run binding to identify the work.
+        // This is independent of run state and whether that agent still exists.
+        return run.source_agent_node_id.is_some();
+    }
+    if !graph.is_issue_driven_autopilot_review() {
+        return false;
+    }
+    let canonical = CircuitGraph::issue_driven_autopilot_review("");
+    if graph.has_review_topology_of(&canonical) {
+        return true;
+    }
+    let mut compatible = graph.clone();
+    crate::circuit::stored_graph::upgrade(
+        &mut compatible,
+        crate::circuit::stored_graph::UpgradeTarget::Blueprint,
+    );
+    compatible.has_review_topology_of(&canonical)
 }
 
 fn review_source_id(
     run: &crate::models::AutopilotCircuitRun,
     original: &CircuitGraph,
     steps: &[crate::models::AutopilotCircuitRunStep],
-) -> Result<(i64, bool), DbError> {
+) -> Result<(i64, bool), EligibilityError> {
     if run.state != "failed" {
-        return Err(DbError::invalid(
-            "Only failed reviews can be continued. Open the active run to resume or cancel it.",
-        ));
+        return Err(Refusal::RunNotFailed.into());
+    }
+    if original
+        .nodes
+        .iter()
+        .any(|node| matches!(node.kind, CircuitNodeKind::ReviewVerdict { .. }))
+        && !matches!(
+            original.node("reviewer").map(|node| &node.kind),
+            Some(CircuitNodeKind::SpawnAgentNode { .. })
+        )
+    {
+        return Err(Refusal::ReviewerDefinitionMissing.into());
+    }
+    let local = original.has_local_review_contract();
+    if local && run.source_agent_node_id.is_none() {
+        return Err(Refusal::SourceMissing.into());
     }
     if !review_continuation_supported(run, original) {
-        return Err(DbError::invalid(
-            "This custom circuit needs manual recovery. Open its implementation agent and inspect the failed step.",
-        ));
+        return Err(Refusal::UnsupportedGraph.into());
     }
-    let local = run.source_agent_node_id.is_some() && original.has_local_review_contract();
     let source_id = if local {
         run.source_agent_node_id
     } else {
-        steps.iter().find(|step| step.node_id == "implementer").and_then(|step| step.agent_node_id)
-    }.ok_or_else(|| DbError::not_found(
-        "The implementation agent is no longer retained. Recover from the PR branch and start a new review.",
-    ))?;
+        steps
+            .iter()
+            .find(|step| step.node_id == "implementer")
+            .and_then(|step| step.agent_node_id)
+    }
+    .ok_or_else(|| EligibilityError::Refused(Refusal::SourceMissing))?;
     if !steps.iter().any(|step| {
         original
             .node(&step.node_id)
             .is_some_and(|node| matches!(node.kind, CircuitNodeKind::ReviewVerdict { .. }))
     }) {
-        return Err(DbError::invalid(
-            "This run stopped before review. Open the implementation agent and resolve its failure first.",
-        ));
-    }
-    if !matches!(
-        original.node("reviewer").map(|node| &node.kind),
-        Some(CircuitNodeKind::SpawnAgentNode { .. })
-    ) {
-        return Err(DbError::invalid("The reviewer definition is unavailable."));
+        return Err(Refusal::BeforeReview.into());
     }
     let feedback_id = if local { "feedback" } else { "follow_feedback" };
     if !matches!(
         original.node(feedback_id).map(|node| &node.kind),
         Some(CircuitNodeKind::InjectPty { .. })
     ) {
-        return Err(DbError::conflict(
-            "The review feedback step has changed. Open the implementation agent to recover this custom circuit.",
-        ));
+        return Err(Refusal::FeedbackChanged.into());
     }
     Ok((source_id, local))
 }
@@ -406,101 +521,25 @@ pub(crate) fn extend_failed_review_locked(
         ));
     }
     let tx = db.transaction()?;
-    if let Some(run) = super::ledger::get_circuit_run_inner(&tx, run_id)? {
-        if is_review_extension(&run.state, &run.context_json) {
-            return Ok(run_id);
-        }
-    }
-    let target = match continuation_target_inner(&tx, run_id)? {
-        ContinuationTarget::Existing(id) => return Ok(id),
-        ContinuationTarget::Failed(id) => id,
+    let plan = match extension_plan_inner(
+        &ReviewContinuationReader::new(&tx),
+        run_id,
+        additional_rounds,
+    )? {
+        ExtensionPlan::Existing(id) => return Ok(id),
+        ExtensionPlan::Extend(plan) => plan,
     };
-    let run = super::ledger::get_circuit_run_inner(&tx, target)?
-        .ok_or_else(|| DbError::not_found("This run no longer exists."))?;
-    let original_graph_json = super::evidence::run_graph_json(&tx, target)?;
-    let graph = CircuitGraph::from_json(&original_graph_json)?;
-    let steps = super::ledger::list_circuit_run_steps_inner(&tx, target)?;
-    let prior_limit = ["review_retry", "retry"]
-        .iter()
-        .find_map(|id| match graph.node(id).map(|node| &node.kind) {
-            Some(CircuitNodeKind::RetryLimit { max_retries }) => Some(*max_retries),
-            _ => None,
-        })
-        .ok_or_else(|| DbError::invalid("The review round limit is unavailable."))?;
-    let last_attempt = steps
-        .iter()
-        .filter(|step| {
-            matches!(
-                step.node_id.as_str(),
-                "reviewer" | "verdict" | "review_classifier" | "re_review"
-            )
-        })
-        .map(|step| step.attempt)
-        .max()
-        .unwrap_or(0);
-    let next_attempt = last_attempt
-        .checked_add(1)
-        .ok_or_else(|| DbError::conflict("Review round limit reached."))?;
-    let context = super::context_store::StoredContext::strict_of_column(&run.context_json)?;
-    let prior_limit = context
-        .get("review.round_limit")
-        .and_then(|value| value.parse::<i32>().ok())
-        .filter(|limit| *limit > 0)
-        .unwrap_or(prior_limit);
-    let next_limit = prior_limit
-        .max(last_attempt)
-        .checked_add(additional_rounds)
-        .filter(|limit| *limit <= 10000)
-        .ok_or_else(|| DbError::conflict("Review round limit reached."))?;
-    let mut recovery = review_recovery_inner(&tx, target, next_limit)?;
-    let other_live = super::ledger::find_live_run_for_source_inner(&tx, recovery.source_id)?;
-    if let Some(id) = other_live {
-        return Ok(id);
-    }
-    let cleanup_in_progress: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM agent_node_lifecycle_leases WHERE node_id=?1 AND cleanup_generation IS NOT NULL)",
-        [recovery.source_id], |row| row.get(0))?;
-    if cleanup_in_progress {
-        return Err(DbError::conflict(
-            "The implementation agent is still being stopped. Try Review again in a moment.",
-        ));
-    }
-    let retained_reviewer = retained_reviewer_inner(&tx, target)?;
-    if retained_reviewer.is_some() {
-        // The completed spawn supplies identity, not a fresh report. Route
-        // through delivery before the join can schedule a verdict.
-        recovery
-            .graph
-            .retarget_edge("reviewer", "review_round", "re_review");
-        recovery.graph.validate()?;
-    }
-
-    // Old continuation runs are moved back under their original Circuit.
-    // Their pinned review-only snapshot remains the executable graph.
-    let mut root = target;
-    let mut visited = std::collections::HashSet::new();
-    loop {
-        if !visited.insert(root) {
-            return Err(DbError::conflict("Review lineage is inconsistent."));
-        }
-        let current = super::ledger::get_circuit_run_inner(&tx, root)?
-            .ok_or_else(|| DbError::conflict("Review lineage is incomplete."))?;
-        let context = super::context_store::StoredContext::strict_of_column(&current.context_json)?;
-        match context
-            .get("recovery.from_run_id")
-            .and_then(|id| id.parse::<i64>().ok())
-        {
-            Some(parent) => root = parent,
-            None => break,
-        }
-    }
-    let root_run = super::ledger::get_circuit_run_inner(&tx, root)?
-        .ok_or_else(|| DbError::conflict("Review lineage is incomplete."))?;
-    let circuit_name: String = tx.query_row(
-        "SELECT name FROM autopilot_circuits WHERE id=?1",
-        [root_run.circuit_id],
-        |row| row.get(0),
-    )?;
+    let PreparedExtension {
+        target,
+        run,
+        original_graph_json,
+        next_attempt,
+        next_limit,
+        recovery,
+        retained_reviewer,
+        root_run,
+        circuit_name,
+    } = *plan;
     // The extension keeps the run's trigger context but starts the
     // reviewer's working state afresh: the node-scoped and evidence-scoped
     // values go with it (issue #2601). The values the extension does keep —
@@ -512,7 +551,7 @@ pub(crate) fn extend_failed_review_locked(
     mutation.put("retry.attempt", next_attempt.to_string());
     mutation.put("retry.max_retries", next_limit.to_string());
     mutation.put("review.round_limit", next_limit.to_string());
-    mutation.put("review.extended", "1");
+    mutation.put(REVIEW_EXTENDED_KEY, "1");
     if run.source_agent_node_id.is_none() {
         mutation.put("review.source_was_circuit_owned", "1");
     }
@@ -586,6 +625,283 @@ pub(crate) fn extend_failed_review_locked(
     })?;
     tx.commit()?;
     Ok(target)
+}
+
+enum ExtensionPlan {
+    Existing(i64),
+    Extend(Box<PreparedExtension>),
+}
+struct PreparedExtension {
+    target: i64,
+    run: crate::models::AutopilotCircuitRun,
+    original_graph_json: String,
+    next_attempt: i32,
+    next_limit: i32,
+    recovery: ReviewRecovery,
+    retained_reviewer: Option<i64>,
+    root_run: crate::models::AutopilotCircuitRun,
+    circuit_name: String,
+}
+
+fn extension_plan_inner(
+    reader: &ReviewContinuationReader<'_>,
+    run_id: i64,
+    additional_rounds: i32,
+) -> Result<ExtensionPlan, EligibilityError> {
+    let db = reader.db;
+    if let Some(run) = super::ledger::get_circuit_run_inner(db, run_id)? {
+        if is_review_extension(&run.state, &run.context_json) {
+            return Ok(ExtensionPlan::Existing(run_id));
+        }
+    }
+    let target = match continuation_target_checked(reader, run_id)? {
+        ContinuationTarget::Existing(id) => return Ok(ExtensionPlan::Existing(id)),
+        ContinuationTarget::Failed(id) => id,
+    };
+    let run = super::ledger::get_circuit_run_inner(db, target)?
+        .ok_or_else(|| EligibilityError::Refused(Refusal::RunMissing))?;
+    let original_graph_json = super::evidence::run_graph_json(db, target)?;
+    let graph = CircuitGraph::from_json(&original_graph_json)?;
+    let steps = super::ledger::list_circuit_run_steps_inner(db, target)?;
+    let prior_limit = ["review_retry", "retry"]
+        .iter()
+        .find_map(|id| match graph.node(id).map(|node| &node.kind) {
+            Some(CircuitNodeKind::RetryLimit { max_retries }) => Some(*max_retries),
+            _ => None,
+        })
+        .ok_or_else(|| EligibilityError::Refused(Refusal::RoundLimitMissing))?;
+    let last_attempt = steps
+        .iter()
+        .filter(|step| {
+            matches!(
+                step.node_id.as_str(),
+                "reviewer" | "verdict" | "review_classifier" | "re_review"
+            )
+        })
+        .map(|step| step.attempt)
+        .max()
+        .unwrap_or(0);
+    let next_attempt = last_attempt
+        .checked_add(1)
+        .ok_or_else(|| EligibilityError::Refused(Refusal::RoundLimitReached))?;
+    let context = super::context_store::StoredContext::strict_of_column(&run.context_json)
+        .map_err(|_| Refusal::InvalidContext)?;
+    let prior_limit = context
+        .get("review.round_limit")
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|limit| *limit > 0)
+        .unwrap_or(prior_limit);
+    let next_limit = prior_limit
+        .max(last_attempt)
+        .checked_add(additional_rounds)
+        .filter(|limit| *limit <= 10000)
+        .ok_or_else(|| EligibilityError::Refused(Refusal::RoundLimitReached))?;
+    let mut recovery = review_recovery_checked(db, target, next_limit)?;
+    let other_live = super::ledger::find_live_run_for_source_inner(db, recovery.source_id)?;
+    if let Some(id) = other_live {
+        return Ok(ExtensionPlan::Existing(id));
+    }
+    let cleanup_in_progress: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agent_node_lifecycle_leases WHERE node_id=?1 AND cleanup_generation IS NOT NULL)",
+        [recovery.source_id], |row| row.get(0))?;
+    if cleanup_in_progress {
+        return Err(Refusal::SourceStopping.into());
+    }
+    let retained_reviewer = retained_reviewer_inner(db, target)?;
+    if retained_reviewer.is_some() {
+        // The completed spawn supplies identity, not a fresh report. Route
+        // through delivery before the join can schedule a verdict.
+        recovery
+            .graph
+            .retarget_edge("reviewer", "review_round", "re_review");
+        recovery.graph.validate()?;
+    }
+
+    // Old continuation runs are moved back under their original Circuit.
+    // Their pinned review-only snapshot remains the executable graph.
+    let root_run = lineage_root_inner(db, target)?;
+    let circuit_name: String = db.query_row(
+        "SELECT name FROM autopilot_circuits WHERE id=?1",
+        [root_run.circuit_id],
+        |row| row.get(0),
+    )?;
+    Ok(ExtensionPlan::Extend(Box::new(PreparedExtension {
+        target,
+        run,
+        original_graph_json,
+        next_attempt,
+        next_limit,
+        recovery,
+        retained_reviewer,
+        root_run,
+        circuit_name,
+    })))
+}
+
+fn lineage_root_inner(
+    db: &Connection,
+    run_id: i64,
+) -> Result<crate::models::AutopilotCircuitRun, EligibilityError> {
+    let mut root = run_id;
+    let mut visited = std::collections::HashSet::new();
+    loop {
+        if !visited.insert(root) {
+            return Err(Refusal::InvalidAncestry.into());
+        }
+        let current = super::ledger::get_circuit_run_inner(db, root)?
+            .ok_or_else(|| EligibilityError::Refused(Refusal::MissingAncestor))?;
+        let context = super::context_store::StoredContext::strict_of_column(&current.context_json)
+            .map_err(|_| Refusal::InvalidContext)?;
+        match RunLineage::recovery_ancestry(|key| context.get(key)) {
+            RecoveryAncestry::FromRun { run_id } => root = run_id,
+            RecoveryAncestry::None => break,
+            RecoveryAncestry::Invalid => return Err(Refusal::InvalidAncestry.into()),
+        }
+    }
+    super::ledger::get_circuit_run_inner(db, root)?
+        .ok_or_else(|| EligibilityError::Refused(Refusal::MissingAncestor))
+}
+
+/// Read-only projection of the same preparation the mutation repeats under its
+/// transaction. Operational DB failures stay errors, rather than false refusals.
+pub(crate) fn review_continuation_inner(
+    db: &Connection,
+    run: &crate::models::AutopilotCircuitRun,
+    steps: &[crate::models::AutopilotCircuitRunStep],
+) -> Result<ReviewContinuation, DbError> {
+    ReviewContinuationReader::new(db).project(run, steps)
+}
+
+fn project_continuation(
+    reader: &ReviewContinuationReader<'_>,
+    run: &crate::models::AutopilotCircuitRun,
+    steps: &[crate::models::AutopilotCircuitRunStep],
+) -> Result<ReviewContinuation, DbError> {
+    let db = reader.db;
+    let stored = super::context_store::StoredContext::of_column(&run.context_json);
+    let graph_json = super::evidence::run_graph_json(db, run.id)?;
+    let graph = CircuitGraph::from_json(&graph_json);
+    let lineage = RunLineage::read(
+        |key| stored.get(key),
+        graph
+            .as_ref()
+            .unwrap_or(&CircuitGraph::walking_skeleton("")),
+    );
+    let mut projection = ReviewContinuation {
+        lineage,
+        supported: false,
+        available: false,
+        refusal_reason: None,
+        refusal_message: None,
+        source_agent_node_id: run.source_agent_node_id,
+        reviewer_agent_node_id: steps
+            .iter()
+            .find(|step| step.node_id == "reviewer")
+            .and_then(|step| step.agent_node_id),
+        target_run_id: None,
+        review_nodes: None,
+    };
+    if !matches!(lineage.recovery, RecoveryAncestry::None) {
+        projection.lineage.review_origin = crate::circuit::lineage::ReviewOrigin::Unknown;
+        match lineage_root_inner(db, run.id) {
+            Ok(root) => {
+                let root_context =
+                    super::context_store::StoredContext::of_column(&root.context_json);
+                let root_graph = super::evidence::run_graph_json(db, root.id)?;
+                // An unreadable historical graph cannot invalidate the current
+                // executable snapshot. Its known codec origin can still survive.
+                projection.lineage.review_origin = match CircuitGraph::from_json(&root_graph) {
+                    Ok(graph) => {
+                        RunLineage::read(|key| root_context.get(key), &graph).review_origin
+                    }
+                    Err(_) => RunLineage::decode(|key| root_context.get(key)).review_origin,
+                };
+            }
+            Err(EligibilityError::Refused(_)) => {}
+            Err(EligibilityError::Database(error)) => return Err(error),
+        }
+    }
+    let refusal = match graph {
+        Err(_) => Some(Refusal::InvalidGraph),
+        Ok(graph) => {
+            projection.supported = review_continuation_supported(run, &graph);
+            projection.review_nodes = review_nodes(&graph);
+            if projection.source_agent_node_id.is_none() && graph.is_issue_driven_autopilot_review()
+            {
+                projection.source_agent_node_id = steps
+                    .iter()
+                    .find(|step| step.node_id == "implementer")
+                    .and_then(|step| step.agent_node_id);
+            }
+            if run.state != "failed" {
+                Some(if projection.supported {
+                    Refusal::RunNotFailed
+                } else {
+                    Refusal::UnsupportedGraph
+                })
+            } else {
+                match extension_plan_inner(reader, run.id, 1) {
+                    Ok(ExtensionPlan::Existing(id)) => {
+                        let target = super::ledger::get_circuit_run_inner(db, id)?
+                            .ok_or_else(|| DbError::not_found(Refusal::RunMissing.message()))?;
+                        let target_steps = super::ledger::list_circuit_run_steps_inner(db, id)?;
+                        projection.source_agent_node_id =
+                            target.source_agent_node_id.or_else(|| {
+                                target_steps
+                                    .iter()
+                                    .find(|step| step.node_id == "implementer")
+                                    .and_then(|step| step.agent_node_id)
+                            });
+                        projection.reviewer_agent_node_id = target_steps
+                            .iter()
+                            .find(|step| step.node_id == "reviewer")
+                            .and_then(|step| step.agent_node_id);
+                        projection.target_run_id = Some(id);
+                        projection.available = true;
+                        None
+                    }
+                    Ok(ExtensionPlan::Extend(plan)) => {
+                        projection.target_run_id = Some(plan.target);
+                        projection.source_agent_node_id = Some(plan.recovery.source_id);
+                        projection.reviewer_agent_node_id = plan.retained_reviewer;
+                        projection.available = true;
+                        None
+                    }
+                    Err(EligibilityError::Refused(reason)) => Some(reason),
+                    Err(EligibilityError::Database(error)) => return Err(error),
+                }
+            }
+        }
+    };
+    projection.refusal_reason = refusal;
+    projection.refusal_message = refusal.map(|reason| reason.message().to_string());
+    Ok(projection)
+}
+
+fn review_nodes(graph: &CircuitGraph) -> Option<ReviewRunNodes> {
+    let verdict = graph
+        .nodes
+        .iter()
+        .find(|node| matches!(node.kind, CircuitNodeKind::ReviewVerdict { .. }))?;
+    let present = |id: &str| graph.node(id).map(|_| id.to_string());
+    Some(ReviewRunNodes {
+        verdict_node_id: verdict.id.clone(),
+        retry_node_ids: graph
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.kind, CircuitNodeKind::RetryLimit { .. }))
+            .map(|node| node.id.clone())
+            .collect(),
+        merge_node_id: graph
+            .node("merge")
+            .filter(|node| matches!(node.kind, CircuitNodeKind::InjectPty { .. }))
+            .map(|node| node.id.clone()),
+        merge_confirmed_node_id: present("close_implementer"),
+        merge_unconfirmed_node_ids: ["merge_unconfirmed", "merge_blocked"]
+            .iter()
+            .filter_map(|id| present(id))
+            .collect(),
+    })
 }
 
 pub(crate) fn recovery_circuit_inner(

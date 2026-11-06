@@ -41,13 +41,9 @@ export interface ReviewCircuitMetadata {
   retryNodeIds: readonly string[];
   /** The step that asks the implementation agent to merge after approval. */
   mergeNodeId?: string;
-  supportsContinuation?: boolean;
+  mergeConfirmedNodeId?: string;
+  mergeUnconfirmedNodeIds?: readonly string[];
 }
-
-const MERGE_HAND_OFF_NODE_ID = 'merge';
-/** Steps the issue-review blueprint adds once the merge is checked on GitHub. */
-const MERGE_VERIFIED_NODE_ID = 'close_implementer';
-const MERGE_UNCONFIRMED_NODE_IDS = ['merge_unconfirmed', 'merge_blocked'];
 
 /** Review semantics come from the persisted graph, not `is_preset`. */
 export function reviewCircuitMetadata(
@@ -60,11 +56,17 @@ export function reviewCircuitMetadata(
 export function reviewCircuitForRun(
   detail: CircuitRunDetail,
   circuit: ReviewCircuitMetadata | null,
-  context = parseRunContext(detail.run.context_json),
 ): ReviewCircuitMetadata | null {
-  return context['review.extended'] === '1' || context['recovery.from_run_id']
-    ? { verdictNodeId: 'verdict', retryNodeIds: ['retry'], mergeNodeId: MERGE_HAND_OFF_NODE_ID, supportsContinuation: true }
-    : circuit;
+  const projection = detail.review_continuation;
+  if (!projection) return circuit;
+  const nodes = projection.review_nodes;
+  return nodes ? {
+    verdictNodeId: nodes.verdict_node_id,
+    retryNodeIds: nodes.retry_node_ids,
+    ...(nodes.merge_node_id === null ? {} : { mergeNodeId: nodes.merge_node_id }),
+    ...(nodes.merge_confirmed_node_id === null ? {} : { mergeConfirmedNodeId: nodes.merge_confirmed_node_id }),
+    mergeUnconfirmedNodeIds: nodes.merge_unconfirmed_node_ids,
+  } : null;
 }
 
 export interface CircuitGraphFacts {
@@ -82,14 +84,11 @@ export function circuitGraphFacts(
   try {
     const graph = parseGraph(circuit.graph_json);
     const verdict = graph.nodes.find((node) => node.type.type === 'review_verdict');
-    const merge = graph.nodes.find((node) => node.id === MERGE_HAND_OFF_NODE_ID && node.type.type === 'inject_pty');
     return {
       reviewCircuit: verdict === undefined
         ? null
         : {
             verdictNodeId: verdict.id,
-            ...(merge === undefined ? {} : { mergeNodeId: merge.id }),
-            ...(graph.blueprint === 'issue_driven_autopilot_review' ? { supportsContinuation: true } : {}),
             retryNodeIds: graph.nodes
               .filter((node) => node.type.type === 'retry_limit')
               .map((node) => node.id),
@@ -107,6 +106,7 @@ export function reviewResult(
   reviewCircuit: ReviewCircuitMetadata | null = null,
   context = parseRunContext(detail.run.context_json),
 ): { label: string; detail: string; needsAttention: boolean } | null {
+  reviewCircuit = reviewCircuitForRun(detail, reviewCircuit);
   if (reviewCircuit === null || !isTerminalRunState(detail.run.state)) return null;
   const review = detail.steps.find((s) => s.node_id === reviewCircuit.verdictNodeId);
   if (!review) return null;
@@ -124,14 +124,14 @@ export function reviewResult(
     && detail.steps.some((s) => s.node_id === reviewCircuit.mergeNodeId && s.status === 'completed');
   const stepDone = (nodeId: string) => detail.steps.some((s) => s.node_id === nodeId && s.status === 'completed');
   // Approved is not merged: say which of the two happened when the run knows.
-  if (approved && stepDone(MERGE_VERIFIED_NODE_ID)) {
+  if (approved && reviewCircuit.mergeConfirmedNodeId !== undefined && stepDone(reviewCircuit.mergeConfirmedNodeId)) {
     return {
       label: 'Review approved',
       detail: `${pass === null ? '' : `Approved on pass ${pass}. `}GitHub confirmed the squash-merge and the implementation agent was closed.`,
       needsAttention: false,
     };
   }
-  if (approved && MERGE_UNCONFIRMED_NODE_IDS.some(stepDone)) {
+  if (approved && reviewCircuit.mergeUnconfirmedNodeIds?.some(stepDone)) {
     return {
       label: 'Merge needs attention',
       detail: `${pass === null ? '' : `Approved on pass ${pass}. `}The squash-merge was not confirmed on GitHub, so the implementation agent was left open. Open it, finish the merge, then close it yourself.`,
@@ -148,20 +148,13 @@ export function reviewResult(
       }
     : {
         label: exhausted ? 'Review limit reached' : 'Review needs attention',
-        detail: `${exhausted && pass !== null ? `Ran out of review attempts after pass ${pass}. ` : ''}No final approval is recorded. ${canContinueReview(detail, reviewCircuit, context) ? 'Inspect the latest findings or open the retained reviewer. If the work is ready, choose additional review rounds for this run. If the approach needs changing, open the implementation agent first.' : 'Open the implementation agent, or resume its saved session from Archive. Address the failed step and latest findings before starting a fresh review. If the session is unavailable, recover from the PR branch.'}`,
+        detail: `${exhausted && pass !== null ? `Ran out of review attempts after pass ${pass}. ` : ''}No final approval is recorded. ${canContinueReview(detail) ? 'Inspect the latest findings or open the retained reviewer. If the work is ready, choose additional review rounds for this run. If the approach needs changing, open the implementation agent first.' : (detail.review_continuation?.refusal_message ?? 'Review continuation eligibility is unavailable. Open the implementation agent or start a fresh review.')}`,
         needsAttention: true,
       };
 }
 
-export function canContinueReview(
-  detail: CircuitRunDetail,
-  reviewCircuit: ReviewCircuitMetadata | null,
-  context = parseRunContext(detail.run.context_json),
-): boolean {
-  if (detail.run.state !== 'failed' || reviewCircuit === null) return false;
-  const supported = reviewCircuit.supportsContinuation || context['source.review_preset'] === '1' || Boolean(context['recovery.from_run_id']);
-  return Boolean(supported && detail.steps.some((s) => s.node_id === reviewCircuit.verdictNodeId)
-    && (detail.run.source_agent_node_id !== null || detail.steps.some((s) => s.node_id === 'implementer' && s.agent_node_id !== null)));
+export function canContinueReview(detail: CircuitRunDetail): boolean {
+  return detail.review_continuation?.available === true;
 }
 
 /**
@@ -300,7 +293,7 @@ export function buildCircuitProbeRows(
         : new Map(row.runs.map((run) => [run.run.id, runSearchContext(contextByRunId.get(run.run.id) ?? {})]));
       const reviewCircuit = facts.reviewCircuit;
       const contextFor = (run: CircuitRunDetail) => contextByRunId.get(run.run.id) ?? {};
-      const reviewFor = (run: CircuitRunDetail) => reviewCircuitForRun(run, reviewCircuit, contextFor(run));
+      const reviewFor = (run: CircuitRunDetail) => reviewCircuitForRun(run, reviewCircuit);
       let visibleRuns = view === 'history'
         ? row.runs.filter(runBelongsToHistory)
         : view === 'activity'
@@ -386,14 +379,14 @@ export function circuitActivityStats(
       const context = contextByRunId.get(detail.run.id) ?? {};
       if (runBelongsToActivity(detail)) {
         activeCount += 1;
-if (runNeedsOutstandingAttention(detail, reviewCircuitForRun(detail, reviewCircuit, context), context)) {
+if (runNeedsOutstandingAttention(detail, reviewCircuitForRun(detail, reviewCircuit), context)) {
           activeAttentionCount += 1;
           attentionCount += 1;
         }
       }
       if (runBelongsToHistory(detail)) {
         historyCount += 1;
-if (runNeedsOutstandingAttention(detail, reviewCircuitForRun(detail, reviewCircuit, context), context)) {
+if (runNeedsOutstandingAttention(detail, reviewCircuitForRun(detail, reviewCircuit), context)) {
           historyAttentionCount += 1;
           attentionCount += 1;
         }

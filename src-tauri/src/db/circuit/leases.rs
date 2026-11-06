@@ -778,8 +778,9 @@ fn sweepable_runs_sql() -> String {
         AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_runs c \
                         WHERE json_extract(CASE WHEN json_valid(c.context_json) \
                                           THEN c.context_json ELSE '{{}}' END, \
-                                          '$.\"recovery.from_run_id\"') = r.id)",
-        RunState::SQL_IN_SWEEPABLE
+                                          '$.\"{}\"') = r.id)",
+        RunState::SQL_IN_SWEEPABLE,
+        crate::circuit::lineage::RECOVERY_PARENT_KEY
     )
 }
 

@@ -3,9 +3,10 @@ import type { AutopilotCircuitRun } from "./AutopilotCircuitRun";
 import type { AutopilotCircuitRunStep } from "./AutopilotCircuitRunStep";
 import type { CircuitGraph } from "./CircuitGraph";
 import type { CircuitRunAttention } from "./CircuitRunAttention";
+import type { ReviewContinuation } from "./ReviewContinuation";
 
 export type CircuitRunOverview = { run: AutopilotCircuitRun, steps: Array<AutopilotCircuitRunStep>, circuit_name: string, 
 /**
  * The graph this run executes.
  */
-graph: CircuitGraph, attention: CircuitRunAttention, review_round_limit?: number, };
+graph: CircuitGraph, attention: CircuitRunAttention, review_round_limit?: number, review_continuation?: ReviewContinuation, };

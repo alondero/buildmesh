@@ -513,7 +513,7 @@ fn create_node_circuit_run_with_recovery_locked(
         {
             context.set("review.login_id", login_id);
         }
-        context.set("source.review_preset", "1");
+        crate::circuit::lineage::RunLineage::mark_local_preset(&mut context);
         context.set(
             "source.provider",
             node.launch_configuration
@@ -563,7 +563,7 @@ fn create_node_circuit_run_with_recovery_locked(
     }
     context.set("retry.attempt", "1");
     if let Some(recovery) = &recovery {
-        context.set("recovery.from_run_id", recovery.run_id.to_string());
+        crate::circuit::lineage::RunLineage::record_parent(&mut context, recovery.run_id);
     }
     context.set("retry.max_retries", max_rounds.to_string());
     // The run's context is one logical thing. The store decides which half
@@ -650,7 +650,8 @@ fn pin_review_launches(
             continue;
         };
         if !graph.nodes.iter().any(|gate| matches!(&gate.kind, CircuitNodeKind::ReviewVerdict { target_node_id } if target_node_id.as_deref() == Some(&node.id))) { continue; }
-        let preset = context.get("source.review_preset") == Some("1");
+        let preset =
+            crate::circuit::lineage::RunLineage::decode(|key| context.get(key)).is_local_preset();
         let parent_selection = graph
             .nearest_upstream_agent_step(&node.id)
             .and_then(|id| graph.node(&id))
@@ -900,6 +901,33 @@ pub struct CircuitRunLedger {
     pub run: AutopilotCircuitRun,
     pub steps: Vec<AutopilotCircuitRunStep>,
     pub review_round_limit: Option<i32>,
+    pub review_continuation: crate::circuit::review_continuation::ReviewContinuation,
+}
+
+/// Read recent runs, steps and continuation eligibility from one snapshot.
+pub fn list_circuit_run_ledgers(
+    circuit_id: i64,
+    limit: i64,
+) -> Result<Vec<CircuitRunLedger>, DbError> {
+    let db = crate::db::read_conn()?;
+    let tx = db.unchecked_transaction()?;
+    let runs = list_circuit_runs_inner(&tx, circuit_id, limit)?;
+    let continuation = super::recovery::ReviewContinuationReader::new(&tx);
+    let ledgers = runs
+        .into_iter()
+        .map(|run| {
+            let steps = list_circuit_run_steps_inner(&tx, run.id)?;
+            Ok(CircuitRunLedger {
+                review_round_limit: super::review_rounds::current_limit(&tx, &run)?,
+                review_continuation: continuation.project(&run, &steps)?,
+                run,
+                steps,
+            })
+        })
+        .collect::<Result<Vec<_>, DbError>>()?;
+    drop(continuation);
+    tx.commit()?;
+    Ok(ledgers)
 }
 
 /// Ensure the inspectable built-in exists before any review run is created.
@@ -923,17 +951,20 @@ pub(crate) fn ensure_review_blueprint_inner(db: &Connection, mesh_id: i64) -> Sq
 pub fn list_circuits_with_recent_runs(
     mesh_id: i64,
     runs_per_circuit: i64,
-) -> SqlResult<Vec<(AutopilotCircuit, Vec<CircuitRunLedger>)>> {
+) -> Result<Vec<(AutopilotCircuit, Vec<CircuitRunLedger>)>, DbError> {
     ensure_review_blueprint(mesh_id)?;
     let db = crate::db::read_conn()?;
-    list_circuits_with_recent_runs_inner(&db, mesh_id, runs_per_circuit)
+    let tx = db.unchecked_transaction()?;
+    let result = list_circuits_with_recent_runs_inner(&tx, mesh_id, runs_per_circuit)?;
+    tx.commit()?;
+    Ok(result)
 }
 
 pub(crate) fn list_circuits_with_recent_runs_inner(
     db: &Connection,
     mesh_id: i64,
     runs_per_circuit: i64,
-) -> SqlResult<Vec<(AutopilotCircuit, Vec<CircuitRunLedger>)>> {
+) -> Result<Vec<(AutopilotCircuit, Vec<CircuitRunLedger>)>, DbError> {
     let mut stmt = db.prepare(
         "SELECT id, mesh_id, name, description, enabled, \
                 graph_json, created_at, updated_at, is_preset \
@@ -1067,19 +1098,22 @@ pub(crate) fn list_circuits_with_recent_runs_inner(
         }
     }
 
+    let continuation = super::recovery::ReviewContinuationReader::new(db);
     let mut out = Vec::with_capacity(circuits.len());
     for circuit in circuits {
         let runs = runs_by_circuit.remove(&circuit.id).unwrap_or_default();
         let ledgers = runs
             .into_iter()
             .map(|run| {
+                let steps = steps_by_run.remove(&run.id).unwrap_or_default();
                 Ok(CircuitRunLedger {
+                    review_continuation: continuation.project(&run, &steps)?,
                     review_round_limit: super::review_rounds::current_limit(db, &run)?,
-                    steps: steps_by_run.remove(&run.id).unwrap_or_default(),
+                    steps,
                     run,
                 })
             })
-            .collect::<SqlResult<Vec<_>>>()?;
+            .collect::<Result<Vec<_>, DbError>>()?;
         out.push((circuit, ledgers));
     }
     Ok(out)
@@ -1682,12 +1716,7 @@ pub(crate) fn list_active_circuit_runs_inner(db: &Connection) -> SqlResult<Vec<A
     rows.collect()
 }
 
-pub fn list_circuit_runs(circuit_id: i64, limit: i64) -> SqlResult<Vec<AutopilotCircuitRun>> {
-    let db = crate::db::read_conn()?;
-    list_circuit_runs_inner(&db, circuit_id, limit)
-}
-
-/// Per-test isolated variant of [`list_circuit_runs`] (issue #1691).
+/// Recent run rows with their served logical context.
 pub(crate) fn list_circuit_runs_inner(
     db: &Connection,
     circuit_id: i64,

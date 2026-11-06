@@ -341,7 +341,7 @@ export function CircuitRunCard({
       </a>}
 
       {expanded && review && <p className="px-2 pb-1.5 text-2xs text-text-secondary break-words">{review.detail}</p>}
-      {canContinueReview(detail, reviewCircuit, context) && onContinueReview && (
+      {canContinueReview(detail) && onContinueReview && (
         <div className="px-2 pb-2">
           <label className="mb-1 flex flex-wrap items-center gap-1 text-2xs text-text-secondary">
             Additional review rounds
@@ -359,7 +359,8 @@ export function CircuitRunCard({
           <p hidden={!expanded} className="mt-1 text-2xs text-text-muted break-words">Adds the selected rounds to this run and continues with the retained reviewer. Earlier findings remain in Run History. Change Review rounds on the active run to adjust its remaining allowance.</p>
         </div>
       )}
-      {expanded && context['recovery.from_run_id'] && <p className="px-2 pb-1.5 text-2xs text-text-secondary">Continues run #{context['recovery.from_run_id']} on the same worktree.</p>}
+      {expanded && run.state === 'failed' && !review && detail.review_continuation?.refusal_message && <p className="px-2 pb-1.5 text-2xs text-text-secondary break-words">{detail.review_continuation.refusal_message}</p>}
+      {expanded && detail.review_continuation?.lineage.recovery.kind === 'from_run' && <p className="px-2 pb-1.5 text-2xs text-text-secondary">Continues run #{detail.review_continuation.lineage.recovery.run_id} on the same worktree.</p>}
       {blockedSteps.length > 0 && <p className="px-2 pb-1.5 text-2xs text-status-warning break-words">
         {blockedSteps.some((step) => step.node_id === 'confirm_source')
           ? 'Check the source agent, then approve to start review.'

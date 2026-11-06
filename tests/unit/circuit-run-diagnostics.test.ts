@@ -9,6 +9,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { reviewContinuation } from './helpers/reviewContinuation';
 import { formatDurationMs, runDurationMs } from '../../src/components/Circuits/circuitGraphModel';
 import {
   activityStatusToken,
@@ -27,6 +28,7 @@ import {
   runNeedsAttention,
   runNeedsOutstandingAttention,
   reviewResult,
+  canContinueReview,
   reviewCircuitMetadata,
   reviewCircuitForRun,
   runStateLabel,
@@ -81,13 +83,39 @@ describe('run diagnostics', () => {
   });
 
   describe('Probe view model', () => {
+    it('uses backend eligibility with arbitrary node identities and no lineage flags', () => {
+      const response = { ...detail(47, 'failed'), review_continuation: reviewContinuation({
+        review_nodes: { verdict_node_id: 'inspect_work', retry_node_ids: ['another_pass'],
+          merge_node_id: null, merge_confirmed_node_id: null, merge_unconfirmed_node_ids: [] },
+      }) };
+      expect(canContinueReview(response)).toBe(true);
+      expect(reviewCircuitForRun(response, null)?.verdictNodeId).toBe('inspect_work');
+      const unavailable = { ...response, review_continuation: reviewContinuation({
+        available: false, refusal_reason: 'source_wrong_mesh', refusal_message: 'The implementation agent no longer belongs to this Mesh.',
+      }) };
+      expect(canContinueReview(unavailable)).toBe(false);
+      expect(canContinueReview({ ...detail(46, 'failed'), run: { ...detail(46, 'failed').run,
+        source_agent_node_id: 9, context_json: '{"source.review_preset":"1","recovery.from_run_id":"5"}' } })).toBe(false);
+    });
+
+    it('presents backend refusal wording without manufacturing a review approval', () => {
+      const response = { ...detail(47, 'failed'), review_continuation: reviewContinuation({
+        available: false, refusal_reason: 'source_wrong_mesh', refusal_message: 'The implementation agent no longer belongs to this Mesh.',
+      }), steps: [{ id: 1, run_id: 47, node_id: 'verdict', agent_node_id: null,
+        parent_agent_node_id: null, status: 'completed', attempt: 3, outcome: 'working',
+        error_message: null, started_at: null, completed_at: null }] };
+      expect(reviewResult(response)?.detail).toContain(response.review_continuation.refusal_message);
+      expect(reviewResult(response)?.label).toBe('Review needs attention');
+      expect(reviewResult({ ...response, steps: [] })).toBeNull();
+    });
+
     it('reads an extended issue review through its review-only run snapshot', () => {
       const extended = {
         ...detail(49, 'failed'),
-        run: { ...detail(49, 'failed').run, context_json: '{"review.extended":"1"}' },
+        review_continuation: reviewContinuation({ lineage: { review_origin: 'issue_driven', extended: true, recovery: { kind: 'none' } } }),
       };
       expect(reviewCircuitForRun(extended, { verdictNodeId: 'review_classifier', retryNodeIds: ['review_retry'] }))
-        .toEqual({ verdictNodeId: 'verdict', retryNodeIds: ['retry'], mergeNodeId: 'merge', supportsContinuation: true });
+        .toEqual({ verdictNodeId: 'verdict', retryNodeIds: ['retry'], mergeNodeId: 'merge', mergeUnconfirmedNodeIds: [] });
     });
     it('says the agent was asked to merge only when the run delivered that request', () => {
       const graph = { version: 3, nodes: [
@@ -96,11 +124,11 @@ describe('run diagnostics', () => {
         { id: 'merge', type: { type: 'inject_pty', prompt: 'Squash and merge', target_node_id: 'implementer' } },
       ], edges: [] };
       const reviewCircuit = reviewCircuitMetadata({ graph_json: JSON.stringify(graph) });
-      expect(reviewCircuit?.mergeNodeId).toBe('merge');
+      expect(reviewCircuit?.verdictNodeId).toBe('review_classifier');
       const step = (node_id: string) => ({ id: 1, run_id: 50, node_id, agent_node_id: null,
         parent_agent_node_id: null, status: 'completed', attempt: 1, outcome: 'completed',
         error_message: null, started_at: null, completed_at: null });
-      const handedOff = { ...detail(50, 'completed'), steps: [step('review_classifier'), step('merge')] };
+      const handedOff = { ...detail(50, 'completed'), review_continuation: reviewContinuation({ available: false, review_nodes: { verdict_node_id: 'review_classifier', retry_node_ids: ['review_retry'], merge_node_id: 'merge', merge_confirmed_node_id: null, merge_unconfirmed_node_ids: [] } }), steps: [step('review_classifier'), step('merge')] };
       expect(reviewResult(handedOff, reviewCircuit)?.label).toBe('Review approved');
       expect(reviewResult(handedOff, reviewCircuit)?.detail).toBe(
         'The implementation agent was asked to squash-merge the pull request and was handed back. Check its report to confirm the merge.');
@@ -120,13 +148,13 @@ describe('run diagnostics', () => {
         error_message: null, started_at: null, completed_at: null });
       const base = [step('review_classifier'), step('merge')];
 
-      const verified = { ...detail(60, 'completed'), steps: [...base, step('merge_verify'), step('close_implementer')] };
+      const verified = { ...detail(60, 'completed'), review_continuation: reviewContinuation({ available: false, review_nodes: { verdict_node_id: 'review_classifier', retry_node_ids: ['review_retry'], merge_node_id: 'merge', merge_confirmed_node_id: 'close_implementer', merge_unconfirmed_node_ids: ['merge_unconfirmed', 'merge_blocked'] } }), steps: [...base, step('merge_verify'), step('close_implementer')] };
       expect(reviewResult(verified, reviewCircuit)).toMatchObject({ label: 'Review approved', needsAttention: false });
       expect(reviewResult(verified, reviewCircuit)?.detail).toContain('GitHub confirmed the squash-merge');
       expect(reviewResult(verified, reviewCircuit)?.detail).toContain('closed');
 
       for (const ending of ['merge_unconfirmed', 'merge_blocked']) {
-        const unconfirmed = { ...detail(61, 'completed'), steps: [...base, step(ending)] };
+        const unconfirmed = { ...detail(61, 'completed'), review_continuation: verified.review_continuation, steps: [...base, step(ending)] };
         const result = reviewResult(unconfirmed, reviewCircuit);
         expect(result?.label, ending).toBe('Merge needs attention');
         expect(result?.needsAttention, ending).toBe(true);
