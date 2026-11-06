@@ -115,7 +115,7 @@ pub(super) async fn start_streams(
             reader,
             spawned_at,
             needs_session_capture,
-            is_plain_terminal: adapter.is_plain_terminal(),
+            is_plain_terminal: adapter.descriptor().is_plain_terminal,
             generation,
             resume_attempt,
         },

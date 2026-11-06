@@ -6,7 +6,7 @@
 //! the user has not installed. The Circuits Inspector is an authoring form and
 //! needs that answer for every selectable harness. This catalog enumerates
 //! [`crate::models::Provider::all`] and records each adapter's
-//! [`AgentProvider::capabilities`](crate::agent::provider::AgentProvider::capabilities)
+//! [`capabilities_for`](crate::agent::capabilities::capabilities_for)
 //! plus its Inspector/docs label.
 //!
 //! `cargo test` writes the committed TypeScript/JSON artifacts under
@@ -141,7 +141,7 @@ pub fn builtin_harness_catalog() -> Vec<HarnessCatalogEntry> {
             HarnessCatalogEntry {
                 id: adapter.id().to_string(),
                 label: inspector_label(provider).to_string(),
-                capabilities: adapter.capabilities(),
+                capabilities: crate::agent::capabilities::capabilities_for(adapter),
             }
         })
         .collect()

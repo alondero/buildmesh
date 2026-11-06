@@ -662,8 +662,8 @@ pub(super) async fn provision_workspace(
     let launch_runtime = routing.launch_runtime();
     let provisioning_resolved = resolved.clone();
     let provisioning_runtime = launch_runtime.clone();
-    let needs_attention_hook = adapter.requires_attention_hook();
-    let passive_observer = adapter.supports_passive_turn_watcher();
+    let needs_attention_hook = adapter.descriptor().requires_attention_hook();
+    let passive_observer = adapter.descriptor().supports_passive_turn_watcher();
     let provisioning = crate::commands::run_blocking("provider_provisioning", move || {
         Ok(run_provider_provisioning(
             || adapter.ensure_workspace_trusted(&provisioning_resolved, &provisioning_runtime),

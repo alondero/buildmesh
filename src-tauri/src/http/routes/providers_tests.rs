@@ -5,7 +5,7 @@ fn phone_menu_exposes_selection_metadata_without_private_login_details() {
     let codex: crate::agent::provider::ProviderInfo = serde_json::from_value(serde_json::json!({
         "id":"codex", "label":"Codex", "harness_id":"codex", "group_key":"codex",
         "color":"#ffffff", "icon":"C", "resumable":true, "provider_id":null, "is_proxied":false,
-        "capabilities": crate::models::Provider::Codex.adapter().capabilities()
+        "capabilities": crate::agent::capabilities::capabilities_for(crate::models::Provider::Codex.adapter())
     }))
     .unwrap();
     let mut routed = codex.clone();

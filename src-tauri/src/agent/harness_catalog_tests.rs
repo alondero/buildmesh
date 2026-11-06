@@ -138,12 +138,12 @@ fn catalog_capabilities_match_adapter() {
             "from_db_str({:?}) must round-trip the catalog id (not fall back to anthropic)",
             entry.id
         );
-        let expected = provider.adapter().capabilities();
+        let expected = crate::agent::capabilities::capabilities_for(provider.adapter());
         let actual_json = serde_json::to_value(&entry.capabilities).unwrap();
         let expected_json = serde_json::to_value(&expected).unwrap();
         assert_eq!(
             actual_json, expected_json,
-            "catalog capabilities for {} drifted from adapter.capabilities()",
+            "catalog capabilities for {} drifted from crate::agent::capabilities::capabilities_for(adapter)",
             entry.id
         );
         assert_eq!(entry.capabilities.harness_id, entry.id);

@@ -31,6 +31,38 @@ pub struct PerchAdapter;
 pub static PERCH: PerchAdapter = PerchAdapter;
 
 impl AgentProvider for PerchAdapter {
+    fn descriptor(&self) -> &'static crate::agent::capabilities::HarnessDescriptor {
+        static DESCRIPTOR: std::sync::LazyLock<crate::agent::capabilities::HarnessDescriptor> =
+            std::sync::LazyLock::new(|| crate::agent::capabilities::HarnessDescriptor {
+                supports_resume: true,
+                auto_resume_on_startup: true,
+                produces_readable_transcript: false,
+                supports_model_override: true,
+                supports_extra_args: true,
+                supports_prefill: false,
+                available_on: { &[Platform::Windows, Platform::Linux, Platform::Macos] },
+                effort_control: {
+                    EffortControlKind::Closed {
+                        allowed: PERCH_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),
+                    }
+                },
+                permission_modes: {
+                    vec![
+                    PermissionModeOption::unattended(
+                        "--permission take_the_wheel",
+                        "Prompts off — Perch acts without asking (required for unattended runs).",
+                    ),
+                    PermissionModeOption::prompt(
+                        "Prompts on (no flag)",
+                        "Perch asks for confirmation the way a human-launched session does.",
+                    ),
+                ]
+                },
+                ..Default::default()
+            });
+        &DESCRIPTOR
+    }
+
     fn id(&self) -> &'static str {
         "perch"
     }
@@ -52,45 +84,12 @@ impl AgentProvider for PerchAdapter {
         }
     }
 
-    fn permission_modes(&self) -> Vec<PermissionModeOption> {
-        vec![
-            PermissionModeOption::unattended(
-                "--permission take_the_wheel",
-                "Prompts off — Perch acts without asking (required for unattended runs).",
-            ),
-            PermissionModeOption::prompt(
-                "Prompts on (no flag)",
-                "Perch asks for confirmation the way a human-launched session does.",
-            ),
-        ]
-    }
-
     fn permission_args(&self, mode_id: &str) -> Vec<String> {
         if mode_id == PERMISSION_MODE_UNATTENDED {
             vec!["--permission".into(), "take_the_wheel".into()]
         } else {
             Vec::new()
         }
-    }
-
-    fn supports_resume(&self) -> bool {
-        true
-    }
-
-    fn auto_resume_on_startup(&self) -> bool {
-        true
-    }
-
-    fn requires_attention_hook(&self) -> bool {
-        false
-    }
-
-    fn produces_readable_transcript(&self) -> bool {
-        false
-    }
-
-    fn supports_model_override(&self) -> bool {
-        true
     }
 
     fn validate_model_override(&self, model: &str) -> Result<(), String> {
@@ -103,24 +102,6 @@ impl AgentProvider for PerchAdapter {
             return Err("Perch model overrides must be a model name, not a flag.".into());
         }
         Ok(())
-    }
-
-    fn effort_control(&self) -> EffortControlKind {
-        EffortControlKind::Closed {
-            allowed: PERCH_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),
-        }
-    }
-
-    fn supports_extra_args(&self) -> bool {
-        true
-    }
-
-    fn supports_prefill(&self) -> bool {
-        false
-    }
-
-    fn available_on(&self) -> &'static [Platform] {
-        &[Platform::Windows, Platform::Linux, Platform::Macos]
     }
 
     fn self_assigns_session_id(&self) -> bool {

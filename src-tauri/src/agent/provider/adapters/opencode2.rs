@@ -19,6 +19,49 @@ pub struct OpenCode2Adapter;
 pub static OPENCODE2: OpenCode2Adapter = OpenCode2Adapter;
 
 impl AgentProvider for OpenCode2Adapter {
+    fn descriptor(&self) -> &'static crate::agent::capabilities::HarnessDescriptor {
+        static DESCRIPTOR: std::sync::LazyLock<crate::agent::capabilities::HarnessDescriptor> =
+            std::sync::LazyLock::new(|| crate::agent::capabilities::HarnessDescriptor {
+                supports_resume: true,
+                auto_resume_on_startup: true,
+                attention_capability: {
+                    use crate::agent::session_lifecycle::LifecycleKind;
+                    AttentionCapability::Hook {
+                        events: vec![
+                            LifecycleKind::TurnCompleted,
+                            LifecycleKind::PermissionRequested,
+                        ],
+                        launch_mode: AttentionLaunchMode::PermissionAsk,
+                        trust: None,
+                        min_version: Some("2.2.3".into()),
+                    }
+                },
+                circuit_observation: {
+                    // Native foreground fences and V2 child identity are a separate port.
+                    crate::circuit::strategy::ObservationStrategy::UNWIRED
+                },
+                produces_readable_transcript: true,
+                supports_model_override: true,
+                supports_extra_args: false,
+                supports_prefill: true,
+                available_on: { &[Platform::Windows, Platform::Macos, Platform::Linux] },
+                permission_modes: {
+                    vec![
+                    PermissionModeOption::unattended(
+                        "--auto",
+                        "Use OpenCode's auto-approve mode with managed project permission rules.",
+                    ),
+                    PermissionModeOption::prompt(
+                        "Prompts on (no flag)",
+                        "OpenCode asks before permission-gated tools.",
+                    ),
+                ]
+                },
+                ..Default::default()
+            });
+        &DESCRIPTOR
+    }
+
     fn id(&self) -> &'static str {
         "opencode2"
     }
@@ -37,61 +80,11 @@ impl AgentProvider for OpenCode2Adapter {
             windows_shell: shell_for(platform),
         }
     }
-    fn supports_resume(&self) -> bool {
-        true
-    }
-    fn auto_resume_on_startup(&self) -> bool {
-        true
-    }
-    fn requires_attention_hook(&self) -> bool {
-        true
-    }
-    fn produces_readable_transcript(&self) -> bool {
-        true
-    }
-    fn supports_model_override(&self) -> bool {
-        true
-    }
-    fn supports_extra_args(&self) -> bool {
-        false
-    }
-    fn supports_prefill(&self) -> bool {
-        true
-    }
+
     fn confirms_prompt_submission(&self) -> bool {
         true
     }
-    fn available_on(&self) -> &'static [Platform] {
-        &[Platform::Windows, Platform::Macos, Platform::Linux]
-    }
-    fn circuit_observation(&self) -> crate::circuit::strategy::ObservationStrategy {
-        // Native foreground fences and V2 child identity are a separate port.
-        crate::circuit::strategy::ObservationStrategy::UNWIRED
-    }
-    fn attention_capability(&self) -> AttentionCapability {
-        use crate::agent::session_lifecycle::LifecycleKind;
-        AttentionCapability::Hook {
-            events: vec![
-                LifecycleKind::TurnCompleted,
-                LifecycleKind::PermissionRequested,
-            ],
-            launch_mode: AttentionLaunchMode::PermissionAsk,
-            trust: None,
-            min_version: Some("2.2.3".into()),
-        }
-    }
-    fn permission_modes(&self) -> Vec<PermissionModeOption> {
-        vec![
-            PermissionModeOption::unattended(
-                "--auto",
-                "Use OpenCode's auto-approve mode with managed project permission rules.",
-            ),
-            PermissionModeOption::prompt(
-                "Prompts on (no flag)",
-                "OpenCode asks before permission-gated tools.",
-            ),
-        ]
-    }
+
     fn permission_args(&self, mode_id: &str) -> Vec<String> {
         if mode_id == crate::agent::capabilities::PERMISSION_MODE_UNATTENDED {
             vec!["--auto".into()]

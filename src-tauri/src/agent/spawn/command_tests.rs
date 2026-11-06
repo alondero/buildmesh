@@ -1,5 +1,6 @@
-use super::command::{cascade_inputs_for, native_login_home, resolve_spawn_config};
+use super::command::{cascade_inputs_for, resolve_spawn_config};
 use super::{ExplicitSpawnOverrides, SpawnIntent, SpawnRequest, TerminalSize};
+use base64::Engine;
 
 /// A native Codex launch whose frozen plan selected an additional Harness
 /// Login runs with that login's home as `CODEX_HOME`.
@@ -45,18 +46,48 @@ fn a_native_codex_launch_with_a_login_sets_codex_home() {
 /// Provider Routes keep the environment they inherit.
 #[test]
 fn only_native_codex_launches_take_a_login_home() {
+    let _env = crate::env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    use super::command::{build_spawn_command_prepared, SpawnCommandInput};
+    use super::reader::SessionIdMode;
     let native = crate::agent::launch_routing::PreparedLaunchRouting::Native {
         executable: None,
         harness_home: Some("home".into()),
     };
-    assert_eq!(
-        native_login_home(EnvType::Windows, Provider::Codex, &native).as_deref(),
-        Some("home")
-    );
-    assert!(native_login_home(EnvType::Wsl, Provider::Codex, &native).is_none());
-    assert!(native_login_home(EnvType::Windows, Provider::Anthropic, &native).is_none());
     let environment = crate::agent::launch_routing::PreparedLaunchRouting::environment(&[]);
-    assert!(native_login_home(EnvType::Windows, Provider::Codex, &environment).is_none());
+    for (runtime, provider, routing, expected) in [
+        (EnvType::Windows, Provider::Codex, &native, Some("home")),
+        (EnvType::Wsl, Provider::Codex, &native, None),
+        (EnvType::Windows, Provider::Anthropic, &native, None),
+        (EnvType::Windows, Provider::Codex, &environment, None),
+    ] {
+        let resolved = crate::env::ResolvedPath {
+            host_path: ".".into(),
+            spawn_path: ".".into(),
+            raw_path: ".".into(),
+            env_type: runtime,
+        };
+        let command = build_spawn_command_prepared(SpawnCommandInput {
+            resolved: &resolved,
+            provider,
+            routing,
+            session_id_mode: &SessionIdMode::None,
+            session_id: 7,
+            config: &ResolvedAgentConfig::default(),
+            prefill: None,
+            sandbox: false,
+            resume_cause: super::ResumeCause::Explicit,
+        })
+        .unwrap();
+        // No override means inherited CODEX_HOME, which may exist in the test host.
+        if let Some(expected) = expected {
+            assert_eq!(command.get_env("CODEX_HOME").unwrap(), expected);
+        } else {
+            let inherited = std::env::var_os("CODEX_HOME");
+            assert_eq!(command.get_env("CODEX_HOME"), inherited.as_deref());
+        }
+    }
 }
 use crate::agent::capabilities::{
     resolve_agent_config, FieldInputs, HarnessCapabilities, ResolvedAgentConfig,
@@ -66,6 +97,250 @@ use crate::agent::launch::{HarnessLaunchInput, SessionIdModeRef};
 use crate::agent::provider::Platform;
 use crate::models::{EnvType, Provider};
 use crate::preferences::HarnessConfigValue;
+
+/// Exact argv and environment policy before OS wrapping, across every adapter
+/// and launch mode. The fixture was captured before the descriptor migration.
+/// The old backend-reset flag is expanded into its effective removal keys.
+#[test]
+fn harness_launch_contract_preserves_all_adapter_recipes() {
+    let _env = crate::env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut rows = Vec::new();
+    for provider in Provider::all() {
+        let adapter = provider.adapter();
+        for platform in [Platform::Linux, Platform::Windows, Platform::Macos] {
+            for mode in ["fresh", "assign", "resume", "regenerate"] {
+                let session = match mode {
+                    "assign" => SessionIdModeRef::Assign("ses_contract"),
+                    "resume" | "regenerate" => SessionIdModeRef::Resume {
+                        id: "ses_contract",
+                        cause: if mode == "regenerate" {
+                            super::ResumeCause::Regenerate
+                        } else {
+                            super::ResumeCause::Explicit
+                        },
+                    },
+                    _ => SessionIdModeRef::None,
+                };
+                let config = ResolvedAgentConfig {
+                    model: Some("provider/model".into()),
+                    effort: Some("high".into()),
+                    extra_args: Some("--contract 'two words'".into()),
+                    ..Default::default()
+                };
+                let prepared = adapter.prepare_launch(HarnessLaunchInput {
+                    routing: None,
+                    node_id: None,
+                    platform,
+                    runtime: EnvType::Windows,
+                    session,
+                    config: &config,
+                    prefill: Some("contract\r\nprompt"),
+                    sandbox: false,
+                });
+                rows.push(serde_json::json!({
+                    "harness": adapter.id(),
+                    "platform": crate::agent::capabilities::platform_name(platform),
+                    "mode": mode,
+                    "binary": prepared.recipe.binary,
+                    "args": prepared.recipe.base_args,
+                    "trailing": prepared.recipe.trailing_args,
+                    "remove": prepared.environment.env_remove,
+                    "set": prepared.environment.env_set,
+                }));
+            }
+        }
+    }
+    let actual = rows
+        .iter()
+        .map(|row| serde_json::to_string(row).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/agent/spawn/fixtures/harness-launch-contract.jsonl");
+    assert_eq!(actual, std::fs::read_to_string(fixture).unwrap());
+}
+
+/// The command builder must invoke a selected adapter's override rather than
+/// reconstructing its launch from the shared recipe helpers.
+#[test]
+fn production_command_dispatches_the_selected_adapter_override() {
+    let _env = crate::env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    use super::command::{build_spawn_command_with_adapter, SpawnCommandInput};
+    use super::reader::SessionIdMode;
+    use crate::agent::capabilities::{AttentionCapability, AttentionLaunchMode, HarnessDescriptor};
+    use crate::agent::launch::{HarnessEnvironmentPolicy, PreparedHarnessLaunch};
+    use crate::agent::provider::{AgentProvider, SpawnRecipe, UiMeta, WindowsShell};
+
+    struct DistinctLaunch;
+    impl AgentProvider for DistinctLaunch {
+        fn id(&self) -> &'static str {
+            "distinct-launch"
+        }
+        fn ui(&self) -> UiMeta {
+            panic!("command construction needs no UI metadata")
+        }
+        fn descriptor(&self) -> &'static HarnessDescriptor {
+            static DESCRIPTOR: std::sync::LazyLock<HarnessDescriptor> =
+                std::sync::LazyLock::new(|| HarnessDescriptor {
+                    supports_resume: true,
+                    attention_capability: AttentionCapability::Hook {
+                        events: vec![crate::agent::session_lifecycle::LifecycleKind::TurnCompleted],
+                        launch_mode: AttentionLaunchMode::SkipPermissions,
+                        trust: None,
+                        min_version: None,
+                    },
+                    ..Default::default()
+                });
+            &DESCRIPTOR
+        }
+        fn spawn_recipe(&self, _: Platform, _: EnvType) -> SpawnRecipe {
+            panic!("production bypassed the launch override")
+        }
+        fn prepare_launch(&self, input: HarnessLaunchInput<'_>) -> PreparedHarnessLaunch {
+            assert!(input.routing.is_some());
+            assert_eq!(input.node_id, Some(2524));
+            PreparedHarnessLaunch {
+                recipe: SpawnRecipe {
+                    binary: "distinct-harness",
+                    base_args: vec!["--distinct-launch".into()],
+                    trailing_args: vec![],
+                    windows_shell: WindowsShell::Direct,
+                },
+                capabilities: crate::agent::capabilities::capabilities_for(self),
+                environment: HarnessEnvironmentPolicy {
+                    env_set: vec![("BUILDMESH_DISPATCH_TEST".into(), "selected".into())],
+                    ..Default::default()
+                },
+            }
+        }
+    }
+    let adapter: &dyn AgentProvider = &DistinctLaunch;
+    let advertised = crate::agent::capabilities::capabilities_for(adapter);
+    assert_eq!(advertised.harness_id, "distinct-launch");
+    assert!(advertised.supports_resume);
+    assert!(advertised.requires_attention_hook);
+    for runtime in [EnvType::Windows, EnvType::Wsl, EnvType::WindowsInterop] {
+        let resolved = crate::env::ResolvedPath {
+            host_path: ".".into(),
+            spawn_path: ".".into(),
+            raw_path: ".".into(),
+            env_type: runtime,
+        };
+        let command = build_spawn_command_with_adapter(
+            adapter,
+            SpawnCommandInput {
+                resolved: &resolved,
+                provider: Provider::Anthropic,
+                routing: &crate::agent::launch_routing::PreparedLaunchRouting::environment(&[]),
+                session_id_mode: &SessionIdMode::None,
+                session_id: 2524,
+                config: &ResolvedAgentConfig::default(),
+                prefill: None,
+                sandbox: false,
+                resume_cause: super::ResumeCause::Explicit,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            command.get_env("BUILDMESH_DISPATCH_TEST").unwrap(),
+            "selected"
+        );
+        assert!(rendered_spawn_command(&command).contains("distinct-harness"));
+    }
+}
+
+#[test]
+fn production_commands_preserve_identity_and_environment_across_runtimes() {
+    let _env = crate::env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    use super::command::{build_spawn_command_prepared, SpawnCommandInput};
+    use super::reader::SessionIdMode;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().to_string_lossy().into_owned();
+    for provider in Provider::all() {
+        let adapter = provider.adapter();
+        let mut modes = vec![(SessionIdMode::None, super::ResumeCause::Explicit)];
+        if adapter.descriptor().supports_resume {
+            if !adapter.self_assigns_session_id() {
+                modes.push((
+                    SessionIdMode::Assign("ses_contract".into()),
+                    super::ResumeCause::Explicit,
+                ));
+            }
+            modes.push((
+                SessionIdMode::Resume("ses_contract".into()),
+                super::ResumeCause::Explicit,
+            ));
+            modes.push((
+                SessionIdMode::Resume("ses_contract".into()),
+                super::ResumeCause::Regenerate,
+            ));
+        }
+        for runtime in [EnvType::Windows, EnvType::Wsl, EnvType::WindowsInterop] {
+            let resolved = crate::env::ResolvedPath {
+                host_path: path.clone(),
+                spawn_path: path.clone(),
+                raw_path: path.clone(),
+                env_type: runtime,
+            };
+            for (mode, cause) in &modes {
+                let routing =
+                    crate::agent::launch_routing::PreparedLaunchRouting::environment(&[(
+                        "BUILDMESH_ROUTE_CONTRACT".into(),
+                        "selected-route".into(),
+                    )]);
+                let command = build_spawn_command_prepared(SpawnCommandInput {
+                    resolved: &resolved,
+                    provider: *provider,
+                    routing: &routing,
+                    session_id_mode: mode,
+                    session_id: 2524,
+                    config: &ResolvedAgentConfig::default(),
+                    prefill: None,
+                    sandbox: false,
+                    resume_cause: *cause,
+                })
+                .unwrap();
+                let rendered = rendered_spawn_command(&command);
+                assert_eq!(
+                    rendered.contains("ses_contract"),
+                    !matches!(mode, SessionIdMode::None),
+                    "{} {runtime:?} {cause:?}: {rendered}",
+                    adapter.id()
+                );
+                assert_eq!(
+                    command.get_env("BUILDMESH_ROUTE_CONTRACT").unwrap(),
+                    "selected-route"
+                );
+                if runtime == EnvType::Wsl && cfg!(windows) {
+                    assert!(command
+                        .get_env("WSLENV")
+                        .unwrap()
+                        .to_string_lossy()
+                        .contains("BUILDMESH_ROUTE_CONTRACT"));
+                }
+                if provider == &Provider::Codex {
+                    for key in [
+                        "OPENAI_API_KEY",
+                        "OPENAI_BASE_URL",
+                        "BUILDMESH_CODEX_PROVIDER_KEY",
+                    ] {
+                        assert!(command.get_env(key).is_none(), "native Codex leaked {key}");
+                    }
+                }
+                if provider == &Provider::CommandCode {
+                    assert_eq!(command.get_env("TERM_PROGRAM").unwrap(), "vscode");
+                }
+            }
+        }
+    }
+}
 
 #[test]
 fn opencode2_commands_select_independent_node_config_files() {
@@ -211,7 +486,6 @@ fn mcode_spawn_validates_final_model_for_fresh_and_resumed_sessions() {
                 .map(|arg| arg.to_string_lossy())
                 .collect();
             if runtime == EnvType::WindowsInterop {
-                use base64::Engine;
                 let bytes = base64::engine::general_purpose::STANDARD
                     .decode(argv.last().unwrap().as_bytes())
                     .unwrap();
@@ -327,7 +601,6 @@ fn codex_spawn_carries_attention_hooks_for_the_launched_node() {
                 (cfg!(windows) && runtime == EnvType::Windows) || runtime == EnvType::WindowsInterop
             }) {
                 Some(encoded) => {
-                    use base64::Engine;
                     let bytes = base64::engine::general_purpose::STANDARD
                         .decode(encoded.as_bytes())
                         .unwrap();
@@ -407,7 +680,6 @@ fn codex_launch_carries_the_review_prompt_next_to_its_attention_hooks() {
             (cfg!(windows) && runtime == EnvType::Windows) || runtime == EnvType::WindowsInterop
         }) {
             Some(encoded) => {
-                use base64::Engine;
                 let bytes = base64::engine::general_purpose::STANDARD
                     .decode(encoded.as_bytes())
                     .unwrap();
@@ -451,6 +723,8 @@ fn make_input<'a>(
     prefill: Option<&'a str>,
 ) -> HarnessLaunchInput<'a> {
     HarnessLaunchInput {
+        routing: None,
+        node_id: None,
         platform,
         runtime: EnvType::Windows,
         session,
@@ -479,7 +753,7 @@ fn capability_recipe_coherence() {
     let mut any_adapters = 0;
     for provider in crate::models::Provider::all() {
         let adapter = provider.adapter();
-        let caps = adapter.capabilities();
+        let caps = crate::agent::capabilities::capabilities_for(adapter);
         any_adapters += 1;
 
         // Build a config where every layer is populated, then verify
@@ -523,7 +797,7 @@ fn capability_recipe_coherence() {
             &config,
             Some(prefill_text),
         );
-        let prepared = crate::agent::launch::default_prepare(adapter, input);
+        let prepared = adapter.prepare_launch(input);
         let args = &prepared.recipe.base_args;
 
         // 1. Model-flag coherence. Ask the adapter what its model-flag
@@ -616,7 +890,7 @@ fn capability_recipe_coherence() {
             sandbox: true,
             ..sandbox_input
         };
-        let sandbox_prepared = crate::agent::launch::default_prepare(adapter, sandbox_input);
+        let sandbox_prepared = adapter.prepare_launch(sandbox_input);
         let sandbox_args = sandbox_prepared
             .recipe
             .base_args
@@ -646,13 +920,13 @@ fn capability_recipe_coherence() {
         //    must drop the unattended contribution.
         assert_eq!(
             caps.permission_modes,
-            adapter.permission_modes(),
+            adapter.descriptor().permission_modes,
             "permission_modes / descriptor mismatch for {}",
             adapter.id(),
         );
         assert_eq!(
             caps.default_permission_mode,
-            adapter.default_permission_mode(),
+            adapter.descriptor().default_permission_mode(),
             "default_permission_mode / descriptor mismatch for {}",
             adapter.id(),
         );
@@ -700,7 +974,7 @@ fn capability_recipe_coherence() {
                 &prompt_config,
                 Some(prefill_text),
             );
-            let prompt_prepared = crate::agent::launch::default_prepare(adapter, prompt_input);
+            let prompt_prepared = adapter.prepare_launch(prompt_input);
             let unattended_args =
                 adapter.permission_args(crate::agent::capabilities::PERMISSION_MODE_UNATTENDED);
             for dropped in &unattended_args {
@@ -739,7 +1013,7 @@ fn codex_resume_recipe_uses_subcommand_shape() {
         &config,
         None,
     );
-    let prepared = crate::agent::launch::default_prepare(adapter, input);
+    let prepared = adapter.prepare_launch(input);
     let args: Vec<&str> = prepared.recipe.argv().collect();
     assert!(args.contains(&"resume"));
     assert!(args.contains(&"sess-xyz"));
@@ -766,7 +1040,7 @@ fn mcode_recipe_carries_model_arg_under_coherence_matrix() {
         &config,
         Some("check the auth handler"),
     );
-    let prepared = crate::agent::launch::default_prepare(adapter, input);
+    let prepared = adapter.prepare_launch(input);
     let args = &prepared.recipe.base_args;
     assert_eq!(
         args,
@@ -1131,4 +1405,24 @@ fn spawn_request_extra_args_capability_mask_at_resolver() {
         "Terminal masks extra_args at the resolver (issue #1358). Got: {:?}",
         resolved_terminal.extra_args
     );
+}
+
+fn rendered_spawn_command(command: &portable_pty::CommandBuilder) -> String {
+    let args: Vec<_> = command
+        .get_argv()
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    if let Some(index) = args.iter().position(|a| a == "-EncodedCommand") {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&args[index + 1])
+            .unwrap();
+        let utf16: Vec<_> = bytes
+            .chunks_exact(2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        String::from_utf16(&utf16).unwrap()
+    } else {
+        args.join(" ")
+    }
 }

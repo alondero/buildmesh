@@ -40,7 +40,7 @@ pub(crate) fn native_completion_format_for(
     provider: crate::models::Provider,
 ) -> Option<TranscriptFormat> {
     let adapter = provider.adapter();
-    if !adapter.produces_readable_transcript() {
+    if !adapter.descriptor().produces_readable_transcript {
         return None;
     }
     // No reader wired (issue #1817) means no native completion to observe.
@@ -92,7 +92,7 @@ pub(crate) fn native_turn_completion_for(
 /// without a DB.
 pub fn transcript_tail(node: &AgentNode, tail: usize) -> TranscriptTail {
     let adapter = crate::preferences::resolve_harness_provider(&node.provider).adapter();
-    if !adapter.produces_readable_transcript() {
+    if !adapter.descriptor().produces_readable_transcript {
         return TranscriptTail::Unavailable {
             reason: UnavailableReason::Unsupported,
         };
@@ -171,7 +171,7 @@ pub fn observed_session_telemetry(node: &AgentNode) -> Option<ObservedMuseSessio
 /// full-tail [`transcript_tail`] is reserved for the on-demand `/log` drill-in.
 pub fn digest_enrichment(node: &AgentNode) -> Option<TranscriptTail> {
     let adapter = crate::preferences::resolve_harness_provider(&node.provider).adapter();
-    if !adapter.produces_readable_transcript() {
+    if !adapter.descriptor().produces_readable_transcript {
         return None;
     }
     // No reader wired for this harness (issue #1817): surface `Unsupported`
@@ -197,7 +197,7 @@ pub(crate) fn transcript_glance(
     node: &AgentNode,
 ) -> Result<transcript_reader::TranscriptGlance, UnavailableReason> {
     let adapter = crate::preferences::resolve_harness_provider(&node.provider).adapter();
-    if !adapter.produces_readable_transcript() {
+    if !adapter.descriptor().produces_readable_transcript {
         return Err(UnavailableReason::Unsupported);
     }
     let format =
@@ -228,7 +228,7 @@ fn scrub_glance(
 
 pub(crate) fn assistant_report(node: &AgentNode) -> Option<transcript_reader::AssistantReport> {
     let adapter = crate::preferences::resolve_harness_provider(&node.provider).adapter();
-    if !adapter.produces_readable_transcript() {
+    if !adapter.descriptor().produces_readable_transcript {
         return None;
     }
     // No reader wired (issue #1817): fall back to live per-turn PTY

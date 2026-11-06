@@ -914,7 +914,8 @@ pub(crate) fn visible_in_spawn_menu(
 ) -> bool {
     let native_here = crate::models::Provider::from_db_str(&profile.harness)
         .adapter()
-        .available_on()
+        .descriptor()
+        .available_on
         .contains(&host);
     let mirror = matches!(
         profile.runtime,
@@ -959,7 +960,8 @@ fn preferred_profiles_with_executables(
                     (Platform::Windows, Some(EnvType::Windows))
                         if crate::models::Provider::from_db_str(tool.harness)
                             .adapter()
-                            .available_on()
+                            .descriptor()
+                            .available_on
                             .contains(&host) =>
                     {
                         if native_executable {
@@ -971,7 +973,8 @@ fn preferred_profiles_with_executables(
                     (_, None)
                         if crate::models::Provider::from_db_str(tool.harness)
                             .adapter()
-                            .available_on()
+                            .descriptor()
+                            .available_on
                             .contains(&host) =>
                     {
                         if native_executable {
