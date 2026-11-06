@@ -107,6 +107,174 @@ static CLI_CAPABILITY_CACHE: Lazy<Mutex<HashSet<String>>> =
 const MAX_POSITIONAL_PREFILL_CHARS: usize = 2_000;
 
 impl AgentProvider for CodexAdapter {
+    fn prepare_launch(
+        &self,
+        input: crate::agent::launch::HarnessLaunchInput<'_>,
+    ) -> crate::agent::launch::PreparedHarnessLaunch {
+        use crate::agent::launch_routing::PreparedLaunchRouting;
+        let routing = input.routing;
+        let runtime = input.runtime;
+        let mut config = input.config.clone();
+        if let Some(PreparedLaunchRouting::CodexProxy { descriptor, .. }) = routing {
+            if config.model.is_none() {
+                config.model = Some(descriptor.model_id.clone());
+            }
+        }
+        let mut prepared = crate::agent::launch::default_prepare(
+            self,
+            crate::agent::launch::HarnessLaunchInput {
+                config: &config,
+                ..input
+            },
+        );
+        prepared
+            .environment
+            .env_remove
+            .extend(["OPENAI_API_KEY".into(), "OPENAI_BASE_URL".into()]);
+        if routing.is_some() {
+            prepared
+                .environment
+                .env_remove
+                .push(PROXY_CREDENTIAL_ENV.into());
+        }
+        // A pairing-scoped key inherited through an environment route is never
+        // an alternative credential for a native Codex process.
+        prepared
+            .environment
+            .env_set
+            .retain(|(key, _)| key != PROXY_CREDENTIAL_ENV);
+        if let Some(PreparedLaunchRouting::CodexProxy {
+            profile_name,
+            descriptor,
+            credential_reference,
+            credential,
+            ..
+        }) = routing
+        {
+            prepared
+                .recipe
+                .base_args
+                .extend(["--profile".into(), profile_name.clone()]);
+            if descriptor.reasoning_effort == Some(true) {
+                prepared.recipe.base_args.extend([
+                    "-c".into(),
+                    "model_supports_reasoning_summaries=true".into(),
+                    "-c".into(),
+                    "model_reasoning_summary=\"none\"".into(),
+                ]);
+            }
+            debug_assert_eq!(credential_reference, PROXY_CREDENTIAL_ENV);
+            prepared
+                .environment
+                .env_set
+                .push((credential_reference.clone(), credential.clone()));
+        }
+        if let Some(routing) = routing {
+            let home = if runtime == EnvType::WindowsInterop {
+                routing
+                    .launch_runtime()
+                    .harness_home
+                    .map(|home| crate::env::windows_path_from_wsl(&home))
+            } else if runtime == EnvType::Windows {
+                match routing {
+                    PreparedLaunchRouting::Native { harness_home, .. } => harness_home.clone(),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let Some(home) = home {
+                prepared
+                    .environment
+                    .env_set
+                    .push(("CODEX_HOME".into(), home));
+            }
+        }
+        prepared
+    }
+
+    fn descriptor(&self) -> &'static crate::agent::capabilities::HarnessDescriptor {
+        static DESCRIPTOR: std::sync::LazyLock<crate::agent::capabilities::HarnessDescriptor> =
+            std::sync::LazyLock::new(|| crate::agent::capabilities::HarnessDescriptor {
+                supports_resume: true,
+                auto_resume_on_startup: true,
+                attention_capability: {
+                    use crate::agent::capabilities::{AttentionCapability, AttentionLaunchMode};
+                    use crate::agent::session_lifecycle::LifecycleKind;
+                    AttentionCapability::Hook {
+                        events: vec![
+                            LifecycleKind::TurnCompleted,
+                            LifecycleKind::InputRequired,
+                            LifecycleKind::QuestionRequested,
+                            LifecycleKind::PermissionRequested,
+                            LifecycleKind::BackgroundRunning,
+                        ],
+                        launch_mode: AttentionLaunchMode::PermissionAsk,
+                        trust: Some("codex project trust (#1379)".into()),
+                        min_version: Some(CODEX_MIN_HOOK_VERSION.into()),
+                    }
+                },
+                circuit_observation: {
+                    ObservationStrategy {
+            push: PushSource::Hooks(HookPush {
+                parse: |value| hook_contract::parse("codex", false, value),
+                source: "codex_native_hook",
+                request_source: "codex_request_hook",
+                ownership_gap: None,
+                foreground: true,
+            }),
+            pull: PullSource::NativeTurnCompletion(NativePull {
+                source: "codex_rollout_task_complete",
+                recheck_source: "codex_rollout_foreground_recheck",
+                label: "Codex",
+                ownership_limit: CODEX_OWNERSHIP_LIMIT,
+            }),
+            turn_identity: TurnIdentity::NativeToken,
+            owned_work: OwnedWorkCoverage::Unavailable {
+                reason: "rollouts do not expose a complete child/background registry",
+            },
+            final_report: FinalReportSource::PullMessage,
+            reconciliation: ReconciliationPolicy {
+                yielded_budget_ms: 60_000,
+            },
+            passive_watcher: None,
+            notes: StrategyNotes {
+                foreground: "Identity-bound rollout task_complete pull",
+                owned_work: "rollouts do not expose a complete child/background registry",
+                final_report: "Scrubbed task_complete response; oversized or missing records remain unavailable",
+                reconciliation: "Bounded native rollout pull with session, turn, input and timestamp fences",
+            },
+        }
+                },
+                produces_readable_transcript: true,
+                supports_model_override: true,
+                supports_extra_args: true,
+                supports_prefill: true,
+                available_on: { &[Platform::Macos, Platform::Windows, Platform::Linux] },
+                effort_control: {
+                    EffortControlKind::InlineConfig {
+                        key: CODEX_EFFORT_KEY.to_string(),
+                        allowed: CODEX_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),
+                    }
+                },
+                permission_modes: {
+                    use crate::agent::capabilities::PermissionModeOption;
+                    vec![
+                        PermissionModeOption::unattended(
+                            "--ask-for-approval never",
+                            "Approvals off (today's behavior; required for unattended runs).",
+                        ),
+                        PermissionModeOption::prompt(
+                            "Prompts on (no flag)",
+                            "Codex asks for approval like a human-launched session.",
+                        ),
+                    ]
+                },
+                ..Default::default()
+            });
+        &DESCRIPTOR
+    }
+
     fn id(&self) -> &'static str {
         "codex"
     }
@@ -129,24 +297,6 @@ impl AgentProvider for CodexAdapter {
             trailing_args: Vec::new(),
             windows_shell: shell_for(platform),
         }
-    }
-
-    /// Issue #2151: Buildmesh passes Codex's own approval flag through.
-    /// Unattended keeps today's `--ask-for-approval never`. `--sandbox`
-    /// and `--dangerously-bypass-hook-trust` are not part of this choice
-    /// (sandbox control and hook trust respectively).
-    fn permission_modes(&self) -> Vec<crate::agent::capabilities::PermissionModeOption> {
-        use crate::agent::capabilities::PermissionModeOption;
-        vec![
-            PermissionModeOption::unattended(
-                "--ask-for-approval never",
-                "Approvals off (today's behavior; required for unattended runs).",
-            ),
-            PermissionModeOption::prompt(
-                "Prompts on (no flag)",
-                "Codex asks for approval like a human-launched session.",
-            ),
-        ]
     }
 
     fn permission_args(&self, mode_id: &str) -> Vec<String> {
@@ -233,73 +383,6 @@ impl AgentProvider for CodexAdapter {
         })
     }
 
-    fn supports_resume(&self) -> bool {
-        true
-    }
-
-    fn auto_resume_on_startup(&self) -> bool {
-        true
-    }
-
-    /// Codex rollout completion establishes only the foreground turn. The
-    /// rollout does not expose a complete child/background registry, including
-    /// work started by code-mode calls, so it cannot establish ownership
-    /// coverage. Hooks deliver requests and lifecycle receipts but carry no
-    /// prompt echo, so they never bind a recorded submission.
-    fn circuit_observation(&self) -> ObservationStrategy {
-        ObservationStrategy {
-            push: PushSource::Hooks(HookPush {
-                parse: |value| hook_contract::parse("codex", false, value),
-                source: "codex_native_hook",
-                request_source: "codex_request_hook",
-                ownership_gap: None,
-                foreground: true,
-            }),
-            pull: PullSource::NativeTurnCompletion(NativePull {
-                source: "codex_rollout_task_complete",
-                recheck_source: "codex_rollout_foreground_recheck",
-                label: "Codex",
-                ownership_limit: CODEX_OWNERSHIP_LIMIT,
-            }),
-            turn_identity: TurnIdentity::NativeToken,
-            owned_work: OwnedWorkCoverage::Unavailable {
-                reason: "rollouts do not expose a complete child/background registry",
-            },
-            final_report: FinalReportSource::PullMessage,
-            reconciliation: ReconciliationPolicy {
-                yielded_budget_ms: 60_000,
-            },
-            passive_watcher: None,
-            notes: StrategyNotes {
-                foreground: "Identity-bound rollout task_complete pull",
-                owned_work: "rollouts do not expose a complete child/background registry",
-                final_report: "Scrubbed task_complete response; oversized or missing records remain unavailable",
-                reconciliation: "Bounded native rollout pull with session, turn, input and timestamp fences",
-            },
-        }
-    }
-
-    fn requires_attention_hook(&self) -> bool {
-        true
-    }
-
-    fn attention_capability(&self) -> crate::agent::capabilities::AttentionCapability {
-        use crate::agent::capabilities::{AttentionCapability, AttentionLaunchMode};
-        use crate::agent::session_lifecycle::LifecycleKind;
-        AttentionCapability::Hook {
-            events: vec![
-                LifecycleKind::TurnCompleted,
-                LifecycleKind::InputRequired,
-                LifecycleKind::QuestionRequested,
-                LifecycleKind::PermissionRequested,
-                LifecycleKind::BackgroundRunning,
-            ],
-            launch_mode: AttentionLaunchMode::PermissionAsk,
-            trust: Some("codex project trust (#1379)".into()),
-            min_version: Some(CODEX_MIN_HOOK_VERSION.into()),
-        }
-    }
-
     /// Codex's global project trust is a launch prerequisite, not an attention
     /// hook side effect. Proxy preflight supplies the exact runtime home/distro
     /// so this edits the same trust store the child will read.
@@ -333,27 +416,8 @@ impl AgentProvider for CodexAdapter {
         &[]
     }
 
-    /// Codex writes rollout transcripts under `~/.codex/sessions/` that
-    /// `services::transcript_reader` parses via `TranscriptFormat::Codex`
-    /// (issue #887).
-    fn produces_readable_transcript(&self) -> bool {
-        true
-    }
-
-    fn supports_model_override(&self) -> bool {
-        true
-    }
-
-    fn supports_extra_args(&self) -> bool {
-        true
-    }
-
     /// Codex fires `UserPromptSubmit` when a prompt starts a turn.
     fn confirms_prompt_submission(&self) -> bool {
-        true
-    }
-
-    fn supports_prefill(&self) -> bool {
         true
     }
 
@@ -392,10 +456,6 @@ impl AgentProvider for CodexAdapter {
         COMPOSER_PLACEHOLDERS
             .iter()
             .any(|placeholder| tail.contains(placeholder))
-    }
-
-    fn available_on(&self) -> &'static [Platform] {
-        &[Platform::Macos, Platform::Windows, Platform::Linux]
     }
 
     fn self_assigns_session_id(&self) -> bool {
@@ -452,19 +512,6 @@ impl AgentProvider for CodexAdapter {
 
     fn prefill_args(&self, text: &str) -> Vec<String> {
         vec![text.into()]
-    }
-
-    /// Codex's reasoning-effort knob is the inline per-invocation config
-    /// override `-c model_reasoning_effort="…"` (issue #1143 research),
-    /// distinct from Claude Code's closed-vocab flag. The vocabulary
-    /// list lives in `agent::capabilities::CODEX_EFFORT_ALLOWED` and is
-    /// consumed by both this method and the resolver; the key is
-    /// surfaced to the frontend for knob labelling.
-    fn effort_control(&self) -> EffortControlKind {
-        EffortControlKind::InlineConfig {
-            key: CODEX_EFFORT_KEY.to_string(),
-            allowed: CODEX_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),
-        }
     }
 }
 

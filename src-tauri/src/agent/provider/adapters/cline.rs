@@ -369,28 +369,22 @@ pub fn resolve_install(
 }
 
 impl AgentProvider for ClineAdapter {
-    fn id(&self) -> &'static str {
-        "cline"
-    }
-
-    /// Issue #1902: Cline 3.0.62 (Windows npm `.cmd` resolved through
-    /// `cmd.exe /c`; macOS/Linux direct) was inspected, not assumed. Its
-    /// file-hook layer dispatches `agent_end` from `afterRun` **only** when
-    /// `result.status === "completed"`, so a completed turn is a real
-    /// attention signal. What that payload cannot do is decide a Circuit
-    /// step: it carries `taskId` (the session) but no turn id, no prompt
-    /// echo and no input stamp, so no Buildmesh submission can be
-    /// correlated, and the shutdown event is not a clean exit:
-    /// `SessionShutdown` maps to `session_shutdown`, but 3.0.62 wires it only
-    /// into the abort branch of `afterRun`, where the session is still live.
-    /// Ownership is absent too: Buildmesh never passes Cline's own background
-    /// surfaces (`--kanban`, `-z`/`--zen`, `--team-name`), so no registry
-    /// reaches us. It therefore declares no Circuit hook source — a validated
-    /// turn signal opens the attention gate while Circuit execution stays
-    /// visibly Unverified until a controlled live run exists.
-    fn circuit_observation(&self) -> crate::circuit::strategy::ObservationStrategy {
-        use crate::circuit::strategy::{ObservationStrategy, StrategyNotes};
-        ObservationStrategy {
+    fn descriptor(&self) -> &'static crate::agent::capabilities::HarnessDescriptor {
+        static DESCRIPTOR: std::sync::LazyLock<crate::agent::capabilities::HarnessDescriptor> =
+            std::sync::LazyLock::new(|| crate::agent::capabilities::HarnessDescriptor {
+                supports_resume: true,
+                auto_resume_on_startup: true,
+                attention_capability: {
+                    AttentionCapability::Hook {
+                        events: vec![LifecycleKind::TurnCompleted],
+                        launch_mode: AttentionLaunchMode::SkipPermissions,
+                        trust: None,
+                        min_version: Some(CLINE_MIN_HOOK_VERSION.into()),
+                    }
+                },
+                circuit_observation: {
+                    use crate::circuit::strategy::{ObservationStrategy, StrategyNotes};
+                    ObservationStrategy {
             notes: StrategyNotes {
                 foreground: "Cline 3.0.62 (Windows npm .cmd via cmd.exe /c; macOS/Linux direct) has no validated Circuit lifecycle adapter; the agent_end TaskComplete file hook marks a completed turn but carries no turn id, prompt echo or input stamp, and Cline dispatches no clean-exit event",
                 owned_work: "Cline exposes no child/background registry to Buildmesh (its --kanban/--zen/--team-name surfaces are never passed); unknown child/background work never establishes completion",
@@ -399,6 +393,27 @@ impl AgentProvider for ClineAdapter {
             },
             ..ObservationStrategy::UNWIRED
         }
+                },
+                produces_readable_transcript: true,
+                supports_model_override: true,
+                supports_extra_args: true,
+                supports_prefill: true,
+                available_on: { &[Platform::Windows, Platform::Linux, Platform::Macos] },
+                effort_control: {
+                    EffortControlKind::Closed {
+                        allowed: crate::agent::capabilities::CLINE_EFFORT_ALLOWED
+                            .iter()
+                            .map(|value| value.to_string())
+                            .collect(),
+                    }
+                },
+                ..Default::default()
+            });
+        &DESCRIPTOR
+    }
+
+    fn id(&self) -> &'static str {
+        "cline"
     }
 
     fn ui(&self) -> UiMeta {
@@ -421,39 +436,6 @@ impl AgentProvider for ClineAdapter {
         }
     }
 
-    fn supports_resume(&self) -> bool {
-        true
-    }
-
-    /// `true` — the `TaskComplete` file hook is provisioned at spawn (issue
-    /// #1775) and opens the Autopilot / review-circuit gate. See
-    /// [`Self::attention_capability`] for the structured contract.
-    fn requires_attention_hook(&self) -> bool {
-        true
-    }
-
-    /// Issue #1775 — the honest Cline contract: `TaskComplete` → `agent_end`
-    /// delivers a completed turn, and nothing else. Cline's file-hook layer has
-    /// no clean-exit dispatch (`session_shutdown` is abort-only), no
-    /// permission/question primitive under the default auto-approve launch
-    /// (Buildmesh passes no approval flag), and no failure dispatch Buildmesh
-    /// provisions — so `permission_requested`, `question_requested`,
-    /// `background_running`, `process_idle`, and `session_exited` are all
-    /// deliberately absent. Mirrors `mcode`, which likewise advertises only
-    /// `TurnCompleted`.
-    fn attention_capability(&self) -> AttentionCapability {
-        AttentionCapability::Hook {
-            events: vec![LifecycleKind::TurnCompleted],
-            launch_mode: AttentionLaunchMode::SkipPermissions,
-            trust: None,
-            min_version: Some(CLINE_MIN_HOOK_VERSION.into()),
-        }
-    }
-
-    fn auto_resume_on_startup(&self) -> bool {
-        true
-    }
-
     fn self_assigns_session_id(&self) -> bool {
         true
     }
@@ -463,44 +445,6 @@ impl AgentProvider for ClineAdapter {
     /// (issue #1774).
     fn captures_session_id_from_pty(&self) -> bool {
         false
-    }
-
-    fn supports_model_override(&self) -> bool {
-        true
-    }
-
-    fn supports_extra_args(&self) -> bool {
-        true
-    }
-
-    fn supports_prefill(&self) -> bool {
-        true
-    }
-
-    /// Issue #1776 — `true`. Cline persists a per-session history tree at
-    /// `<cline data dir>/sessions/<id>/`, and
-    /// [`services::transcript_reader::adapters::cline`] parses the
-    /// `<id>.messages.json` document there into the shared `Turn` shape. This
-    /// is what makes two downstream products work:
-    ///
-    /// - the **Node Digest rich layer** (`coordinator::enrichment`), which
-    ///   carries real turn content instead of the spine-only read; and
-    /// - the **archived-node resume picker**, whose `resumable` flag is
-    ///   `supports_resume() && produces_readable_transcript()`.
-    ///
-    /// The reader degrades explicitly rather than silently: a node whose
-    /// session directory, messages document, or document version is missing or
-    /// unparseable yields a typed `UnavailableReason` (`NoTranscript` /
-    /// `NoSession` / `ShapeChanged`), which the digest reports as a flagged
-    /// degrade, never as an omission.
-    fn produces_readable_transcript(&self) -> bool {
-        true
-    }
-
-    /// Windows, macOS, Linux. WSL is deliberately absent from the supported
-    /// story for this slice (see the module docstring).
-    fn available_on(&self) -> &'static [Platform] {
-        &[Platform::Windows, Platform::Linux, Platform::Macos]
     }
 
     /// Cline always self-assigns, so a fresh spawn never carries a mint flag.
@@ -582,15 +526,6 @@ impl AgentProvider for ClineAdapter {
         vec!["--thinking".into(), effort.into()]
     }
 
-    fn effort_control(&self) -> EffortControlKind {
-        EffortControlKind::Closed {
-            allowed: crate::agent::capabilities::CLINE_EFFORT_ALLOWED
-                .iter()
-                .map(|value| value.to_string())
-                .collect(),
-        }
-    }
-
     /// Provision Cline's attention file hook (issue #1775). Writes
     /// `<cline home>/hooks/TaskComplete.<ext>` with a node-agnostic script that
     /// expands the callback URL from `BUILDMESH_PORT` / `BUILDMESH_SESSION_ID`
@@ -626,7 +561,7 @@ mod tests {
     /// bug (a recipe that hardcodes one shell for every platform).
     #[test]
     fn spawn_recipe_uses_cmd_on_windows_and_direct_elsewhere() {
-        for platform in CLINE.available_on() {
+        for platform in CLINE.descriptor().available_on {
             let recipe = CLINE.spawn_recipe(*platform, EnvType::Windows);
             assert_eq!(
                 recipe.binary, "cline",
@@ -663,7 +598,7 @@ mod tests {
 
     #[test]
     fn available_on_excludes_no_supported_platform_and_has_no_wsl_handling() {
-        let platforms = CLINE.available_on();
+        let platforms = CLINE.descriptor().available_on;
         assert_eq!(
             platforms.len(),
             3,
@@ -734,7 +669,7 @@ mod tests {
 
     #[test]
     fn capabilities_descriptor_advertises_attention_and_a_readable_transcript() {
-        let caps = CLINE.capabilities();
+        let caps = crate::agent::capabilities::capabilities_for(&CLINE);
         assert_eq!(caps.harness_id, "cline");
         assert!(caps.supports_resume);
         assert!(caps.auto_resume_on_startup);
@@ -787,9 +722,9 @@ mod tests {
     #[test]
     fn spawn_recipe_never_carries_cline_orchestration_flags() {
         use crate::agent::capabilities::ResolvedAgentConfig;
-        use crate::agent::launch::{default_prepare, HarnessLaunchInput, SessionIdModeRef};
+        use crate::agent::launch::{HarnessLaunchInput, SessionIdModeRef};
 
-        for platform in CLINE.available_on() {
+        for platform in CLINE.descriptor().available_on {
             for session in [
                 SessionIdModeRef::None,
                 SessionIdModeRef::Resume {
@@ -804,6 +739,8 @@ mod tests {
                     permission_mode: None,
                 };
                 let input = HarnessLaunchInput {
+                    routing: None,
+                    node_id: None,
                     platform: *platform,
                     runtime: EnvType::Windows,
                     session,
@@ -811,7 +748,7 @@ mod tests {
                     prefill: Some("fix the auth bug"),
                     sandbox: false,
                 };
-                let prepared = default_prepare(&CLINE, input);
+                let prepared = CLINE.prepare_launch(input);
                 let argv: Vec<&str> = prepared.recipe.argv().collect();
                 for forbidden in CLINE_NEVER_PASS {
                     assert!(
@@ -831,36 +768,34 @@ mod tests {
     #[test]
     fn default_prepare_fresh_and_resume_argv_shapes() {
         use crate::agent::capabilities::ResolvedAgentConfig;
-        use crate::agent::launch::{default_prepare, HarnessLaunchInput, SessionIdModeRef};
+        use crate::agent::launch::{HarnessLaunchInput, SessionIdModeRef};
 
         let config = ResolvedAgentConfig::default();
-        let fresh = default_prepare(
-            &CLINE,
-            HarnessLaunchInput {
-                platform: Platform::Windows,
-                runtime: EnvType::Windows,
-                session: SessionIdModeRef::None,
-                config: &config,
-                prefill: None,
-                sandbox: false,
-            },
-        );
+        let fresh = CLINE.prepare_launch(HarnessLaunchInput {
+            routing: None,
+            node_id: None,
+            platform: Platform::Windows,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::None,
+            config: &config,
+            prefill: None,
+            sandbox: false,
+        });
         assert_eq!(fresh.recipe.base_args, vec!["-i".to_string()]);
 
-        let resumed = default_prepare(
-            &CLINE,
-            HarnessLaunchInput {
-                platform: Platform::Windows,
-                runtime: EnvType::Windows,
-                session: SessionIdModeRef::Resume {
-                    id: "1789757012702_7of3e",
-                    cause: crate::agent::spawn::ResumeCause::Explicit,
-                },
-                config: &config,
-                prefill: None,
-                sandbox: false,
+        let resumed = CLINE.prepare_launch(HarnessLaunchInput {
+            routing: None,
+            node_id: None,
+            platform: Platform::Windows,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::Resume {
+                id: "1789757012702_7of3e",
+                cause: crate::agent::spawn::ResumeCause::Explicit,
             },
-        );
+            config: &config,
+            prefill: None,
+            sandbox: false,
+        });
         assert_eq!(
             resumed.recipe.base_args,
             vec![
@@ -1029,7 +964,7 @@ mod tests {
     /// Buildmesh provisions — none of those may be advertised.
     #[test]
     fn attention_capability_advertises_turn_completed_only() {
-        let capability = CLINE.attention_capability();
+        let capability = CLINE.descriptor().attention_capability.clone();
         match &capability {
             AttentionCapability::Hook {
                 events,
@@ -1068,7 +1003,7 @@ mod tests {
     #[test]
     fn requires_attention_hook_is_enabled_after_1775() {
         assert!(
-            CLINE.requires_attention_hook(),
+            CLINE.descriptor().requires_attention_hook(),
             "issue #1775 wires the file hooks; reverting to false would re-close the Autopilot gate"
         );
     }

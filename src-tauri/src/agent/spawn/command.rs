@@ -6,7 +6,6 @@ use crate::agent::spawn_environment;
 use crate::env;
 use crate::models::{EnvType, Provider};
 use portable_pty::CommandBuilder;
-use std::borrow::Cow;
 
 /// Everything [`build_spawn_command_prepared`] composes the launch from.
 ///
@@ -52,9 +51,15 @@ pub struct SpawnCommandInput<'a> {
 pub fn build_spawn_command_prepared(
     input: SpawnCommandInput<'_>,
 ) -> Result<CommandBuilder, String> {
+    build_spawn_command_with_adapter(input.provider.adapter(), input)
+}
+
+pub(super) fn build_spawn_command_with_adapter(
+    adapter: &dyn crate::agent::provider::AgentProvider,
+    input: SpawnCommandInput<'_>,
+) -> Result<CommandBuilder, String> {
     let SpawnCommandInput {
         resolved,
-        provider: provider_enum,
         routing,
         session_id_mode,
         session_id,
@@ -62,8 +67,8 @@ pub fn build_spawn_command_prepared(
         prefill,
         sandbox,
         resume_cause,
+        ..
     } = input;
-    let adapter = provider_enum.adapter();
     let platform = if resolved.env_type == EnvType::Wsl {
         Platform::Linux
     } else if resolved.env_type == EnvType::WindowsInterop {
@@ -72,30 +77,6 @@ pub fn build_spawn_command_prepared(
         Platform::current()
     };
 
-    // The per-pairing model id is routing knowledge, so it is folded
-    // into the resolved config rather than appended to the recipe:
-    // `default_prepare` is the only owner of `--model` (it knows the
-    // flag spelling, gates it on the harness's own model-override
-    // capability, and keeps it ahead of `resume <id>`), and a second
-    // occurrence is rejected by the CLI as a repeated argument. The
-    // fold is load-bearing the other way too: the generated
-    // `<profile>.config.toml` carries only `model_provider`, so an
-    // empty cascade model would leave Codex on an OpenAI model against
-    // a foreign endpoint.
-    let routed_config = match routing {
-        // Guarded so the populated case borrows: a proxy launch whose
-        // cascade already resolved a model is the common shape, and it
-        // needs no new config at all.
-        crate::agent::launch_routing::PreparedLaunchRouting::CodexProxy { descriptor, .. }
-            if config.model.is_none() =>
-        {
-            let mut routed = config.clone();
-            routed.model = Some(descriptor.model_id.clone());
-            Cow::Owned(routed)
-        }
-        _ => Cow::Borrowed(config),
-    };
-    let config = routed_config.as_ref();
     if let Some(model) = config.model.as_deref() {
         adapter.validate_model_override(model)?;
     }
@@ -120,50 +101,17 @@ pub fn build_spawn_command_prepared(
         config,
         prefill,
         sandbox,
+        routing: Some(routing),
+        node_id: Some(session_id),
     };
-    let prepared = crate::agent::launch::default_prepare(adapter, input);
+    let prepared = adapter.prepare_launch(input);
 
-    // CodexProxy contributes --profile to the recipe. The profile name
-    // is the orchestrator's knowledge (the pairing's verified endpoint
-    // identity), so it cannot live in the adapter recipe.
-    let mut recipe = prepared.recipe;
-    recipe
-        .base_args
-        .extend(adapter.launch_hook_args(session_id, resolved.env_type));
-    if let crate::agent::launch_routing::PreparedLaunchRouting::CodexProxy {
-        profile_name,
-        descriptor,
-        ..
-    } = routing
-    {
-        recipe
-            .base_args
-            .extend(["--profile".into(), profile_name.clone()]);
-        if descriptor.reasoning_effort == Some(true) {
-            // Unknown model names otherwise suppress Codex's reasoning field entirely.
-            recipe.base_args.extend([
-                "-c".into(),
-                "model_supports_reasoning_summaries=true".into(),
-                "-c".into(),
-                "model_reasoning_summary=\"none\"".into(),
-            ]);
-        }
-    }
-
-    let (wsl_distro, executable_override) = match routing {
-        crate::agent::launch_routing::PreparedLaunchRouting::CodexProxy { install, .. } => (
-            install.wsl_distro.as_deref(),
-            Some(install.executable.as_str()),
-        ),
-        _ => (
-            None,
-            routing.executable_override().and_then(|path| path.to_str()),
-        ),
-    };
+    let runtime = routing.launch_runtime();
+    let executable_override = routing.executable_override().and_then(|path| path.to_str());
     let mut cmd = spawn_environment::wrap(
-        recipe,
+        prepared.recipe,
         resolved.env_type,
-        wsl_distro,
+        runtime.wsl_distro.as_deref(),
         executable_override,
         &resolved.spawn_path,
         session_id,
@@ -179,7 +127,7 @@ pub fn build_spawn_command_prepared(
             cmd.env_remove(k);
         }
     }
-    for k in prepared.environment.env_remove {
+    for k in &prepared.environment.env_remove {
         cmd.env_remove(k);
     }
     let mut command_wsl_env: Vec<&str> = Vec::new();
@@ -188,30 +136,11 @@ pub fn build_spawn_command_prepared(
         cmd.env(key, value);
         command_wsl_env.push(key);
     }
-    for (k, v) in prepared.environment.env_set {
-        cmd.env(*k, *v);
-        command_wsl_env.push(*k);
+    for (k, v) in &prepared.environment.env_set {
+        cmd.env(k, v);
+        command_wsl_env.push(k);
     }
 
-    // Inject the per-profile backend env + Codex Proxy credential. WSLENV is
-    // assembled once after all command-defined variables are known, avoiding
-    // one routing branch overwriting another branch's entries.
-    command_wsl_env.extend(apply_routing_env(&mut cmd, routing));
-    if let Some(key) = apply_codex_proxy_credential(&mut cmd, routing, provider_enum) {
-        command_wsl_env.push(key);
-    }
-    if resolved.env_type == EnvType::WindowsInterop && provider_enum == Provider::Codex {
-        if let Some(home) = routing.launch_runtime().harness_home {
-            cmd.env("CODEX_HOME", crate::env::windows_path_from_wsl(&home));
-            command_wsl_env.push("CODEX_HOME");
-        }
-    }
-    // A native launch with an additional Harness Login runs Codex against
-    // that login's home; without one the child inherits Buildmesh's own
-    // CODEX_HOME (or none), exactly as before.
-    if let Some(home) = native_login_home(resolved.env_type, provider_enum, routing) {
-        cmd.env("CODEX_HOME", home);
-    }
     command_wsl_env.extend(["TERM", "COLORTERM", "FORCE_COLOR"]);
     spawn_environment::apply_wsl_env(
         &mut cmd,
@@ -220,74 +149,6 @@ pub fn build_spawn_command_prepared(
         adapter.wsl_passthrough_env(),
     );
     Ok(cmd)
-}
-
-/// The `CODEX_HOME` a native (host) Codex launch must run with: the Harness
-/// Login home its frozen plan selected. `None` for every other harness,
-/// runtime or routing, which keep the inherited environment.
-pub(crate) fn native_login_home(
-    env_type: EnvType,
-    provider: Provider,
-    routing: &crate::agent::launch_routing::PreparedLaunchRouting,
-) -> Option<String> {
-    if env_type != EnvType::Windows || provider != Provider::Codex {
-        return None;
-    }
-    match routing {
-        crate::agent::launch_routing::PreparedLaunchRouting::Native { harness_home, .. } => {
-            harness_home.clone()
-        }
-        _ => None,
-    }
-}
-
-/// Apply the per-profile backend env (`PreparedLaunchRouting::Environment`)
-/// to the child command and return the names that need WSL propagation.
-pub(super) fn apply_routing_env<'a>(
-    cmd: &mut CommandBuilder,
-    routing: &'a crate::agent::launch_routing::PreparedLaunchRouting,
-) -> Vec<&'a str> {
-    let backend_env: &[(String, String)] = match routing {
-        crate::agent::launch_routing::PreparedLaunchRouting::Environment { values, .. } => {
-            values.as_slice()
-        }
-        _ => &[],
-    };
-    for (k, v) in backend_env {
-        cmd.env(k, v);
-    }
-    backend_env.iter().map(|(key, _)| key.as_str()).collect()
-}
-
-/// Apply the Codex Proxy pairing-scoped credential. A verified profile
-/// authenticates exclusively through its pairing-scoped reference
-/// (`PROXY_CREDENTIAL_ENV`); generic `OPENAI_API_KEY` / `OPENAI_BASE_URL`
-/// inherited by Buildmesh are stripped so they cannot become an alternate
-/// credential/endpoint. The generated credential key is returned for the
-/// shared WSL environment pass.
-pub(super) fn apply_codex_proxy_credential(
-    cmd: &mut CommandBuilder,
-    routing: &crate::agent::launch_routing::PreparedLaunchRouting,
-    provider_enum: Provider,
-) -> Option<&'static str> {
-    if !matches!(provider_enum, Provider::Codex) {
-        return None;
-    }
-    let key = crate::agent::provider::adapters::codex::PROXY_CREDENTIAL_ENV;
-    cmd.env_remove(key);
-    let crate::agent::launch_routing::PreparedLaunchRouting::CodexProxy {
-        credential_reference,
-        credential,
-        ..
-    } = routing
-    else {
-        return None;
-    };
-    debug_assert_eq!(credential_reference, key);
-    cmd.env_remove("OPENAI_API_KEY");
-    cmd.env_remove("OPENAI_BASE_URL");
-    cmd.env(credential_reference, credential);
-    Some(key)
 }
 
 /// Build the per-field cascade inputs the spawn pipeline hands to

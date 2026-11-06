@@ -64,9 +64,9 @@ pub fn targets_for(
     profiles
         .into_iter()
         .flat_map(|harness| {
-            let caps = crate::models::Provider::from_db_str(&harness.harness)
-                .adapter()
-                .capabilities();
+            let caps = crate::agent::capabilities::capabilities_for(
+                crate::models::Provider::from_db_str(&harness.harness).adapter(),
+            );
             let native = LaunchTarget {
                 id: harness.id.clone(),
                 harness_id: harness.id.clone(),

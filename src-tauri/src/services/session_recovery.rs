@@ -77,7 +77,7 @@ pub(crate) fn recover_live_node(node_id: i64) -> Result<Option<String>, String> 
 pub async fn recover_suspended_node(node: AgentNode) -> Result<bool, String> {
     crate::blocking::run_blocking("recover_suspended_session", move || {
         if node.cli_session_id.as_deref().is_some_and(|id| !id.is_empty())
-            || !crate::preferences::resolve_harness_provider(&node.provider).adapter().auto_resume_on_startup()
+            || !crate::preferences::resolve_harness_provider(&node.provider).adapter().descriptor().auto_resume_on_startup
             // A suspended Autopilot node without an identity may be awaiting
             // sandbox approval and must never be started by transcript matching.
             || crate::db::legacy_retirement::has_history(node.id).map_err(|e| e.to_string())?

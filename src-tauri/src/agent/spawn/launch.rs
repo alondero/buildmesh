@@ -225,7 +225,8 @@ pub(super) async fn launch_process(
     timer.checkpoint("before_command_build");
     // A sandbox-setup failure must not reach the PTY at all, so the error is
     // raised here rather than carried as a poisoned command (#2034).
-    let launch_prompt = launch_carries_prompt(adapter.supports_prefill(), prefill.as_deref());
+    let launch_prompt =
+        launch_carries_prompt(adapter.descriptor().supports_prefill, prefill.as_deref());
     let cmd = build_spawn_command_prepared(SpawnCommandInput {
         resolved: &resolved,
         provider,

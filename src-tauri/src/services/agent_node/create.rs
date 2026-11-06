@@ -65,7 +65,7 @@ pub(super) fn reject_unsupported_initial_prompt(
         return Ok(());
     }
     let adapter = crate::models::Provider::from_db_str(harness_id).adapter();
-    if adapter.accepts_initial_prompt() {
+    if adapter.descriptor().accepts_initial_prompt() {
         Ok(())
     } else {
         Err(AgentNodeError::InitialPromptUnsupported)

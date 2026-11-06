@@ -1,8 +1,6 @@
 use super::*;
 use crate::agent::{
-    capabilities::ResolvedAgentConfig,
-    launch::{default_prepare, HarnessLaunchInput},
-    spawn::ResumeCause,
+    capabilities::ResolvedAgentConfig, launch::HarnessLaunchInput, spawn::ResumeCause,
 };
 
 #[cfg(windows)]
@@ -357,17 +355,16 @@ fn fresh_and_resume_use_standalone_assigned_identity_without_v1_flags() {
             cause: ResumeCause::Regenerate,
         },
     ] {
-        let prepared = default_prepare(
-            &OPENCODE2,
-            HarnessLaunchInput {
-                platform: Platform::Linux,
-                runtime: EnvType::Windows,
-                session,
-                config: &config,
-                prefill: Some("hello"),
-                sandbox: false,
-            },
-        );
+        let prepared = OPENCODE2.prepare_launch(HarnessLaunchInput {
+            routing: None,
+            node_id: None,
+            platform: Platform::Linux,
+            runtime: EnvType::Windows,
+            session,
+            config: &config,
+            prefill: Some("hello"),
+            sandbox: false,
+        });
         assert_eq!(
             prepared.recipe.base_args,
             [

@@ -37,6 +37,21 @@ pub struct FreebuffAdapter;
 pub static FREEBUFF: FreebuffAdapter = FreebuffAdapter;
 
 impl AgentProvider for FreebuffAdapter {
+    fn descriptor(&self) -> &'static crate::agent::capabilities::HarnessDescriptor {
+        static DESCRIPTOR: std::sync::LazyLock<crate::agent::capabilities::HarnessDescriptor> =
+            std::sync::LazyLock::new(|| crate::agent::capabilities::HarnessDescriptor {
+                supports_resume: true,
+                auto_resume_on_startup: true,
+                produces_readable_transcript: false,
+                supports_model_override: false,
+                supports_extra_args: true,
+                supports_prefill: false,
+                available_on: { &[Platform::Windows, Platform::Linux, Platform::Macos] },
+                ..Default::default()
+            });
+        &DESCRIPTOR
+    }
+
     fn id(&self) -> &'static str {
         "freebuff"
     }
@@ -56,38 +71,6 @@ impl AgentProvider for FreebuffAdapter {
             trailing_args: Vec::new(),
             windows_shell: shell_for(platform),
         }
-    }
-
-    fn supports_resume(&self) -> bool {
-        true
-    }
-
-    fn auto_resume_on_startup(&self) -> bool {
-        true
-    }
-
-    fn requires_attention_hook(&self) -> bool {
-        false
-    }
-
-    fn produces_readable_transcript(&self) -> bool {
-        false
-    }
-
-    fn supports_model_override(&self) -> bool {
-        false
-    }
-
-    fn supports_extra_args(&self) -> bool {
-        true
-    }
-
-    fn supports_prefill(&self) -> bool {
-        false
-    }
-
-    fn available_on(&self) -> &'static [Platform] {
-        &[Platform::Windows, Platform::Linux, Platform::Macos]
     }
 
     /// Buildmesh assigns the session UUID at spawn so `cli_session_id` is

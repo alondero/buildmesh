@@ -441,6 +441,27 @@ environment handling.
 
 ## Agent Spawning on Windows
 
+The selected adapter owns both advertised capabilities and launch construction.
+Its immutable `HarnessDescriptor` is authoritative; `capabilities_for` derives
+the wire descriptor used by the Spawn Menu, configuration validation and generated
+catalogue. Add or change a capability in the adapter's declaration. Attention-hook
+installation derives from `attention_capability`; effort support and permission
+defaults derive from the declared vocabulary and modes.
+
+Production calls `AgentProvider::prepare_launch` through the selected adapter.
+Adapters reuse private shared option assembly and own harness-specific routing
+arguments and environment changes. Routing resolves the pairing, credentials,
+executable and runtime; `spawn_environment::wrap` owns OS process arrangement.
+Codex's adapter supplies its profile flags, fallback model, scoped credential
+and login home. Session preparation remains adapter behavior, including OpenCode
+2's native session/fork API and Cline's self-assigned identities.
+
+Launch tests cross this dispatched interface. The characterization fixture in
+`agent/spawn/fixtures/harness-launch-contract.jsonl` pins option ordering and
+environment policy across all adapters, platforms and session modes; command
+tests additionally cover OS wrapping and resolved routes. Argument tests do not
+establish acceptance by an installed CLI.
+
 The shell a provider spawns through is **adapter-owned, and deliberately not
 enumerated here**. Each harness adapter's `spawn_recipe`
 (`src-tauri/src/agent/provider/adapters/<id>.rs`) sets `SpawnRecipe::windows_shell`,

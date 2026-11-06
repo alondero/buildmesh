@@ -76,6 +76,17 @@ export function frontendInScope(paths) {
 // `pathIncludeDrift` below, so a new `#[path]` fails the gate that runs on the
 // Rust diff itself, not only the one CI happens to run (review of PR #2232).
 export const RUST_PATH_INCLUDES = {
+  'src-tauri/src/agent/launch_tests.rs': 'agent::launch::tests',
+  'src-tauri/src/agent/provider/adapters/anthropic_tests.rs': 'agent::provider::adapters::anthropic::tests',
+  'src-tauri/src/agent/provider/adapters/commandcode_tests.rs': 'agent::provider::adapters::commandcode::tests',
+  'src-tauri/src/agent/provider/adapters/cursor_tests.rs': 'agent::provider::adapters::cursor::tests',
+  'src-tauri/src/agent/provider/adapters/dsh_tests.rs': 'agent::provider::adapters::dsh::tests',
+  'src-tauri/src/agent/provider/adapters/kimi_tests.rs': 'agent::provider::adapters::kimi::tests',
+  'src-tauri/src/agent/provider/adapters/muse_tests.rs': 'agent::provider::adapters::muse::tests',
+  'src-tauri/src/agent/provider/adapters/opencode_contract_tests.rs': 'agent::provider::adapters::opencode::tests',
+  'src-tauri/src/agent/provider/adapters/terminal_tests.rs': 'agent::provider::adapters::terminal::tests',
+  'src-tauri/src/models/models_tests.rs': 'models::tests',
+
   'src-tauri/src/services/interruption_recovery_tests.rs': 'services::interruption_recovery::tests',
   'src-tauri/src/services/transcript_reader/interruption_tests.rs': 'services::transcript_reader::interruption::tests',
   'src-tauri/src/services/transcript_reader/readers/codex_failure_tests.rs': 'services::transcript_reader::readers::codex::failure_tests',

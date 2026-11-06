@@ -198,7 +198,7 @@ fn stamp_effective_permission_uses_row_capabilities_and_prefs_snapshot() {
             provider_id: None,
             is_proxied: false,
             group_key: harness.to_string(),
-            capabilities: adapter.capabilities(),
+            capabilities: crate::agent::capabilities::capabilities_for(adapter),
             runtime: None,
             configurations: Vec::new(),
             configuration: None,
@@ -1893,7 +1893,7 @@ fn memo_row() -> ProviderInfo {
         provider_id: None,
         is_proxied: false,
         group_key: "terminal".to_string(),
-        capabilities: TERMINAL.capabilities(),
+        capabilities: crate::agent::capabilities::capabilities_for(&TERMINAL),
         runtime: None,
         configurations: Vec::new(),
         configuration: None,
@@ -2298,4 +2298,19 @@ fn republishing_the_same_detection_observation_keeps_the_epoch() {
         "an unchanged observation must not move the epoch"
     );
     crate::agent::detection::restore_detection_state(&previous);
+}
+
+/// Pure adapter-level core of [`effective_permission_for`]: no prefs, no
+/// disk — the unit-test seam. Test-only since the menu stamp reads the
+/// row's own capabilities (finding 4); kept because the adapter tests pin
+/// the contract without building menu rows.
+fn effective_permission_for_adapter(
+    adapter: &dyn AgentProvider,
+    stored: Option<&str>,
+) -> Option<EffectivePermissionMode> {
+    effective_permission_for_modes(
+        &adapter.descriptor().permission_modes,
+        adapter.descriptor().default_permission_mode().as_deref(),
+        stored,
+    )
 }
