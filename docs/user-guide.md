@@ -8,6 +8,7 @@ programs for you.
 
 - [The mental model](#the-mental-model)
 - [Install and authenticate a harness](#install-and-authenticate-a-harness)
+  - [Add a custom API provider](#add-a-custom-api-provider)
 - [Your first session](#your-first-session)
 - [Open tools from the title bar](#open-tools-from-the-title-bar)
 - [Coordinate agents with Companion](#coordinate-agents-with-companion)
@@ -68,7 +69,7 @@ Buildmesh so the detection cache is refreshed.
 |---|---|---|
 | Harness-owned login or API key | Claude Code, Codex, Antigravity, OpenCode, Cursor, Grok Code, Kimi Code, MiniMax Code, DeepSeek Harness, Command Code, Freebuff, Meta Muse, and Perch | The selected CLI's own login/configuration flow |
 | Buildmesh provider account | Anthropic, MiniMax, and Kimi usage/quota integrations | **Settings → Providers** |
-| Custom compatible endpoint | Claude-compatible model endpoints | **Settings → Providers**, then select the proxied profile for a harness |
+| Custom compatible endpoint | OpenAI Responses or Anthropic Messages APIs | **Settings → Providers → Add provider → Other / custom** |
 
 The two columns are independent: a detected harness can run with its own
 login, while a compatible provider profile can supply routing or usage data.
@@ -90,6 +91,32 @@ current figures directly. Where no direct dashboard is available, it opens the
 provider's account console, quota documentation, or subscription settings instead.
 Custom providers and externally managed billing omit the link. The browser uses
 its own login; choose the same account or workspace as the meter.
+
+### Add a custom API provider
+
+1. Open **Settings → Providers → Add provider → Other / custom**.
+2. Enter a name and API key, then choose **OpenAI Responses — Codex** or
+   **Anthropic Messages — Claude Code**.
+3. Enter the provider's API **base URL** and exact **Model ID**. For example,
+   an OpenAI base might end in `/v1`; leave off `/responses`, `/messages`, and
+   `/chat/completions`. Hosted endpoints require HTTPS. Local servers can use
+   HTTP on `localhost` or a loopback IP address.
+4. Click **Add provider**. Buildmesh saves the credential, provider route and
+   named Launch Configuration together. Select the configuration from the
+   corresponding harness's spawn submenu. Install the harness first if it is
+   not available.
+
+Codex requires Responses with streaming and tool calls; an API advertised as
+“OpenAI-compatible” may offer only Chat Completions. Claude Code requires
+Anthropic Messages with streaming and tool calls. Buildmesh does not translate
+between these APIs. Codex routes receive a background verification check;
+failure is a warning you can inspect in **Launch Configurations → Advanced
+Provider Routes**, where endpoint and model mappings can also be edited.
+Claude routes initially use your chosen model for every tier, including
+background tasks; edit the tier mappings there to use different models.
+
+Choose **Credentials only — configure later** to save just the account and key.
+You can attach the account to another harness later and reuse the credential.
 
 ## Your first session
 

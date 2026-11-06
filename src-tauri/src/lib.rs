@@ -329,6 +329,7 @@ pub fn run() {
             commands::preferences::get_provider_accounts_with_preferences_keys,
             commands::preferences::get_keyed_first_class_catalog,
             commands::preferences::upsert_provider_account,
+            commands::preferences::create_custom_provider,
             commands::preferences::remove_provider_account,
             commands::preferences::get_provider_pairings,
             commands::preferences::get_pairing_verifications,

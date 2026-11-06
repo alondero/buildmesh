@@ -372,18 +372,9 @@ fn prepare_route(
     {
         route.model_tiers.default = value.model.clone();
     }
-    let url = reqwest::Url::parse(route.base_url.as_deref().unwrap_or(""))
-        .map_err(|_| "Enter a valid provider endpoint URL")?;
-    if url.scheme() != "https"
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        return Err(
-            "Provider endpoint must use HTTPS without credentials, query, or fragment".into(),
-        );
-    }
+    super::resolver::pairing_compat::validate_endpoint_url(
+        route.base_url.as_deref().unwrap_or(""),
+    )?;
     super::upsert_provider_pairing(prefs, route);
     Ok(())
 }

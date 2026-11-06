@@ -245,6 +245,23 @@ export const upsertProviderAccount = async (
   }
 };
 
+/** Save a custom credential, route and launch configuration in one transaction. */
+export const createCustomProvider = async (
+  name: string,
+  apiKey: string,
+  surface: ProviderPairing['surface'],
+  baseUrl: string,
+  model: string,
+): Promise<SpawnConfiguration> => {
+  try {
+    return await _invoke<SpawnConfiguration>('create_custom_provider', {
+      name, apiKey, surface, baseUrl, model,
+    });
+  } finally {
+    setProviderListPromise(null);
+  }
+};
+
 /** Remove a provider account by id. Busts the provider-list cache. */
 export const removeProviderAccount = async (id: string): Promise<void> => {
   try {
