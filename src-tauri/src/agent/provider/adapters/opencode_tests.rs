@@ -7,13 +7,13 @@ const PARENT: &str = "ses_e77a04977ffea25PMbbvyAZJYU";
 const CHILD: &str = "ses_e77a02cc6ffeHjnk2f6NIW0LE8";
 
 fn parse_hook(value: serde_json::Value) -> Option<crate::circuit::strategy::NativeHook> {
-    OPENCODE.circuit_observation().parse_hook(&value)
+    OPENCODE.descriptor().circuit_observation.parse_hook(&value)
 }
 
 #[test]
 fn child_sessions_are_declared_owned_work_without_a_foreground_source() {
     use crate::circuit::strategy::{OwnedWorkKind, PushKind, TurnIdentity};
-    let strategy = OPENCODE.circuit_observation();
+    let strategy = OPENCODE.descriptor().circuit_observation;
     let hooks = strategy.hooks().expect("child-session hooks are declared");
     assert!(
         !hooks.foreground,

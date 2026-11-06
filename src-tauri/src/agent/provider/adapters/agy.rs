@@ -273,15 +273,26 @@ fn parse_circuit_hook(value: &serde_json::Value) -> Option<NativeHook> {
 const AGY_OWNERSHIP_GAP: &str = "Antigravity exposes no child/background registry; a settled foreground turn cannot verify owned work. Inspect the agent and Recheck evidence.";
 
 impl AgentProvider for AgyAdapter {
-    fn id(&self) -> &'static str {
-        "agy"
-    }
-
-    /// Validated against agy 1.2.11 on Windows interactive sessions (issue
-    /// #1901). `-p` print mode emits no `Stop` hook, so hook evidence covers
-    /// only Buildmesh-launched PTY sessions.
-    fn circuit_observation(&self) -> ObservationStrategy {
-        ObservationStrategy {
+    fn descriptor(&self) -> &'static crate::agent::capabilities::HarnessDescriptor {
+        static DESCRIPTOR: std::sync::LazyLock<crate::agent::capabilities::HarnessDescriptor> =
+            std::sync::LazyLock::new(|| crate::agent::capabilities::HarnessDescriptor {
+                supports_resume: true,
+                auto_resume_on_startup: true,
+                attention_capability: {
+                    use crate::agent::capabilities::{AttentionCapability, AttentionLaunchMode};
+                    use crate::agent::session_lifecycle::LifecycleKind;
+                    AttentionCapability::Hook {
+                        events: vec![
+                            LifecycleKind::TurnCompleted,
+                            LifecycleKind::BackgroundRunning,
+                        ],
+                        launch_mode: AttentionLaunchMode::SkipPermissions,
+                        trust: Some("workspace trust".into()),
+                        min_version: Some("1.0.0".into()),
+                    }
+                },
+                circuit_observation: {
+                    ObservationStrategy {
             push: PushSource::Hooks(HookPush {
                 parse: parse_circuit_hook,
                 source: "agy_native_hook",
@@ -306,6 +317,44 @@ impl AgentProvider for AgyAdapter {
                 reconciliation: "Durable Stop receipt replay with session and incarnation fences; input fencing is unavailable (no UserPromptSubmit binding), freshness recheck parks Unverified",
             },
         }
+                },
+                produces_readable_transcript: {
+                    // Issue #1283: AGY writes per-conversation JSONL under
+                    // `~/.gemini/antigravity-cli/brain/<conversation-id>/.system_generated/
+                    // logs/transcript.jsonl`. `services::transcript_reader` knows the
+                    // shape (`TranscriptFormat::Agy`), so the Node Digest rich layer,
+                    // the `read_last_assistant_message` cheap digest, and the
+                    // archived-node resume picker all hydrate AGY sessions.
+                    true
+                },
+                supports_model_override: true,
+                supports_extra_args: true,
+                supports_prefill: true,
+                available_on: { &[Platform::Windows, Platform::Linux, Platform::Macos] },
+                effort_control: {
+                    EffortControlKind::Closed {
+                        allowed: vec!["low".into(), "medium".into(), "high".into()],
+                    }
+                },
+                permission_modes: {
+                    vec![
+            PermissionModeOption::unattended(
+                "--dangerously-skip-permissions",
+                "Prompts off — tools run without asking (today's behavior; required for unattended runs).",
+            ),
+            PermissionModeOption::prompt(
+                "Prompts on (no flag)",
+                "Antigravity asks for approval like a human-launched session.",
+            ),
+        ]
+                },
+                ..Default::default()
+            });
+        &DESCRIPTOR
+    }
+
+    fn id(&self) -> &'static str {
+        "agy"
     }
 
     fn ui(&self) -> UiMeta {
@@ -328,31 +377,12 @@ impl AgentProvider for AgyAdapter {
         }
     }
 
-    /// Issue #2151: Buildmesh passes Antigravity's own flag through.
-    /// Unattended keeps today's `--dangerously-skip-permissions`.
-    fn permission_modes(&self) -> Vec<PermissionModeOption> {
-        vec![
-            PermissionModeOption::unattended(
-                "--dangerously-skip-permissions",
-                "Prompts off — tools run without asking (today's behavior; required for unattended runs).",
-            ),
-            PermissionModeOption::prompt(
-                "Prompts on (no flag)",
-                "Antigravity asks for approval like a human-launched session.",
-            ),
-        ]
-    }
-
     fn permission_args(&self, mode_id: &str) -> Vec<String> {
         if mode_id == PERMISSION_MODE_UNATTENDED {
             vec!["--dangerously-skip-permissions".into()]
         } else {
             Vec::new()
         }
-    }
-
-    fn supports_resume(&self) -> bool {
-        true
     }
 
     fn background_recipe(
@@ -379,41 +409,6 @@ impl AgentProvider for AgyAdapter {
             },
             BackgroundResultOutput::Stdout,
         ))
-    }
-
-    fn produces_readable_transcript(&self) -> bool {
-        // Issue #1283: AGY writes per-conversation JSONL under
-        // `~/.gemini/antigravity-cli/brain/<conversation-id>/.system_generated/
-        // logs/transcript.jsonl`. `services::transcript_reader` knows the
-        // shape (`TranscriptFormat::Agy`), so the Node Digest rich layer,
-        // the `read_last_assistant_message` cheap digest, and the
-        // archived-node resume picker all hydrate AGY sessions.
-        true
-    }
-
-    fn auto_resume_on_startup(&self) -> bool {
-        true
-    }
-
-    /// Delivers completion / background turn signals via `Stop` hook (`fullyIdle: true`
-    /// vs `fullyIdle: false`). Tool approvals are unavailable under the current
-    /// `--dangerously-skip-permissions` launch policy (issue #1367).
-    fn requires_attention_hook(&self) -> bool {
-        true
-    }
-
-    fn attention_capability(&self) -> crate::agent::capabilities::AttentionCapability {
-        use crate::agent::capabilities::{AttentionCapability, AttentionLaunchMode};
-        use crate::agent::session_lifecycle::LifecycleKind;
-        AttentionCapability::Hook {
-            events: vec![
-                LifecycleKind::TurnCompleted,
-                LifecycleKind::BackgroundRunning,
-            ],
-            launch_mode: AttentionLaunchMode::SkipPermissions,
-            trust: Some("workspace trust".into()),
-            min_version: Some("1.0.0".into()),
-        }
     }
 
     fn ensure_workspace_trusted(
@@ -453,22 +448,6 @@ impl AgentProvider for AgyAdapter {
             &hook_command(platform),
             pre.as_deref().zip(post.as_deref()),
         )
-    }
-
-    fn supports_model_override(&self) -> bool {
-        true
-    }
-
-    fn supports_extra_args(&self) -> bool {
-        true
-    }
-
-    fn supports_prefill(&self) -> bool {
-        true
-    }
-
-    fn available_on(&self) -> &'static [Platform] {
-        &[Platform::Windows, Platform::Linux, Platform::Macos]
     }
 
     fn self_assigns_session_id(&self) -> bool {
@@ -533,18 +512,6 @@ impl AgentProvider for AgyAdapter {
         vec![]
     }
 
-    /// Antigravity CLI exposes a closed-vocab reasoning-effort knob via
-    /// `--effort <low|medium|high>` (`agy --help` verified). The trait
-    /// default `effort_args` already emits `["--effort", effort]`, which
-    /// matches AGY's flag exactly; advertising `Closed` here lets the
-    /// capability mask forward resolved effort values from the resolver
-    /// (issue #1286).
-    fn effort_control(&self) -> EffortControlKind {
-        EffortControlKind::Closed {
-            allowed: vec!["low".into(), "medium".into(), "high".into()],
-        }
-    }
-
     /// Issue #1287 — Antigravity's CLI accepts a native `--sandbox`
     /// flag ("Run in a sandbox with terminal restrictions enabled").
     /// Forwarded when the parent mesh has its `sandbox` toggle on, in
@@ -563,7 +530,7 @@ mod tests {
     use super::*;
     use crate::agent::capabilities::{EffortControlKind, ResolvedAgentConfig};
     use crate::agent::launch::{
-        assert_flag_followed_by_value, default_prepare, HarnessLaunchInput, SessionIdModeRef,
+        assert_flag_followed_by_value, HarnessLaunchInput, SessionIdModeRef,
     };
     use tempfile::TempDir;
 
@@ -595,7 +562,7 @@ mod tests {
     /// Mirrors the equivalent pin in `grok::tests`.
     #[test]
     fn capabilities_descriptor_advertises_effort_override() {
-        let caps = AGY.capabilities();
+        let caps = crate::agent::capabilities::capabilities_for(&AGY);
         assert_eq!(caps.harness_id, "agy");
         assert!(caps.supports_resume);
         assert!(caps.supports_model_override);
@@ -629,6 +596,8 @@ mod tests {
             permission_mode: None,
         };
         let input = HarnessLaunchInput {
+            routing: None,
+            node_id: None,
             platform: Platform::Linux,
             runtime: EnvType::Windows,
             session: SessionIdModeRef::None,
@@ -636,7 +605,7 @@ mod tests {
             prefill: None,
             sandbox: false,
         };
-        let prepared = default_prepare(&AGY, input);
+        let prepared = AGY.prepare_launch(input);
         assert_flag_followed_by_value(&prepared.recipe.base_args, "--effort", "high");
     }
 
@@ -648,6 +617,8 @@ mod tests {
     fn default_prepare_appends_sandbox_flag_when_mesh_sandbox_is_true() {
         let config = ResolvedAgentConfig::default();
         let input = HarnessLaunchInput {
+            routing: None,
+            node_id: None,
             platform: Platform::Linux,
             runtime: EnvType::Windows,
             session: SessionIdModeRef::None,
@@ -655,7 +626,7 @@ mod tests {
             prefill: None,
             sandbox: true,
         };
-        let prepared = default_prepare(&AGY, input);
+        let prepared = AGY.prepare_launch(input);
         let args = &prepared.recipe.base_args;
         assert!(
             args.contains(&"--sandbox".to_string()),
@@ -686,6 +657,8 @@ mod tests {
     fn default_prepare_omits_sandbox_flag_when_mesh_sandbox_is_false() {
         let config = ResolvedAgentConfig::default();
         let input = HarnessLaunchInput {
+            routing: None,
+            node_id: None,
             platform: Platform::Linux,
             runtime: EnvType::Windows,
             session: SessionIdModeRef::None,
@@ -693,7 +666,7 @@ mod tests {
             prefill: None,
             sandbox: false,
         };
-        let prepared = default_prepare(&AGY, input);
+        let prepared = AGY.prepare_launch(input);
         assert!(
             !prepared.recipe.base_args.iter().any(|a| a == "--sandbox"),
             "agy recipe must NOT carry --sandbox when mesh.sandbox=false; got {:?}",
@@ -1069,9 +1042,9 @@ mod tests {
     /// layer populates alongside the spine.
     #[test]
     fn agy_declares_attention_hook_with_readable_transcript() {
-        assert!(AGY.requires_attention_hook());
+        assert!(AGY.descriptor().requires_attention_hook());
         // Issue #1283: AGY writes per-conversation JSONL.
-        assert!(AGY.produces_readable_transcript());
+        assert!(AGY.descriptor().produces_readable_transcript);
     }
 
     /// Issue #1367: Verify that atomic write leaves no temporary `.tmp` residue.

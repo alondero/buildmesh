@@ -48,7 +48,7 @@ pub(crate) fn provider_info_for(
     }
     let adapter = crate::models::Provider::from_db_str(&profile.harness).adapter();
     let target = profile_platform(profile, host);
-    if !adapter.available_on().contains(&target) {
+    if !adapter.descriptor().available_on.contains(&target) {
         return None;
     }
     Some(profile_row(profile))
@@ -64,7 +64,8 @@ fn profile_row(profile: &crate::preferences::HarnessProfile) -> ProviderInfo {
     // resume picker consumes this so a custom Claude-compatible profile
     // (e.g. "DeepSeek via Claude") shows up without the old hardcoded id
     // allow-list (#550 follow-up).
-    let resumable = adapter.supports_resume() && adapter.produces_readable_transcript();
+    let resumable =
+        adapter.descriptor().supports_resume && adapter.descriptor().produces_readable_transcript;
     ProviderInfo {
         id: profile.id.clone(),
         label: profile.name.clone(),
@@ -126,7 +127,7 @@ pub(super) fn provider_info_for_pairing(
         .find(|p| p.id == pairing.harness_id)
         .map(|p| profile_platform(p, host))
         .unwrap_or(host);
-    if !adapter.available_on().contains(&target) {
+    if !adapter.descriptor().available_on.contains(&target) {
         return None;
     }
     let ui = adapter.ui();
@@ -135,7 +136,8 @@ pub(super) fn provider_info_for_pairing(
         label: account.name.clone(),
         color: ui.color,
         icon: ui.icon,
-        resumable: adapter.supports_resume() && adapter.produces_readable_transcript(),
+        resumable: adapter.descriptor().supports_resume
+            && adapter.descriptor().produces_readable_transcript,
         harness_id: pairing.harness_id.clone(),
         provider_id: Some(pairing.provider_id.clone()),
         is_proxied: true,
@@ -267,7 +269,8 @@ pub(super) fn compose_provider_menu(
                     |harness| {
                         crate::models::Provider::from_db_str(harness)
                             .adapter()
-                            .available_on()
+                            .descriptor()
+                            .available_on
                             .contains(&host)
                     },
                 )
@@ -474,7 +477,7 @@ fn derived_menu_at(key: MenuKey, derive: impl FnOnce() -> Vec<ProviderInfo>) -> 
 }
 
 /// Returns the list of agent providers available on this host platform.
-/// Each provider declares which platforms it runs on via `AgentProvider::available_on()`.
+/// Each provider declares its platforms in `AgentProvider::descriptor()`.
 ///
 /// `pub(crate)` so the mobile HTTP route (`http/routes/providers.rs`) can
 /// keep using it as its menu source — the route wraps this call in
@@ -547,22 +550,6 @@ fn effective_permission_for_modes(
         description: option.description,
         is_default: stored.is_none(),
     })
-}
-
-/// Pure adapter-level core of [`effective_permission_for`]: no prefs, no
-/// disk — the unit-test seam. Test-only since the menu stamp reads the
-/// row's own capabilities (finding 4); kept because the adapter tests pin
-/// the contract without building menu rows.
-#[cfg(test)]
-fn effective_permission_for_adapter(
-    adapter: &dyn AgentProvider,
-    stored: Option<&str>,
-) -> Option<EffectivePermissionMode> {
-    effective_permission_for_modes(
-        &adapter.permission_modes(),
-        adapter.default_permission_mode().as_deref(),
-        stored,
-    )
 }
 
 /// Stamp the resolved launch permission mode onto every menu row (issue

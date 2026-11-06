@@ -273,7 +273,7 @@ pub fn decide_resume(
     let new_id = SpawnOptionId::from(new_provider);
     let same_harness = old_id.harness_id() == new_id.harness_id();
     let new_provider_enum = resolve_harness_provider_for(&new_id);
-    if same_harness && new_provider_enum.adapter().supports_resume() {
+    if same_harness && new_provider_enum.adapter().descriptor().supports_resume {
         cli_session_id.map(String::from)
     } else {
         None

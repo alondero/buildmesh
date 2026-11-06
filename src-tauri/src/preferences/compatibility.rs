@@ -248,8 +248,8 @@ fn fallback_surfaces(harness_id: &str) -> &'static [ApiSurface] {
 ///     Anthropic pairing + account key (legacy pre-composite node ids).
 ///
 /// Returns empty when no account matches or no stored pairing exists — the
-/// spawn path resets inherited backend vars first (see
-/// [`crate::agent::provider::AgentProvider::resets_backend_env`]), so empty
+/// Anthropic launch adapter resets inherited backend vars first (see
+/// [`crate::agent::provider::AgentProvider::prepare_launch`]), so empty
 /// means a clean slate, not a leaked override.
 ///
 /// The env is resolved from an **already-loaded** preferences snapshot, so the

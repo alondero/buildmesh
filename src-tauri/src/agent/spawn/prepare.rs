@@ -249,7 +249,7 @@ pub(super) async fn prepare_context(
     // Session-id mode: Assign writes the UUID before launch; Resume
     // reuses the captured id; None leaves capture to the adapter.
     let can_infer_scope = resume.is_none() && resume_cause != ResumeCause::Startup;
-    let session_id_mode = if adapter.supports_resume() {
+    let session_id_mode = if adapter.descriptor().supports_resume {
         match resume {
             Some(ref id) if !id.is_empty() => SessionIdMode::Resume(id.clone()),
             _ => {

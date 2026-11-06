@@ -689,6 +689,46 @@ fn provision_at(plugin_root: Option<&Path>, env_type: EnvType, node_id: i64) -> 
 }
 
 impl AgentProvider for McodeAdapter {
+    fn descriptor(&self) -> &'static crate::agent::capabilities::HarnessDescriptor {
+        static DESCRIPTOR: std::sync::LazyLock<crate::agent::capabilities::HarnessDescriptor> =
+            std::sync::LazyLock::new(|| crate::agent::capabilities::HarnessDescriptor {
+                supports_resume: true,
+                auto_resume_on_startup: true,
+                attention_capability: {
+                    AttentionCapability::Hook {
+                        events: vec![LifecycleKind::TurnCompleted],
+                        launch_mode: AttentionLaunchMode::SkipPermissions,
+                        trust: None,
+                        min_version: Some(MCODE_MIN_HOOK_VERSION.into()),
+                    }
+                },
+                produces_readable_transcript: true,
+                supports_model_override: true,
+                supports_extra_args: {
+                    // Issue #1358: mcode's interactive TUI still accepts arbitrary
+                    // CLI flags as positional args (it's a runtime, not a
+                    // vocab-restricted CLI like Codex). Effort controls remain
+                    // unsupported; model selection uses the dedicated override.
+                    true
+                },
+                supports_prefill: {
+                    // mcode accepts `[prompt]` as a trailing positional on the
+                    // interactive TUI (and on `exec`). Override below emits the
+                    // text verbatim, no `--prefill` flag.
+                    true
+                },
+                available_on: { &[Platform::Windows, Platform::Linux, Platform::Macos] },
+                permission_modes: {
+                    vec![PermissionModeOption::unattended(
+            "Full Access (permissionMode: bypassPermissions)",
+            "Pinned in mcode's config.yaml on every spawn — the TUI has no permission flag.",
+        )]
+                },
+                ..Default::default()
+            });
+        &DESCRIPTOR
+    }
+
     fn id(&self) -> &'static str {
         "mcode"
     }
@@ -711,25 +751,6 @@ impl AgentProvider for McodeAdapter {
             trailing_args: Vec::new(),
             windows_shell: shell_for(platform),
         }
-    }
-
-    /// Issue #2151: mcode's TUI accepts no permission flag, so the mode
-    /// set is a singleton — Full Access via the `permissionMode:
-    /// bypassPermissions` pin in `<dataDir>/config.yaml`
-    /// ([`pin_permission_mode`]). There is no prompt entry to offer: the
-    /// pin is machine-global (shared with the user's standalone `mcode`
-    /// sessions), so merely skipping the pin would not restore prompts
-    /// once a previous spawn pinned it. Settings shows this enforced
-    /// mode explicitly rather than a choice.
-    fn permission_modes(&self) -> Vec<PermissionModeOption> {
-        vec![PermissionModeOption::unattended(
-            "Full Access (permissionMode: bypassPermissions)",
-            "Pinned in mcode's config.yaml on every spawn — the TUI has no permission flag.",
-        )]
-    }
-
-    fn supports_resume(&self) -> bool {
-        true
     }
 
     fn background_recipe(
@@ -761,42 +782,6 @@ impl AgentProvider for McodeAdapter {
             BackgroundPromptInput::Stdin,
             BackgroundResultOutput::LastMessageFile,
         ))
-    }
-
-    fn auto_resume_on_startup(&self) -> bool {
-        true
-    }
-
-    /// `true` — the Buildmesh Agent-Plugin is provisioned into
-    /// `<dataDir>/plugins/io.buildmesh.attention/.claude-plugin/plugin.json`
-    /// and `Stop` delivery was validated against a live 0.4.12 TUI using the
-    /// historical per-node callback (issue #1797). A 0.6.13 TUI collector also
-    /// captured SessionStart and UserPromptSubmit; app delivery to the shared
-    /// callback remains unvalidated. This flag opens the
-    /// spawn-time gate at `provision.rs:557-569` and, downstream, the Autopilot
-    /// compatibility gate; see `attention_capability()` for the contract.
-    fn requires_attention_hook(&self) -> bool {
-        true
-    }
-
-    /// Issue #1797: `Stop` is the validated attention signal. That
-    /// 0.4.12 validation used the historical `/api/attention/<node-id>` URL;
-    /// current `/api/attention/mcode` app delivery remains unvalidated.
-    /// SessionStart captures identity; UserPromptSubmit resumes work without
-    /// requesting attention, matching the other adapters' descriptors.
-    /// Buildmesh launches mcode in Full Access
-    /// (`permissionMode: bypassPermissions`, pinned by
-    /// [`pin_permission_mode`]), so no approval prompt is raised and
-    /// `PermissionRequested` is not advertised — exactly like Cursor under
-    /// `--force`. No workspace-trust step is required and none is taken, so
-    /// `trust` stays `None`.
-    fn attention_capability(&self) -> AttentionCapability {
-        AttentionCapability::Hook {
-            events: vec![LifecycleKind::TurnCompleted],
-            launch_mode: AttentionLaunchMode::SkipPermissions,
-            trust: None,
-            min_version: Some(MCODE_MIN_HOOK_VERSION.into()),
-        }
     }
 
     /// Provision mcode's Agent-Plugin attention hook (issue #1796; Stop delivery
@@ -840,21 +825,6 @@ impl AgentProvider for McodeAdapter {
         provision_at(data_root.as_deref(), resolved.env_type, node_id)
     }
 
-    /// `true` — mcode persists canonical history under
-    /// `<dataDir>/v2/sessions/…/messages.jsonl` (manifest-indexed) which
-    /// `services::transcript_reader` parses via `TranscriptFormat::Mcode`,
-    /// so the Node Digest rich layer hydrates and the archived-node picker
-    /// surfaces mcode (`resumable = supports_resume &&
-    /// produces_readable_transcript` in `provider_menu.rs`).
-    fn produces_readable_transcript(&self) -> bool {
-        true
-    }
-
-    /// The interactive CLI accepts a session-only `--model` override (0.6.5).
-    fn supports_model_override(&self) -> bool {
-        true
-    }
-
     fn validate_model_override(&self, model: &str) -> Result<(), String> {
         // A conservative identifier alphabet keeps references literal when
         // the Windows .cmd shim is launched through cmd.exe.
@@ -880,25 +850,6 @@ impl AgentProvider for McodeAdapter {
         } else {
             Err("MiniMax Code model reference must use provider/model or provider/model#variant; identifier parts allow only ASCII letters, digits, '.', '_' and '-', with an optional 'custom_provider:' provider prefix".into())
         }
-    }
-
-    fn supports_extra_args(&self) -> bool {
-        // Issue #1358: mcode's interactive TUI still accepts arbitrary
-        // CLI flags as positional args (it's a runtime, not a
-        // vocab-restricted CLI like Codex). Effort controls remain
-        // unsupported; model selection uses the dedicated override.
-        true
-    }
-
-    fn supports_prefill(&self) -> bool {
-        // mcode accepts `[prompt]` as a trailing positional on the
-        // interactive TUI (and on `exec`). Override below emits the
-        // text verbatim, no `--prefill` flag.
-        true
-    }
-
-    fn available_on(&self) -> &'static [Platform] {
-        &[Platform::Windows, Platform::Linux, Platform::Macos]
     }
 
     /// MiniMax Code assigns ids captured by native session/workspace callbacks.

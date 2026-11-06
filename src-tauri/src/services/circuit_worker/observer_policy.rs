@@ -93,7 +93,7 @@ mod tests {
         use crate::circuit::strategy::OwnedWorkKind;
         for provider in crate::models::Provider::all() {
             let id = provider.adapter().id();
-            let strategy = provider.adapter().circuit_observation();
+            let strategy = provider.adapter().descriptor().circuit_observation;
             let policy = for_provider(id);
             assert_eq!(policy.harness, id);
             assert!(policy.yielded_budget_ms > 0 && policy.yielded_budget_ms <= 90_000);

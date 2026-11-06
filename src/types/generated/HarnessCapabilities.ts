@@ -125,7 +125,7 @@ effort_control: EffortControlKind,
  * the "this harness has no such flag" line instead of a control and
  * the launch path contributes no approval argv. Otherwise the first
  * entry is the unattended default (see
- * [`crate::agent::provider::AgentProvider::default_permission_mode`]).
+ * [`HarnessDescriptor::default_permission_mode`]).
  */
 permission_modes: Array<PermissionModeOption>, 
 /**

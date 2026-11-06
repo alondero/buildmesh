@@ -1069,7 +1069,8 @@ pub(crate) fn node_is_plain_terminal(node_id: i64) -> bool {
 pub(crate) fn harness_is_plain_terminal(provider: &str) -> bool {
     crate::preferences::resolve_harness_provider(provider)
         .adapter()
-        .is_plain_terminal()
+        .descriptor()
+        .is_plain_terminal
 }
 
 /// Commit a user-submitted resume and return the envelope that was stored.

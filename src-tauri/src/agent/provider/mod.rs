@@ -9,7 +9,6 @@ pub mod compatibility;
 pub mod muse;
 pub mod provider_conf;
 
-use crate::agent::capabilities::{EffortControlKind, HarnessCapabilities, PermissionModeOption};
 use crate::env::ResolvedPath;
 use crate::models::EnvType;
 use std::future::Future;
@@ -208,7 +207,8 @@ pub fn claude_direct_recipe(platform: Platform) -> SpawnRecipe {
 /// inherited from buildmesh's own process environment (e.g. an `ANTHROPIC_*`
 /// override exported in the shell that launched the app) can't leak into the
 /// agent — reproducing the clean slate cwrap gave each session. Mirrors the
-/// `unset ...` block in `~/.local/bin/cwrap`. See [`AgentProvider::resets_backend_env`].
+/// `unset ...` block in `~/.local/bin/cwrap`. Anthropic's
+/// [`AgentProvider::prepare_launch`] expands this list into concrete removals.
 ///
 /// `MINIMAX_API_KEY` is included even though Claude Code itself does not read
 /// it: a value exported in the user's shell still propagates to the spawn
@@ -507,53 +507,6 @@ pub trait AgentProvider: Send + Sync {
     /// `claude` / `claude.exe` binary is the same regardless of env.
     fn spawn_recipe(&self, platform: Platform, env_type: EnvType) -> SpawnRecipe;
 
-    /// Whether to accept `--session-id <uuid>` (fresh) / `--resume <uuid>` (resume) args.
-    fn supports_resume(&self) -> bool;
-
-    /// Whether the app should attempt to auto-resume suspended sessions on startup
-    /// using the stored `cli_session_id`.
-    fn auto_resume_on_startup(&self) -> bool;
-
-    /// Whether the spawn path should call [`provision_attention_hooks`] before
-    /// launching this provider (issue #886).
-    ///
-    /// [`provision_attention_hooks`]: AgentProvider::provision_attention_hooks
-    fn requires_attention_hook(&self) -> bool;
-
-    /// The structured attention-hook capability (issue #1364 §3): which
-    /// normalized lifecycle events the hook delivers, its launch mode, and
-    /// its trust/version requirements. The default `None` keeps every harness
-    /// without an attention hook outside the contract; `capabilities()`
-    /// derives `requires_attention_hook` from this so the two can't drift.
-    fn attention_capability(&self) -> crate::agent::capabilities::AttentionCapability {
-        crate::agent::capabilities::AttentionCapability::None
-    }
-
-    /// What this harness contributes to a Circuit's observation of one agent
-    /// (issue #2128): its push hook parser, native pull, identity and
-    /// owned-work coverage, report source and reconciliation budget. The
-    /// Circuit worker selects behaviour from this declaration and renders its
-    /// diagnostics from it. The default is unwired: execution support never
-    /// implies lifecycle or ownership authority.
-    fn circuit_observation(&self) -> crate::circuit::strategy::ObservationStrategy {
-        crate::circuit::strategy::ObservationStrategy::UNWIRED
-    }
-
-    /// Whether this harness supplies turn lifecycle signals through a passive
-    /// transcript watcher rather than a native attention hook. Derived from
-    /// the observation strategy so the two cannot disagree.
-    fn supports_passive_turn_watcher(&self) -> bool {
-        self.circuit_observation().passive_watcher.is_some()
-    }
-
-    /// Whether a Circuit can take this harness's result file as its turn
-    /// completion (see `HarnessCapabilities::supports_result_file_handoff`).
-    /// Every agent harness can write one; only the plain shell cannot be
-    /// asked to.
-    fn supports_result_file_handoff(&self) -> bool {
-        !self.is_plain_terminal()
-    }
-
     /// Ensure the workspace is trusted for this harness before its process is
     /// created. Trust is a launch prerequisite, independent of attention-hook
     /// installation. Providers with vendor-specific trust stores opt in by
@@ -617,66 +570,11 @@ pub trait AgentProvider: Send + Sync {
         &[]
     }
 
-    /// Whether this provider writes a transcript the coordinator read API can
-    /// parse into a Node Digest's rich layer (ADR-0008). The Claude-backed
-    /// `anthropic` adapter runs real Claude Code (with a swapped backend for
-    /// custom MiniMax/DeepSeek profiles), so it writes Claude Code's
-    /// `~/.claude/projects/<encoded-cwd>/<session>.jsonl`, which
-    /// `services::transcript_reader` knows how to read. Codex's rollout format
-    /// is parsed via `TranscriptFormat::Codex` (issue #887); Cursor's
-    /// workspace-scoped JSONL via `TranscriptFormat::Cursor`; AGY, Grok,
-    /// mcode, OpenCode (issue #1296 SQLite reader), Muse (issue #1708 JSONL
-    /// reader), Cline (issue #1776 single-JSON-document reader), and Command
-    /// Code have dedicated readers as well.
-    /// Providers with no wired transcript reader (Kimi, dsh, freebuff,
-    /// terminal) return `false`; their digest degrades to spine-only
-    /// with enrichment explicitly flagged `unsupported`, never silently
-    /// omitted.
-    fn produces_readable_transcript(&self) -> bool {
-        false
-    }
-
-    /// Whether `--model <name>` / `--effort <level>` args from mesh config apply.
-    fn supports_model_override(&self) -> bool;
-
     /// Validate model-reference syntax at save and spawn boundaries.
     /// Adapters with a constrained CLI grammar override this; availability
     /// to the user's account remains the harness's responsibility.
     fn validate_model_override(&self, _model: &str) -> Result<(), String> {
         Ok(())
-    }
-
-    /// Whether the harness accepts verbatim CLI flag args from
-    /// configuration (issue #1358). The orchestrator's
-    /// `default_prepare` only forwards `ResolvedAgentConfig.extra_args`
-    /// through `adapter.extra_args_args(...)` when this returns `true`;
-    /// every interactive harness declares `true` (it owns its argv
-    /// shape and the launch helper just tokenises the user's string),
-    /// while the plain-shell Terminal adapter declares `false` (splicing
-    /// synthetic flags into a user's interactive shell session would be
-    /// a footgun). Mirrors the per-adapter opt-in pattern
-    /// `supports_model_override` already uses.
-    fn supports_extra_args(&self) -> bool;
-
-    /// Whether an initial prompt is accepted. Used by both spawn flows:
-    /// `spawn_issue_agent` (URL + title hint, ~150 bytes; never the full body —
-    /// see memory: buildmesh-issue-spawn-url-only) and `spawn_handover_agent`
-    /// (free-form selected text from a parent terminal, often multi-line).
-    fn supports_prefill(&self) -> bool;
-
-    /// Whether a user-facing spawn (issue, pull request, prompt or handover)
-    /// may carry an initial prompt. A harness with CLI prefill takes it on
-    /// argv; any other interactive harness receives it through the live PTY
-    /// once its TUI has booted (`agent::spawn::startup_prompt`). A plain shell
-    /// declines: typed text would run as a command.
-    fn accepts_initial_prompt(&self) -> bool {
-        self.supports_prefill() || !self.is_plain_terminal()
-    }
-
-    /// Whether the CLI submits the prompt from `prefill_args` on launch.
-    /// Circuit launches must not send another Enter for an already submitted turn.
-    fn prefill_auto_submits(&self) -> bool {
-        false
     }
 
     /// Whether the harness's attention integration reports a prompt that
@@ -763,9 +661,6 @@ pub trait AgentProvider: Send + Sync {
     fn paste_requires_cr_newlines(&self) -> bool {
         false
     }
-
-    /// Platforms where this provider is available. Used to filter `list_providers`.
-    fn available_on(&self) -> &'static [Platform];
 
     /// Whether this provider auto-assigns session IDs (captured from PTY output)
     /// rather than accepting one via CLI flag.
@@ -970,68 +865,6 @@ pub trait AgentProvider: Send + Sync {
         Vec::new()
     }
 
-    /// True for plain shell providers (e.g. a node whose PTY runs
-    /// `powershell.exe` / `sh` directly, with no LLM agent loop).
-    /// When `true`, `start_reader` skips the LLM-specific EOF tail:
-    /// PTY exit becomes `SessionStatus::Idle` (never `Error`), and the
-    /// 3-second "resume-failed" early-exit warning and event are
-    /// suppressed. Other LLM-specific skips in `spawn_agent_inner`
-    /// are already gated by the existing capability flags this adapter
-    /// also returns `false` for.
-    fn is_plain_terminal(&self) -> bool {
-        false
-    }
-
-    /// Whether this provider's launcher resets [`CLAUDE_BACKEND_ENV_VARS`] before
-    /// the spawn path applies the per-profile backend env
-    /// ([`crate::preferences::resolve_provider_env`]). True for the Claude-backed
-    /// `anthropic` adapter (the executor for every Claude-compatible endpoint):
-    /// cwrap `unset` those vars before `exec claude`, so any value inherited from
-    /// buildmesh's environment is cleared first to give the agent the same clean
-    /// slate. The built-in Anthropic subscription exports nothing of its own, so
-    /// the reset alone keeps it on the default endpoint; a custom profile's
-    /// account env is then layered on top. False for native-binary providers
-    /// (Codex, OpenCode, Agy) that never went through cwrap and don't read these
-    /// vars.
-    fn resets_backend_env(&self) -> bool {
-        false
-    }
-
-    /// The effort-control vocabulary this harness accepts.
-    ///
-    /// Replaces the adapter-id switch in the previous
-    /// `agent::capabilities::effort_control_for`. Adapters whose CLI
-    /// exposes a reasoning-effort knob override this with the matching
-    /// `EffortControlKind::Closed { allowed }` (e.g. Claude Code's
-    /// `--effort low|medium|high`) or
-    /// `EffortControlKind::InlineConfig { key, allowed }` (e.g. Codex's
-    /// `-c model_reasoning_effort=…`); every other adapter inherits the
-    /// `None` default and the resolver drops the effort layer.
-    fn effort_control(&self) -> EffortControlKind {
-        EffortControlKind::None
-    }
-
-    /// The launch permission modes this harness supports (issue #2151).
-    ///
-    /// The default empty vec means "no permission flag" — Settings
-    /// renders the "this harness has no such flag" line and the launch
-    /// path contributes no approval argv. A harness with a choice returns
-    /// its unattended entry first and its prompt entry second; a harness
-    /// with a single enforced mode (mcode's Full Access pin, which the TUI
-    /// exposes no flag for) returns one entry.
-    fn permission_modes(&self) -> Vec<PermissionModeOption> {
-        Vec::new()
-    }
-
-    /// The mode used when no layer supplies one. The default is the first
-    /// entry of [`AgentProvider::permission_modes`] (the unattended entry
-    /// by the ordering convention above), or `None` when the harness has
-    /// no modes. `Some` preserves today's unattended launch for existing
-    /// meshes until the person changes the setting.
-    fn default_permission_mode(&self) -> Option<String> {
-        self.permission_modes().first().map(|m| m.id.clone())
-    }
-
     /// Argv contributed by the effective permission mode (issue #2151).
     /// `default_prepare` calls this exactly once per spawn with the
     /// resolved mode id; [`AgentProvider::spawn_recipe`] itself must stay
@@ -1043,74 +876,17 @@ pub trait AgentProvider: Send + Sync {
         Vec::new()
     }
 
-    /// The capability contract this harness advertises for its normal
-    /// launch mode (issue #1149, refactored in #1179).
-    ///
-    /// **Invariant:** the values here must match the recipe produced by
-    /// [`AgentProvider::prepare_launch`] for the same platform; the
-    /// coherence is regression-pinned by
-    /// `crate::agent::spawn::tests::capability_recipe_coherence`. The
-    /// default implementation composes the existing `*_flags` methods
-    /// so every adapter that does not need a custom descriptor inherits
-    /// a correct one for free; the resolver and Spawn Menu consult
-    /// this single source of truth.
-    fn capabilities(&self) -> HarnessCapabilities {
-        let platforms: Vec<String> = self
-            .available_on()
-            .iter()
-            .map(|p| crate::agent::capabilities::platform_name(*p).to_string())
-            .collect();
-        let effort_control = self.effort_control();
-        HarnessCapabilities {
-            harness_id: self.id().to_string(),
-            background_inference: self
-                .background_recipe(Platform::current())
-                .map(|recipe| recipe.capability),
-            supports_resume: self.supports_resume(),
-            auto_resume_on_startup: self.auto_resume_on_startup(),
-            requires_attention_hook: self.requires_attention_hook(),
-            attention_capability: self.attention_capability(),
-            supports_passive_turn_watcher: self.supports_passive_turn_watcher(),
-            supports_result_file_handoff: self.supports_result_file_handoff(),
-            produces_readable_transcript: self.produces_readable_transcript(),
-            supports_model_override: self.supports_model_override(),
-            supports_effort_override: !matches!(effort_control, EffortControlKind::None),
-            supports_extra_args: self.supports_extra_args(),
-            supports_prefill: self.supports_prefill(),
-            accepts_initial_prompt: self.accepts_initial_prompt(),
-            is_plain_terminal: self.is_plain_terminal(),
-            effort_control,
-            permission_modes: self.permission_modes(),
-            default_permission_mode: self.default_permission_mode(),
-            available_on: platforms,
-        }
-    }
+    /// Authoritative capability facts. Derived wire flags are computed by
+    /// `capabilities_for`; consumers cannot override them independently.
+    fn descriptor(&self) -> &'static crate::agent::capabilities::HarnessDescriptor;
 
-    /// Build the coherent launch contribution for one spawn (issue #1179).
-    ///
-    /// Pure (no I/O, no DB, no globals). The shared default
-    /// implementation in `agent::launch::default_prepare` composes the
-    /// existing `*_args` methods into a single
-    /// [`crate::agent::launch::PreparedHarnessLaunch`] — recipe +
-    /// capability contract + env policy — so `build_spawn_command_prepared`
-    /// no longer has to reassemble per-adapter semantics from many
-    /// independent trait methods. Subcommand-style resume (Codex) is
-    /// expressed as `trailing_args` on the recipe, not a `prepare_launch`
-    /// override; nothing in the current set needs to override this.
-    ///
-    /// `where Self: Sized` because the default coerces `&Self` to a
-    /// `&dyn AgentProvider` to call the shared helper. Object-safe
-    /// callers (the orchestrator's `&'static dyn AgentProvider`) route
-    /// through the free function `agent::launch::default_prepare`
-    /// directly; the trait method exists so future adapter overrides
-    /// can be invoked through the same call site.
+    /// Actual object-safe launch dispatch used by production command construction.
+    /// Adapters may reuse shared option assembly and add their resolved routing
+    /// contribution here. OS wrapping and database orchestration remain callers'.
     fn prepare_launch(
         &self,
         input: crate::agent::launch::HarnessLaunchInput<'_>,
-    ) -> crate::agent::launch::PreparedHarnessLaunch
-    where
-        Self: Sized,
-    {
+    ) -> crate::agent::launch::PreparedHarnessLaunch {
         crate::agent::launch::default_prepare(self, input)
     }
 }

@@ -479,7 +479,7 @@ mod tests {
             for platform in [Platform::Windows, Platform::Macos, Platform::Linux] {
                 let recipe = adapter.background_recipe(platform);
                 assert_eq!(
-                    adapter.capabilities().background_inference,
+                    crate::agent::capabilities::capabilities_for(adapter).background_inference,
                     recipe.as_ref().map(|r| r.capability.clone()),
                     "{provider:?} {platform:?}"
                 );

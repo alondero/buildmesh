@@ -220,6 +220,63 @@ pub struct BackgroundInferenceCapability {
     pub max_prompt_bytes: Option<u32>,
 }
 
+/// Adapter-owned capability facts. Redundant flags live only in the wire
+/// projection, so attention installation, effort support and prompt admission
+/// cannot be declared independently of the facts they describe.
+pub struct HarnessDescriptor {
+    pub supports_resume: bool,
+    pub auto_resume_on_startup: bool,
+    pub attention_capability: crate::agent::capabilities::AttentionCapability,
+    pub circuit_observation: crate::circuit::strategy::ObservationStrategy,
+    pub produces_readable_transcript: bool,
+    pub supports_model_override: bool,
+    pub supports_extra_args: bool,
+    pub supports_prefill: bool,
+    pub available_on: &'static [Platform],
+    pub is_plain_terminal: bool,
+    pub effort_control: EffortControlKind,
+    pub permission_modes: Vec<PermissionModeOption>,
+    pub prefill_auto_submits: bool,
+}
+
+impl Default for HarnessDescriptor {
+    fn default() -> Self {
+        Self {
+            supports_resume: false,
+            auto_resume_on_startup: false,
+            attention_capability: crate::agent::capabilities::AttentionCapability::None,
+            circuit_observation: crate::circuit::strategy::ObservationStrategy::UNWIRED,
+            produces_readable_transcript: false,
+            supports_model_override: false,
+            supports_extra_args: false,
+            supports_prefill: false,
+            available_on: &[],
+            is_plain_terminal: false,
+            effort_control: EffortControlKind::None,
+            permission_modes: Vec::new(),
+            prefill_auto_submits: false,
+        }
+    }
+}
+
+impl HarnessDescriptor {
+    pub fn requires_attention_hook(&self) -> bool {
+        !matches!(self.attention_capability, AttentionCapability::None)
+    }
+    pub fn supports_passive_turn_watcher(&self) -> bool {
+        self.circuit_observation.passive_watcher.is_some()
+    }
+    pub fn accepts_initial_prompt(&self) -> bool {
+        self.supports_prefill || !self.is_plain_terminal
+    }
+    pub fn default_permission_mode(&self) -> Option<String> {
+        self.permission_modes.first().map(|m| m.id.clone())
+    }
+    pub fn supports_result_file_handoff(&self) -> bool {
+        !self.is_plain_terminal
+    }
+}
+
 /// Backend-owned **Harness Capability Contract** (issue #1149, prefactor for
 /// #1148). One descriptor per Agent Harness — the same descriptor drives:
 ///
@@ -308,7 +365,7 @@ pub struct HarnessCapabilities {
     /// the "this harness has no such flag" line instead of a control and
     /// the launch path contributes no approval argv. Otherwise the first
     /// entry is the unattended default (see
-    /// [`crate::agent::provider::AgentProvider::default_permission_mode`]).
+    /// [`HarnessDescriptor::default_permission_mode`]).
     pub permission_modes: Vec<PermissionModeOption>,
     /// The mode used when no layer supplies one. `None` when the harness
     /// has no modes. `Some` preserves today's unattended launch for
@@ -537,25 +594,43 @@ fn normalize_non_empty(raw: &str) -> Option<String> {
 // Trait integration
 // ---------------------------------------------------------------------------
 
-/// Default implementation that packages every `AgentProvider` capability flag
-/// into a [`HarnessCapabilities`] descriptor. The default impl makes the
-/// trait additive: no existing adapter needs to override `capabilities()`
-/// to compile, and adding a new flag at the trait level automatically
-/// appears in every adapter's descriptor.
-///
-/// Adapters that need a non-default `effort_control` override
-/// [`capabilities_for`] (the lower-level helper) rather than this method —
-/// the override pattern keeps each adapter's CLI surface in one place.
-/// Derive a [`HarnessCapabilities`] descriptor for one adapter.
-///
-/// Thin pass-through to [`AgentProvider::capabilities`] (issue #1179).
-/// Retained as a free function so the ~9 external call sites
-/// (`provider_menu.rs`, `autopilot/compatibility.rs`, `preferences.rs`,
-/// `commands/agent_tests.rs`, `spawn.rs`, the inventory tests) keep
-/// their existing import surface; the body is one line so any future
-/// harness that overrides `capabilities()` automatically flows through.
-pub fn capabilities_for(adapter: &dyn AgentProvider) -> HarnessCapabilities {
-    adapter.capabilities()
+/// Project the selected adapter's authoritative facts into the generated wire
+/// contract. This projection is shared by the menu, resolver and catalogue.
+pub fn capabilities_for<A: AgentProvider + ?Sized>(adapter: &A) -> HarnessCapabilities {
+    let descriptor = adapter.descriptor();
+    let default_permission_mode = descriptor.default_permission_mode();
+    let requires_attention_hook = descriptor.requires_attention_hook();
+    let supports_passive_turn_watcher = descriptor.supports_passive_turn_watcher();
+    let supports_result_file_handoff = descriptor.supports_result_file_handoff();
+    let accepts_initial_prompt = descriptor.accepts_initial_prompt();
+
+    HarnessCapabilities {
+        harness_id: adapter.id().to_string(),
+        background_inference: adapter
+            .background_recipe(Platform::current())
+            .map(|r| r.capability),
+        supports_resume: descriptor.supports_resume,
+        auto_resume_on_startup: descriptor.auto_resume_on_startup,
+        requires_attention_hook,
+        attention_capability: descriptor.attention_capability.clone(),
+        supports_passive_turn_watcher,
+        supports_result_file_handoff,
+        produces_readable_transcript: descriptor.produces_readable_transcript,
+        supports_model_override: descriptor.supports_model_override,
+        supports_extra_args: descriptor.supports_extra_args,
+        supports_prefill: descriptor.supports_prefill,
+        accepts_initial_prompt,
+        is_plain_terminal: descriptor.is_plain_terminal,
+        effort_control: descriptor.effort_control.clone(),
+        permission_modes: descriptor.permission_modes.clone(),
+        default_permission_mode,
+        supports_effort_override: !matches!(descriptor.effort_control, EffortControlKind::None),
+        available_on: descriptor
+            .available_on
+            .iter()
+            .map(|p| platform_name(*p).to_string())
+            .collect(),
+    }
 }
 
 /// Claude Code's effort levels. Availability varies by model, but the CLI
@@ -1281,7 +1356,7 @@ mod tests {
             &crate::agent::provider::adapters::CLINE,
             &crate::agent::provider::adapters::PERCH,
         ] {
-            let from_trait = adapter.effort_control();
+            let from_trait = adapter.descriptor().effort_control.clone();
             let from_descriptor = capabilities_for(adapter).effort_control;
             assert_eq!(
                 from_trait,
