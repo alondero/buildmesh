@@ -821,12 +821,10 @@ pub fn trigger_circuit_now(circuit_id: i64) -> Result<i64, String> {
     // the writer mutex, then drop the guard before any signal/IO. The
     // worker wake signals a condvar other DB callers can park on; firing
     // it while holding the writer mutex would deadlock any reader pool
-    // checkout that races the wake against the next commit.
+    // checkout that races the wake against the next commit. The service
+    // owns the connection and releases it before it returns.
     let preferences = crate::preferences::load()?;
-    let run_id = {
-        let mut db = crate::db::write_conn();
-        trigger_circuit_now_prepared_locked(&mut db, circuit_id, &preferences)?
-    };
+    let run_id = crate::services::circuit_trigger::trigger_circuit_now(circuit_id, &preferences)?;
     crate::services::circuit_worker::wake_circuit_worker();
     tracing::info!(
         "circuits: manual trigger for circuit {} → run {}",
@@ -846,63 +844,17 @@ pub fn trigger_circuit_now(circuit_id: i64) -> Result<i64, String> {
 /// mutex first so the wake's condvar signal doesn't deadlock concurrent
 /// reader-pool checkouts (CLAUDE.md three-phase pattern).
 #[cfg(test)]
+// allow-test-in-production: two suites call it — this file's own suite and the DB
+// suite — so it stays a `pub` item here rather than a sibling test file's helper.
 pub fn trigger_circuit_now_locked(
     conn: &mut rusqlite::Connection,
     circuit_id: i64,
 ) -> Result<i64, String> {
-    trigger_circuit_now_prepared_locked(
+    crate::services::circuit_trigger::trigger_circuit_now_prepared_locked(
         conn,
         circuit_id,
         &crate::preferences::AppPreferences::default(),
     )
-}
-
-fn trigger_circuit_now_prepared_locked(
-    conn: &mut rusqlite::Connection,
-    circuit_id: i64,
-    preferences: &crate::preferences::AppPreferences,
-) -> Result<i64, String> {
-    let circuit = crate::db::circuit::get_autopilot_circuit_inner(conn, circuit_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("circuit {} does not exist", circuit_id))?;
-    let graph = CircuitGraph::from_json(&circuit.graph_json)?;
-    if graph.requires_source_agent() {
-        return Err("Start this Circuit from the source agent's title bar.".into());
-    }
-    if graph.is_issue_driven_autopilot_review() {
-        return Err(
-            "issue-driven Circuit review runs are triggered by labelled GitHub issues; Trigger Now requires issue context"
-                .to_string(),
-        );
-    }
-    // Draft-first (issue #1356): Trigger Now is the dry-run seam and
-    // must work while the circuit is still disabled. Background
-    // pollers (`list_enabled_circuits`) stay gated on `enabled`.
-    let identity = format!(
-        "manual:{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-    );
-    let mut context = crate::circuit::context::CircuitContext::new();
-    context.with_circuit(circuit.id, &circuit.name, circuit.mesh_id);
-    context.set(
-        "review.provider",
-        preferences.reviewer_provider.as_deref().unwrap_or(""),
-    );
-    let action = "draft_pr".to_string();
-    context.with_circuit_finish_prompt(None, Some(action.as_str()));
-    let run_id = crate::db::circuit::create_circuit_run_prepared_locked(
-        conn,
-        circuit.id,
-        circuit.mesh_id,
-        &identity,
-        &context.to_json()?,
-        preferences,
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(run_id)
 }
 
 /// Start a review or an authored Circuit from an agent node's title bar.
@@ -995,9 +947,10 @@ pub fn list_circuit_runs(
             let review_round_limit = {
                 // The reader checkout is fallible (issue #1533): a saturated
                 // pool is a transient shortage, not a broken command, so the
-                // error carries the retryable copy instead of panicking.
-                let db = crate::db::read_conn().map_err(|e| e.to_string())?;
-                crate::db::circuit::review_rounds::current_limit(&db, &run)
+                // error carries the retryable copy instead of panicking. The
+                // checkout lives in the DB layer — the command boundary does
+                // not hold a connection (issue #2527).
+                crate::db::circuit::review_rounds::current_limit_for_run(&run)
                     .map_err(|e| e.to_string())?
             };
             Ok(CircuitRunDetail {

@@ -58,6 +58,19 @@ pub(crate) fn current_limit(
     Ok(Some(preset.unwrap_or(authored).max(1)))
 }
 
+/// The current review-round limit for a run, with the reader checkout inside.
+///
+/// The IPC boundary must not hold a connection: the DB layer owns the pool,
+/// so the reader lease starts and ends here. A saturated pool is a transient
+/// shortage, not a broken command, and the checkout reports it as a typed
+/// `SQLITE_BUSY` error rather than a panic (issue #1533).
+pub fn current_limit_for_run(
+    run: &crate::models::AutopilotCircuitRun,
+) -> crate::db::SqlResult<Option<i32>> {
+    let conn = crate::db::read_conn()?;
+    current_limit(&conn, run)
+}
+
 /// Zero or a value above nine selects unlimited review rounds.
 pub fn set_review_round_limit(run_id: i64, max_rounds: i32) -> Result<String, DbError> {
     if max_rounds < 0 {
