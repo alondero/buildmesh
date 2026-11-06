@@ -131,3 +131,45 @@ async fn close_rejects_invalid_ids_and_does_not_turn_storage_failure_into_succes
         .unwrap();
     assert_eq!(close(&close_request(1)).await.status_code(), 500);
 }
+
+#[tokio::test]
+async fn authenticated_close_cancels_the_source_circuit_and_releases_capacity() {
+    let _db = db::test_support::isolated();
+    db::test_support::seed_unique_circuit_run_ids();
+    let mesh = db::create_mesh("close-circuit", "/tmp/mobile-close-circuit").unwrap();
+    let (node, run) = {
+        let conn = db::write_conn();
+        conn.execute("INSERT INTO agent_nodes(mesh_id,name,path,status) VALUES(?1,'source','/tmp/mobile-close-circuit','ready')", [mesh.id]).unwrap();
+        let node = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO autopilot_circuits(mesh_id,name) VALUES(?1,'review')",
+            [mesh.id],
+        )
+        .unwrap();
+        let circuit = conn.last_insert_rowid();
+        conn.execute("INSERT INTO autopilot_circuit_runs(circuit_id,mesh_id,state,source_agent_node_id) VALUES(?1,?2,'running',?3)", rusqlite::params![circuit, mesh.id, node]).unwrap();
+        let run = conn.last_insert_rowid();
+        conn.execute("INSERT INTO autopilot_circuit_run_steps(run_id,node_id,status) VALUES(?1,'confirm_publish','blocked')", [run]).unwrap();
+        (node, run)
+    };
+    assert!(db::reserve_circuit_agent_slots(run, 2).unwrap());
+    let token = db::get_or_create_root_token().unwrap();
+    let mut request = close_request(node);
+    request
+        .headers
+        .push_str(&format!("Cookie: bm_session={token}\r\n"));
+    let result = crate::http::router::dispatch(request).await;
+    assert!(
+        matches!(result, crate::http::router::DispatchResult::Http(response) if response.status_code() == 204)
+    );
+    assert_eq!(
+        db::get_circuit_run(run).unwrap().unwrap().state,
+        "cancelled"
+    );
+    assert_eq!(db::count_active_circuit_runs(mesh.id).unwrap(), 0);
+    assert_eq!(db::circuit_agent_slots_reserved(run).unwrap(), 0);
+    assert!(matches!(
+        db::get_agent_node_by_id(node),
+        Err(rusqlite::Error::QueryReturnedNoRows)
+    ));
+}

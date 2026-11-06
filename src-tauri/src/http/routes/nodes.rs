@@ -21,7 +21,7 @@ pub async fn list(_req: &ParsedRequest) -> Response {
 }
 
 /// Mobile close preserves the checkout. Like desktop, stop the process before
-/// deleting its node; `delete(_, false)` alone does not stop a live process.
+/// deleting its node and cancelling attached circuits.
 pub async fn close(req: &ParsedRequest) -> Response {
     let node_id = req.id0();
     if node_id <= 0 {
@@ -29,7 +29,7 @@ pub async fn close(req: &ParsedRequest) -> Response {
     }
     match crate::commands::run_blocking("http_close_node", move || {
         crate::agent::process::kill_agent_blocking(node_id)?;
-        crate::services::agent_node::delete(node_id, false).map_err(|error| error.to_string())
+        crate::services::agent_node::close(node_id, false).map_err(|error| error.to_string())
     })
     .await
     {
