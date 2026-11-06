@@ -50,6 +50,11 @@ scope-selected gate:
 npm run verify -- --base <base-commit>
 ```
 
+During implementation or after a `REQUEST_CHANGES` review, use
+`npm run harness -- check --base <base-commit>` for fast checks. A deliberate
+scope-complete run requires `npm run verify -- --repair`; see
+[review and repair](docs/agents/development-harness.md#review-and-repair).
+
 On every pull request, CI runs the required checks: the static agent/docs/lint
 gates, the frontend build and bundle budget, the vitest unit and integration
 suites and the `verify-smoke` Playwright project whenever the diff touches
