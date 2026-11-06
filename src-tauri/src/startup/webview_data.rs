@@ -7,10 +7,11 @@
 //! Windows and Linux that folder defaults to the app's *local data* directory
 //! — `%LOCALAPPDATA%\<bundle id>` for a desktop build — and WebView2 creates
 //! its `EBWebView` profile inside it. Tauri forces that default on both
-//! platforms, so the folder is per **identifier** rather than per profile:
-//! every `buildmesh-dev` build shared one folder, and a fresh worktree
-//! launched with an empty `buildmesh.db` still showed the previous worktree's
-//! unread notifications and window layout.
+//! platforms, so the folder is per **identifier** rather than per profile: on
+//! this machine every `buildmesh-dev` build pointed at the same folder, and
+//! that folder carried a populated `Default\Local Storage\leveldb` from an
+//! earlier launch — the shared state the issue reported as a fresh worktree
+//! showing the previous worktree's unread notifications and window layout.
 //!
 //! `BUILDMESH_PROFILE_DIR` already gives a worktree its own database,
 //! preferences and lockfile. This module gives it the matching webview
@@ -25,14 +26,18 @@
 //! the environment wins over the config. That is why this module moves the
 //! folder through `appDirectoriesOverride` rather than by setting the
 //! variable: the app derives the folder from the profile it already resolved,
-//! so it travels with the launch on every platform the app builds for and
-//! every launch path that names a profile (the Unix launcher included), and
-//! it needs no process-global variable.
+//! so the move travels with every launch path that names a profile (the Unix
+//! launcher included), it needs no process-global variable, and it needs no
+//! launcher change.
 //!
-//! A repository-wide search for `WEBVIEW2_USER_DATA_FOLDER` finds only this
-//! module's documentation, so nothing in the repository sets it. A caller that
-//! does set it keeps it — the variable is the stronger lever, and the app
-//! cannot take it back.
+//! The effect is Windows and Linux, where Tauri forces the webview's
+//! user-data folder to the app's local data directory. macOS is untouched:
+//! WKWebView keeps its own store, so there is no folder to move there.
+//!
+//! A repository-wide search for `WEBVIEW2_USER_DATA_FOLDER` finds only
+//! documentation, so nothing in the repository sets it. A caller that does set
+//! it keeps it — the variable is the stronger lever, and the app cannot take
+//! it back.
 
 use std::path::PathBuf;
 

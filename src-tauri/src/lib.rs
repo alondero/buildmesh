@@ -155,11 +155,11 @@ pub fn run() {
 
     // Issue #2469 — the webview keeps `localStorage`, IndexedDB and cookies in
     // one folder, and on Windows that folder defaults to the per-identifier
-    // local data directory, so the dev builds shared one folder between them: a
-    // fresh worktree started with an empty database and still showed the
-    // previous worktree's notifications and window layout. The folder is part
-    // of the app-data profile, so it moves with `BUILDMESH_PROFILE_DIR` — and
-    // a shipped release build, which names no profile, keeps the platform
+    // local data directory, so the dev builds pointed at one shared folder
+    // between them — the state the issue reported as a fresh worktree showing
+    // the previous worktree's notifications and window layout. The folder is
+    // part of the app-data profile, so it moves with `BUILDMESH_PROFILE_DIR` —
+    // and a shipped release build, which names no profile, keeps the platform
     // default.
     //
     // This has to happen before the app is built: Tauri creates the window
