@@ -290,7 +290,7 @@ pub async fn delete_agent_node(
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     crate::commands::run_blocking("delete_agent_node", move || {
-        services::agent_node::delete(node_id, remove_worktree.unwrap_or(false))
+        services::agent_node::close(node_id, remove_worktree.unwrap_or(false))
             .map_err(|e| e.to_string())
     })
     .await?;
