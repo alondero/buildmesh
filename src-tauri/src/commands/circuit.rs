@@ -559,9 +559,13 @@ fn release_circuit_source(run_id: i64) {
     }
 }
 
-fn cancel_run_and_cleanup_inner(app: Option<&AppHandle>, run_id: i64) -> Result<(), DbError> {
+fn cancel_run_and_cleanup_inner(
+    app: Option<&AppHandle>,
+    run_id: i64,
+    closing_agent_id: Option<i64>,
+) -> Result<(), DbError> {
     crate::services::circuit_worker::mark_circuit_run_cancelled(run_id);
-    let agent_ids = crate::db::cancel_circuit_run(run_id).map_err(DbError::from)?;
+    let agent_ids = cancel_run_ledger(run_id, closing_agent_id)?;
     crate::services::circuit_worker::finish_circuit_run_cancellation(run_id);
     release_circuit_source(run_id);
     crate::services::circuit_worker::wake_circuit_worker();
@@ -581,12 +585,36 @@ fn cancel_run_and_cleanup_inner(app: Option<&AppHandle>, run_id: i64) -> Result<
 /// pool shortage (issue #1533) rather than the `500` a flattened string
 /// would produce.
 pub(crate) fn cancel_circuit_run_now(app: Option<&AppHandle>, run_id: i64) -> Result<(), DbError> {
+    cancel_circuit_run_with_closing_agent(app, run_id, None)
+}
+
+pub(crate) fn cancel_circuit_run_for_agent_close(
+    app: Option<&AppHandle>,
+    run_id: i64,
+    agent_id: i64,
+) -> Result<(), DbError> {
+    cancel_circuit_run_with_closing_agent(app, run_id, Some(agent_id))
+}
+
+fn cancel_run_ledger(run_id: i64, closing_agent_id: Option<i64>) -> Result<Vec<i64>, DbError> {
+    match closing_agent_id {
+        Some(agent_id) => crate::db::cancel_circuit_run_for_agent_close(run_id, agent_id),
+        None => crate::db::cancel_circuit_run(run_id),
+    }
+    .map_err(DbError::from)
+}
+
+fn cancel_circuit_run_with_closing_agent(
+    app: Option<&AppHandle>,
+    run_id: i64,
+    closing_agent_id: Option<i64>,
+) -> Result<(), DbError> {
     // Invalidate the worker's current effect batch before waiting for spawn
     // teardown. This closes the race where a slow external effect would
     // otherwise continue after the user pressed Cancel.
     crate::services::circuit_worker::mark_circuit_run_cancelled(run_id);
     match crate::services::circuit_worker::with_circuit_run_spawns_quiesced(run_id, || {
-        cancel_run_and_cleanup_inner(app, run_id)
+        cancel_run_and_cleanup_inner(app, run_id, closing_agent_id)
     }) {
         Ok(result) => result,
         Err(wait_error) => {
@@ -594,7 +622,7 @@ pub(crate) fn cancel_circuit_run_now(app: Option<&AppHandle>, run_id: i64) -> Re
             // quiescence window. The spawn's post-launch compensation will
             // retire itself; retaining the terminal ledger makes a retry
             // possible if that OS cleanup is transiently locked.
-            if crate::db::cancel_circuit_run(run_id).is_ok() {
+            if cancel_run_ledger(run_id, closing_agent_id).is_ok() {
                 crate::services::circuit_worker::finish_circuit_run_cancellation(run_id);
             }
             release_circuit_source(run_id);
@@ -733,7 +761,7 @@ pub fn delete_circuit(app: AppHandle, circuit_id: i64) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
         let mut cleanup_errors = Vec::new();
         for run_id in run_ids {
-            if let Err(error) = cancel_run_and_cleanup_inner(Some(&app), run_id) {
+            if let Err(error) = cancel_run_and_cleanup_inner(Some(&app), run_id, None) {
                 cleanup_errors.push(format!("run {}: {}", run_id, error));
             }
         }

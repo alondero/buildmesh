@@ -1425,13 +1425,31 @@ pub fn cancel_circuit_run(run_id: i64) -> SqlResult<Vec<i64>> {
     cancel_circuit_run_locked(&mut db, run_id)
 }
 
+/// The operator-close path owns this agent's retirement and worktree choice.
+/// Exclude it from both immediate retirement and durable cleanup intent, in
+/// the transaction that releases capacity, so the cleanup sweep cannot race it.
+pub fn cancel_circuit_run_for_agent_close(run_id: i64, agent_id: i64) -> SqlResult<Vec<i64>> {
+    let mut db = crate::db::write_conn();
+    let tx = db.transaction()?;
+    let result = cancel_circuit_run_inner(&tx, run_id, Some(agent_id))?;
+    tx.execute(
+        "INSERT INTO agent_node_lifecycle_leases (node_id, cleanup_requested)
+         SELECT id, 0 FROM agent_nodes WHERE id = ?1
+         ON CONFLICT(node_id) DO UPDATE SET
+           cleanup_requested = 0, updated_at = unixepoch()",
+        params![agent_id],
+    )?;
+    tx.commit()?;
+    Ok(result.agents)
+}
+
 /// Per-test isolated variant of [`cancel_circuit_run`] (issue #1691).
 /// The public function locks the process-global writer; this helper
 /// takes an explicit `&Connection` so parallel tests can each operate
 /// against their own in-memory DB.
 pub(crate) fn cancel_circuit_run_locked(conn: &mut Connection, run_id: i64) -> SqlResult<Vec<i64>> {
     let tx = conn.transaction()?;
-    let result = cancel_circuit_run_inner(&tx, run_id)?;
+    let result = cancel_circuit_run_inner(&tx, run_id, None)?;
     tx.commit()?;
     Ok(result.agents)
 }
@@ -1444,7 +1462,11 @@ struct CancelRunWrite {
     cancelled: bool,
 }
 
-fn cancel_circuit_run_inner(tx: &Connection, run_id: i64) -> SqlResult<CancelRunWrite> {
+fn cancel_circuit_run_inner(
+    tx: &Connection,
+    run_id: i64,
+    closing_agent_id: Option<i64>,
+) -> SqlResult<CancelRunWrite> {
     let row: Option<(String, Option<i64>)> = tx
         .query_row(
             "SELECT state, source_agent_node_id FROM autopilot_circuit_runs WHERE id = ?1",
@@ -1464,12 +1486,13 @@ fn cancel_circuit_run_inner(tx: &Connection, run_id: i64) -> SqlResult<CancelRun
     let agents = {
         let mut stmt = tx.prepare(&format!(
             "SELECT DISTINCT s.agent_node_id FROM autopilot_circuit_run_steps s \
-             WHERE s.run_id = ?1 AND s.agent_node_id IS NOT NULL AND {} \
+             WHERE s.run_id = ?1 AND s.agent_node_id IS NOT NULL \
+               AND s.agent_node_id IS NOT ?2 AND {} \
              ORDER BY s.agent_node_id",
             super::leases::RETIRABLE_STEP_AGENT
         ))?;
         let rows = stmt
-            .query_map(params![run_id], |row| row.get(0))?
+            .query_map(params![run_id, closing_agent_id], |row| row.get(0))?
             .collect::<SqlResult<Vec<i64>>>()?;
         rows
     };
@@ -1491,11 +1514,12 @@ fn cancel_circuit_run_inner(tx: &Connection, run_id: i64) -> SqlResult<CancelRun
              WHERE s.run_id = ?1 AND s.agent_node_id IS NOT NULL
                AND {}
                AND s.agent_node_id IS NOT (SELECT source_agent_node_id FROM autopilot_circuit_runs WHERE id = ?1)
+               AND s.agent_node_id IS NOT ?2
              ON CONFLICT(node_id) DO UPDATE SET
                cleanup_requested = 1, retired = 0, updated_at = unixepoch()",
                 super::leases::RETIRABLE_STEP_AGENT
             ),
-            params![run_id],
+            params![run_id, closing_agent_id],
         )?;
     }
     // Terminalise the ledger in the same transaction as the run state. A
@@ -1559,7 +1583,7 @@ pub(crate) fn cancel_circuit_runs_locked(
         if !seen.insert(run_id) {
             continue;
         }
-        let write = cancel_circuit_run_inner(&tx, *run_id)?;
+        let write = cancel_circuit_run_inner(&tx, *run_id, None)?;
         agents.extend(write.agents);
         if let Some(source) = write.source {
             if !sources.contains(&source) {
