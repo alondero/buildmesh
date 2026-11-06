@@ -98,7 +98,7 @@ fn validate_base_url(value: &str) -> Result<String, String> {
         .iter()
         .any(|suffix| url.path().ends_with(suffix))
     {
-        return Err("Enter the API base URL, without /responses, /messages, or /chat/completions. Codex requires the Responses API".into());
+        return Err("Enter the API base URL, without /responses, /messages, or /chat/completions.".into());
     }
     Ok(value.into())
 }
