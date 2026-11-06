@@ -10,6 +10,10 @@
 //! [`update_worktree_base_ref`]); that mirror is an output, not a source of
 //! truth — the DB column is the source.
 //!
+//! Every statement behind these commands lives in [`crate::db::mesh_properties`]
+//! (issue #2527). This module validates the wire value, calls one `db::`
+//! function, and maps the error to `String` — it issues no SQL of its own.
+//!
 //! Pure sync — each command is a single SQLite read/write (with optional
 //! `std::fs::*` for the settings.json mirror on `base_ref` updates). Runs on
 //! Tauri's IPC worker, NOT the bounded tokio pool. Issue #1380 review point 4.
@@ -95,12 +99,8 @@ pub fn get_mesh_properties(mesh_id: i64) -> Result<MeshRow, String> {
 
 #[tauri::command]
 pub fn update_mesh_name(mesh_id: i64, name: String) -> Result<(), String> {
-    let db = db::write_conn();
-    db.execute(
-        "UPDATE meshes SET name = ?1 WHERE id = ?2",
-        rusqlite::params![name, mesh_id],
-    )
-    .map_err(|e| format!("failed to update mesh name: {}", e))?;
+    db::mesh_properties::set_mesh_name(mesh_id, &name)
+        .map_err(|e| format!("failed to update mesh name: {}", e))?;
     Ok(())
 }
 
@@ -111,44 +111,23 @@ pub fn update_mesh_column(mesh_id: i64, column: String, value: String) -> Result
     // `base_ref` / `use_worktree` have settings.json or structural side-effects
     // and route through their own commands. A direct column name is the
     // honest wire shape now that the data lives on the `meshes` row (issue
-    // #474); the SQL below still validates against the allowlist rather than
-    // interpolating an untrusted column name from the wire.
-    const ALLOWED_COLUMNS: &[&str] = &[
-        "build_command",
-        "run_command",
-        // Per-context build/run commands (issue #802). Nullable siblings of
-        // build_command/run_command; a Root Node prefers these and falls back
-        // to the plain columns when they're unset.
-        "root_build_command",
-        "root_run_command",
-        "model",
-        "effort",
-        "worktree_mode",
-        "default_provider",
-    ];
-    if !ALLOWED_COLUMNS.contains(&column.as_str()) {
+    // #474); the list itself belongs to the module that owns the statement
+    // (`db::mesh_properties::WRITABLE_COLUMNS`), because a column name cannot
+    // be a bound parameter — so the SQL interpolates it, and only that module
+    // may widen the list.
+    if !db::mesh_properties::WRITABLE_COLUMNS.contains(&column.as_str()) {
         return Err(format!("unknown mesh column: {}", column));
     }
 
-    let db = db::write_conn();
-    db.execute(
-        &format!("UPDATE meshes SET {} = ?1 WHERE id = ?2", column),
-        rusqlite::params![value, mesh_id],
-    )
-    .map_err(|e| format!("failed to update mesh column: {}", e))?;
+    db::mesh_properties::set_mesh_column(mesh_id, &column, &value)
+        .map_err(|e| format!("failed to update mesh column: {}", e))?;
     Ok(())
 }
 
 #[tauri::command]
 pub fn update_mesh_use_worktree(mesh_id: i64, use_worktree: bool) -> Result<(), String> {
-    let rows = {
-        let db = db::write_conn();
-        db.execute(
-            "UPDATE meshes SET use_worktree = ?1 WHERE id = ?2",
-            rusqlite::params![use_worktree as i32, mesh_id],
-        )
-        .map_err(|e| format!("failed to update use_worktree: {}", e))?
-    };
+    let rows = db::mesh_properties::set_mesh_use_worktree(mesh_id, use_worktree)
+        .map_err(|e| format!("failed to update use_worktree: {}", e))?;
     if rows == 0 {
         return Err(format!("mesh {} not found (no rows updated)", mesh_id));
     }
@@ -185,12 +164,7 @@ pub fn update_mesh_pool_size(app: AppHandle, mesh_id: i64, pool_size: i32) -> Re
         ));
     }
     {
-        let db = db::write_conn();
-        let rows = db
-            .execute(
-                "UPDATE meshes SET pre_spawn_pool_size = ?1 WHERE id = ?2",
-                rusqlite::params![pool_size, mesh_id],
-            )
+        let rows = db::mesh_properties::set_mesh_pre_spawn_pool_size(mesh_id, pool_size)
             .map_err(|e| format!("failed to update pre_spawn_pool_size: {}", e))?;
         // An UPDATE that matches no rows silently succeeds otherwise —
         // returning `Ok(())` would let the frontend believe the save
@@ -315,14 +289,8 @@ pub fn update_worktree_base_ref(mesh_id: i64, base_ref: String) -> Result<(), St
     };
 
     // Write to both DB and settings.json
-    {
-        let db = db::write_conn();
-        db.execute(
-            "UPDATE meshes SET base_ref = ?1 WHERE id = ?2",
-            rusqlite::params![resolved, mesh_id],
-        )
+    db::mesh_properties::set_mesh_base_ref(mesh_id, &resolved)
         .map_err(|e| format!("failed to update base_ref in DB: {}", e))?;
-    }
 
     write_base_ref(&mesh.path, &resolved)
 }
@@ -333,14 +301,8 @@ pub fn remove_worktree_base_ref(mesh_id: i64) -> Result<(), String> {
         db::get_mesh_by_id(mesh_id).map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
 
     // Write default to DB and remove from settings.json
-    {
-        let db = db::write_conn();
-        db.execute(
-            "UPDATE meshes SET base_ref = 'origin/main' WHERE id = ?1",
-            rusqlite::params![mesh_id],
-        )
+    db::mesh_properties::reset_mesh_base_ref(mesh_id)
         .map_err(|e| format!("failed to reset base_ref in DB: {}", e))?;
-    }
 
     remove_base_ref(&mesh.path)
 }
