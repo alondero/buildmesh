@@ -37,11 +37,50 @@ test('docs-only changes trigger neither graph', () => {
   assert.deepEqual(classifyPaths(['CLAUDE.md', '.claude/skills/verify/SKILL.md']), { rust: false, frontend: false });
 });
 
-test('CI, scripts, and unknown paths conservatively run both graphs', () => {
-  assert.equal(categorisePath('.github/workflows/verify.yml'), 'both');
-  assert.equal(categorisePath('scripts/ci/run-guarded.mjs'), 'both');
+test('ordinary scripts and GitHub configuration skip the Rust graph', () => {
+  for (const path of [
+    'scripts/idle-animation-probe.mjs',
+    'scripts/ui-mock/hub-fixtures.mjs',
+    'scripts/generate-android-circuit-wire.mjs',
+    'scripts/ci/new-tool.mjs',
+    'scripts/harness-plan.mjs.backup',
+    '.github/workflows/verify.yml',
+    '.github/actions/install-linux-build-deps/action.yml',
+    '.github/dependabot.yml',
+    './scripts/idle-animation-probe.mjs',
+    'scripts\\ui-mock\\hub-fixtures.mjs',
+  ]) {
+    assert.equal(categorisePath(path), 'frontend', path);
+    assert.deepEqual(classifyPaths([path]), { rust: false, frontend: true }, path);
+  }
+});
+
+test('scripts controlling Rust verification or supplying Rust build inputs run both graphs', () => {
+  for (const path of [
+    'scripts/harness.mjs',
+    'scripts/harness-plan.mjs',
+    'scripts/harness-check.mjs',
+    'scripts/harness-lanes.mjs',
+    'scripts/harness-state.mjs',
+    'scripts/agent-tests.mjs',
+    'scripts/ci/changed-scope.mjs',
+    'scripts/ci/run-guarded.mjs',
+    'scripts/rust-test-shards.mjs',
+    'scripts/ci/rust-shards.mjs',
+    'scripts/check-rust-shard-coverage.mjs',
+    'scripts/harness-test-failures.mjs',
+    'scripts/prepare-conpty.mjs',
+    'scripts/conpty-LICENSE.txt',
+    '.\\scripts\\ci\\changed-scope.mjs',
+  ]) {
+    assert.equal(categorisePath(path), 'both', path);
+    assert.deepEqual(classifyPaths([path]), { rust: true, frontend: true }, path);
+  }
+});
+
+test('unknown paths conservatively run both graphs', () => {
   assert.equal(categorisePath('some/unknown/file.bin'), 'both');
-  assert.deepEqual(classifyPaths(['.github/workflows/verify.yml']), { rust: true, frontend: true });
+  assert.deepEqual(classifyPaths(['some/unknown/file.bin']), { rust: true, frontend: true });
 });
 
 test('a mixed pull request runs everything it touches', () => {
@@ -73,14 +112,14 @@ test('classifies a paths file into GitHub Actions outputs', () => {
   try {
     const pathsFile = join(dir, 'paths.txt');
     const output = join(dir, 'github-output.txt');
-    writeFileSync(pathsFile, 'src-tauri/src/lib.rs\nREADME.md\n');
+    writeFileSync(pathsFile, 'scripts/idle-animation-probe.mjs\n.github/workflows/verify.yml\nREADME.md\n');
     const res = spawnSync(process.execPath, [script, '--paths-file', pathsFile], {
       encoding: 'utf8',
       env: { ...process.env, GITHUB_OUTPUT: output },
     });
     assert.equal(res.status, 0, res.stderr);
-    assert.equal(readFileSync(output, 'utf8'), 'rust=true\nfrontend=false\n');
-    assert.match(res.stdout, /rust=true frontend=false/);
+    assert.equal(readFileSync(output, 'utf8'), 'rust=false\nfrontend=true\n');
+    assert.match(res.stdout, /rust=false frontend=true/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
