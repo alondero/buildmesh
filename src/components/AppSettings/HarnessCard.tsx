@@ -326,7 +326,7 @@ export function HarnessCard({
                       <label className="block text-sm text-text-muted mb-1">Models</label>
                       <p className="text-sm text-text-muted mb-2">
                         {surface === 'openai'
-                          ? 'Codex uses one explicit Responses model.'
+                          ? 'Requires the OpenAI Responses API with streaming and tool calls. Chat Completions alone is not supported by Codex.'
                           : 'Which model backs each Claude tier. Background tasks use small / fast.'}
                       </p>
                       <div className="space-y-2">

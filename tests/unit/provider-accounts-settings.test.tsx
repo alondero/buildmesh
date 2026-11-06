@@ -80,6 +80,8 @@ function mockBackend() {
       case 'upsert_provider_account':
         accounts.push((args as { account: ProviderAccount }).account);
         return Promise.resolve(undefined);
+      case 'create_custom_provider':
+        return Promise.resolve({ id: 'custom-configuration', name: args?.name });
       case 'list_device_sessions':
         return Promise.resolve([]);
       default:
@@ -119,6 +121,7 @@ describe('Accounts & Usage settings (issue #537)', () => {
     await user.click(screen.getByRole('button', { name: /other \/ custom/i }));
     await user.type(screen.getByLabelText(/custom provider name/i), 'DeepSeek via Claude Code');
     await user.type(screen.getByLabelText(/custom provider API key/i), 'sk-deep');
+    await user.selectOptions(screen.getByLabelText(/custom provider API type/i), 'later');
     await user.click(screen.getByRole('button', { name: /add provider/i }));
 
     await waitFor(() => expect(calls['upsert_provider_account']).toBeTruthy());
@@ -134,6 +137,53 @@ describe('Accounts & Usage settings (issue #537)', () => {
     // base_url / model_tiers no longer on ProviderAccount.
     expect(sent).not.toHaveProperty('base_url');
     expect(sent).not.toHaveProperty('model_tiers');
+  }, 15000);
+
+  it.each(['openai', 'anthropic'])('configures a custom %s API and saved launch from one form', async (surface) => {
+    const calls = mockBackend();
+    const user = userEvent.setup();
+    render(<AppSettingsModal onClose={() => {}} />);
+    await screen.findByText('Anthropic / Claude');
+    await openSettingsPane('Providers');
+    await user.click(screen.getByRole('button', { name: /add provider/i }));
+    await user.click(screen.getByRole('button', { name: /other \/ custom/i }));
+    await user.selectOptions(screen.getByLabelText(/custom provider API type/i), surface);
+    await user.type(screen.getByLabelText(/custom provider name/i), 'Example API');
+    await user.type(screen.getByLabelText(/custom provider API key/i), 'test-credential');
+    expect((screen.getByRole('button', { name: /^add provider$/i }) as HTMLButtonElement).disabled).toBe(true);
+    await user.type(screen.getByLabelText(/custom provider base URL/i), 'https://example.com/v1');
+    await user.type(screen.getByLabelText(/custom provider model ID/i), 'vendor/model');
+    if (surface === 'openai') expect(screen.getByText(/Chat Completions alone is not supported/i)).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: /^add provider$/i }));
+    await waitFor(() => expect(calls.create_custom_provider).toEqual([{
+      name: 'Example API', apiKey: 'test-credential', surface,
+      baseUrl: 'https://example.com/v1', model: 'vendor/model',
+    }]));
+    expect(calls.upsert_provider_account).toBeUndefined();
+    expect(await screen.findByText(/Saved Example API/)).toBeTruthy();
+    expect(screen.queryByLabelText(/custom provider API key/i)).toBeNull();
+  }, 15000);
+
+  it('keeps custom setup fields and credential available after a backend rejection', async () => {
+    mockBackend();
+    const backend = vi.mocked(invoke).getMockImplementation()!;
+    vi.mocked(invoke).mockImplementation((cmd, args) => cmd === 'create_custom_provider'
+      ? Promise.reject(new Error('A provider with this id already exists')) : backend(cmd, args));
+    const user = userEvent.setup();
+    render(<AppSettingsModal onClose={() => {}} />);
+    await screen.findByText('Anthropic / Claude');
+    await openSettingsPane('Providers');
+    await user.click(screen.getByRole('button', { name: /add provider/i }));
+    await user.click(screen.getByRole('button', { name: /other \/ custom/i }));
+    await user.type(screen.getByLabelText(/custom provider name/i), 'Example');
+    await user.type(screen.getByLabelText(/custom provider API key/i), 'test-credential');
+    await user.type(screen.getByLabelText(/custom provider base URL/i), 'https://example.com/v1');
+    await user.type(screen.getByLabelText(/custom provider model ID/i), 'vendor/model');
+    await user.click(screen.getByRole('button', { name: /^add provider$/i }));
+    expect(await screen.findByText(/A provider with this id already exists/)).toBeTruthy();
+    expect((screen.getByLabelText(/custom provider API key/i) as HTMLInputElement).value).toBe('test-credential');
+    expect((screen.getByLabelText(/custom provider model ID/i) as HTMLInputElement).value).toBe('vendor/model');
+    expect((screen.getByRole('button', { name: /^add provider$/i }) as HTMLButtonElement).disabled).toBe(false);
   }, 15000);
 
   // Issue #601 — Usage Meters moved off the Settings modal and onto the

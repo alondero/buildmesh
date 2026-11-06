@@ -253,6 +253,18 @@ rows in `BUILTIN_PROVIDER_ACCOUNTS` — they live in
 `AppPreferences::provider_pairings` and `effective_pairings` returns stored
 rows only (ADR-0025: no auto-derived Claude pairing on key alone). Endpoint
 URL + model tiers live on the pairing (Harnesses page), not the account.
+Custom API setup on **Providers → Add provider → Other / custom** explicitly
+creates an account, a pairing and a user-owned Launch Configuration in one
+`PreferencesStore::try_update` transaction (`preferences::custom_providers`).
+The `create_custom_provider` command runs that blocking work off the async
+worker, emits `provider-list-changed`, and schedules the usual advisory
+Responses verification. It never treats a route's existence as verification.
+OpenAI means Responses for Codex; Anthropic means Messages for Claude Code.
+Provider identity, including Kimi, does not select a different OpenAI wire.
+The existing credentials-only option still stores no explicit pairing or
+launch configuration for custom accounts. Keys use the existing credential
+storage path; endpoints and models remain on the pairing, not the account.
+
 The desktop spawn picker renders harness parents and puts their saved Launch
 Configurations in each harness submenu — only user-saved recipes appear, so a
 fresh install shows none. The backend also retains

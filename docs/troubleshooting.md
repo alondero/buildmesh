@@ -440,6 +440,18 @@ file when it holds nothing else) by hand. If the error persists,
 use [What to include in a report](#what-to-include-in-a-report) and include the
 Codex version, node status, and relevant redacted log lines.
 
+## A custom OpenAI-compatible API fails verification
+
+Codex uses the OpenAI **Responses** API with streaming and tool calls. Chat
+Completions support alone is insufficient. Check your provider's documentation
+for Responses support, or use its Anthropic Messages endpoint with Claude Code
+if available. Buildmesh does not translate Chat Completions into Responses.
+
+In **Settings → Launch Configurations → Advanced Provider Routes**, check the
+API base URL and exact model ID, then run verification again. Leave the request
+path (`/responses` or `/messages`) off the base URL. A failed or stale Codex
+verification is advisory; it does not prevent you from trying the configuration.
+
 ## Codex refuses to start over a proxied provider
 
 A node opened from a proxied provider (a Codex route) fails immediately with a

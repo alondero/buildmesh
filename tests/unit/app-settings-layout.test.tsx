@@ -170,25 +170,27 @@ describe('Settings dialog layout', () => {
   describe('Providers help text', () => {
     // The Harnesses tab is now Launch Configurations, so help that sends people
     // "under Harnesses" points at a tab that does not exist.
-    it('sends the Accounts section and the add-provider form to Launch Configurations', async () => {
+    it('explains quick API setup and sends later configuration to Launch Configurations', async () => {
       const user = userEvent.setup();
       render(<AppSettingsModal onClose={() => {}} />);
       await openSettingsPane('Providers');
 
       await user.hover(await screen.findByRole('button', { name: 'About Accounts' }));
       const tip = await screen.findByRole('tooltip');
-      expect(tip.textContent).toMatch(/attach a provider under Launch Configurations/);
+      expect(tip.textContent).toMatch(/Manage routes under Launch Configurations/);
       expect(tip.textContent).not.toMatch(/Harnesses/);
 
       const add = await screen.findByRole('button', { name: '+ Add provider' });
       await waitFor(() => expect((add as HTMLButtonElement).disabled).toBe(false));
       await user.click(add);
       const form = await screen.findByTestId('add-provider-form');
-      expect(form.textContent).toMatch(/attach it under Launch Configurations/);
+      expect(form.textContent).toMatch(/add any compatible API with its endpoint, model and key/);
       expect(form.textContent).not.toMatch(/Harnesses/);
 
       await user.click(within(form).getByRole('button', { name: /other \/ custom/i }));
-      expect(form.textContent).toMatch(/Attach under Launch Configurations to set base URL/);
+      expect(form.textContent).toMatch(/save a launch configuration for it/);
+      await user.selectOptions(within(form).getByLabelText('Custom provider API type'), 'later');
+      expect(form.textContent).toMatch(/attach the provider under Launch Configurations when ready/);
       expect(form.textContent).not.toMatch(/Harnesses/);
     });
   });
