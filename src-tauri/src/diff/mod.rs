@@ -180,17 +180,14 @@ fn node_change_set_of(node_id: i64, only: Option<&str>) -> Result<Vec<FileDiff>,
         return Err(DiffError::Cancelled);
     }
     let baseline = node_baseline(node_id)?;
-    let result = engine::diff_against_base(
-        &baseline.repo_path,
-        &baseline.base_ref,
-        only,
-        Some(&token),
-    )?;
+    let result =
+        engine::diff_against_base(&baseline.repo_path, &baseline.base_ref, only, Some(&token))?;
     Ok(result.files)
 }
 
 /// The node's repository and the ref its change set is measured against.
 fn node_baseline(node_id: i64) -> Result<baseline::NodeBaseline, DiffError> {
-    let node = crate::db::get_agent_node_by_id(node_id).map_err(|e| DiffError::Db(e.to_string()))?;
+    let node =
+        crate::db::get_agent_node_by_id(node_id).map_err(|e| DiffError::Db(e.to_string()))?;
     Ok(baseline::node_baseline(&node))
 }

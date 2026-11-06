@@ -3,9 +3,7 @@
 //! The test names are the ones the suite had inside `commands/diff.rs`; the
 //! module they live in moved, the assertions did not.
 
-use crate::diff::highlight::{
-    ext_for_path, highlighted_or_escape, highlight_content, html_escape,
-};
+use crate::diff::highlight::{ext_for_path, highlight_content, highlighted_or_escape, html_escape};
 
 #[test]
 fn ext_for_path_extracts_extension() {

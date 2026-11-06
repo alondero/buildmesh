@@ -24,10 +24,7 @@ use crate::preferences::AppPreferences;
 ///
 /// The writer is held for the read and the write, and released before this
 /// returns: the caller's worker wake happens after the guard is gone.
-pub fn trigger_circuit_now(
-    circuit_id: i64,
-    preferences: &AppPreferences,
-) -> Result<i64, String> {
+pub fn trigger_circuit_now(circuit_id: i64, preferences: &AppPreferences) -> Result<i64, String> {
     let mut conn = db::write_conn();
     trigger_circuit_now_prepared_locked(&mut conn, circuit_id, preferences)
 }

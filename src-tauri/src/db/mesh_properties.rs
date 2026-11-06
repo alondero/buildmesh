@@ -54,11 +54,7 @@ pub fn set_mesh_name(mesh_id: i64, name: &str) -> SqlResult<usize> {
     set_mesh_name_inner(&db, mesh_id, name)
 }
 
-pub(crate) fn set_mesh_name_inner(
-    conn: &Connection,
-    mesh_id: i64,
-    name: &str,
-) -> SqlResult<usize> {
+pub(crate) fn set_mesh_name_inner(conn: &Connection, mesh_id: i64, name: &str) -> SqlResult<usize> {
     conn.execute(
         "UPDATE meshes SET name = ?1 WHERE id = ?2",
         params![name, mesh_id],

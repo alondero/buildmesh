@@ -6,12 +6,9 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::diff::cancel::{
-    cancel_poll_count, set_cancel_poll_probe, DIFF_CANCELLED,
-};
+use crate::diff::cancel::{cancel_poll_count, set_cancel_poll_probe, DIFF_CANCELLED};
 use crate::diff::engine::{
-    build_hunk, build_sides, compute_file_diff, diff_against_base, group_into_hunks,
-    CONTEXT_LINES,
+    build_hunk, build_sides, compute_file_diff, diff_against_base, group_into_hunks, CONTEXT_LINES,
 };
 use crate::diff::{changed_files_at, file_against_head};
 use crate::env::test_helpers::{commit_file, init_repo_with_commit, repo_is_dirty, TestDir};
@@ -882,7 +879,9 @@ fn a_mixed_change_set_renders_the_pinned_diff() {
     std::fs::remove_file(tmp.join("rename-me.txt")).unwrap();
     {
         let mut index = repo.index().unwrap();
-        index.remove_path(std::path::Path::new("rename-me.txt")).unwrap();
+        index
+            .remove_path(std::path::Path::new("rename-me.txt"))
+            .unwrap();
         index.add_path(std::path::Path::new("new.txt")).unwrap();
         index.add_path(std::path::Path::new("renamed.txt")).unwrap();
         index.write().unwrap();
@@ -944,9 +943,8 @@ fn a_mixed_change_set_renders_the_pinned_diff() {
     );
 
     // The counts over the same change set.
-    let summary = crate::git::state::summarize_statuses(
-        result.files.iter().map(|file| file.status.as_str()),
-    );
+    let summary =
+        crate::git::state::summarize_statuses(result.files.iter().map(|file| file.status.as_str()));
     assert_eq!(summary.total, 5);
     assert_eq!(summary.added, 2, "added counts new + untracked");
     assert_eq!(summary.modified, 2, "a rename reads as a modification");

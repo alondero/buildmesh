@@ -7,9 +7,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use crate::diff::cancel::{
-    acquire_diff_cancel, current_cancel_token, release_diff_cancel,
-};
+use crate::diff::cancel::{acquire_diff_cancel, current_cancel_token, release_diff_cancel};
 
 /// Acquiring a fresh token returns a non-cancelled flag, so the
 /// first invocation of a `node_id` walks the full diff.
