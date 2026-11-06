@@ -136,3 +136,34 @@ fn the_override_moves_only_the_local_data_directory() {
         );
     });
 }
+
+/// A config-level directory override gives way to the profile pin. The pin is
+/// per launch and the config is per build, so the launch's own profile owns
+/// the webview folder; the app's other directories fall back to their platform
+/// defaults, which is what the shipped config already asks for.
+#[test]
+fn the_profile_pin_replaces_a_config_level_directory_override() {
+    let _lock = crate::env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let profile = scratch_profile("precedence");
+    crate::env::with_env_vars(&[(PROFILE_DIR_ENV, Some(profile.as_os_str()))], || {
+        let mut config = tauri::utils::config::Config::default();
+        config.app.app_directories_override =
+            Some(AppDirectoriesOverride::Directories(AppDirectoryOverrides {
+                local_data: Some(PathBuf::from("a-local-data-dir-of-the-config")),
+                ..AppDirectoryOverrides::default()
+            }));
+
+        apply(&mut config);
+
+        assert_eq!(
+            config.app.app_directories_override,
+            Some(AppDirectoriesOverride::Directories(AppDirectoryOverrides {
+                local_data: Some(profile.clone()),
+                ..AppDirectoryOverrides::default()
+            })),
+            "the launch's profile owns the webview folder, not the config"
+        );
+    });
+}

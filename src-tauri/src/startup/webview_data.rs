@@ -72,8 +72,14 @@ pub(crate) fn apply(config: &mut tauri::utils::config::Config) {
     };
     // Only the local-data directory moves: it is the webview's user-data
     // folder on Windows and Linux, and the app's other directories (config,
-    // data, cache, log) keep their platform defaults. The shipped config
-    // carries no directory override, so this replaces nothing today.
+    // data, cache, log) keep their platform defaults.
+    //
+    // The override is set wholesale rather than merged. The profile pin is per
+    // launch and the config is per build, so the pin wins: the launch's own
+    // profile owns the webview folder even when the config names one. The
+    // shipped config carries no directory override, so this replaces nothing
+    // today, and the other directories fall back to the defaults they already
+    // had.
     config.app.app_directories_override =
         Some(AppDirectoriesOverride::Directories(AppDirectoryOverrides {
             local_data: Some(dir),
