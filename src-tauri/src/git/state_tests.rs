@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 
-use super::{state_at, Baseline};
+use super::{changed_files_summary, state_at, Baseline, ChangedFile};
 use crate::env::test_helpers::{init_repo_with_commit, TestDir};
 
 /// A repository with a mixed change set: one modified file, one deleted
@@ -247,4 +247,48 @@ fn a_clean_repository_reports_nothing_changed() {
     assert!(!state.head.unborn);
     assert!(state.head.branch.is_some());
     assert!(!state.head.short_sha.is_empty());
+}
+
+/// The header summary is a fold of the very same list — so the header count
+/// and the tree can never disagree.
+///
+/// The fold moved here with the rest of the changed-file reads (issue
+/// #2527); the test moved with it, unchanged.
+#[test]
+fn summary_folds_the_changed_files_list() {
+    let files = vec![
+        ChangedFile {
+            path: "a.rs".into(),
+            old_path: None,
+            status: "added".into(),
+            additions: 3,
+            deletions: 0,
+        },
+        ChangedFile {
+            path: "b.rs".into(),
+            old_path: None,
+            status: "modified".into(),
+            additions: 1,
+            deletions: 1,
+        },
+        ChangedFile {
+            path: "c.rs".into(),
+            old_path: None,
+            status: "deleted".into(),
+            additions: 0,
+            deletions: 5,
+        },
+        ChangedFile {
+            path: "d.rs".into(),
+            old_path: None,
+            status: "untracked".into(),
+            additions: 2,
+            deletions: 0,
+        },
+    ];
+    let summary = changed_files_summary(&files);
+    assert_eq!(summary.total, 4);
+    assert_eq!(summary.added, 2, "added counts new + untracked");
+    assert_eq!(summary.modified, 1);
+    assert_eq!(summary.deleted, 1);
 }

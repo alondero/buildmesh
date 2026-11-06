@@ -15,7 +15,7 @@
 
 ## Project Structure
 - `src/` — React frontend (Zustand stores, xterm.js TerminalManager)
-- `src-tauri/src/` — Rust backend (commands/, db/, env/, git/, models/). Module ownership and seams live in the [Rust module map](development/module-map.md). `env/host_path.rs` is the only module allowed to build `\\wsl$\` paths.
+- `src-tauri/src/` — Rust backend (commands/, db/, diff/, env/, git/, models/). Module ownership and seams live in the [Rust module map](development/module-map.md). `env/host_path.rs` is the only module allowed to build `\\wsl$\` paths.
 - `tests/unit/` — Vitest unit tests
 - `tests/integration/` — Vitest integration tests
 - `tests/e2e/` — Playwright: webServer boots Vite on 1420; `verify-smoke` uses mock IPC, while chromium specs have additional real-runtime requirements. See `docs/agents/engineering.md` before launching.

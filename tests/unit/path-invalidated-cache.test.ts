@@ -231,7 +231,7 @@ describe('subscribeGitPathInvalidation — minRefetchIntervalMs (issue #1165)', 
     // to ~2/s during an agent edit burst; with the 2 s window the panel
     // collapses the burst to one immediate + one trailing refetch
     // instead of one per emit. Without this throttle, every emit fires
-    // `diff_node_against_base` (`commands/diff.rs:602`), which
+    // `diff_node_against_base` (`commands/diff.rs`), which
     // `run_blocking`-walks the worktree via libgit2 + 3× syntect per
     // hunk — the #761/#762 starvation class the issue calls out.
     const cb = vi.fn();

@@ -832,8 +832,15 @@ jobs:
           # `blocking::` and `read_outcome::` are the modules added by #2330.
           # They claim nothing else: libtest filters are substring matches, and
           # neither name appears in any other module's test path.
+          #
+          # `diff::` is the diff engine's own module (#2527), and it is the
+          # nested-path problem once more: `diff::` is a substring of
+          # `git::diff::`, which the `git-env-preferences` shard owns, so
+          # without the skip both shards would claim those tests. `--skip
+          # commands::diff::` is the same guard for the command module's own
+          # path — `commands-http` owns that one.
           - label: remaining
-            args: "artifact_owner:: attention_autoclear:: blocking:: close_cancel_tests:: companion:: diagnostics:: instance_guard:: models:: node_turn:: process_util:: pty:: read_outcome:: review_contract:: sandbox:: secret_scrubber:: session_capture:: session_naming:: startup:: windowing:: worktree_blockers:: --skip agent::sandbox:: --skip commands::diagnostics::"
+            args: "artifact_owner:: attention_autoclear:: blocking:: close_cancel_tests:: companion:: diagnostics:: diff:: instance_guard:: models:: node_turn:: process_util:: pty:: read_outcome:: review_contract:: sandbox:: secret_scrubber:: session_capture:: session_naming:: startup:: windowing:: worktree_blockers:: --skip agent::sandbox:: --skip commands::diagnostics:: --skip commands::diff:: --skip git::diff::"
 
     steps:
       - name: Checkout
