@@ -84,6 +84,7 @@ pub mod create_operation;
 pub mod drive;
 pub mod error;
 pub mod mesh;
+pub mod mesh_properties;
 pub mod semantic_turns;
 pub mod warm_pool;
 

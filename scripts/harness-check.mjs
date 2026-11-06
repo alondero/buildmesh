@@ -76,6 +76,10 @@ export function frontendInScope(paths) {
 // `pathIncludeDrift` below, so a new `#[path]` fails the gate that runs on the
 // Rust diff itself, not only the one CI happens to run (review of PR #2232).
 export const RUST_PATH_INCLUDES = {
+  'src-tauri/src/db/mesh_properties_tests.rs': 'db::mesh_properties::tests',
+  'src-tauri/src/diff/engine_tests.rs': 'diff::engine::tests',
+  'src-tauri/src/diff/highlight_tests.rs': 'diff::highlight::tests',
+  'src-tauri/src/diff/cancel_tests.rs': 'diff::cancel::tests',
   'src-tauri/src/services/interruption_recovery_tests.rs': 'services::interruption_recovery::tests',
   'src-tauri/src/services/transcript_reader/interruption_tests.rs': 'services::transcript_reader::interruption::tests',
   'src-tauri/src/services/transcript_reader/readers/codex_failure_tests.rs': 'services::transcript_reader::readers::codex::failure_tests',
@@ -191,6 +195,10 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/services/harness_logins_tests.rs': 'services::harness_logins::tests',
   'src-tauri/src/services/usage/logins_tests.rs': 'services::usage::logins::tests',
   'src-tauri/src/commands/preferences_tests.rs': 'commands::preferences::preferences_tests',
+  // The webview user-data folder (issue #2469). The sibling is included by
+  // `startup/webview_data.rs`, so the tests run under
+  // `startup::webview_data::tests`, not under a module named after the file.
+  'src-tauri/src/startup/webview_data_tests.rs': 'startup::webview_data::tests',
 };
 
 // A Rust production file whose tests live in a sibling `<stem>_tests` module

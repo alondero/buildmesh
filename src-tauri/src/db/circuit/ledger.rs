@@ -904,6 +904,32 @@ pub struct CircuitRunLedger {
     pub review_continuation: crate::circuit::review_continuation::ReviewContinuation,
 }
 
+/// Read recent runs, steps and continuation eligibility from one snapshot.
+pub fn list_circuit_run_ledgers(
+    circuit_id: i64,
+    limit: i64,
+) -> Result<Vec<CircuitRunLedger>, DbError> {
+    let db = crate::db::read_conn()?;
+    let tx = db.unchecked_transaction()?;
+    let runs = list_circuit_runs_inner(&tx, circuit_id, limit)?;
+    let continuation = super::recovery::ReviewContinuationReader::new(&tx);
+    let ledgers = runs
+        .into_iter()
+        .map(|run| {
+            let steps = list_circuit_run_steps_inner(&tx, run.id)?;
+            Ok(CircuitRunLedger {
+                review_round_limit: super::review_rounds::current_limit(&tx, &run)?,
+                review_continuation: continuation.project(&run, &steps)?,
+                run,
+                steps,
+            })
+        })
+        .collect::<Result<Vec<_>, DbError>>()?;
+    drop(continuation);
+    tx.commit()?;
+    Ok(ledgers)
+}
+
 /// Ensure the inspectable built-in exists before any review run is created.
 pub(super) fn ensure_review_blueprint(mesh_id: i64) -> SqlResult<()> {
     let db = crate::db::write_conn();

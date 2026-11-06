@@ -826,12 +826,10 @@ pub fn trigger_circuit_now(circuit_id: i64) -> Result<i64, String> {
     // the writer mutex, then drop the guard before any signal/IO. The
     // worker wake signals a condvar other DB callers can park on; firing
     // it while holding the writer mutex would deadlock any reader pool
-    // checkout that races the wake against the next commit.
+    // checkout that races the wake against the next commit. The service
+    // owns the connection and releases it before it returns.
     let preferences = crate::preferences::load()?;
-    let run_id = {
-        let mut db = crate::db::write_conn();
-        trigger_circuit_now_prepared_locked(&mut db, circuit_id, &preferences)?
-    };
+    let run_id = crate::services::circuit_trigger::trigger_circuit_now(circuit_id, &preferences)?;
     crate::services::circuit_worker::wake_circuit_worker();
     tracing::info!(
         "circuits: manual trigger for circuit {} → run {}",
@@ -851,63 +849,17 @@ pub fn trigger_circuit_now(circuit_id: i64) -> Result<i64, String> {
 /// mutex first so the wake's condvar signal doesn't deadlock concurrent
 /// reader-pool checkouts (CLAUDE.md three-phase pattern).
 #[cfg(test)]
+// allow-test-in-production: two suites call it — this file's own suite and the DB
+// suite — so it stays a `pub` item here rather than a sibling test file's helper.
 pub fn trigger_circuit_now_locked(
     conn: &mut rusqlite::Connection,
     circuit_id: i64,
 ) -> Result<i64, String> {
-    trigger_circuit_now_prepared_locked(
+    crate::services::circuit_trigger::trigger_circuit_now_prepared_locked(
         conn,
         circuit_id,
         &crate::preferences::AppPreferences::default(),
     )
-}
-
-fn trigger_circuit_now_prepared_locked(
-    conn: &mut rusqlite::Connection,
-    circuit_id: i64,
-    preferences: &crate::preferences::AppPreferences,
-) -> Result<i64, String> {
-    let circuit = crate::db::circuit::get_autopilot_circuit_inner(conn, circuit_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("circuit {} does not exist", circuit_id))?;
-    let graph = CircuitGraph::from_json(&circuit.graph_json)?;
-    if graph.requires_source_agent() {
-        return Err("Start this Circuit from the source agent's title bar.".into());
-    }
-    if graph.is_issue_driven_autopilot_review() {
-        return Err(
-            "issue-driven Circuit review runs are triggered by labelled GitHub issues; Trigger Now requires issue context"
-                .to_string(),
-        );
-    }
-    // Draft-first (issue #1356): Trigger Now is the dry-run seam and
-    // must work while the circuit is still disabled. Background
-    // pollers (`list_enabled_circuits`) stay gated on `enabled`.
-    let identity = format!(
-        "manual:{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-    );
-    let mut context = crate::circuit::context::CircuitContext::new();
-    context.with_circuit(circuit.id, &circuit.name, circuit.mesh_id);
-    context.set(
-        "review.provider",
-        preferences.reviewer_provider.as_deref().unwrap_or(""),
-    );
-    let action = "draft_pr".to_string();
-    context.with_circuit_finish_prompt(None, Some(action.as_str()));
-    let run_id = crate::db::circuit::create_circuit_run_prepared_locked(
-        conn,
-        circuit.id,
-        circuit.mesh_id,
-        &identity,
-        &context.to_json()?,
-        preferences,
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(run_id)
 }
 
 /// Start a review or an authored Circuit from an agent node's title bar.
@@ -993,29 +945,17 @@ pub fn list_circuit_runs(
     limit: Option<i64>,
 ) -> Result<Vec<CircuitRunDetail>, String> {
     let limit = limit.unwrap_or(20).clamp(1, 100);
-    let db = crate::db::read_conn().map_err(|e| e.to_string())?;
-    let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
-    let runs = crate::db::circuit::ledger::list_circuit_runs_inner(&tx, circuit_id, limit)
-        .map_err(|e| e.to_string())?;
-    let continuation = crate::db::circuit::recovery::ReviewContinuationReader::new(&tx);
-    let details = runs
+    let ledgers = crate::db::circuit::ledger::list_circuit_run_ledgers(circuit_id, limit)
+        .map_err(String::from)?;
+    Ok(ledgers
         .into_iter()
-        .map(|run| {
-            let steps = crate::db::circuit::ledger::list_circuit_run_steps_inner(&tx, run.id)?;
-            let review_round_limit = crate::db::circuit::review_rounds::current_limit(&tx, &run)?;
-            let review_continuation = Some(continuation.project(&run, &steps)?);
-            Ok(CircuitRunDetail {
-                run,
-                steps,
-                review_round_limit,
-                review_continuation,
-            })
+        .map(|ledger| CircuitRunDetail {
+            run: ledger.run,
+            steps: ledger.steps,
+            review_round_limit: ledger.review_round_limit,
+            review_continuation: Some(ledger.review_continuation),
         })
-        .collect::<Result<Vec<_>, DbError>>()
-        .map_err(|e| e.to_string())?;
-    drop(continuation);
-    tx.commit().map_err(|e| e.to_string())?;
-    Ok(details)
+        .collect())
 }
 
 // ---------------------------------------------------------------------------

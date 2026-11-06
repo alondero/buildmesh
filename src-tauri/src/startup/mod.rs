@@ -69,6 +69,14 @@
 //! since `panic = "abort"` kills the process via `__fastfail` before the OS
 //! file buffer would flush. A single file handle also means a single rotation
 //! accounting, which two independent writers could not give.
+//!
+//! The profile is more than the database
+//! ------------------------------------
+//! This module also owns the app-data *profile* — the directory that holds
+//! `buildmesh.db`, `preferences.json` and the logs — and everything else that
+//! belongs to it. [`webview_data`] is the other half: the webview's user-data
+//! folder (`localStorage`, IndexedDB, cookies) is part of the same profile, so
+//! a worktree that owns a profile owns its frontend state too (issue #2469).
 
 use std::borrow::Cow;
 use std::io;
@@ -81,6 +89,7 @@ use tracing_subscriber::fmt::MakeWriter;
 
 mod failure;
 mod present;
+pub(crate) mod webview_data;
 
 pub use failure::StartupFailure;
 pub(crate) use present::present_failure;
