@@ -6,7 +6,7 @@ This directory contains the user-visible release notes for Buildmesh. Each
 release has one file named `vX.Y.Z.md`; the matching Git tag and file are the
 release's versioned source of truth.
 
-The next release is [v1.6.1](v1.6.1.md); later notes are drafted at release time
+The next release is [v1.7.0](v1.7.0.md); later notes are drafted at release time
 (see [Drafting a release](#drafting-a-release)).
 
 ## Drafting a release
@@ -23,11 +23,11 @@ contributors no longer edit it:
    suffix.
 
 The base is the `chore(release): vX.Y.Z` commit for the highest already-released
-version below the one being prepared. Release tags point at the pre-merge commit
-on the release branch and so are not ancestors of `main`, which is why plain tag
-reachability is not used. Check the `Generated from … commits since …` header
-before curating: it names the resolved base and the size of the range, so a wrong
-range is visible immediately.
+version below the one being prepared. The release tag points at the merged
+commit on `main`, so plain tag reachability cannot find that base commit and the
+notes script resolves it from the release commit instead. Check the
+`Generated from … commits since …` header before curating: it names the resolved
+base and the size of the range, so a wrong range is visible immediately.
 
 Preview on stdout with `npm run release:notes`; add `--write` to create the file
 (`--write` refuses to overwrite an existing draft — pass `--force` to regenerate
