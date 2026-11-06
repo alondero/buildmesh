@@ -55,7 +55,7 @@ export const diffFileAgainstHead = (sessionPath: string, filePath: string) =>
 // request has superseded it. Tauri 2's `invoke` doesn't yet forward the
 // signal to the Rust command, so the *actual* backend cancellation
 // (pool-pressure ≤1 per node_id) happens on the Rust side via the
-// `DIFF_NODE_CANCEL` map — see `commands::diff::acquire_diff_cancel`.
+// `DIFF_NODE_CANCEL` map — see `diff::cancel::acquire_diff_cancel`.
 // The frontend signal exists to (a) drop stale local results so the UI
 // doesn't flicker, and (b) be the seam a future Tauri signal-aware
 // invoke can plug into without touching call sites.

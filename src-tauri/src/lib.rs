@@ -10,6 +10,7 @@ mod companion;
 mod coordinator;
 mod db;
 mod diagnostics;
+mod diff;
 mod env;
 mod git;
 mod http;

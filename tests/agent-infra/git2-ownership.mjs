@@ -122,3 +122,197 @@ export function seamDebtPaths(root) {
   const section = map.split(/^## Seam debt\s*$/m)[1]?.split(/^## /m)[0] ?? "";
   return [...section.matchAll(/`([^`\s]*\/[^`]+\.rs)`/g)].map((match) => match[1]);
 }
+
+// ---------------------------------------------------------------------------
+// The SQL rule (issue #2527)
+// ---------------------------------------------------------------------------
+
+/**
+ * A SQL statement, as it appears at the start of a string literal.
+ *
+ * The guard reads *literals*, not the whole file: a comment that names a
+ * statement is prose, and a statement that a command issues is not. The
+ * repository's own SQL always opens the literal with the verb
+ * (`"UPDATE meshes SET …"`, `"INSERT INTO … "`, `"SELECT … FROM …"`), so
+ * anchoring on the verb is both precise and cheap.
+ *
+ * The verb is matched in UPPERCASE, because that is how the repository
+ * writes its statements, and the case-insensitive reading was a false
+ * positive generator: the crate's SQL-shaped literals that start with a
+ * lowercase verb are prose (`"Select a built-in Review Blueprint to copy."`,
+ * `"update the PR"`) or a git ref name (`"update-index"`). A guard that
+ * fired on the repository's own English would cry wolf on the first command
+ * that carried a user-facing message, and a guard that cries wolf is a
+ * guard somebody turns off.
+ *
+ * The leading whitespace is allowed, because a multi-line statement is
+ * written with its verb on its own line — the crate's own `db/mod.rs`
+ * carries `CREATE TABLE IF NOT EXISTS …` literals shaped that way, and a rule
+ * that stopped at the newline would miss every one of them.
+ *
+ * The rule's limits, so a future reader knows what it does not watch: a
+ * connection taken through an aliased `use` (`use … as …`) is not seen, and
+ * neither is a statement whose verb is not the literal's first token.
+ */
+const SQL_STATEMENT =
+  /^\s*(?:SELECT\b|INSERT\s+INTO\b|REPLACE\s+INTO\b|UPDATE\b|DELETE\s+FROM\b|CREATE\s+(?:TABLE|INDEX|UNIQUE|VIEW|TRIGGER)\b|DROP\s+(?:TABLE|INDEX|VIEW|TRIGGER)\b|ALTER\s+TABLE\b|PRAGMA\b)/;
+
+/**
+ * Scan a Rust source file for its string literals and its code.
+ *
+ * A hand-written scan rather than a regex: the guard must not read a
+ * comment's quoted SQL as a statement, must not read a comment that names
+ * `db::read_conn()` as a call, and must not read a `'c'` char literal as a
+ * quote. It walks the source the way rustc does — line comments, block
+ * comments (nested), string literals (with escapes), raw string literals,
+ * and char literals.
+ *
+ * `code` is the source with every comment and every string literal blanked
+ * out (newlines kept, so line numbers survive), so a caller can look for
+ * *calls* in it. `literals` holds the string literals themselves, so a
+ * caller can look for *statements* in them.
+ */
+export function scanRust(source) {
+  const literals = [];
+  let code = "";
+  let i = 0;
+  const blank = (text) => text.replace(/[^\n]/g, " ");
+  while (i < source.length) {
+    const rest = source.slice(i);
+    if (rest.startsWith("//")) {
+      const end = source.indexOf("\n", i);
+      const stop = end === -1 ? source.length : end;
+      code += blank(source.slice(i, stop));
+      i = stop;
+      continue;
+    }
+    if (rest.startsWith("/*")) {
+      let depth = 1;
+      let j = i + 2;
+      while (j < source.length && depth) {
+        if (source.startsWith("/*", j)) {
+          depth += 1;
+          j += 2;
+          continue;
+        }
+        if (source.startsWith("*/", j)) {
+          depth -= 1;
+          j += 2;
+          continue;
+        }
+        j += 1;
+      }
+      code += blank(source.slice(i, j));
+      i = j;
+      continue;
+    }
+    if (rest.startsWith("r") && !/[A-Za-z0-9_]/.test(source[i - 1] ?? " ")) {
+      const raw = rest.match(/^r(#*)"/);
+      if (raw) {
+        const close = `"${raw[1]}`;
+        const end = source.indexOf(close, i + raw[0].length);
+        if (end === -1) {
+          code += blank(source.slice(i));
+          i = source.length;
+          continue;
+        }
+        literals.push(source.slice(i + raw[0].length, end));
+        code += blank(source.slice(i, end + close.length));
+        i = end + close.length;
+        continue;
+      }
+    }
+    if (rest.startsWith('"')) {
+      let j = i + 1;
+      let value = "";
+      while (j < source.length) {
+        const ch = source[j];
+        if (ch === "\\") {
+          value += source.slice(j, j + 2);
+          j += 2;
+          continue;
+        }
+        if (ch === '"') break;
+        value += ch;
+        j += 1;
+      }
+      literals.push(value);
+      code += blank(source.slice(i, j + 1));
+      i = j + 1;
+      continue;
+    }
+    // A char literal, so its quote is not a string delimiter. A lifetime
+    // (`&'a str`) is not a char literal and falls through.
+    if (rest.startsWith("'")) {
+      const literal = rest.match(/^'(?:\\.|[^\\'])'/);
+      if (literal) {
+        code += blank(literal[0]);
+        i += literal[0].length;
+        continue;
+      }
+    }
+    code += source[i];
+    i += 1;
+  }
+  return { code, literals };
+}
+
+/**
+ * Whether a string literal opens like a SQL statement.
+ *
+ * @see SQL_STATEMENT
+ */
+export function isSqlStatement(literal) {
+  return SQL_STATEMENT.test(literal);
+}
+
+/**
+ * The string literals of a Rust source file.
+ *
+ * @see scanRust
+ */
+export function rustStringLiterals(source) {
+  return scanRust(source).literals;
+}
+
+/**
+ * The definitions of the crate's one baseline seam.
+ *
+ * CONTEXT.md names `resolve_base_tree` as *the* seam the Node Change Set
+ * hangs off. Two definitions would let the two readers — the file list and
+ * the per-file diff — disagree about what "changed since the branch" means,
+ * which is the disagreement issue #2527 closed.
+ */
+export function resolveBaseTreeDefinitions(root) {
+  const src = join(root, "src-tauri", "src");
+  return walk(src)
+    .filter((file) => /\bfn resolve_base_tree\b/.test(readFileSync(file, "utf8")))
+    .map((file) => file.slice(src.length + 1).split(sep).join("/"))
+    .sort();
+}
+
+/**
+ * The production files under `commands/` that check a connection out of the
+ * pool or carry a statement of their own.
+ *
+ * `db::write_conn()` / `db::read_conn()` are the only ways a command reaches
+ * a connection, and a statement in a command is a statement in the wrong
+ * layer. Both belong to `db::` (issue #2527).
+ */
+export function productionSqlUnderCommands(root) {
+  const src = join(root, "src-tauri", "src");
+  const found = [];
+  for (const rel of walk(join(src, "commands"))
+    .map((full) => full.slice(src.length + 1).split(sep).join("/"))
+    .filter((rel) => !isTestOnlyFile(rel))) {
+    const source = stripCfgTestItems(readFileSync(join(src, ...rel.split("/")), "utf8"));
+    const { code, literals } = scanRust(source);
+    const reasons = [];
+    if (/\b(?:write_conn|read_conn)\s*\(/.test(code)) reasons.push("checks a connection out");
+    if (literals.some((literal) => isSqlStatement(literal))) {
+      reasons.push("issues a SQL statement");
+    }
+    if (reasons.length) found.push(`${rel} (${reasons.join("; ")})`);
+  }
+  return found.sort();
+}

@@ -1,0 +1,280 @@
+//! The diff engine: line diffing, hunk grouping, and the baseline walk.
+//!
+//! This is the machinery the IPC boundary used to own. The output is
+//! byte-identical to what `commands/diff.rs` produced before the move
+//! (issue #2527): the same `difference_rs` line diff, the same
+//! `CONTEXT_LINES` grouping, the same escaping rules and the same hunk
+//! headers.
+
+use std::sync::atomic::AtomicBool;
+
+use difference_rs::{Changeset, Difference};
+
+use crate::env::to_host_path;
+use crate::models::{DiffHunk, DiffLine, DiffResult, FileDiff};
+
+use super::cancel::cancel_requested;
+use super::highlight::{highlight_content, highlight_group_lines};
+use super::DiffError;
+
+#[cfg(test)]
+#[path = "engine_tests.rs"]
+mod tests;
+
+/// Number of unchanged context lines to show on each side of a change
+/// region. Mirrors the default in `git diff -U3` and GitHub's collapsed
+/// diff view, so the user sees the change with enough surrounding code to
+/// orient themselves but is not flooded with the whole file.
+pub const CONTEXT_LINES: usize = 3;
+
+/// Compute a diff between two strings, returning DiffLine structs
+pub fn compute_file_diff(old_content: &str, new_content: &str) -> Vec<DiffLine> {
+    let changeset = Changeset::new(old_content, new_content, "\n");
+    let mut lines = Vec::new();
+    let mut old_num = 1usize;
+    let mut new_num = 1usize;
+
+    for diff in changeset.diffs {
+        match diff {
+            Difference::Same(text) => {
+                for line in text.lines() {
+                    lines.push(DiffLine {
+                        line_type: "context".to_string(),
+                        content: line.to_string(),
+                        old_num: Some(old_num),
+                        new_num: Some(new_num),
+                    });
+                    old_num += 1;
+                    new_num += 1;
+                }
+            }
+            Difference::Add(text) => {
+                for line in text.lines() {
+                    lines.push(DiffLine {
+                        line_type: "add".to_string(),
+                        content: line.to_string(),
+                        old_num: None,
+                        new_num: Some(new_num),
+                    });
+                    new_num += 1;
+                }
+            }
+            Difference::Rem(text) => {
+                for line in text.lines() {
+                    lines.push(DiffLine {
+                        line_type: "remove".to_string(),
+                        content: line.to_string(),
+                        old_num: Some(old_num),
+                        new_num: None,
+                    });
+                    old_num += 1;
+                }
+            }
+        }
+    }
+    lines
+}
+
+/// Build highlighted old/new content strings from diff lines
+pub fn build_sides(lines: &[DiffLine]) -> (String, String) {
+    let mut old_lines: Vec<&str> = Vec::new();
+    let mut new_lines: Vec<&str> = Vec::new();
+
+    for line in lines {
+        match line.line_type.as_str() {
+            "context" => {
+                old_lines.push(&line.content);
+                new_lines.push(&line.content);
+            }
+            "add" => {
+                old_lines.push("");
+                new_lines.push(&line.content);
+            }
+            "remove" => {
+                old_lines.push(&line.content);
+                new_lines.push("");
+            }
+            _ => {}
+        }
+    }
+
+    (old_lines.join("\n"), new_lines.join("\n"))
+}
+
+/// Split a flat diff into hunks with bounded context. Long stretches of
+/// unchanged lines that fall outside the context window around any change
+/// are dropped. Adjacent change regions whose context windows overlap
+/// (i.e. the gap between them is ≤ 2 * CONTEXT_LINES) are merged into a
+/// single hunk. Returns an empty vec if the diff contains no changes.
+pub fn group_into_hunks(lines: &[DiffLine], context: usize) -> Vec<Vec<DiffLine>> {
+    let change_indices: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.line_type != "context")
+        .map(|(i, _)| i)
+        .collect();
+
+    if change_indices.is_empty() {
+        return vec![];
+    }
+
+    // Window of [i - context, i + context] around each change, clamped to
+    // the diff line range. End is exclusive (Rust range convention).
+    let mut windows: Vec<(usize, usize)> = change_indices
+        .iter()
+        .map(|&i| {
+            let start = i.saturating_sub(context);
+            let end = (i + context + 1).min(lines.len());
+            (start, end)
+        })
+        .collect();
+
+    // Merge overlapping / touching windows so that close changes share
+    // their context lines and render as a single hunk.
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for w in windows.drain(..) {
+        if let Some(last) = merged.last_mut() {
+            if w.0 <= last.1 {
+                last.1 = last.1.max(w.1);
+                continue;
+            }
+        }
+        merged.push(w);
+    }
+
+    merged
+        .iter()
+        .map(|(start, end)| lines[*start..*end].to_vec())
+        .collect()
+}
+
+/// Build a single DiffHunk for a group of diff lines, computing syntax
+/// highlighting and hunk header metadata (old_start / new_start).
+pub fn build_hunk(group: &[DiffLine], highlight_path: &str) -> DiffHunk {
+    let (old_highlighted, new_highlighted) = build_sides(group);
+    let old_hl = highlight_content(&old_highlighted, highlight_path);
+    let new_hl = highlight_content(&new_highlighted, highlight_path);
+    // hunk header: oldest new/old line number in this group, plus the
+    // count of remove/add lines (matches the previous single-hunk
+    // convention; consumers that want total hunk length can read lines.len()).
+    let old_start = group.iter().find_map(|l| l.old_num).unwrap_or(0);
+    let new_start = group.iter().find_map(|l| l.new_num).unwrap_or(0);
+    let old_lines = group.iter().filter(|l| l.line_type == "remove").count();
+    let new_lines = group.iter().filter(|l| l.line_type == "add").count();
+    let lines_highlighted = highlight_group_lines(group, highlight_path);
+    DiffHunk {
+        old_start,
+        old_lines,
+        new_start,
+        new_lines,
+        old_highlighted: old_hl,
+        new_highlighted: new_hl,
+        lines: group.to_vec(),
+        lines_highlighted,
+    }
+}
+
+/// Diff the working directory against the merge-base with `base_ref`, so the
+/// result is everything the agent changed since branching — committed *and*
+/// uncommitted (ADR 0005). `only`, when set, restricts to one repo-relative
+/// path. Files are returned sorted by path for a stable review order.
+///
+/// `cancel`, when set, is polled between deltas and between per-file hunks;
+/// a flipped flag returns the cancellation sentinel so the calling
+/// `#[command]` wrapper can short-circuit the blocking pool task
+/// (issue #1181).
+pub fn diff_against_base(
+    repo_path: &str,
+    base_ref: &str,
+    only: Option<&str>,
+    cancel: Option<&AtomicBool>,
+) -> Result<DiffResult, DiffError> {
+    // Reject path traversal at the core so every caller inherits it — the
+    // desktop IPC path and the mobile /diff route both land here. The HTTP
+    // route keeps its own check to answer with a 400 before we ever open
+    // the repo.
+    if let Some(p) = only {
+        if p.split(['/', '\\'])
+            .any(|seg| seg == ".." || seg.is_empty())
+        {
+            return Err(DiffError::InvalidPath);
+        }
+    }
+    let host = to_host_path(repo_path);
+    let plan = crate::git::diff::diff_plan(
+        &host,
+        &crate::git::state::Baseline::BaseRef(base_ref.to_string()),
+        only,
+    )
+    .map_err(|e| DiffError::Git(e.to_string()))?;
+    let root = plan.root;
+    let mut files = Vec::new();
+
+    for entry in plan.entries {
+        // Poll cancellation at the file boundary — cheap load on every
+        // delta, and the walk is delta-bounded so we can't park here
+        // long. Pairs with the per-hunk poll below for files whose
+        // highlight passes dominate the cost.
+        if cancel_requested(cancel) {
+            return Err(DiffError::Cancelled);
+        }
+        let rel = entry.path;
+        let status = entry.status;
+        let old_path = entry.old_path;
+        let old_content = entry.old_content;
+
+        // New side is the current bytes on disk (absent for deletions).
+        let raw = std::fs::read(root.join(&rel)).ok();
+        let is_binary = entry.binary
+            || raw.as_ref().map(|b| b.contains(&0)).unwrap_or(false)
+            || old_content.as_bytes().contains(&0);
+
+        if is_binary {
+            files.push(FileDiff {
+                path: rel,
+                status,
+                old_path,
+                binary: true,
+                ..Default::default()
+            });
+            continue;
+        }
+
+        let new_content = raw
+            .map(|b| String::from_utf8_lossy(&b).to_string())
+            .unwrap_or_default();
+
+        let lines = compute_file_diff(&old_content, &new_content);
+        let additions = lines.iter().filter(|l| l.line_type == "add").count();
+        let deletions = lines.iter().filter(|l| l.line_type == "remove").count();
+        let groups = group_into_hunks(&lines, CONTEXT_LINES);
+        // Per-hunk poll — `build_hunk` does three syntect highlight
+        // passes per hunk (the costliest step on a busy worktree), so
+        // a single huge file would otherwise pin a worker for seconds
+        // after cancellation. The check is one atomic load; syntect
+        // dominates the cost by orders of magnitude.
+        let hunks = groups
+            .iter()
+            .map(|g| {
+                if cancel_requested(cancel) {
+                    return Err(());
+                }
+                Ok(build_hunk(g, &rel))
+            })
+            .collect::<Result<Vec<_>, ()>>()
+            .map_err(|_| DiffError::Cancelled)?;
+
+        files.push(FileDiff {
+            path: rel,
+            hunks,
+            status: status.to_string(),
+            old_path,
+            additions,
+            deletions,
+            binary: false,
+        });
+    }
+
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(DiffResult { files })
+}
