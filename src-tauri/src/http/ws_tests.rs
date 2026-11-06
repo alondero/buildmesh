@@ -13,13 +13,8 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use tokio::net::TcpListener;
 use tokio_tungstenite::{accept_async, connect_async};
 
-/// Every test in this module mutates process-global fanout state:
-/// `KNOWN_NODES` and the shared tombstone fence, whose budget any sibling
-/// test can exhaust. So they cannot run concurrently with each other — a
-/// fence-stress test that fills the 4096-entry budget would evict another
-/// test's tombstone and make its assertion lie. This is the same reasoning
-/// the database tests serialise on (issue #2048), for the same reason: the
-/// state under test is per-process, not per-test.
+/// Serialize this module's tests that use process-global fanout state.
+/// Other modules can still retire nodes independently of this lock.
 ///
 /// One lock for both accessors below — a second `static` would be a second
 /// mutex and would not serialise anything against the first.
@@ -911,16 +906,19 @@ fn a_create_racing_a_retire_never_leaves_a_channel_behind() {
 async fn an_evicted_tombstone_does_not_reopen_the_channel() {
     let _serial = fanout_lock_async().await;
     let db = crate::db::test_support::isolated();
-    let node_id = 7_100_001_i64;
+    let node_id = -7_100_001_i64;
     retire_pty_channel(node_id);
     assert!(is_retired(node_id));
-    // Push this id out of the bounded fence.
-    for offset in 1..=(RETIRED_NODE_MEMORY as i64) {
-        retire_pty_channel(7_200_000 + offset);
+    // Model the post-eviction state without flooding the shared fence or
+    // depending on which IDs other database fixtures have already retired.
+    {
+        let mut fence = get_retired_nodes().lock();
+        fence.ids.remove(&node_id);
+        fence.order.retain(|id| *id != node_id);
     }
     assert!(
         !is_retired(node_id),
-        "the fence is bounded, so the oldest tombstone must have been evicted"
+        "the tombstone must be absent before reconnecting"
     );
 
     let (url, server) = serve_terminal_ws(node_id, None, &db.handle(), 1);
@@ -946,25 +944,35 @@ async fn an_evicted_tombstone_does_not_reopen_the_channel() {
     assert!(pty_channel_state(node_id).is_none());
 }
 
-/// A fenced id is refused by both creation paths, and the refusal is a
-/// closed receiver rather than a silent empty channel.
+/// Membership and FIFO eviction remain exact at the bounded fence seam.
 #[test]
 fn a_fence_lookups_stay_cheap_enough_to_hold_under_the_map_lock() {
-    let _serial = fanout_lock();
-    // The lookup runs while `KNOWN_NODES.write()` is held, which is the
-    // lock every PTY write needs. Fill the fence to its cap and assert the
-    // membership answer is still exact at the bound — the HashSet keeps
-    // this O(1); a linear scan over the cap is what this pins against.
-    let target = 8_000_001_i64;
-    retire_pty_channel(target);
-    for offset in 1..=(RETIRED_NODE_MEMORY as i64) {
-        retire_pty_channel(8_100_000 + offset);
+    let mut fence = RetiredFence {
+        ids: HashSet::new(),
+        order: VecDeque::new(),
+    };
+    let target = 0;
+    fence.record(target);
+    for id in 1..RETIRED_NODE_MEMORY as i64 {
+        fence.record(id);
     }
-    assert!(!is_retired(target), "evicted at the cap");
-    retire_pty_channel(target);
-    assert!(is_retired(target), "re-recorded after eviction");
-    assert!(is_retired(8_100_000 + RETIRED_NODE_MEMORY as i64 - 1));
-    assert!(!is_retired(8_100_001), "the oldest of that batch is gone");
+    fence.record(target);
+    assert!(
+        fence.contains(target),
+        "duplicate recording keeps the oldest entry"
+    );
+    assert_eq!(fence.ids.len(), RETIRED_NODE_MEMORY);
+    assert_eq!(fence.order.len(), RETIRED_NODE_MEMORY);
+    fence.record(RETIRED_NODE_MEMORY as i64);
+    assert!(
+        !fence.contains(target),
+        "the oldest entry is evicted past the cap"
+    );
+    assert!(fence.contains(1));
+    fence.record(target);
+    assert!(fence.contains(target), "re-recorded after eviction");
+    assert!(!fence.contains(1), "the next oldest entry is evicted");
+    assert!(fence.contains(RETIRED_NODE_MEMORY as i64));
 }
 
 // --- ProcessRegistryApi mock tests ---
