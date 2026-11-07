@@ -42,7 +42,7 @@ For backend responsibility ownership, see the
 | Git query cache: freshness and retention | [git-query-cache.md](development/git-query-cache.md) | `src/lib/pathInvalidatedCache.ts`, `src/hooks/usePathInvalidatedQuery.ts`, `src-tauri/src/git/status_stats.rs` |
 | Windows, WSL paths, frameless window, shortcuts | [windows.md](development/windows.md) | `src-tauri/src/env/host_path.rs`, `src/components/TitleBar/`, `src/lib/windowFocus.ts` |
 | Startup, profiles, crash recovery, environment detection | [startup-and-profiles.md](development/startup-and-profiles.md) | `src-tauri/src/lib.rs`, `src-tauri/src/instance_guard.rs`, `src-tauri/src/env/environment.rs` |
-| Autopilot circuits | [circuits.md](development/circuits.md) | `src-tauri/src/circuit/`, `src-tauri/src/services/circuit_worker/`, `src-tauri/src/db/circuit/` |
+| Autopilot circuits | [circuits.md](development/circuits.md) | `src-tauri/src/{circuit,db/circuit,services/circuit_control,services/circuit_worker}/` |
 | Coordinator API, LAN/VPN exposure | [remote-access.md](development/remote-access.md) | `src-tauri/src/http/`, `src-tauri/src/coordinator/` |
 | State recovery: snapshot, export, integrity, restore | [state-recovery.md](development/state-recovery.md) | `src-tauri/src/services/state_recovery/` |
 | Rust conventions: DB, threading, caches, guards, wire types | [rust-conventions.md](development/rust-conventions.md) | `src-tauri/src/db/`, `src-tauri/src/commands/`, `src/types/generated/` |

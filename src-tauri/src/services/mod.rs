@@ -3,6 +3,10 @@
 pub mod agent_node;
 pub mod agent_node_discovery;
 pub mod agy_session;
+/// The transport-independent owner of Circuit control workflows (issue
+/// #2673): the desktop commands and the mobile routes are two adapters over
+/// these operations.
+pub mod circuit_control;
 pub(crate) mod circuit_prompt;
 pub mod circuit_trigger;
 pub mod circuit_triggers;

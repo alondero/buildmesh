@@ -2540,6 +2540,10 @@ test('a Rust file attached with #[path] selects the module that owns it', () => 
   assert.equal(rustModule('src-tauri/src/db/create_operation.rs'), 'db::create_operation_tests');
   assert.equal(rustModule('src-tauri/src/db/mesh.rs'), 'db::mesh_tests');
   assert.equal(rustModule('src-tauri/src/services/github/pagination.rs'), 'services::github::pagination_tests');
+  // The Circuit control module's `#[path]` suites (issue #2673).
+  assert.equal(rustModule('src-tauri/src/commands/circuit_tests.rs'), 'commands::circuit::tests');
+  assert.equal(rustModule('src-tauri/src/services/circuit_control/control_tests.rs'), 'services::circuit_control::tests');
+  assert.equal(rustModule('src-tauri/src/services/circuit_control/cancellation_tests.rs'), 'services::circuit_control::cancellation::tests');
   // A production file that carries test items of its own keeps its own
   // module: redirecting it to the sibling module would skip those tests.
   assert.equal(rustModule('src-tauri/src/agent/spawn/launch.rs'), 'agent::spawn::launch');
@@ -2569,6 +2573,9 @@ test('extracted Rust implementations and included worker tests select their cont
     ['git/worktree/maintenance.rs', 'git::worktree'],
     ['db/circuit/evidence/transition.rs', 'db::circuit::evidence'],
     ['services/circuit_worker/tests/result_delivery.rs', 'services::circuit_worker::tests'],
+    ['services/circuit_control/operator.rs', 'services::circuit_control'],
+    ['services/circuit_control/review.rs', 'services::circuit_control'],
+    ['services/circuit_control/catalog.rs', 'services::circuit_control'],
   ];
   for (const [file, owner] of owners) {
     const path = `src-tauri/src/${file}`;

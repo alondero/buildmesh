@@ -328,13 +328,11 @@ fn listing() -> Response {
 fn ownership_read_shares_the_desktop_ledger_and_reports_failed_reads() {
     let _db = db::test_support::isolated();
     assert_eq!(
-        text(&ownerships_reply(
-            circuit_commands::list_circuit_agent_ownerships_now()
-        )),
+        text(&ownerships_reply(circuit_control::list_agent_ownerships())),
         "[]"
     );
     let (node, run) = review_run();
-    let response = ownerships_reply(circuit_commands::list_circuit_agent_ownerships_now());
+    let response = ownerships_reply(circuit_control::list_agent_ownerships());
     assert_eq!(response.status, "200 OK");
     let body = json(&response);
     assert_eq!(body.as_array().unwrap().len(), 1);
