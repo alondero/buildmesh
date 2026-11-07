@@ -201,7 +201,7 @@ pub async fn execute(
             run_blocking("companion_circuits", move || {
                 let meshes = match mesh_id { Some(id) => vec![id], None => db::list_meshes().map_err(|e| e.to_string())?.into_iter().map(|m| m.id).collect() };
                 let mut summaries = Vec::new();
-                for id in meshes { summaries.push(json!({"mesh_id":id,"circuits":crate::commands::circuit::list_circuits_with_runs(id, Some(10))?})); }
+                for id in meshes { summaries.push(json!({"mesh_id":id,"circuits":crate::services::circuit_control::list_circuits_with_runs(id, Some(10))?})); }
                 Ok(json!(summaries))
             }).await
         }

@@ -18,7 +18,7 @@ pub async fn labels(req: &ParsedRequest) -> Response {
         let autopilot_triggers = crate::commands::run_blocking("issue_label_triggers", move || {
             Ok(label_triggers(
                 mesh_id,
-                crate::commands::circuit::list_circuits(mesh_id)?,
+                crate::services::circuit_control::list_circuits(mesh_id)?,
             ))
         })
         .await?;

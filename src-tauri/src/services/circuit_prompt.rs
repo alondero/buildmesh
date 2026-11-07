@@ -152,7 +152,7 @@ pub(crate) fn initial_delivery_uncertain(
     match prompt_delivery::park_initial(fence, reason) {
         Ok(true) => {
             crate::commands::attention::mark_attention(agent, app);
-            crate::commands::circuit::emit_run_updated(Some(app), fence.run_id, "running");
+            crate::services::circuit_worker::emit_run_updated(Some(app), fence.run_id, "running");
             crate::services::circuit_worker::wake_circuit_worker();
             true
         }

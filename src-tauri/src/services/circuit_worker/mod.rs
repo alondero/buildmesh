@@ -1954,6 +1954,23 @@ pub struct CircuitRunUpdatedPayload {
     pub state: String,
 }
 
+/// Tell the desktop windows a run changed under them.
+///
+/// The worker owns the payload, so it owns the emit too. `None` is a process
+/// whose app handle is not installed yet, which has no window to tell — the
+/// mobile HTTP routes share this with the desktop commands.
+pub fn emit_run_updated(app: Option<&AppHandle>, run_id: i64, state: &str) {
+    if let Some(app) = app {
+        let _ = app.emit(
+            "circuit-run-updated",
+            CircuitRunUpdatedPayload {
+                run_id,
+                state: state.into(),
+            },
+        );
+    }
+}
+
 /// The mesh-wide "Dismiss all (N)" acknowledgement. `changed` is the number of
 /// runs actually stamped, so a client showing a confirmation can report the
 /// real count instead of the count it predicted before the call.

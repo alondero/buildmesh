@@ -53,7 +53,7 @@ pub fn get_worktree_close_safety(session_id: i64) -> Result<WorktreeCloseSafety,
 /// [`delete`] directly so successful wrap-up does not cancel its own run.
 pub fn close(session_id: i64, remove_worktree: bool) -> Result<(), AgentNodeError> {
     for run_id in db::live_circuit_runs_for_agent(session_id)? {
-        crate::commands::circuit::cancel_circuit_run_for_agent_close(
+        crate::services::circuit_control::cancel_run_for_agent_close(
             crate::http::app_handle(),
             run_id,
             session_id,

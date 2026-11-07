@@ -6,8 +6,15 @@
 //! actions a person can take on each. The `POST /api/circuit-runs/{id}/...`
 //! routes call the same implementation as the desktop commands, so the phone is
 //! held to the eligibility the desktop run card is: Run Recovery for a review
-//! approval, a pull-request lookup or a spawn is refused by
-//! `recover_failed_circuit_run`, not by this file remembering to.
+//! approval, a pull-request lookup or a spawn is refused by the control
+//! module's recovery operation, not by this file remembering to.
+//!
+//! The shared implementation is [`crate::services::circuit_control`] (issue
+//! #2673). This file is an adapter: it authenticates, parses, checks that the
+//! body names the run in the path, offloads the blocking work, and converts a
+//! typed failure into a status. The operation itself — the durable write, the
+//! worker wake and the update the windows need — belongs to the control
+//! module, so the phone and the desktop follow one implementation.
 //!
 //! The run id lives in the path. A body that names a different run is a client
 //! bug and is refused rather than silently resolved in favour of either id.
@@ -17,7 +24,7 @@
 //! `reply` turns the typed result into a status. The handler only joins them
 //! across the `run_blocking_typed` thread hop.
 
-use crate::commands::circuit as circuit_commands;
+use crate::commands::circuit::CircuitAgentOwnership;
 use crate::db;
 use crate::db::circuit::evidence::CheckpointRequest;
 use crate::db::circuit::node_run::{self, NodeCircuitRun};
@@ -25,6 +32,7 @@ use crate::db::circuit::step_recovery::RecoveryRequest;
 use crate::http::response::Response;
 use crate::http::router::ParsedRequest;
 use crate::http::state;
+use crate::services::circuit_control;
 
 #[derive(Debug, serde::Serialize, ts_rs::TS)]
 #[ts(export, export_to = "NodeReviewOption.ts")]
@@ -140,7 +148,7 @@ fn start_review_core_with(
     } else {
         None
     };
-    crate::commands::circuit::trigger_circuit_from_node_now_with(
+    circuit_control::start_review(
         store.or(default_store.as_ref()),
         state::app_handle(),
         node_id,
@@ -290,9 +298,7 @@ pub async fn list(_req: &ParsedRequest) -> Response {
     )
 }
 
-fn ownerships_reply(
-    rows: Result<Vec<circuit_commands::CircuitAgentOwnership>, crate::db::DbError>,
-) -> Response {
+fn ownerships_reply(rows: Result<Vec<CircuitAgentOwnership>, crate::db::DbError>) -> Response {
     match rows {
         Ok(rows) => match serde_json::to_string(&rows) {
             Ok(body) => Response::json("200 OK", body),
@@ -307,7 +313,7 @@ pub async fn ownerships(_req: &ParsedRequest) -> Response {
     ownerships_reply(
         crate::commands::run_blocking_typed::<_, crate::db::DbError, _>(
             "http_circuit_agent_ownerships",
-            circuit_commands::list_circuit_agent_ownerships_now,
+            circuit_control::list_agent_ownerships,
         )
         .await,
     )
@@ -321,7 +327,7 @@ fn approve_core(run_id: i64, node_id: String) -> Result<(), ActError> {
     ensure_run(run_id)?;
     // A refusal stays a `409`; a busy database is transient and earns a `503`
     // (issue #1533). The typed error is what tells them apart.
-    circuit_commands::approve_circuit_step_now(run_id, node_id).map_err(|error| {
+    circuit_control::approve_step(run_id, node_id).map_err(|error| {
         if error.is_busy() {
             ActError::Unavailable(error)
         } else {
@@ -353,8 +359,9 @@ fn outcome_request(req: &ParsedRequest) -> Result<CheckpointRequest, Response> {
 fn outcome_core(request: &CheckpointRequest) -> Result<(), ActError> {
     ensure_run(request.run_id)?;
     // A refusal stays a `409`; a busy database is transient and earns a `503`
-    // (issue #1533).
-    circuit_commands::record_circuit_outcome_now(request).map_err(|error| {
+    // (issue #1533). The operation owns the wake and the update the windows
+    // need, so this adapter only converts the outcome.
+    circuit_control::record_outcome(state::app_handle(), request).map_err(|error| {
         if error.is_busy() {
             ActError::Unavailable(error)
         } else {
@@ -376,9 +383,6 @@ pub async fn outcome(req: &ParsedRequest) -> Response {
         outcome_core(&request)
     })
     .await;
-    if result.is_ok() {
-        circuit_commands::emit_run_updated(state::app_handle(), run_id, "running");
-    }
     reply(run_id, result)
 }
 
@@ -391,8 +395,9 @@ fn recover_request(req: &ParsedRequest) -> Result<RecoveryRequest, Response> {
 fn recover_core(request: &RecoveryRequest) -> Result<(), ActError> {
     ensure_run(request.run_id)?;
     // A refusal stays a `409`; a busy database is transient and earns a `503`
-    // (issue #1533).
-    circuit_commands::recover_failed_circuit_run_now(request).map_err(|error| {
+    // (issue #1533). The operation owns the wake and the update the windows
+    // need, so this adapter only converts the outcome.
+    circuit_control::recover_run(state::app_handle(), request).map_err(|error| {
         if error.is_busy() {
             ActError::Unavailable(error)
         } else {
@@ -413,9 +418,6 @@ pub async fn recover(req: &ParsedRequest) -> Response {
         recover_core(&request)
     })
     .await;
-    if result.is_ok() {
-        circuit_commands::emit_run_updated(state::app_handle(), run_id, "pending");
-    }
     reply(run_id, result)
 }
 
@@ -423,7 +425,7 @@ fn cancel_core(run_id: i64) -> Result<(), ActError> {
     ensure_run(run_id)?;
     // A cancel failure stays a `500`; a busy database is transient and earns
     // a `503` (issue #1533).
-    circuit_commands::cancel_circuit_run_now(state::app_handle(), run_id).map_err(|error| {
+    circuit_control::cancel_run(state::app_handle(), run_id).map_err(|error| {
         if error.is_busy() {
             ActError::Unavailable(error)
         } else {

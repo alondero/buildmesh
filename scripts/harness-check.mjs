@@ -211,6 +211,12 @@ export const RUST_PATH_INCLUDES = {
   // `startup/webview_data.rs`, so the tests run under
   // `startup::webview_data::tests`, not under a module named after the file.
   'src-tauri/src/startup/webview_data_tests.rs': 'startup::webview_data::tests',
+  // The Circuit control module (issue #2673). The command adapter's suite and
+  // the control module's suites are `#[path]`-included siblings, so their
+  // tests run under the module that declares them.
+  'src-tauri/src/commands/circuit_tests.rs': 'commands::circuit::tests',
+  'src-tauri/src/services/circuit_control/control_tests.rs': 'services::circuit_control::tests',
+  'src-tauri/src/services/circuit_control/cancellation_tests.rs': 'services::circuit_control::cancellation::tests',
 };
 
 // A Rust production file whose tests live in a sibling `<stem>_tests` module
@@ -267,6 +273,14 @@ export const RUST_SIBLING_TESTS = {
   'src-tauri/src/preferences/secrets.rs': 'preferences::tests::secrets_tests',
   'src-tauri/src/preferences/storage.rs': 'preferences::tests::storage_tests',
   'src-tauri/src/preferences/store.rs': 'preferences::tests::store_tests',
+  // The Circuit control module (issue #2673) keeps its contract tests in the
+  // suite the module root declares, so an edit to a private child still runs
+  // that suite rather than a filter that selects nothing.
+  'src-tauri/src/services/circuit_control/mod.rs': 'services::circuit_control',
+  'src-tauri/src/services/circuit_control/catalog.rs': 'services::circuit_control',
+  'src-tauri/src/services/circuit_control/operator.rs': 'services::circuit_control',
+  'src-tauri/src/services/circuit_control/review.rs': 'services::circuit_control',
+  'src-tauri/src/services/circuit_control/cancellation.rs': 'services::circuit_control',
 };
 
 // Private implementations keep their contract tests at the owning facade.
