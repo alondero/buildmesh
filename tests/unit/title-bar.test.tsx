@@ -399,7 +399,7 @@ describe('TitleBar (bespoke window chrome)', () => {
         const buttons = within(panel).getAllByRole('button');
         expect(buttons.map((button) => button.querySelector('.font-medium')?.textContent)).toEqual([
           'Project Files', 'Agent Changes', 'Project Settings', 'Repository',
-          'GitHub Issues', 'Pull Requests', 'Circuits', 'Agent History', 'Notes',
+          'GitHub Issues', 'GitHub Pull Requests', 'Circuits', 'Agent History', 'Notes',
         ]);
         for (const button of buttons) {
           expect(button.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true');
