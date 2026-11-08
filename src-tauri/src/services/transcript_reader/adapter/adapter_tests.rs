@@ -1,5 +1,20 @@
 use std::path::Path;
 
+/// The capability flag, not just the default `None`, is the contract: the
+/// stalled-task probe gates on it before any location or open work, so a reader
+/// that implements the method must say so here.
+#[test]
+fn only_minimax_code_observes_background_tasks() {
+    for reader in crate::services::transcript_reader::adapter::registered() {
+        assert_eq!(
+            reader.observes_background_tasks(),
+            reader.id() == "mcode",
+            "{}",
+            reader.id()
+        );
+    }
+}
+
 #[test]
 fn only_minimax_code_declares_the_idle_wake_up_gap() {
     // The nudge is a MiniMax Code behaviour, not a Circuit-wide rule: every
