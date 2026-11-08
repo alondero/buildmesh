@@ -12,7 +12,7 @@
 //! data back.
 
 use crate::commands::git::{GitStatus, GitSummary};
-use crate::models::DiffResult;
+use crate::models::{DiffCounts, DiffResult};
 use tauri::command;
 
 /// Diff two files on disk.
@@ -80,6 +80,22 @@ pub async fn diff_node_file_against_base(
         crate::diff::node_file_change_set(node_id, &file_path)
             .map(|files| DiffResult { files })
             .map_err(|error| error.to_string())
+    })
+    .await
+}
+
+/// The total added/removed lines in an Agent Node's change set.
+///
+/// The turn-finished banner's read (issue #2726): same merge-base baseline,
+/// file walk, binary classification and line counts as
+/// `diff_node_against_base`, without constructing hunks or running syntect.
+// Offloaded via `run_blocking` — the walk still reads repository content.
+// Issue #1181: same per-node cancel plumbing; the banner's AbortSignal drops
+// a stale local result, and a fresh request for the node stops a prior walk.
+#[command]
+pub async fn diff_node_counts_against_base(node_id: i64) -> Result<DiffCounts, String> {
+    crate::commands::run_blocking("diff_node_counts_against_base", move || {
+        crate::diff::node_change_counts(node_id).map_err(|error| error.to_string())
     })
     .await
 }

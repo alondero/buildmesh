@@ -25,6 +25,9 @@ static THEME_SET: Lazy<ThemeSet> = Lazy::new(ThemeSet::load_defaults);
 
 /// Highlight a string with syntect, returning HTML
 pub fn highlight_content(content: &str, path: &str) -> String {
+    #[cfg(test)]
+    // allow-test-in-production: the highlight counter is the seam the counts-only read is measured with.
+    super::work_metrics::side_highlight();
     let ext = ext_for_path(path);
     let syntax = SYNTAX_SET
         .find_syntax_by_extension(&ext)
@@ -69,6 +72,9 @@ pub fn highlight_group_lines(group: &[DiffLine], path: &str) -> Vec<String> {
     use syntect::easy::HighlightLines;
     use syntect::html::{styled_line_to_highlighted_html, IncludeBackground};
 
+    #[cfg(test)]
+    // allow-test-in-production: the highlight counter is the seam the counts-only read is measured with.
+    super::work_metrics::line_highlight();
     let ext = ext_for_path(path);
     let syntax = SYNTAX_SET
         .find_syntax_by_extension(&ext)

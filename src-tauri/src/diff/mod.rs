@@ -40,9 +40,52 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::git::state::{ChangedFile, StatusSummary};
-use crate::models::{DiffResult, FileDiff};
+use crate::models::{DiffCounts, DiffResult, FileDiff};
 
 use cancel::DIFF_CANCELLED;
+
+/// Test-only counters for the work a diff read performs (issue #2726).
+///
+/// The banner must read line totals without constructing a hunk or running a
+/// syntax highlight. These counters are the seam its work-counter test reads,
+/// so "discard the full diff later" cannot masquerade as "never built it".
+#[cfg(test)]
+// allow-test-in-production: the counters are the seam the counts-only banner test reads.
+pub(crate) mod work_metrics {
+    use std::cell::Cell;
+
+    thread_local! {
+        static COUNTS: Cell<[usize; 3]> = const { Cell::new([0; 3]) };
+    }
+
+    fn increment(index: usize) {
+        COUNTS.with(|counts| {
+            let mut value = counts.get();
+            value[index] += 1;
+            counts.set(value);
+        });
+    }
+
+    /// A hunk was constructed.
+    pub fn hunk() {
+        increment(0);
+    }
+
+    /// A whole-hunk old/new HTML side was highlighted.
+    pub fn side_highlight() {
+        increment(1);
+    }
+
+    /// A per-line highlight pass ran.
+    pub fn line_highlight() {
+        increment(2);
+    }
+
+    /// `[hunks, side highlights, line highlights]` since the last read.
+    pub fn take() -> [usize; 3] {
+        COUNTS.with(|counts| counts.replace([0; 3]))
+    }
+}
 
 /// Why a diff read failed.
 #[derive(Debug)]
@@ -170,6 +213,23 @@ pub fn node_changed_files(node_id: i64) -> Result<Vec<ChangedFile>, DiffError> {
 pub fn node_changed_summary(node_id: i64) -> Result<StatusSummary, DiffError> {
     let files = node_changed_files(node_id)?;
     Ok(crate::git::state::changed_files_summary(&files))
+}
+
+/// The total added/removed lines in an Agent Node's change set.
+///
+/// This is the turn-finished banner's read. It walks the same merge-base
+/// change set and counts with the same line-splitting rules as
+/// [`node_change_set`], but it never groups lines into hunks or runs syntect
+/// — the banner shows only two numbers (issue #2726). A fresh request for
+/// the same node cancels the prior walk through the same per-node registry.
+pub fn node_change_counts(node_id: i64) -> Result<DiffCounts, DiffError> {
+    let token = cancel::acquire_diff_cancel(node_id);
+    let _guard = cancel::DiffCancelGuard::new(node_id, Arc::clone(&token));
+    if token.load(Ordering::SeqCst) {
+        return Err(DiffError::Cancelled);
+    }
+    let baseline = node_baseline(node_id)?;
+    engine::diff_counts_against_base(&baseline.repo_path, &baseline.base_ref, Some(&token))
 }
 
 /// The change set of a node, optionally restricted to one path.

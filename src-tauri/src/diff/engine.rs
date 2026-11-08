@@ -6,12 +6,13 @@
 //! `CONTEXT_LINES` grouping, the same escaping rules and the same hunk
 //! headers.
 
+use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
 use difference_rs::{Changeset, Difference};
 
 use crate::env::to_host_path;
-use crate::models::{DiffHunk, DiffLine, DiffResult, FileDiff};
+use crate::models::{DiffCounts, DiffHunk, DiffLine, DiffResult, FileDiff};
 
 use super::cancel::cancel_requested;
 use super::highlight::{highlight_content, highlight_group_lines};
@@ -73,6 +74,26 @@ pub fn compute_file_diff(old_content: &str, new_content: &str) -> Vec<DiffLine> 
         }
     }
     lines
+}
+
+/// Count the added and removed lines between two texts.
+///
+/// Uses the same `difference_rs` line split as [`compute_file_diff`], so a
+/// caller that only needs the two totals gets exactly the counts the full
+/// diff reports — without allocating a `DiffLine` for every line.
+pub fn count_file_changes(old_content: &str, new_content: &str) -> (usize, usize) {
+    let changeset = Changeset::new(old_content, new_content, "\n");
+    let mut additions = 0usize;
+    let mut deletions = 0usize;
+
+    for diff in changeset.diffs {
+        match diff {
+            Difference::Same(_) => {}
+            Difference::Add(text) => additions += text.lines().count(),
+            Difference::Rem(text) => deletions += text.lines().count(),
+        }
+    }
+    (additions, deletions)
 }
 
 /// Build highlighted old/new content strings from diff lines
@@ -151,6 +172,9 @@ pub fn group_into_hunks(lines: &[DiffLine], context: usize) -> Vec<Vec<DiffLine>
 /// Build a single DiffHunk for a group of diff lines, computing syntax
 /// highlighting and hunk header metadata (old_start / new_start).
 pub fn build_hunk(group: &[DiffLine], highlight_path: &str) -> DiffHunk {
+    #[cfg(test)]
+    // allow-test-in-production: the hunk counter is the seam the counts-only read is measured with.
+    super::work_metrics::hunk();
     let (old_highlighted, new_highlighted) = build_sides(group);
     let old_hl = highlight_content(&old_highlighted, highlight_path);
     let new_hl = highlight_content(&new_highlighted, highlight_path);
@@ -172,6 +196,20 @@ pub fn build_hunk(group: &[DiffLine], highlight_path: &str) -> DiffHunk {
         lines: group.to_vec(),
         lines_highlighted,
     }
+}
+
+/// Read a changed file's working-tree bytes and decide whether the delta is
+/// binary.
+///
+/// Both the full diff and the counts-only read use this, so they classify the
+/// same files as binary from the same three signals: libgit2's own verdict,
+/// a NUL in the current bytes, and a NUL in the baseline text.
+fn entry_content(root: &Path, entry: &crate::git::diff::DiffEntry) -> (Option<Vec<u8>>, bool) {
+    let raw = std::fs::read(root.join(&entry.path)).ok();
+    let is_binary = entry.binary
+        || raw.as_ref().map(|b| b.contains(&0)).unwrap_or(false)
+        || entry.old_content.as_bytes().contains(&0);
+    (raw, is_binary)
 }
 
 /// Diff the working directory against the merge-base with `base_ref`, so the
@@ -218,16 +256,11 @@ pub fn diff_against_base(
         if cancel_requested(cancel) {
             return Err(DiffError::Cancelled);
         }
+        let (raw, is_binary) = entry_content(&root, &entry);
         let rel = entry.path;
         let status = entry.status;
         let old_path = entry.old_path;
         let old_content = entry.old_content;
-
-        // New side is the current bytes on disk (absent for deletions).
-        let raw = std::fs::read(root.join(&rel)).ok();
-        let is_binary = entry.binary
-            || raw.as_ref().map(|b| b.contains(&0)).unwrap_or(false)
-            || old_content.as_bytes().contains(&0);
 
         if is_binary {
             files.push(FileDiff {
@@ -277,4 +310,46 @@ pub fn diff_against_base(
 
     files.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(DiffResult { files })
+}
+
+/// Count the added and removed lines against the merge-base with `base_ref`.
+///
+/// This is [`diff_against_base`] without the hunk construction and syntax
+/// highlighting: same baseline, same delta walk, same binary classification,
+/// same `difference_rs` line split and counts. It exists for the
+/// turn-finished banner, which displays only the two totals (issue #2726).
+///
+/// `cancel` is polled at every file boundary, exactly like the full walk.
+pub fn diff_counts_against_base(
+    repo_path: &str,
+    base_ref: &str,
+    cancel: Option<&AtomicBool>,
+) -> Result<DiffCounts, DiffError> {
+    let host = to_host_path(repo_path);
+    let plan = crate::git::diff::diff_plan(
+        &host,
+        &crate::git::state::Baseline::BaseRef(base_ref.to_string()),
+        None,
+    )
+    .map_err(|e| DiffError::Git(e.to_string()))?;
+    let root = plan.root;
+    let mut counts = DiffCounts::default();
+
+    for entry in plan.entries {
+        if cancel_requested(cancel) {
+            return Err(DiffError::Cancelled);
+        }
+        let (raw, is_binary) = entry_content(&root, &entry);
+        if is_binary {
+            continue;
+        }
+        let new_content = raw
+            .map(|b| String::from_utf8_lossy(&b).to_string())
+            .unwrap_or_default();
+        let (additions, deletions) = count_file_changes(&entry.old_content, &new_content);
+        counts.additions += additions;
+        counts.deletions += deletions;
+    }
+
+    Ok(counts)
 }

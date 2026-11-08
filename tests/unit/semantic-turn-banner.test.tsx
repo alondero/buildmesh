@@ -1,5 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { invoke } from '@tauri-apps/api/core';
 import { describe, expect, it, vi } from 'vitest';
 import { SemanticTurnBanner } from '../../src/components/AgentNodeView/SemanticTurnBanner';
 
@@ -60,5 +61,21 @@ describe('SemanticTurnBanner', () => {
     await user.keyboard('{Enter}');
     expect(onFinish).toHaveBeenCalled();
     expect(screen.getByRole('button', { name: 'Continue (Enter)' })).toBeTruthy();
+  });
+
+  it('reads banner totals from the counts-only command, not the full diff', async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({ additions: 12, deletions: 3 });
+    render(
+      <SemanticTurnBanner
+        turn={{ node_id: 11, kind: 'turn_finished', description: 'Tightened the parser.' }}
+        isActive
+        onResolve={vi.fn()}
+        onFinish={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText('Tightened the parser. (+12 -3)')).toBeTruthy();
+    expect(invoke).toHaveBeenCalledWith('diff_node_counts_against_base', { nodeId: 11 });
+    expect(invoke).not.toHaveBeenCalledWith('diff_node_against_base', expect.anything());
   });
 });

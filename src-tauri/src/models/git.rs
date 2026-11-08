@@ -20,6 +20,22 @@ pub struct DiffResult {
     pub files: Vec<FileDiff>,
 }
 
+/// The total added and removed lines in a change set.
+///
+/// This is the turn-finished banner's read (issue #2726): the same counts the
+/// full diff reports, without its hunks or highlighted HTML.
+///
+/// Generated to src/types/generated/DiffCounts.ts. `usize` counters carry
+/// `#[ts(as = "i32")]` so they emit `number`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "DiffCounts.ts")]
+pub struct DiffCounts {
+    #[ts(as = "i32")]
+    pub additions: usize,
+    #[ts(as = "i32")]
+    pub deletions: usize,
+}
+
 /// A single file diff.
 ///
 /// Generated to src/types/generated/FileDiff.ts (issue #404). `usize`

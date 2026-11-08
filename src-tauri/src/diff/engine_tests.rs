@@ -8,8 +8,10 @@ use std::sync::Arc;
 
 use crate::diff::cancel::{cancel_poll_count, set_cancel_poll_probe, DIFF_CANCELLED};
 use crate::diff::engine::{
-    build_hunk, build_sides, compute_file_diff, diff_against_base, group_into_hunks, CONTEXT_LINES,
+    build_hunk, build_sides, compute_file_diff, count_file_changes, diff_against_base,
+    diff_counts_against_base, group_into_hunks, CONTEXT_LINES,
 };
+use crate::diff::work_metrics;
 use crate::diff::{changed_files_at, file_against_head};
 use crate::env::test_helpers::{commit_file, init_repo_with_commit, repo_is_dirty, TestDir};
 use crate::models::{DiffLine, DiffResult};
@@ -612,6 +614,147 @@ fn diff_against_base_flags_binary_without_hunks() {
     let bin = result.files.iter().find(|f| f.path == "blob.bin").unwrap();
     assert!(bin.binary, "binary file should be flagged");
     assert!(bin.hunks.is_empty(), "binary file must not dump byte hunks");
+}
+
+/// The counts helper uses the same line-splitting rules as the full diff,
+/// including a file whose last line has no trailing newline.
+#[test]
+fn count_file_changes_matches_the_line_diff_counts() {
+    for (old, new) in [
+        ("", ""),
+        ("", "one\ntwo\n"),
+        ("one\ntwo\n", "one\ntwo\nthree\n"),
+        ("one\ntwo\nthree\n", "one\nTWO\nthree\n"),
+        ("one\ntwo\nthree\n", "one\n"),
+        ("one\nlast", "one\nlast\n"),
+        ("one\nlast\n", "one\nlast"),
+        ("one\r\ntwo\r\n", "one\r\nTWO\r\n"),
+    ] {
+        let lines = compute_file_diff(old, new);
+        let additions = lines.iter().filter(|line| line.line_type == "add").count();
+        let deletions = lines
+            .iter()
+            .filter(|line| line.line_type == "remove")
+            .count();
+        assert_eq!(
+            count_file_changes(old, new),
+            (additions, deletions),
+            "counts must match the full line diff for {old:?} -> {new:?}"
+        );
+    }
+}
+
+/// Issue #2726: the banner's counts-only read must report exactly the totals
+/// the full diff reports, for committed and uncommitted work, staged and
+/// unstaged edits, additions, deletions, modifications, a rename, an
+/// untracked file and a binary file — while doing none of the hunk or
+/// highlight work. That last part is what distinguishes this read from
+/// fetching the full diff and discarding all but its counts.
+#[test]
+fn counts_against_base_match_full_diff_without_hunk_or_highlight_work() {
+    let tmp = DiffFixture::new();
+    let repo = init_mixed_repo(&tmp);
+
+    // Committed since base: a new file and a rename.
+    std::fs::write(tmp.join("new.txt"), "new\nlines\n").unwrap();
+    std::fs::write(tmp.join("renamed.txt"), "alpha\nbeta\n").unwrap();
+    std::fs::remove_file(tmp.join("rename-me.txt")).unwrap();
+    {
+        let mut index = repo.index().unwrap();
+        index
+            .remove_path(std::path::Path::new("rename-me.txt"))
+            .unwrap();
+        index.add_path(std::path::Path::new("new.txt")).unwrap();
+        index.add_path(std::path::Path::new("renamed.txt")).unwrap();
+        index.write().unwrap();
+    }
+    commit_all(&repo, "agent work");
+
+    // A staged edit, an unstaged edit and deletion, an untracked text file
+    // and a binary file — all since the base.
+    std::fs::write(tmp.join("base.txt"), "one\nTWO\nthree\nstaged\n").unwrap();
+    {
+        let mut index = repo.index().unwrap();
+        index.add_path(std::path::Path::new("base.txt")).unwrap();
+        index.write().unwrap();
+    }
+    std::fs::write(tmp.join("edit.txt"), "one\ntwo\nthree\nfour\nFIVE\n").unwrap();
+    std::fs::remove_file(tmp.join("drop.txt")).unwrap();
+    std::fs::write(tmp.join("untracked.txt"), "u1\nu2\n").unwrap();
+    std::fs::write(tmp.join("blob.bin"), [0u8, 1, 2, 0, 255, 7]).unwrap();
+    drop(repo);
+
+    work_metrics::take();
+    let full = diff_against_base(tmp.to_str().unwrap(), "base", None, None).unwrap();
+    let full_work = work_metrics::take();
+    assert!(
+        full_work[0] > 0 && full_work[1] > 0 && full_work[2] > 0,
+        "precondition: the full diff constructs hunks and highlights both sides, got {full_work:?}"
+    );
+    assert!(
+        full.files.iter().any(|file| file.status == "renamed"),
+        "fixture must include a rename; got {:?}",
+        full.files
+            .iter()
+            .map(|file| (&file.path, &file.status))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        full.files.iter().any(|file| file.binary),
+        "fixture must include a binary file"
+    );
+
+    let counts = diff_counts_against_base(tmp.to_str().unwrap(), "base", None).unwrap();
+    assert_eq!(
+        work_metrics::take(),
+        [0, 0, 0],
+        "the counts-only walk must not construct a hunk or run a highlight"
+    );
+
+    let expected = full.files.iter().fold((0usize, 0usize), |totals, file| {
+        (totals.0 + file.additions, totals.1 + file.deletions)
+    });
+    assert_eq!(
+        (counts.additions, counts.deletions),
+        expected,
+        "counts-only totals must equal the sum of the full diff"
+    );
+    assert!(counts.additions > 0 && counts.deletions > 0);
+}
+
+/// A pre-set cancel flag short-circuits the counts-only walk with the same
+/// sentinel the full walk uses.
+#[test]
+fn diff_counts_against_base_returns_cancelled_when_flag_pre_set() {
+    let tmp = DiffFixture::new();
+    init_repo_with_base(&tmp);
+    std::fs::write(tmp.join("edit.rs"), "fn main() {}\n").unwrap();
+
+    let token = AtomicBool::new(true);
+    let result = diff_counts_against_base(tmp.to_str().unwrap(), "base", Some(&token));
+    assert_eq!(
+        result.as_ref().err().map(|error| error.to_string()),
+        Some(DIFF_CANCELLED.to_string()),
+        "pre-set flag must short-circuit with the cancellation sentinel"
+    );
+}
+
+/// The counts-only read reports the same unavailable-repository error as the
+/// full read, so the banner's enrichment path keeps its current behaviour.
+#[test]
+fn diff_counts_against_base_reports_the_same_error_for_a_missing_repository() {
+    let tmp = DiffFixture::new();
+    let missing = tmp.join("not-a-repository");
+
+    let full_error = diff_against_base(missing.to_str().unwrap(), "base", None, None)
+        .unwrap_err()
+        .to_string();
+    let counts_error = diff_counts_against_base(missing.to_str().unwrap(), "base", None)
+        .unwrap_err()
+        .to_string();
+
+    assert_eq!(counts_error, full_error);
+    assert!(!counts_error.is_empty());
 }
 
 #[test]
