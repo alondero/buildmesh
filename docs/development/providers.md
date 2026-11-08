@@ -43,6 +43,34 @@ OAuth login.
 Never derive remaining allowance from local requests or MSP token/context
 events, and never fold it into a Meta Model API pay-as-you-go wallet.
 
+**OpenCode Go usage.** The native adapter reads
+`GET https://opencode.ai/inference/go/v1/usage`. `usage.rolling`, `.weekly`, and
+`.monthly` supply the 5-hour, Weekly, and Monthly percentages and reset
+datetimes. Preserve those server values; weekly resets are Monday UTC and
+monthly resets follow the subscription anniversary, including its time of day.
+The API may floor percentages where the Console rounds them. See the
+[investigation and authenticated comparison](../research/opencode-go-usage.md).
+
+OpenCode 2's selected `opencode` credential in `opencode.db` supplies the OAuth
+access token or API key plus `metadata.orgID` as `x-opencode-org-id`. Selection
+matches the CLI: active first, then newest creation time and ID. Legacy key
+`configuration` overrides matching metadata. The adapter opens SQLite read-only
+and follows `XDG_DATA_HOME` (default `~/.local/share`) and `OPENCODE_DB` (absolute
+or relative to the `opencode` data directory). Custom channel databases need an
+explicit `OPENCODE_DB`; custom Console hosts are not supported. If there is no
+native Console credential, V1's `auth.json` `opencode-go.key` supplies the bearer.
+A malformed or rejected selected credential does not fall back to another key.
+The salted cache identity includes the token and workspace.
+
+Quota reads do not use Buildmesh's legacy `opencode:console` credential or local
+session costs. Native OAuth renewal stays with OpenCode, which coordinates
+rotating refresh tokens across processes. Expired native sessions return a
+rejected outcome with guidance to open OpenCode and refresh usage. The shared
+meter gate may hide rejected native readings or show a last-known reading.
+Missing auth, rejected access, rate limits,
+transport errors, and malformed quota data use the shared outcome and last-known
+reading paths; a failed read does not manufacture zero usage or reset dates.
+
 **Where a new provider's usage endpoint goes.** The seam is
 `UsageAdapter` (`services/usage/adapter.rs`), and a new provider's file under
 `services/usage/adapters/` owns that provider's whole fetch: the credential
@@ -418,7 +446,7 @@ The Buildmesh-managed OAuth secrets live in Windows Credential Manager under `CR
 - **Known targets** (extend-only — never delete from this list without a migration ticket):
   - `gemini:antigravity` — written by older Antigravity CLIs, read-only here. Current CLI (1.2+) refreshes `<agy_dir>/antigravity-oauth-token` instead and leaves this target stale; the Usage Meter prefers the file, then this keyring, and retries the alternate source on HTTP 401/403.
   - `buildmesh:<profile>:provider-account:<account id>` and `buildmesh:<profile>:minimax-api-key` — a provider account's API key and the deprecated flat MiniMax key, written by `preferences::secrets` (issue #830). The blob is the key as UTF-8 text. `<profile>` is the app-data directory's leaf, i.e. the bundle identifier, so the stable and dev builds (same OS user, one vault) never read or delete each other's keys. Never rename either segment without a migration: the entry name is the only link from an account to its key.
-  - `opencode:console` — written by Buildmesh for the OpenCode Go OAuth dance (issue #956). Persisted blob is JSON `{ access_token, workspace_id, refresh_token, expires_at, server_id }` (RFC-3339 string for `expires_at`, mirroring the original #957 fixture so the live probe still parses; the `server_id` field is the SolidStart deployment id captured into the `X-Server-Id` header).
+  - `opencode:console` — retained for the legacy Buildmesh Console account flow (issue #956). Persisted blob is JSON `{ access_token, workspace_id, refresh_token, expires_at, server_id }`. Go usage now reads the native CLI credential described above; this blob does not authenticate the meter.
 
 - **Provider API keys** (`src-tauri/src/preferences/secrets.rs`, issue #830) are ordinary `api_key` / `minimax_api_key` fields in memory and never fields on disk. `storage::write_to_disk` calls `secrets::externalize` (store each key, blank the ones the store accepted, delete the entry of a cleared key or removed account); `storage::read_state` calls `secrets::hydrate_json` through `recovery::classify_with` **before** the read-time migrations, because ADR-0025's migration creates a pairing only for an account that has a key. Rules a change must keep: a key leaves the file only after the store accepted it (no store means it stays in the file, never lost); a key present in the file wins over the stored one (hand edit, restored backup); a file from an older build is scrubbed in place on first load (`secrets::scrub_file`: only the secret fields change, no shape migration and no fabricated backup, preserving the read-never-persists rule), and so is its `.bak`; a recovery reset deletes nothing; a full-fidelity bundle (`state_recovery::build_bundle`) inlines the keys back through `secrets::with_keys_inlined`. Non-Windows builds have no store, so keys stay in the file. Tests use a per-thread in-memory vault (`secrets::test_support`), so they never touch the real Credential Manager; the OS wrapper has its own round-trip test that skips where Credential Manager is unreachable.
 
@@ -435,7 +463,7 @@ The Buildmesh-managed OAuth secrets live in Windows Credential Manager under `CR
   1. **`GetLastError` is mandatory after a `CredDeleteW` FALSE return.** Microsoft conflates "didn't exist" with "real failure" by returning FALSE for both, so a TRUE-only check would shadow the idempotent revoke the Settings UI relies on.
   2. **`from_raw_parts` requires non-null even for length 0.** Guard with `if cred.credential_blob.is_null() || cred.credential_blob_size == 0` to avoid UB on a freshly-written credential whose blob pointer hasn't been allocated.
   3. **`CRED_PERSIST_SESSION` is wrong for OAuth tokens.** A credential with this flag is gone after logoff — fine for session-only secrets (the kind cwrap adapters carry), wrong for a long-lived refresh token.
-  4. **The Rust blob format is implicit.** Buildmesh's parser (`services::opencode_oauth::parse_opencode_console_full_credential`) currently shapes a 5-field blob: `access_token` + `workspace_id` + `refresh_token` + `expires_at` + `server_id`. The first two are required for the live probe (see `parse_opencode_console_full_credential`); the last three ride along for the refresh path and the `X-Server-Id` header fallback. Any future extension that adds a sixth field must update both the writer (`services::opencode_oauth::persist_token_response`) AND the parsers atomically, or the live probe will silently drop the field (serde defaults — `skip_serializing_if = "Option::is_none"` on the writer + `#[serde(default)]` on the reader means both sides tolerate missing keys but never notice renamed ones). `parse_full_credential_round_trips_all_five_fields` pins the contract; CI's `git diff --exit-code src/types/generated/` is the wire-shape gate, but not the Rust-side wire-shape gate — keep both directories in sync by hand until both ts-rs exports and Rust struct shape are auto-derived.
+  4. **Keep legacy blob fields round-trippable.** `services::opencode_oauth::parse_opencode_console_full_credential` retains `access_token`, `workspace_id`, `refresh_token`, `expires_at`, and `server_id` for legacy Console commands. `parse_full_credential_round_trips_all_five_fields` pins this record. These fields no longer select or authenticate the Go Usage Meter.
 
 ## Agent runtime PATH on macOS and Linux
 

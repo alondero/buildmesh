@@ -6,14 +6,11 @@
 //! - the `opencode:console` Windows Credential Manager target name (single
 //!   source of truth — also referenced by `read_opencode_console_credential`
 //!   in `services::usage` and by `commands::opencode_oauth::revoke_*`),
-//! - the lazy-refresh TTL (`REFRESH_TTL = 300s`, aligned with `CACHE_TTL` in
-//!   `services::usage`),
 //!
 //! Siblings this module hosts:
 //! - `start_device_flow` / `poll_for_token_once` — RFC 8628 device
 //!   authorization; the poll is stateless (React owns the in-flight window,
 //!   issue #956),
-//! - `try_refresh_against` — `refresh_token` → new access_token + expires_at,
 //! - `fetch_workspaces` — `GET /api/user` + `/api/orgs` enumeration,
 //! - `revoke` — `windows_cred::delete(OPENCODE_CONSOLE_CRED_TARGET)`.
 //!
@@ -336,52 +333,9 @@ pub(crate) fn parse_user_workspace(body: &str) -> Result<OpenCodeWorkspace, OAut
     })
 }
 
-/// Refreshes an existing access token against a parameterized
-/// `refresh_url`. Pure HTTP — does NOT read from or write to Windows
-/// Credential Manager; the caller is responsible for both. Production
-/// callers pin `OPENCODE_CONSOLE_HOST + device_flow::TOKEN_PATH` via
-/// [`try_refresh_against`]; tests substitute a loopback `tiny_http` listener so
-/// the full refresh round-trip is exercised without hitting the live
-/// server (issue #971).
-///
-/// The form-encoded request body matches RFC 6749 §6: `grant_type`,
-/// `client_id`, `refresh_token`. Response is the same `TokenResponse`
-/// shape the device-flow dance returns, parsed via
-/// [`parse_token_response`].
-pub(crate) fn try_refresh_against(
-    refresh_url: &str,
-    refresh_token: &str,
-) -> Result<TokenResponse, OAuthError> {
-    let client = blocking_client_builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|e| OAuthError::Transport(format!("refresh client: {e}")))?;
-    let response = client
-        .post(refresh_url)
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .form(&[
-            ("grant_type", "refresh_token".to_string()),
-            ("client_id", OPENCODE_OAUTH_CLIENT_ID.to_string()),
-            ("refresh_token", refresh_token.to_string()),
-        ])
-        .send()
-        .map_err(|e| OAuthError::Transport(format!("/auth/device/token refresh send: {e}")))?;
-    let status = response.status();
-    let body = response
-        .text()
-        .map_err(|e| OAuthError::Transport(format!("/auth/device/token refresh body: {e}")))?;
-    if !status.is_success() {
-        return Err(OAuthError::Shape(format!(
-            "/auth/device/token refresh HTTP {status}: {body}"
-        )));
-    }
-    parse_token_response(&body)
-}
-
 /// Composes the credential blob from a fresh `TokenResponse` and writes
 /// it to the Windows Credential Manager. Used by the device-flow dance
-/// (after `poll_for_token_once` returns a token) and by the refresh path
-/// (after `try_refresh_against` issues a new bundle).
+/// after `poll_for_token_once` returns a token.
 ///
 /// `workspace_id` and `server_id` are no longer in the token response
 /// (verified 2026-07-23 against console.opencode.ai). The caller supplies
@@ -842,14 +796,6 @@ pub(crate) fn poll_for_token_once_against(
 /// `services::opencode_oauth::persist_token_response` refer here.
 pub(crate) const OPENCODE_CONSOLE_CRED_TARGET: &str = "opencode:console";
 
-/// Idle TTL for the lazy refresh strategy (issue #956): a credential within
-/// `REFRESH_TTL` of expiry is treated as fresh *and* a successful live fetch
-/// within the same window short-circuits the next refresh. Mirrors the
-/// `CACHE_TTL` of `services::usage` so the OAuth lifecycle and the cache
-/// lifecycle agree — refreshing at minute N doesn't poison a stale cache hit
-/// at minute N+1.
-pub(crate) const REFRESH_TTL: Duration = Duration::from_secs(300);
-
 /// Tauri event name emitted by the OpenCode OAuth commands after a successful
 /// credential change (sign-in, sign-out, workspace switch). The frontend's
 /// `useOpencodeAccountInvalidation` hook (`src/hooks/useOpencodeAccountInvalidation.ts`)
@@ -858,17 +804,8 @@ pub(crate) const REFRESH_TTL: Duration = Duration::from_secs(300);
 /// `provider-list-changed` pattern (see `useProviderListInvalidation`).
 pub(crate) const OPENCODE_CONSOLE_CHANGED_EVENT: &str = "opencode-console-changed";
 
-/// JSON shape of the credential blob written by the device-flow dance.
-/// `access_token` is the live RPC bearer; `workspace_id` is the
-/// `<account_id>` (`acc_<id>`-prefixed) sourced from `GET /api/user` via
-/// `list_opencode_workspaces` and passed to the `_server billing.get`
-/// body; `refresh_token` + `expires_at` drive the lazy refresh;
-/// `server_id` is the SolidStart deployment id the OAuth device-flow
-/// exchange returns and is consumed by
-/// `services::usage::adapters::opencode::opencode_usage_impl` at the
-/// `X-Server-Id` header
-/// (issue #972) — with a documented legacy default (`OPENCODE_SERVER_ID`)
-/// for blobs written before this field was added by #956.
+/// Credential blob retained for the legacy Buildmesh Console account flow.
+/// Go usage reads the native CLI credential instead of this record.
 ///
 /// All fields are `Option<String>` so a partially-written blob (e.g. before
 /// workspace discovery completes) still round-trips — the higher-level
@@ -978,8 +915,7 @@ pub(crate) fn parse_opencode_console_credential(
 /// credential that's never been refreshed still attempts the live fetch
 /// rather than looping on a "we don't know" answer).
 ///
-/// Cheap pure function used by the lazy-refresh gating: refresh fires when
-/// `is_expired(cached) || cached_age > REFRESH_TTL`.
+/// Used to report the legacy Console account's session status.
 pub(crate) fn cred_is_expired(cred: &OpenCodeConsoleCred, now_unix: i64) -> bool {
     let Some(expires_at) = cred.expires_at.as_deref() else {
         return false;

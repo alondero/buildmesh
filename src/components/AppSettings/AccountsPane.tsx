@@ -21,7 +21,6 @@ import { formatError } from '../../lib/errorUtils';
 import { isSelfAuthId, KEYED_FIRST_CLASS_IDS } from '../../lib/providerClassification';
 import { AccountCard } from './AccountCard';
 import { AddProviderForm } from './AddProviderForm';
-import { OpenCodeAccountCard } from './OpenCodeAccountCard';
 import { SettingsSection } from './SettingsRow';
 import { ResourceLoadStatus } from './ResourceLoadStatus';
 import { useSettingsData } from './SettingsDataContext';
@@ -206,9 +205,13 @@ export function AccountsPane() {
         </div>
       )}
 
-      <div className="pt-6 border-t border-border-subtle space-y-4">
-        <OpenCodeAccountCard />
-      </div>
+      <SettingsSection title="OpenCode Go">
+        <p className="text-sm text-text-secondary">
+          Connect OpenCode Console in OpenCode 2 and select your Go workspace,
+          or connect OpenCode Go in OpenCode 1 with your API key. Usage and reset
+          times appear in the Usage tab automatically.
+        </p>
+      </SettingsSection>
 
       {addingProvider ? (
         <AddProviderForm
