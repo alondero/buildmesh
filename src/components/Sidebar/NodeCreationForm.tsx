@@ -3,6 +3,7 @@ import { type SpawnOption } from '../../lib/groups';
 import { dropdownId } from '../../lib/dropdownId';
 import { isMac } from '../../lib/platform';
 import { SpawnButtonCluster } from './SpawnButtonCluster';
+import { useUIStore } from '../../stores/uiStore';
 
 interface NodeCreationFormProps {
   mesh: Mesh;
@@ -56,6 +57,10 @@ export function NodeCreationForm({
       isOpen={isDropdownOpen}
       isSpawning={isSpawning}
       menuFooter={mesh.use_worktree ? `${modifierKey} spawns in mesh root` : undefined}
+      menuLeadingAction={{ id: `prompt-library-${mesh.id}`, label: 'Spawn from prompt…', onSelect: () => {
+        onToggleDropdown(mesh);
+        useUIStore.getState().openCanvasSpawnMenu(mesh.id, { promptLibrary: true });
+      } }}
       onToggleDropdown={() => onToggleDropdown(mesh)}
       onSpawnDefault={handleSpawnDefault}
       onSelectProvider={(providerId, altKey, configurationId, loginId) =>

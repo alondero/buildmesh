@@ -828,6 +828,22 @@ afterwards.
 
 ## Saved Spawn Configurations
 
+Reusable initial prompts are independent of Launch Configurations. The desktop
+project Spawn Menu opens `PromptLibrary` inside `CanvasSpawnMenu`; built-ins
+live in `src/lib/promptLibrary.ts`, while user prompts live in the profile's
+`AppPreferences.saved_prompts`. `preferences::prompt_library` validates and
+mutates individual prompts through `PreferencesStore::try_update`, preserving
+other preference writes. The three prompt-library commands offload disk work.
+Older preferences acquire an empty collection during read migration. Frontend
+drafts never replace that collection from a stale snapshot after a mutation.
+Launches use `selectProviderForMesh`, forwarding the edited initial prompt,
+configuration, login and worktree choice. Its optional creation callback retains
+the created node in the dialog. A failed launch offers Retry launch with the
+current prompt on that same node and its frozen configuration. A successful
+request can close only the dialog instance it started in. Prompted launches
+exclude Terminal from the picker; the
+backend retains the authoritative initial-prompt capability check.
+
 Companion's AI Assistant selection lives in Provider defaults and uses the
 same `backgroundInferenceOption` UI decoration and `agent::background::resolve_plan`
 backend validation as auto-naming. The selection is stored in

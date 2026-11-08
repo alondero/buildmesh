@@ -1,4 +1,5 @@
 import { _invoke } from './_invoke';
+import type { SavedPrompt } from '../../types/generated/SavedPrompt';
 import { emit } from '@tauri-apps/api/event';
 import { clearDefaultProviderPromises } from '../providerCache';
 import { PROVIDER_LIST_CHANGED_EVENT } from '../streams/providerListStream';
@@ -9,6 +10,11 @@ import type { PreferencesHealth } from '../../types/generated/PreferencesHealth'
 import type { PreferencesStatus } from '../../types/generated/PreferencesStatus';
 import type { RecoveryOutcome } from '../../types/generated/RecoveryOutcome';
 import type { ProbeSpawnPromptDefaults } from '../../types/generated/ProbeSpawnPromptDefaults';
+
+export const listSavedPrompts = () => _invoke<SavedPrompt[]>('list_saved_prompts');
+export const savePrompt = (id: string | null, name: string, body: string) =>
+  _invoke<SavedPrompt>('save_prompt', { id, name, body });
+export const deleteSavedPrompt = (id: string) => _invoke<void>('delete_saved_prompt', { id });
 
 // ── App-wide preferences (`preferences.json`) ──────────────────────────────
 //

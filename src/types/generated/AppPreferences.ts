@@ -7,6 +7,7 @@ import type { PairingVerification } from "./PairingVerification";
 import type { ProviderAccount } from "./ProviderAccount";
 import type { ProviderPairing } from "./ProviderPairing";
 import type { ProxiedProviderOrder } from "./ProxiedProviderOrder";
+import type { SavedPrompt } from "./SavedPrompt";
 import type { SpawnConfiguration } from "./SpawnConfiguration";
 
 /**
@@ -205,4 +206,8 @@ issue_spawn_prompt: string | null,
  * Additive on disk - older `preferences.json` files without it load
  * as `None`.
  */
-pr_spawn_prompt: string | null, };
+pr_spawn_prompt: string | null, 
+/**
+ * User-authored initial prompts, shared across this profile's projects.
+ */
+saved_prompts: Array<SavedPrompt>, };

@@ -126,6 +126,7 @@ interface SpawnButtonClusterProps {
    *  worktree-gated "Alt-click spawns in mesh root" hint the sidebar
    *  passes when `mesh.use_worktree` is true). Omitted everywhere else. */
   menuFooter?: ReactNode;
+  menuLeadingAction?: GroupedProviderMenuProps['leadingAction'];
 }
 
 export function SpawnButtonCluster({
@@ -143,6 +144,7 @@ export function SpawnButtonCluster({
   isSpawning,
   mode = 'spawn',
   menuFooter,
+  menuLeadingAction,
 }: SpawnButtonClusterProps) {
   // Cache the default provider id for the tooltip + quick-spawn icon so
   // we don't refetch on every render. The parent passes a fresh closure
@@ -315,6 +317,7 @@ export function SpawnButtonCluster({
           providers={providers}
           mode={mode}
           footer={menuFooter}
+          leadingAction={menuLeadingAction}
           onSelect={onSelectProvider}
           // Issue #814 — Escape closes the dropdown. The cluster re-uses
           // `onToggleDropdown` because toggling an open cluster is

@@ -32,7 +32,7 @@ export function createCreationSlice(set: SetAgentNodeState, get: GetAgentNodeSta
     }));
   },
 
-  selectProviderForMesh: async (meshId, meshName, meshPath, providerId, useWorktree?: boolean, initialPrompt?: string, configurationId?: string, loginId?: string): Promise<AgentNode> => {
+  selectProviderForMesh: async (meshId, meshName, meshPath, providerId, useWorktree?: boolean, initialPrompt?: string, configurationId?: string, loginId?: string, onCreated?: (node: AgentNode) => void): Promise<AgentNode> => {
     // Create FIRST — only switch active mesh/node if creation succeeded.
     // The order is the invariant: pre-refactor this lived in three sequential
     // store calls in Sidebar.handleSelectProvider (#283), where a future hand
@@ -42,6 +42,8 @@ export function createCreationSlice(set: SetAgentNodeState, get: GetAgentNodeSta
     const { focusNode } = await import('../../lib/navigation');
     const node = await get().createAgentNode(meshId, meshName, meshPath, 'main', providerId, useWorktree, configurationId, initialPrompt, loginId);
     focusNode(node.id, { view: 'mesh', scope: 'node' });
+    // Prompted spawn surfaces retain this node for a retry if launch fails.
+    onCreated?.(node);
     // Explicit create-then-spawn (issue #1413 review): the prompt rides
     // on this call, not a store-side dictionary the Terminal mount
     // later peeks at. `spawnAgent` flips the row to `spawning`

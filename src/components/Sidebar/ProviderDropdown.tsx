@@ -41,6 +41,7 @@ interface ProviderDropdownProps {
   /** Optional footer rendered at the bottom of the menu (e.g. a
    *  worktree-gated modifier hint). Omitted when undefined. */
   footer?: ReactNode;
+  leadingAction?: GroupedProviderMenuProps['leadingAction'];
   /**
    * Issue #814 — stable id used by the parent's trigger button's
    * `aria-controls`. The id is mirrored onto the menu's outer div so the
@@ -52,7 +53,7 @@ interface ProviderDropdownProps {
   menuId?: string;
 }
 
-export function ProviderDropdown({ dropdownKey, providers, onSelect, onClose, menuId, mode, footer }: ProviderDropdownProps) {
+export function ProviderDropdown({ dropdownKey, providers, onSelect, onClose, menuId, mode, footer, leadingAction }: ProviderDropdownProps) {
   // Issue #575 / ADR-0016 — render the harness-grouped, always-expanded
   // Spawn Menu. The backend-derived list is grouped by `group_key`
   // (== `harness_id`): each native harness is a clickable parent, and
@@ -116,7 +117,7 @@ export function ProviderDropdown({ dropdownKey, providers, onSelect, onClose, me
       {/* Issue #814 — forward `onClose` to `GroupedProviderMenu` so its
           keyboard handler (Escape → close) calls the same callback the
           parent's `useClickOutside` and outside-mousedown paths call. */}
-      <GroupedProviderMenu providers={providers} onSelect={onSelect} onClose={onClose} mode={mode} footer={footer} />
+      <GroupedProviderMenu providers={providers} onSelect={onSelect} onClose={onClose} mode={mode} footer={footer} leadingAction={leadingAction} />
     </div>
   );
 }
