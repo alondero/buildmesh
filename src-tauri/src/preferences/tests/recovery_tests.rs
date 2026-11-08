@@ -766,3 +766,60 @@ fn a_corrupt_file_in_one_directory_cannot_affect_another() {
     ));
     let _ = std::fs::remove_dir_all(&broken_dir);
 }
+
+// ---------------------------------------------------------------------------
+// The atomic replacement (issue #2220)
+// ---------------------------------------------------------------------------
+
+/// Issue #2220: the atomic replacement is a `MoveFileExW` with
+/// `MOVEFILE_REPLACE_EXISTING`, and Windows refuses it while the destination
+/// is held by a handle that does not share delete access. A scanner walking
+/// the profile directory is one such holder, and a reader that still has the
+/// file open is another; the settings write used to fail outright with
+/// "Access is denied. (os error 5)" instead of landing.
+///
+/// The replacement must ride out a transient holder: the write lands once the
+/// holder lets go, and the destination is never left half-written.
+///
+/// Windows-only: the refusal is a Windows sharing rule, and on Unix the
+/// rename is atomic and never refused this way.
+#[cfg(windows)]
+#[test]
+fn the_atomic_replacement_rides_out_a_transient_holder() {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::sync::mpsc;
+
+    let dir = test_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("preferences.json");
+    std::fs::write(&path, b"old").unwrap();
+
+    // The holder opens the destination with no sharing at all, so nothing may
+    // delete or replace it while it is open.
+    let (holding_tx, holding_rx) = mpsc::channel();
+    let holder_path = path.clone();
+    let holder = std::thread::spawn(move || {
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&holder_path)
+            .expect("hold the destination open");
+        // The holder is open from here on; the write that follows cannot
+        // replace the destination until it lets go.
+        holding_tx.send(()).expect("announce the holder");
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        drop(held);
+    });
+    holding_rx
+        .recv()
+        .expect("the holder must be open before the write starts");
+
+    recovery::persist_bytes(&path, b"new").expect("the replacement must ride out the holder");
+    holder.join().unwrap();
+
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        b"new",
+        "the replacement must land whole, not half-written"
+    );
+}

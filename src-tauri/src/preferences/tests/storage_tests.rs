@@ -6,7 +6,7 @@
 
 use super::super::model::AppPreferences;
 use super::super::store::PreferencesStore;
-use super::{test_dir, with_store};
+use super::{profile_dir_name, test_dir, test_dir_for, with_store, TEST_DIR_COUNTER};
 
 #[test]
 fn preference_files_are_isolated_between_temp_directories() {
@@ -24,6 +24,57 @@ fn preference_files_are_isolated_between_temp_directories() {
     });
 
     assert_ne!(first_dir, second_dir);
+}
+
+/// Issue #2220: the profile fixture used to name its directories
+/// `buildmesh-prefs-test-<pid>-<counter>`, and Windows recycles process ids.
+/// A run whose pid matched an earlier run's computed the same name and
+/// adopted that run's leftover profile directory — a `preferences.json` it
+/// had not written and would read back as the current state.
+///
+/// The fixture must step around a survivor instead of adopting it.
+#[test]
+fn a_profile_fixture_steps_around_a_directory_an_earlier_run_left_behind() {
+    let id = TEST_DIR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    // An earlier run with the same (recycled) process id left this behind,
+    // under the name that run's fixture computed. This is the name the
+    // fixture would hand out if it were built from the pid alone, so
+    // adopting it would reproduce the reported failure exactly.
+    let legacy =
+        std::env::temp_dir().join(format!("buildmesh-prefs-test-{}-{id}", std::process::id()));
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::write(legacy.join("earlier-run.txt"), "not mine to delete\n").unwrap();
+
+    // This run's own name is occupied too, so the claim has to step around a
+    // survivor rather than adopt it.
+    let survivor = std::env::temp_dir().join(profile_dir_name(id));
+    std::fs::create_dir_all(&survivor).unwrap();
+    std::fs::write(survivor.join("earlier-run.txt"), "not mine to delete\n").unwrap();
+
+    let claimed = test_dir_for(id);
+    assert_ne!(
+        claimed, legacy,
+        "the fixture adopted the directory an earlier run left behind"
+    );
+    assert_ne!(
+        claimed, survivor,
+        "the fixture adopted a directory an earlier run left behind"
+    );
+    assert!(
+        legacy.join("earlier-run.txt").exists(),
+        "claiming a profile directory must not delete a survivor"
+    );
+    assert!(
+        survivor.join("earlier-run.txt").exists(),
+        "claiming a profile directory must not delete a survivor"
+    );
+
+    // The seeded survivors are removed through the retrying helper: a plain
+    // delete can lose the same transient refusal the fixture rides out, and
+    // then this test leaves litter in %TEMP% — the very thing it inspects.
+    let _ = crate::env::test_helpers::remove_dir_all_with_retry(&legacy);
+    let _ = crate::env::test_helpers::remove_dir_all_with_retry(&survivor);
 }
 
 #[test]

@@ -465,13 +465,10 @@ pub(super) fn teardown_incarnation(
     //    `kill_process_tree` is a fallback for the rare spawn case
     //    where job assignment failed; `child.kill` + `try_wait` reap
     //    the shell handle portable-pty owns.
-    if let Some(job) = &agent.job {
-        job.terminate();
-    }
     {
         let mut child = agent.child.lock().unwrap();
         if let Some(pid) = child.process_id() {
-            crate::process_util::kill_process_tree(pid);
+            crate::process_util::kill_process_tree_contained(agent.job.as_ref(), pid);
         }
         child.kill().ok();
         let _ = child.try_wait();

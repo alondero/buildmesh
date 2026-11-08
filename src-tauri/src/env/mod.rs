@@ -77,7 +77,7 @@ pub(crate) fn with_env_vars<T>(
 /// them — `mod tests` items are private to that scope. Kept inside
 /// env/mod.rs rather than a standalone file so the helpers stay
 /// co-located with the production code they exercise.
-#[cfg(test)]
+#[cfg(test)] // allow-test-in-production: the shared fixture helpers several sibling suites claim their scratch directories through.
 pub(crate) mod test_helpers {
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -96,7 +96,7 @@ pub(crate) mod test_helpers {
     /// recycled within seconds, so `_<pid>_<counter>` from a run three days
     /// ago still matched the next run's (issue #1992). Pairing the two makes
     /// the name a function of *this* process instance, not of the pid alone.
-    fn process_token() -> u64 {
+    pub(crate) fn process_token() -> u64 {
         static TOKEN: OnceLock<u64> = OnceLock::new();
         *TOKEN.get_or_init(|| {
             std::time::SystemTime::now()
@@ -115,7 +115,7 @@ pub(crate) mod test_helpers {
     /// survivor is now stepped around rather than destroyed, so the returned
     /// path is one this call created.
     /// `claim_dir_steps_around_a_directory_an_earlier_run_left` pins that.
-    fn claim_dir(parent: &Path, stem: &str) -> std::io::Result<PathBuf> {
+    pub(crate) fn claim_dir(parent: &Path, stem: &str) -> std::io::Result<PathBuf> {
         for attempt in 0..CLAIM_ATTEMPTS {
             let mut name = stem.to_string();
             if attempt > 0 {
@@ -133,6 +133,92 @@ pub(crate) mod test_helpers {
             std::io::ErrorKind::AlreadyExists,
             format!("no free directory for `{stem}` under {}", parent.display()),
         ))
+    }
+
+    /// Claim a directory *name* under `parent` and hand it back **absent**.
+    ///
+    /// Some consumers refuse a path that already exists: libgit2's
+    /// `git_worktree_add` fails with `failed to make directory ...: directory
+    /// exists` (code `Exists`) when the worktree path is present — measured,
+    /// including when the directory is empty (issue #2220). Such a caller
+    /// cannot be handed a directory this process created, so the claim is made
+    /// with the same exclusive `create_dir` [`claim_dir`] uses — which proves
+    /// the name was free and steps around a survivor instead of adopting it —
+    /// and the empty directory is then removed again.
+    ///
+    /// The caller must put [`process_token`] in the stem: the claim is
+    /// exclusive only until the directory is removed, and the token is what
+    /// makes the name a function of this process instance rather than of the
+    /// pid alone.
+    pub(crate) fn claim_dir_name(parent: &Path, stem: &str) -> std::io::Result<PathBuf> {
+        for attempt in 0..CLAIM_ATTEMPTS {
+            let mut name = stem.to_string();
+            if attempt > 0 {
+                name.push('_');
+                name.push_str(&attempt.to_string());
+            }
+            let path = parent.join(&name);
+            match fs::create_dir(&path) {
+                Ok(()) => {
+                    // The claim proved the name was ours; take it back so the
+                    // consumer can create the path itself. If even that is
+                    // blocked the name is not usable, and the next candidate
+                    // is tried.
+                    if fs::remove_dir(&path).is_ok() {
+                        return Ok(path);
+                    }
+                    let _ = fs::remove_dir_all(&path);
+                    continue;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "no free directory name for `{stem}` under {}",
+                parent.display()
+            ),
+        ))
+    }
+
+    /// Remove `path` and everything under it, retrying while Windows is still
+    /// releasing a just-killed process's directory handles.
+    ///
+    /// A fixture that loses that race leaves its directory behind, and the
+    /// leftovers are what a later run collides with (issue #2220). The retry
+    /// rides out the same close-node window production's worktree removal
+    /// rides out; a removal blocked by something still alive still fails, so
+    /// the retry widens the window rather than hiding a real holder.
+    pub(crate) fn remove_dir_all_with_retry(path: &Path) -> std::io::Result<()> {
+        const ATTEMPTS: u32 = 40;
+        const BACKOFF_MS: u64 = 50;
+        let mut attempt = 0;
+        loop {
+            match fs::remove_dir_all(path) {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    // Nothing to remove is success: the directory is already
+                    // gone, which is the state the caller asked for.
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        return Ok(());
+                    }
+                    // Only the transient "still being released" refusal is
+                    // worth another attempt. `ERROR_ACCESS_DENIED` (5),
+                    // `ERROR_SHARING_VIOLATION` (32) and
+                    // `ERROR_LOCK_VIOLATION` (33) are the Windows codes for a
+                    // handle that is on its way out; anything else is reported
+                    // at once rather than retried.
+                    let transient = matches!(error.raw_os_error(), Some(5) | Some(32) | Some(33));
+                    if !transient || attempt + 1 >= ATTEMPTS {
+                        return Err(error);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(BACKOFF_MS));
+                    attempt += 1;
+                }
+            }
+        }
     }
 
     /// Per-test scratch directory under %TEMP%, claimed through `claim_dir` so
@@ -374,6 +460,49 @@ pub(crate) mod test_helpers {
             assert_ne!(claimed_again, claimed);
             assert!(claimed_again.is_dir());
             assert!(claimed.is_dir(), "the first claim must survive the second");
+        }
+
+        /// Issue #2220: a caller that requires an *absent* path — libgit2's
+        /// `git_worktree_add`, which fails with "directory exists" on a path
+        /// that is present even when it is empty — cannot be handed a
+        /// directory this process created. The claim still steps around a
+        /// survivor instead of adopting it, and hands the name back absent.
+        #[test]
+        fn claim_dir_name_steps_around_a_survivor_and_hands_the_name_back_absent() {
+            let owner = TestDir::new("claim_dir_name");
+            let parent = owner.path();
+
+            let survivor = parent.join("fixture");
+            fs::create_dir(&survivor).unwrap();
+            fs::write(survivor.join("earlier-run.txt"), "not mine to delete\n").unwrap();
+
+            let claimed = claim_dir_name(parent, "fixture").unwrap();
+            assert_ne!(
+                claimed, survivor,
+                "a survivor's name must not be handed out again"
+            );
+            assert!(
+                !claimed.exists(),
+                "the claimed name must be absent, so a consumer that refuses an \
+                 existing path can create it"
+            );
+            assert!(
+                survivor.join("earlier-run.txt").exists(),
+                "claiming a name must not delete a directory it did not create"
+            );
+        }
+
+        /// Issue #2220: a fixture whose directory is still held by a
+        /// just-killed process is not removed on the first attempt, and the
+        /// leftover it leaves is what a later run collides with. The retry
+        /// rides out the release window; a directory that is genuinely absent
+        /// is success, not a failure.
+        #[test]
+        fn remove_dir_all_with_retry_succeeds_on_an_absent_directory() {
+            let owner = TestDir::new("remove_retry");
+            let absent = owner.path().join("never-created");
+            remove_dir_all_with_retry(&absent)
+                .expect("an absent directory is already in the state the caller wants");
         }
     }
 }

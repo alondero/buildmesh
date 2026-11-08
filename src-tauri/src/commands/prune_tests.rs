@@ -101,15 +101,41 @@ fn scoped_mesh_prune_protects_live_sibling_checkout() {
     .unwrap();
 }
 
+/// The directory name this module's fixtures claim for `id`.
+///
+/// The per-process token is part of the name because Windows recycles
+/// process ids: a name built from the pid alone collides with a directory an
+/// earlier run left behind, and libgit2 refuses a worktree path that already
+/// exists — `failed to make directory ...: directory exists`, code `Exists`
+/// (issue #2220). The token makes the name a function of *this* process
+/// instance rather than of the pid alone.
+fn fixture_dir_name(id: u64) -> String {
+    format!(
+        "buildmesh_prune_test_{}_{}_{}",
+        std::process::id(),
+        crate::env::test_helpers::process_token(),
+        id
+    )
+}
+
 /// Unique temp directory with RAII cleanup on drop.
 struct TempDir(std::path::PathBuf);
 
 impl TempDir {
     fn new() -> Self {
-        let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
-        let pid = std::process::id();
-        let tmp = std::env::temp_dir().join(format!("buildmesh_prune_test_{}_{}", pid, id));
-        Self(tmp)
+        Self::with_id(NEXT_ID.fetch_add(1, Ordering::SeqCst))
+    }
+
+    /// The fixture for a chosen `id`, so a test can seed the directory that
+    /// id would claim and prove the claim steps around it.
+    fn with_id(id: u64) -> Self {
+        let parent = std::env::temp_dir();
+        // The name is claimed, not created: libgit2's `git_worktree_add`
+        // refuses a worktree path that is already there, even when it is
+        // empty, so the directory this fixture hands to it must be absent.
+        let path = crate::env::test_helpers::claim_dir_name(&parent, &fixture_dir_name(id))
+            .expect("claiming a fresh prune fixture directory must succeed");
+        Self(path)
     }
     fn path(&self) -> &Path {
         &self.0
@@ -121,8 +147,87 @@ impl TempDir {
 
 impl Drop for TempDir {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        // A removal that loses the race with a just-killed process's handle
+        // release leaves the directory behind, and a leftover is what a later
+        // run collides with (issue #2220). The retry rides out that window.
+        let _ = crate::env::test_helpers::remove_dir_all_with_retry(&self.0);
     }
+}
+
+/// Issue #2220: the fixture used to name its directories
+/// `buildmesh_prune_test_<pid>_<counter>`, and Windows recycles process ids.
+/// A run whose pid matched an earlier run's computed the same name, adopted
+/// that run's leftover directory, and libgit2 then refused it —
+/// `failed to make directory ...: directory exists`, code `Exists` — failing
+/// the test at setup with an error that named a path nobody had touched.
+///
+/// The fixture must step around a survivor instead of adopting it, and the
+/// worktree it hands to libgit2 must be creatable.
+#[test]
+fn a_worktree_fixture_steps_around_a_directory_an_earlier_run_left_behind() {
+    let parent = std::env::temp_dir();
+    let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
+
+    // An earlier run with the same (recycled) process id left this behind,
+    // under the name that run's fixture computed. This is the name the
+    // fixture would hand to libgit2 if it were built from the pid alone, so
+    // adopting it would reproduce the reported failure exactly.
+    let legacy = parent.join(format!(
+        "buildmesh_prune_test_{}_{}",
+        std::process::id(),
+        id
+    ));
+    fs::create_dir_all(&legacy).unwrap();
+    fs::write(legacy.join("earlier-run.txt"), "not mine to delete\n").unwrap();
+
+    // This run's own name is occupied too, so the claim has to step around a
+    // survivor rather than adopt it.
+    let survivor = parent.join(fixture_dir_name(id));
+    fs::create_dir_all(&survivor).unwrap();
+    fs::write(survivor.join("earlier-run.txt"), "not mine to delete\n").unwrap();
+
+    let wt = TempDir::with_id(id);
+    assert_ne!(
+        wt.path(),
+        legacy,
+        "the fixture adopted the directory an earlier run left behind"
+    );
+    assert_ne!(
+        wt.path(),
+        survivor,
+        "the fixture adopted a directory an earlier run left behind"
+    );
+    assert!(
+        legacy.join("earlier-run.txt").exists(),
+        "claiming a fixture directory must not delete a survivor"
+    );
+    assert!(
+        survivor.join("earlier-run.txt").exists(),
+        "claiming a fixture directory must not delete a survivor"
+    );
+
+    // The consequence that used to fail the suite: libgit2 refuses a worktree
+    // path that already exists, so the worktree must be creatable at the
+    // claimed name.
+    let repo_dir = TempDir::new();
+    let repo = init_repo(repo_dir.path());
+    branch_from_head(&repo, "wt-branch");
+    repo.worktree(
+        "wt1",
+        wt.path(),
+        Some(
+            git2::WorktreeAddOptions::new()
+                .reference(Some(&repo.find_reference("refs/heads/wt-branch").unwrap())),
+        ),
+    )
+    .expect("the worktree must be creatable at a claimed name");
+    assert!(wt.path().join("file.txt").exists());
+
+    // The seeded survivors are removed through the retrying helper: a plain
+    // delete can lose the same transient refusal the fixture rides out, and
+    // then this test leaves litter in %TEMP% — the very thing it inspects.
+    let _ = crate::env::test_helpers::remove_dir_all_with_retry(&survivor);
+    let _ = crate::env::test_helpers::remove_dir_all_with_retry(&legacy);
 }
 
 fn sig() -> git2::Signature<'static> {
@@ -1060,6 +1165,22 @@ impl PinnedWorktree {
             .expect("killed process tree must exit and release its output handle");
     }
 
+    /// Kill the pinning tree the way the agent teardown does.
+    ///
+    /// The Job Object is authoritative: it contains the grandchild that
+    /// inherited the pin, and `taskkill /T` walks only the *live*
+    /// parent→child links, so it can miss a grandchild whose shell has
+    /// already gone. A grandchild that outlives the kill keeps the worktree
+    /// pinned as its working directory, and the rename then fails with "the
+    /// process cannot access the file because it is being used by another
+    /// process" (os error 32) — the refusal
+    /// `the_removal_rides_out_a_working_directory_that_is_still_pinned`
+    /// reproduces (issue #2220).
+    fn kill_tree(&mut self) {
+        crate::process_util::kill_process_tree_contained(self.job.as_ref(), self.locker_pid());
+        let _ = self.locker.kill();
+    }
+
     fn wait_for_release(&mut self, timeout: std::time::Duration) -> Result<(), String> {
         // Reap without a blocking wait, then check the inherited grandchild
         // handle. A surviving ping cannot satisfy the release condition.
@@ -1071,20 +1192,38 @@ impl PinnedWorktree {
                 .try_wait()
                 .map_err(|error| error.to_string())?
                 .is_some();
-            let released = match fs::OpenOptions::new()
-                .read(true)
-                .share_mode(0)
-                .open(self.path().join("agent.lock"))
-            {
-                Ok(_) => true,
-                // Successful removal has already proved that the pin is gone.
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::NotFound && !self.path().exists() =>
-                {
-                    true
-                }
-                Err(_) => false,
+            // The job is the containment boundary, so it is the precise
+            // answer to "is anything still inside the tree?". A process that
+            // holds the tree only as its working directory pins it just as
+            // firmly as one holding a file inside it, and no file inside
+            // would show it — the rename fails with "the process cannot
+            // access the file because it is being used by another process"
+            // (os error 32) (issue #2220).
+            //
+            // A job query that Windows refuses is "unknown", not "empty", so
+            // it counts as not released and the wait keeps going.
+            let tree_released = match self.job.as_ref() {
+                // No job means nothing was ever contained, so nothing can be
+                // holding the tree through one.
+                None => true,
+                Some(job) => job.active_process_count() == Some(0),
             };
+            let released = tree_released
+                && match fs::OpenOptions::new()
+                    .read(true)
+                    .share_mode(0)
+                    .open(self.path().join("agent.lock"))
+                {
+                    Ok(_) => true,
+                    // Successful removal has already proved that the pin is gone.
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::NotFound
+                            && !self.path().exists() =>
+                    {
+                        true
+                    }
+                    Err(_) => false,
+                };
             if exited && released {
                 return Ok(());
             }
@@ -1103,13 +1242,14 @@ impl Drop for PinnedWorktree {
     fn drop(&mut self) {
         // This backstop is independent of the production tree walk being
         // tested. The job contains ping even after its shell has exited.
-        if let Some(job) = self.job.take() {
-            job.terminate();
-            drop(job);
-        }
-        let _ = self.locker.kill();
+        self.kill_tree();
         if let Err(error) = self.wait_for_release(std::time::Duration::from_secs(10)) {
             eprintln!("pinning fixture cleanup failed: {error}");
+        }
+        // The job handle is released last: it is the signal the release wait
+        // above reads, and closing it would terminate the job for good.
+        if let Some(job) = self.job.take() {
+            drop(job);
         }
     }
 }
@@ -1219,12 +1359,21 @@ fn remove_worktree_fails_while_process_pins_it() {
 /// The fix: killing the whole process tree (shell + agent grandchild) releases
 /// the worktree, and removal then succeeds — the rmdir retry rides out the
 /// async handle-release window after the kill.
+///
+/// The kill is the sequence production uses: the Job Object first (it is a
+/// containment boundary, so it reaches the grandchild that inherited the
+/// pin), then `taskkill /T` as the fallback. `taskkill /T` alone walks only
+/// the live parent→child links, so it can leave a grandchild holding the
+/// worktree as its working directory — and Windows refuses to rename a
+/// directory a live process sits in, with "the process cannot access the
+/// file because it is being used by another process" (os error 32) (issue
+/// #2220).
 #[cfg(windows)]
 #[test]
 fn remove_worktree_succeeds_after_killing_process_tree() {
     let mut pinned = worktree_pinned_by_process_tree();
 
-    crate::process_util::kill_process_tree(pinned.locker_pid());
+    pinned.kill_tree();
     pinned.reap_locker();
 
     remove_one_worktree(&pinned.path_str()).expect("prune succeeds once the tree is gone");
