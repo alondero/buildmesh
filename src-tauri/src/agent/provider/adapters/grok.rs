@@ -764,6 +764,7 @@ mod tests {
             effort: None,
             extra_args: None,
             permission_mode: None,
+            agent: None,
         };
         let input = HarnessLaunchInput {
             routing: None,
@@ -809,6 +810,7 @@ mod tests {
             effort: None,
             extra_args: None,
             permission_mode: None,
+            agent: None,
         };
         let input = HarnessLaunchInput {
             routing: None,
@@ -922,6 +924,7 @@ mod tests {
             effort: Some("high".into()),
             extra_args: None,
             permission_mode: None,
+            agent: None,
         };
         let input = HarnessLaunchInput {
             routing: None,
@@ -999,6 +1002,7 @@ mod tests {
                 ..FieldInputs::default()
             },
             permission_mode: FieldInputs::default(),
+            agent: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&caps, inputs, None);
         assert_eq!(resolved.effort.as_deref(), Some("xhigh"));
@@ -1032,6 +1036,7 @@ mod tests {
                 ..FieldInputs::default()
             },
             permission_mode: FieldInputs::default(),
+            agent: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&caps, inputs, None);
         assert!(

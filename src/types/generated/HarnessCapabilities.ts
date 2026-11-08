@@ -81,6 +81,14 @@ produces_readable_transcript: boolean,
  */
 supports_model_override: boolean, 
 /**
+ * Whether an agent / persona selector (`--agent <name>` or the
+ * session-API equivalent) from configuration applies. The mask drops
+ * the value for every harness that does not opt in, so a stale
+ * `harness_defaults` entry can never splice a synthetic flag into an
+ * unrelated CLI (issue #1552 / #2716).
+ */
+supports_agent: boolean, 
+/**
  * Whether `--effort <level>` (or equivalent) from configuration applies.
  * Mirrors `effort_control != EffortControlKind::None`; pinned by a unit
  * test so the two can't drift.

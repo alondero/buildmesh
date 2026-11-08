@@ -7,7 +7,7 @@ import type { ProviderPairing } from "./ProviderPairing";
 /**
  * Immutable, secret-free launch facts. Credentials are read from the account at launch.
  */
-export type ResolvedLaunchPlan = { configuration_id: string, configuration_name: string, spawn_option_id: string, harness: HarnessProfile, route: ProviderPairing | null, verification: PairingVerification | null, model: string | null, effort: string | null, extra_args: string | null, 
+export type ResolvedLaunchPlan = { configuration_id: string, configuration_name: string, spawn_option_id: string, harness: HarnessProfile, route: ProviderPairing | null, verification: PairingVerification | null, model: string | null, effort: string | null, extra_args: string | null, agent: string | null, 
 /**
  * The Harness Login this launch uses; absent means the default login.
  * Frozen with the home path so a resume returns to the home that holds

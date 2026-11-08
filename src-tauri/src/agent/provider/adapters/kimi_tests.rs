@@ -391,6 +391,7 @@ fn kimi_interactive_recipe_carries_short_m_model_arg() {
         effort: None,
         extra_args: None,
         permission_mode: None,
+        agent: None,
     };
     let input = HarnessLaunchInput {
         routing: None,

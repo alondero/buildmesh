@@ -117,6 +117,7 @@ fn harness_capabilities(
         supports_result_file_handoff: !plain_terminal,
         produces_readable_transcript: true,
         supports_model_override: true,
+        supports_agent: false,
         supports_effort_override: false,
         supports_extra_args: true,
         supports_prefill,

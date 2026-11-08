@@ -39,6 +39,7 @@ fn mcode_configuration_rejects_shell_characters_and_accepts_variants() {
         model: Some(" minimax/MiniMax-M3#variant ".into()),
         effort: None,
         permission_mode: None,
+        agent: None,
     };
     super::super::upsert_harness_default(&mut prefs, "mcode", valid).unwrap();
     let saved = prefs.clone();
@@ -46,6 +47,7 @@ fn mcode_configuration_rejects_shell_characters_and_accepts_variants() {
         model: Some("minimax/%PATH%".into()),
         effort: None,
         permission_mode: None,
+        agent: None,
     };
     assert!(
         super::super::upsert_harness_default(&mut prefs, "mcode", invalid)

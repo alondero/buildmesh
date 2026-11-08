@@ -80,7 +80,7 @@ export function LaunchConfigurationEditor({ value, targets, onSave, onCancel, on
       ? verification.inputs === inputs ? verification.message : 'Configuration changed; verify again to confirm it still works.'
       : '';
   const selectTarget = (id: string) => {
-    setDraft({ ...draft, spawn_option_id: id, harness_id: undefined, provider_route_id: undefined, model: null, effort: null, extra_args: null, login_id: undefined });
+    setDraft({ ...draft, spawn_option_id: id, harness_id: undefined, provider_route_id: undefined, model: null, effort: null, extra_args: null, agent: undefined, login_id: undefined });
     setEndpoint(null); setCustomModel(false); setVerification(null); setAdvancedNotice(false);
   };
   // A selected custom model makes its input required, so the disclosure refuses
@@ -142,6 +142,7 @@ export function LaunchConfigurationEditor({ value, targets, onSave, onCancel, on
         </select></label>
         <EffortGuidance id="launch-config-effort-help" efforts={efforts} selectedEffort={draft.effort} />
       </>}
+      {target?.supports_agent && <label>Agent<input value={draft.agent ?? ''} placeholder="Native agent" onChange={(e) => setDraft({ ...draft, agent: e.target.value || undefined })} /></label>}
       {target?.route && efforts.length === 0 && <p>No configurable effort is documented for this model through this harness.</p>}
       {(target?.supports_extra_args || customModel) && <section className="launch-config-advanced">
         <button type="button" id={advancedToggleId} className="launch-config-advanced-toggle"

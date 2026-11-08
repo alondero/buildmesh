@@ -133,7 +133,7 @@ describe('Settings › Launch Configurations › Codex logins', () => {
 describe('pinning a login on a Launch Configuration', () => {
   const codex: LaunchTarget = {
     id: 'codex', harness_id: 'codex', harness_name: 'Codex', provider_name: 'OpenAI',
-    models: [], efforts: [], route_attached: false, manual_model: true, supports_model: true, supports_extra_args: true,
+    models: [], efforts: [], route_attached: false, manual_model: true, supports_model: true, supports_extra_args: true, supports_agent: false,
   };
   const value: SpawnConfiguration = { id: 'launch/codex', name: 'Codex', spawn_option_id: 'codex', model: null, effort: null, extra_args: null };
 

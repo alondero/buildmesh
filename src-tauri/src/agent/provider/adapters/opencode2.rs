@@ -43,6 +43,11 @@ impl AgentProvider for OpenCode2Adapter {
                 },
                 produces_readable_transcript: true,
                 supports_model_override: true,
+                // Issue #2716: the V2 full TUI has no `--agent` flag
+                // (`opencode2 --help`), so the value is applied through
+                // the session API in `prepare_session` instead — the same
+                // transport `supports_model_override` uses.
+                supports_agent: true,
                 supports_extra_args: false,
                 supports_prefill: true,
                 available_on: { &[Platform::Windows, Platform::Macos, Platform::Linux] },
@@ -114,6 +119,29 @@ impl AgentProvider for OpenCode2Adapter {
     fn validate_model_override(&self, model: &str) -> Result<(), String> {
         model_ref(model).map(|_| ())
     }
+    fn validate_agent_override(&self, agent: &str) -> Result<(), String> {
+        super::opencode::validate_agent_name(agent)
+    }
+    fn agent_args(&self, _agent: &str) -> Vec<String> {
+        // The full V2 TUI has no `--agent` flag; the selector is applied
+        // through the session API in `prepare_session` (mirroring the
+        // model path). Returning empty keeps the interactive argv
+        // flag-free so a future V2 release that adds the flag cannot
+        // silently double-apply it.
+        Vec::new()
+    }
+    fn agent_override_via_session_api(&self) -> bool {
+        true
+    }
+    fn background_agent_args(&self, agent: &str) -> Vec<String> {
+        // Issue #2716: `opencode2 run --agent <name>` is the one-shot
+        // spelling; the background recipe never touches the session API.
+        if agent.is_empty() {
+            Vec::new()
+        } else {
+            vec!["--agent".into(), agent.into()]
+        }
+    }
     fn prefill_args(&self, text: &str) -> Vec<String> {
         vec![
             "--prompt".into(),
@@ -154,9 +182,13 @@ impl AgentProvider for OpenCode2Adapter {
         let directory = Path::new(&input.resolved.host_path);
         config::provision(directory, input.node_id, None)?;
         let config_path = config::config_path(directory, input.node_id);
+        if let Some(agent) = input.config.agent.as_deref() {
+            self.validate_agent_override(agent)?;
+        }
         let target = prepare_identity(
             input.session,
             input.config.model.as_deref(),
+            input.config.agent.as_deref(),
             &mut |method, path, body| api(executable, directory, &config_path, method, path, body),
         )?;
         let id = match input.session {
@@ -218,6 +250,7 @@ impl From<SessionApiError> for String {
 fn prepare_identity(
     session: SessionIdModeRef<'_>,
     model: Option<&str>,
+    agent: Option<&str>,
     request: &mut dyn FnMut(
         &str,
         &str,
@@ -237,6 +270,9 @@ fn prepare_identity(
     };
     if crate::http::request::parse_opencode_session_id(id).as_deref() != Some(id) {
         return Err("Invalid OpenCode 2 session identity".into());
+    }
+    if let Some(agent) = agent {
+        super::opencode::validate_agent_name(agent)?;
     }
     let target = if fork {
         let response = request(
@@ -273,16 +309,28 @@ fn prepare_identity(
         if let Some(model) = model {
             body["model"] = model_ref(model)?;
         }
+        if let Some(agent) = agent {
+            body["agent"] = serde_json::json!(agent);
+        }
         let response = request("POST", "/api/session", body)?;
         if response["data"]["id"].as_str() != Some(&target) {
             return Err("OpenCode 2 created a different session identity".into());
         }
-    } else if let Some(model) = model {
-        request(
-            "POST",
-            &format!("/api/session/{target}/model"),
-            serde_json::json!({"model":model_ref(model)?}),
-        )?;
+    } else {
+        if let Some(model) = model {
+            request(
+                "POST",
+                &format!("/api/session/{target}/model"),
+                serde_json::json!({"model":model_ref(model)?}),
+            )?;
+        }
+        if let Some(agent) = agent {
+            request(
+                "POST",
+                &format!("/api/session/{target}/agent"),
+                serde_json::json!({"agent": agent}),
+            )?;
+        }
     }
     Ok(target)
 }

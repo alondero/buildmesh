@@ -382,6 +382,7 @@ pub(crate) async fn spawn_with_intent_from(
             model: explicit.model.clone(),
             effort: explicit.effort.clone(),
             extra_args: explicit.extra_args.clone(),
+            agent: explicit.agent.clone(),
         };
         // Explicit user overrides become the next saved launch; absent overrides
         // preserve the snapshot without consulting today's defaults or routes.
@@ -435,6 +436,7 @@ pub(crate) async fn spawn_with_intent_from(
             // (issue #1148 AC #32 + #1155 AC #3).
             explicit_model: explicit.model,
             explicit_effort: explicit.effort,
+            explicit_agent: explicit.agent,
             // #1219: per-step wall-clock budget from the AST.
             // Threaded into SpawnOptions → LaunchParams so the launch
             // phase logs it (and a future process-level watchdog can

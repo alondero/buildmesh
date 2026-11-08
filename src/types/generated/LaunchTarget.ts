@@ -2,4 +2,4 @@
 import type { CatalogueModel } from "./CatalogueModel";
 import type { ProviderPairing } from "./ProviderPairing";
 
-export type LaunchTarget = { id: string, harness_id: string, harness_name: string, provider_name: string, models: Array<CatalogueModel>, efforts: Array<string>, manual_model: boolean, supports_model: boolean, supports_extra_args: boolean, route?: ProviderPairing, route_attached: boolean, default_model?: string, verification_required?: boolean, };
+export type LaunchTarget = { id: string, harness_id: string, harness_name: string, provider_name: string, models: Array<CatalogueModel>, efforts: Array<string>, manual_model: boolean, supports_model: boolean, supports_extra_args: boolean, supports_agent: boolean, route?: ProviderPairing, route_attached: boolean, default_model?: string, verification_required?: boolean, };

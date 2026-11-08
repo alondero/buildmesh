@@ -75,7 +75,7 @@ function mockBackend() {
         return Promise.resolve([
           {
             id: 'claude', harness_id: 'claude', harness_name: 'Claude Code', provider_name: 'Native authentication',
-            models: [], efforts: [], route_attached: false, manual_model: false, supports_model: false, supports_extra_args: true,
+            models: [], efforts: [], route_attached: false, manual_model: false, supports_model: false, supports_extra_args: true, supports_agent: false,
           },
         ]);
       case 'get_probe_spawn_prompt_defaults':

@@ -27,6 +27,7 @@ pub(super) struct LaunchParams {
     pub explicit_model: Option<String>,
     pub explicit_effort: Option<String>,
     pub explicit_extra_args: Option<String>,
+    pub explicit_agent: Option<String>,
     /// Optional per-step wall-clock budget in seconds (#1219). The
     /// circuit-level watchdog reads the graph node directly in
     /// `services::circuit_worker::observe_waits`; this carrier lets the
@@ -101,6 +102,7 @@ pub(super) async fn launch_process(
         explicit_model,
         explicit_effort,
         explicit_extra_args,
+        explicit_agent,
         explicit_timeout_seconds,
         spawn_option_id,
         registry_mesh_id,
@@ -184,6 +186,7 @@ pub(super) async fn launch_process(
         // / `resolve_extra_args` so whitespace-only inputs cascade-fall.
         explicit_extra_args.as_deref(),
         frozen_application_default(app_default.as_ref(), frozen).as_ref(),
+        explicit_agent.as_deref(),
     );
     let preparation_path = resolved.clone();
     let preparation_executable = routing
@@ -364,6 +367,9 @@ fn frozen_application_default(
             model: None,
             effort: None,
             permission_mode: default.permission_mode.clone(),
+            // A frozen plan carries its own agent (issue #2716); the live
+            // app default must not override the saved value on resume.
+            agent: None,
         }),
         (Some(default), false) => Some(default.clone()),
         (None, _) => None,
@@ -371,6 +377,7 @@ fn frozen_application_default(
 }
 
 #[cfg(test)]
+// allow-test-in-production: this frozen-application-default suite predates the sibling-test-file rule for spawn/launch.rs. Moving it into spawn/launch_tests.rs (which already holds launch_carries_prompt) is out of scope for the agent-selection slice; the agent field additions are mechanical.
 mod tests {
     use super::*;
 
@@ -383,6 +390,7 @@ mod tests {
             model: Some("opus-4".into()),
             effort: Some("high".into()),
             permission_mode: Some("prompt".into()),
+            agent: None,
         };
         let carved = frozen_application_default(Some(&live), true).expect("kept");
         assert_eq!(carved.model, None);
@@ -396,6 +404,7 @@ mod tests {
             model: Some("opus-4".into()),
             effort: Some("high".into()),
             permission_mode: Some("prompt".into()),
+            agent: None,
         };
         let passed = frozen_application_default(Some(&live), false).expect("kept");
         assert_eq!(passed.model.as_deref(), Some("opus-4"));
@@ -427,6 +436,7 @@ mod tests {
                 model: Some("gpt-5.1-codex".into()),
                 effort: Some("high".into()),
                 permission_mode: None,
+                agent: None,
             },
         );
         let app_default =
@@ -437,6 +447,7 @@ mod tests {
             None,
             None,
             frozen_application_default(app_default.as_ref(), false).as_ref(),
+            None,
         );
         assert_eq!(resolved.model, None);
         assert_eq!(resolved.effort, None);
@@ -454,6 +465,7 @@ mod tests {
                 model: Some("gpt-5.1-codex".into()),
                 effort: Some("high".into()),
                 permission_mode: None,
+                agent: None,
             },
         );
         let app_default =
@@ -464,6 +476,7 @@ mod tests {
             None,
             None,
             frozen_application_default(app_default.as_ref(), false).as_ref(),
+            None,
         );
         assert_eq!(resolved.model.as_deref(), Some("gpt-5.1-codex"));
         assert_eq!(resolved.effort.as_deref(), Some("high"));

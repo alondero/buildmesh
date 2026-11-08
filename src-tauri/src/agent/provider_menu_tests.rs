@@ -215,6 +215,7 @@ fn stamp_effective_permission_uses_row_capabilities_and_prefs_snapshot() {
             model: None,
             effort: None,
             permission_mode: Some(PERMISSION_MODE_PROMPT.to_string()),
+            agent: None,
         },
     );
 
@@ -512,6 +513,7 @@ fn caps_all_false(id: &str) -> crate::agent::capabilities::HarnessCapabilities {
         supports_result_file_handoff: false,
         produces_readable_transcript: false,
         supports_model_override: false,
+        supports_agent: false,
         supports_effort_override: false,
         supports_prefill: false,
         accepts_initial_prompt: true,

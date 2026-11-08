@@ -214,6 +214,7 @@ fn permission_mode_changes_argv_of_next_spawn() {
             effort: None,
             extra_args: None,
             permission_mode: mode.map(str::to_string),
+            agent: None,
         };
         let input = HarnessLaunchInput {
             routing: None,
@@ -266,6 +267,7 @@ fn fresh_recipe_forwards_model_and_prompt_without_session_id() {
         effort: None,
         extra_args: None,
         permission_mode: None,
+        agent: None,
     };
     let input = HarnessLaunchInput {
         routing: None,

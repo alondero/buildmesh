@@ -106,6 +106,7 @@ fn fresh_spawn_prepare_wires_session_assign_args() {
         effort: None,
         extra_args: None,
         permission_mode: None,
+        agent: None,
     };
     let input = HarnessLaunchInput {
         routing: None,
@@ -132,6 +133,7 @@ fn resume_prepare_wires_resume_args() {
         effort: None,
         extra_args: None,
         permission_mode: None,
+        agent: None,
     };
     let input = HarnessLaunchInput {
         routing: None,

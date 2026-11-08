@@ -92,6 +92,7 @@ async fn codex_background_naming_reads_the_final_file_and_preserves_saved_settin
             model: Some("gpt-6-luna".into()),
             effort: Some("low".into()),
             extra_args: None,
+            agent: None,
         },
     )
     .unwrap();

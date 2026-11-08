@@ -789,6 +789,7 @@ fn capability_recipe_coherence() {
             effort: Some(effort_value.to_string()),
             extra_args: None,
             permission_mode: None,
+            agent: Some("build".to_string()),
         };
         let prefill_text = "fix the auth bug in handler.rs";
         let input = make_input(
@@ -852,6 +853,34 @@ fn capability_recipe_coherence() {
             has_effort_vocab,
             args
         );
+
+        // 2b. Agent-flag coherence (issue #1552 / #2716). The adapter's
+        //     own `agent_args` shape decides what the recipe carries; a
+        //     session-API harness keeps the argv flag-free.
+        let agent_flag = adapter
+            .agent_args("build")
+            .first()
+            .cloned()
+            .unwrap_or_default();
+        let has_agent_flag =
+            !agent_flag.is_empty() && args.iter().any(|a| a == &agent_flag);
+        assert_eq!(
+            has_agent_flag || adapter.agent_override_via_session_api(),
+            caps.supports_agent,
+            "agent-flag / supports_agent mismatch for {}: \
+                 recipe has {} = {}, caps.supports_agent = {}; args = {:?}",
+            adapter.id(),
+            agent_flag,
+            has_agent_flag,
+            caps.supports_agent,
+            args
+        );
+        if caps.supports_agent && !adapter.agent_override_via_session_api() {
+            assert!(
+                args.iter().any(|a| a == "build"),
+                "agent-capable harness must forward the agent value; args = {args:?}"
+            );
+        }
 
         // 3. Prefill coherence.
         let has_prefill_text = args.last().map(|a| a.as_str()) == Some(prefill_text);
@@ -1033,6 +1062,7 @@ fn mcode_recipe_carries_model_arg_under_coherence_matrix() {
         effort: None,
         extra_args: None,
         permission_mode: None,
+        agent: None,
     };
     let input = make_input(
         Platform::Macos,
@@ -1071,6 +1101,7 @@ fn cascade_inputs_for_populates_explicit_slot_for_both_fields() {
         model: Some("opus-4-1".into()),
         effort: Some("high".into()),
         permission_mode: None,
+        agent: None,
     };
     let inputs = cascade_inputs_for(
         Some("sonnet-4"),
@@ -1078,6 +1109,7 @@ fn cascade_inputs_for_populates_explicit_slot_for_both_fields() {
         Some("haiku-4"),
         Some("low"),
         Some(&app_default),
+        None,
     );
     assert_eq!(
         inputs.model,
@@ -1110,6 +1142,7 @@ fn cascade_inputs_for_collapses_whitespace_explicit_to_none() {
         model: Some("opus-4-1".into()),
         effort: Some("high".into()),
         permission_mode: None,
+        agent: None,
     };
     let inputs = cascade_inputs_for(
         Some("   "),
@@ -1117,6 +1150,7 @@ fn cascade_inputs_for_collapses_whitespace_explicit_to_none() {
         Some("haiku-4"),
         Some("low"),
         Some(&app_default),
+        None,
     );
     assert_eq!(
         inputs.model.explicit, None,
@@ -1139,7 +1173,7 @@ fn cascade_inputs_for_collapses_whitespace_explicit_to_none() {
 /// `"opus"` regardless of which side trimmed it.
 #[test]
 fn cascade_inputs_for_trims_explicit_values() {
-    let inputs = cascade_inputs_for(Some("  opus  "), Some(" high\t"), None, None, None);
+    let inputs = cascade_inputs_for(Some("  opus  "), Some(" high\t"), None, None, None, None);
     assert_eq!(inputs.model.explicit, Some("opus"));
     assert_eq!(inputs.effort.explicit, Some("high"));
 }
@@ -1154,16 +1188,19 @@ fn cascade_inputs_for_independent_fields() {
         model: Some("opus-4-1".into()),
         effort: Some("high".into()),
         permission_mode: None,
+        agent: None,
     };
 
     // Explicit model only — effort falls through to the app default.
-    let model_only = cascade_inputs_for(Some("sonnet-4"), None, None, None, Some(&app_default));
+    let model_only =
+        cascade_inputs_for(Some("sonnet-4"), None, None, None, Some(&app_default), None);
     assert_eq!(model_only.model.explicit, Some("sonnet-4"));
     assert_eq!(model_only.effort.explicit, None);
     assert_eq!(model_only.effort.application, Some("high"));
 
     // Explicit effort only — model falls through to the app default.
-    let effort_only = cascade_inputs_for(None, Some("low"), None, None, Some(&app_default));
+    let effort_only =
+        cascade_inputs_for(None, Some("low"), None, None, Some(&app_default), None);
     assert_eq!(effort_only.model.explicit, None);
     assert_eq!(effort_only.model.application, Some("opus-4-1"));
     assert_eq!(effort_only.effort.explicit, Some("low"));
@@ -1182,6 +1219,7 @@ fn cascade_inputs_for_layer1_wins_over_mesh_and_application_at_resolver() {
         model: Some("opus-4-1".into()),
         effort: Some("high".into()),
         permission_mode: None,
+        agent: None,
     };
     let inputs = cascade_inputs_for(
         Some("sonnet-4"),
@@ -1189,6 +1227,7 @@ fn cascade_inputs_for_layer1_wins_over_mesh_and_application_at_resolver() {
         Some("haiku-4"),
         Some("medium"),
         Some(&app_default),
+        None,
     );
     let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
     assert_eq!(
@@ -1218,6 +1257,7 @@ fn cascade_inputs_for_empty_explicit_falls_through_at_resolver() {
         model: Some("opus-4-1".into()),
         effort: Some("high".into()),
         permission_mode: None,
+        agent: None,
     };
     let inputs = cascade_inputs_for(
         Some("   "),
@@ -1225,6 +1265,7 @@ fn cascade_inputs_for_empty_explicit_falls_through_at_resolver() {
         Some("haiku-4"),
         Some("medium"),
         Some(&app_default),
+        None,
     );
     let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
     // Explicit collapsed → mesh wins over application.
@@ -1247,6 +1288,7 @@ fn cascade_inputs_for_explicit_wins_over_mesh_when_application_empty() {
         Some("medium"),
         Some("haiku-4"),
         Some("low"),
+        None,
         None,
     );
     let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
@@ -1288,12 +1330,14 @@ fn spawn_request_explicit_wins_at_resolver() {
             // `spawn_with_intent` seam.
             extra_args: Some("--dangerously-skip-permissions --verbose".into()),
             timeout_seconds: None,
+            agent: None,
         },
     );
     let app_default = HarnessConfigValue {
         model: Some("sonnet-4".into()),
         effort: Some("medium".into()),
         permission_mode: None,
+        agent: None,
     };
     let resolved = resolve_spawn_config(
         Provider::Anthropic,
@@ -1301,6 +1345,7 @@ fn spawn_request_explicit_wins_at_resolver() {
         req.explicit.effort.as_deref(),
         req.explicit.extra_args.as_deref(),
         Some(&app_default),
+        req.explicit.agent.as_deref(),
     );
     assert_eq!(
             resolved.model.as_deref(),
@@ -1336,12 +1381,14 @@ fn spawn_request_whitespace_explicit_falls_through_at_resolver() {
             effort: Some("\t\n".into()),
             extra_args: None,
             timeout_seconds: None,
+            agent: None,
         },
     );
     let app_default = HarnessConfigValue {
         model: Some("opus-4-1".into()),
         effort: Some("high".into()),
         permission_mode: None,
+        agent: None,
     };
     let resolved = resolve_spawn_config(
         Provider::Anthropic,
@@ -1349,6 +1396,7 @@ fn spawn_request_whitespace_explicit_falls_through_at_resolver() {
         req.explicit.effort.as_deref(),
         req.explicit.extra_args.as_deref(),
         Some(&app_default),
+        req.explicit.agent.as_deref(),
     );
     // Explicit collapsed → application wins.
     assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
@@ -1371,6 +1419,7 @@ fn spawn_request_extra_args_capability_mask_at_resolver() {
             effort: None,
             extra_args: Some("--dangerously-skip-permissions".into()),
             timeout_seconds: None,
+            agent: None,
         });
     let resolved_anthropic = resolve_spawn_config(
         Provider::Anthropic,
@@ -1378,6 +1427,7 @@ fn spawn_request_extra_args_capability_mask_at_resolver() {
         req_interactive.explicit.effort.as_deref(),
         req_interactive.explicit.extra_args.as_deref(),
         None,
+        req_interactive.explicit.agent.as_deref(),
     );
     assert_eq!(
         resolved_anthropic.extra_args.as_deref(),
@@ -1392,6 +1442,7 @@ fn spawn_request_extra_args_capability_mask_at_resolver() {
             effort: None,
             extra_args: Some("--dangerously-skip-permissions --verbose".into()),
             timeout_seconds: None,
+            agent: None,
         });
     let resolved_terminal = resolve_spawn_config(
         Provider::Terminal,
@@ -1399,6 +1450,7 @@ fn spawn_request_extra_args_capability_mask_at_resolver() {
         req_terminal.explicit.effort.as_deref(),
         req_terminal.explicit.extra_args.as_deref(),
         None,
+        req_terminal.explicit.agent.as_deref(),
     );
     assert!(
         resolved_terminal.extra_args.is_none(),

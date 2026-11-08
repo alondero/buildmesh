@@ -60,6 +60,11 @@ pub(super) fn resolve_circuit_spawn_inputs(
             .and_then(non_empty_trim)
             .map(str::to_string),
         timeout_seconds,
+        // SpawnAgentNode carries no agent slot in this slice (issue
+        // #2716 publishes agent via Launch Configurations + the
+        // application default); the resolver still sees the frozen
+        // review configuration's agent through `resolve_review_spawn_inputs`.
+        agent: None,
     };
     Ok(ResolvedCircuitSpawn {
         prompt,
@@ -112,6 +117,7 @@ pub(super) fn resolve_review_spawn_inputs(
         explicit.model = configuration.model;
         explicit.effort = configuration.effort;
         explicit.extra_args = configuration.extra_args;
+        explicit.agent = configuration.agent;
         return (Some(configuration.id), explicit);
     }
 
@@ -162,6 +168,7 @@ pub(super) fn resolve_review_spawn_inputs(
         // launch resolve the selected harness's mesh/application defaults.
         explicit.model = None;
         explicit.effort = None;
+        explicit.agent = None;
     } else {
         explicit.model = explicit.model.or(source_model);
         explicit.effort = explicit.effort.or(source_effort);

@@ -242,6 +242,11 @@ impl AgentProvider for OpenCodeAdapter {
                 },
                 produces_readable_transcript: true,
                 supports_model_override: true,
+                // Issue #1552 / #2716: V1 TUI accepts `--agent <name>`
+                // (`opencode --help`); background `run` accepts the same
+                // flag. Advertised here so the resolver keeps the value
+                // and Settings renders the knob.
+                supports_agent: true,
                 supports_extra_args: true,
                 supports_prefill: true,
                 available_on: { &[Platform::Windows, Platform::Linux, Platform::Macos] },
@@ -309,6 +314,20 @@ impl AgentProvider for OpenCodeAdapter {
             vec!["--auto".into()]
         } else {
             Vec::new()
+        }
+    }
+
+    fn validate_agent_override(&self, agent: &str) -> Result<(), String> {
+        validate_agent_name(agent)
+    }
+
+    fn agent_args(&self, agent: &str) -> Vec<String> {
+        if agent.is_empty() {
+            // Defensive (issue #1552): never emit a dangling `--agent` that
+            // would swallow the next argv token as the agent.
+            Vec::new()
+        } else {
+            vec!["--agent".into(), agent.into()]
         }
     }
 
@@ -431,6 +450,22 @@ impl AgentProvider for OpenCodeAdapter {
         // multi-line handover/issue prefill cannot split the argv.
         vec!["--prompt".into(), flatten_cmd_prefill(text)]
     }
+}
+
+/// Validate an OpenCode agent name (issue #1552 / #2716). The name is a
+/// single CLI token (`build`, `plan`, a user-defined agent): empty or
+/// whitespace-bearing values are malformed and must fail before spawn,
+/// before either the `--agent` argv or the V2 session API can smuggle a
+/// dangling flag or a JSON string the daemon would reject.
+pub(super) fn validate_agent_name(agent: &str) -> Result<(), String> {
+    let invalid = || "OpenCode agent must be a non-empty name without spaces".to_string();
+    if agent.trim().is_empty() || agent.chars().any(char::is_whitespace) {
+        return Err(invalid());
+    }
+    if agent.chars().any(char::is_control) {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 /// Collapse CR/LF so `--prompt` stays a single `cmd.exe /c` argument.

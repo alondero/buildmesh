@@ -43,7 +43,7 @@ const capabilities = {
   produces_readable_transcript: true,
   supports_model_override: true,
   supports_effort_override: true,
-  supports_extra_args: true,
+  supports_extra_args: true, supports_agent: false,
   supports_prefill: true,
   is_plain_terminal: false,
   effort_control: 'inline_config',
@@ -88,7 +88,7 @@ const nativeTarget = {
   manual_model: false,
   default_model: 'MiniMax-M3',
   supports_model: true,
-  supports_extra_args: true,
+  supports_extra_args: true, supports_agent: false,
 };
 
 /** A proxied target: the endpoint field and the verification action belong to it. */
@@ -104,7 +104,7 @@ const proxiedTarget = {
   manual_model: false,
   default_model: 'MiniMax-M3',
   supports_model: true,
-  supports_extra_args: true,
+  supports_extra_args: true, supports_agent: false,
   verification_required: true,
 };
 
