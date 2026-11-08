@@ -12,7 +12,7 @@
 //! see the same preferences clones the handle and passes it in.
 
 use super::store::PreferencesStore;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // Per-feature test files. Each tests a single concern; the cross-module
 // fixtures live here.
@@ -68,6 +68,40 @@ pub(crate) fn test_dir() -> PathBuf {
 pub(crate) fn test_dir_for(id: usize) -> PathBuf {
     crate::env::test_helpers::claim_dir_name(&std::env::temp_dir(), &profile_dir_name(id))
         .expect("claiming a fresh preferences profile directory must succeed")
+}
+
+/// A claimed profile directory that removes itself when the test ends.
+///
+/// The claim proves the name belongs to this run, and the removal rides out
+/// the window in which Windows is still releasing a handle - so a test that
+/// fails part-way through still leaves nothing behind in `%TEMP%`. The
+/// leftovers are what a later run collides with, and a fixture that builds
+/// `%TEMP%\buildmesh_*` by hand has the same leak whether or not it has
+/// failed yet (issue #2220).
+pub(crate) struct ProfileDir(PathBuf);
+
+impl ProfileDir {
+    /// The claimed path. It is **absent** until the test creates it.
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for ProfileDir {
+    fn drop(&mut self) {
+        // The path holds a directory in the usual case, and a *file* in the
+        // storage layer's "the app-data path is a file" case.
+        if self.0.is_dir() {
+            let _ = crate::env::test_helpers::remove_dir_all_with_retry(&self.0);
+        } else {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+}
+
+/// A claimed profile directory that removes itself when the test ends.
+pub(crate) fn profile_dir() -> ProfileDir {
+    ProfileDir(test_dir())
 }
 
 /// Run `f` with a store over a fresh temporary directory.

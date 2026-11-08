@@ -23,7 +23,7 @@ use super::super::secrets::profile_for;
 use super::super::storage::{read_state, LoadState};
 use super::super::store::PreferencesStore;
 use super::super::{migrations, PreferencesStatus};
-use super::{test_dir, with_store};
+use super::{profile_dir, with_store};
 
 /// A legacy-shaped payload: the pre-#1188 `autopilot_pool_size` key and a
 /// keyed account still carrying the endpoint fields ADR-0025 migrates.
@@ -704,16 +704,16 @@ fn a_missing_path_component_is_missing_on_every_platform() {
     // preferences.json and never was", so both must classify as `Missing` —
     // otherwise the classification silently differs by OS. CI caught this as
     // a Linux-only failure in a Windows-authored test.
-    let file_instead_of_dir = test_dir();
+    let file_instead_of_dir = profile_dir();
     let sentinel = b"not a directory";
-    std::fs::write(&file_instead_of_dir, sentinel).unwrap();
-    let store = PreferencesStore::new(file_instead_of_dir.clone());
+    std::fs::write(file_instead_of_dir.path(), sentinel).unwrap();
+    let store = PreferencesStore::new(file_instead_of_dir.path().to_path_buf());
 
     assert!(
         matches!(
             read_state(
-                &file_instead_of_dir.join("preferences.json"),
-                &profile_for(&file_instead_of_dir)
+                &file_instead_of_dir.path().join("preferences.json"),
+                &profile_for(file_instead_of_dir.path())
             )
             .unwrap(),
             LoadState::Missing
@@ -724,9 +724,9 @@ fn a_missing_path_component_is_missing_on_every_platform() {
     // there is genuinely nothing to preserve.
     assert_eq!(store.load().unwrap(), AppPreferences::default());
 
-    let after = std::fs::read(&file_instead_of_dir).expect("the sentinel still exists");
+    let after = std::fs::read(file_instead_of_dir.path()).expect("the sentinel still exists");
     assert_eq!(after, sentinel, "a read must not modify the path");
-    let _ = std::fs::remove_file(&file_instead_of_dir);
+    // The guard removes the sentinel file when the test ends.
 }
 
 // ---------------------------------------------------------------------------
@@ -738,9 +738,9 @@ fn a_corrupt_file_in_one_directory_cannot_affect_another() {
     // The corruption decision is derived from the file on every read, never
     // latched in process state — so two app-data dirs (two profiles, or a
     // test next to a real one) cannot contaminate each other.
-    let broken_dir = test_dir();
-    std::fs::create_dir_all(&broken_dir).unwrap();
-    std::fs::write(broken_dir.join("preferences.json"), b"broken").unwrap();
+    let broken_dir = profile_dir();
+    std::fs::create_dir_all(broken_dir.path()).unwrap();
+    std::fs::write(broken_dir.path().join("preferences.json"), b"broken").unwrap();
 
     with_store(|store| {
         store
@@ -755,7 +755,7 @@ fn a_corrupt_file_in_one_directory_cannot_affect_another() {
         );
     });
 
-    let broken_store = PreferencesStore::new(broken_dir.clone());
+    let broken_store = PreferencesStore::new(broken_dir.path().to_path_buf());
     assert!(matches!(
         read_state(
             &broken_store.preferences_path(),
@@ -764,7 +764,7 @@ fn a_corrupt_file_in_one_directory_cannot_affect_another() {
         .unwrap(),
         LoadState::Corrupt(_)
     ));
-    let _ = std::fs::remove_dir_all(&broken_dir);
+    // The guard removes the directory when the test ends.
 }
 
 // ---------------------------------------------------------------------------
@@ -789,9 +789,9 @@ fn the_atomic_replacement_rides_out_a_transient_holder() {
     use std::os::windows::fs::OpenOptionsExt;
     use std::sync::mpsc;
 
-    let dir = test_dir();
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("preferences.json");
+    let dir = profile_dir();
+    std::fs::create_dir_all(dir.path()).unwrap();
+    let path = dir.path().join("preferences.json");
     std::fs::write(&path, b"old").unwrap();
 
     // The holder opens the destination with no sharing at all, so nothing may
@@ -822,4 +822,6 @@ fn the_atomic_replacement_rides_out_a_transient_holder() {
         b"new",
         "the replacement must land whole, not half-written"
     );
+    // The guard removes the profile directory when the test ends, so the run
+    // leaves nothing behind in %TEMP%.
 }

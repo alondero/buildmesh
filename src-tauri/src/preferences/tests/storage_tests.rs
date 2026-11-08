@@ -6,7 +6,7 @@
 
 use super::super::model::AppPreferences;
 use super::super::store::PreferencesStore;
-use super::{profile_dir_name, test_dir, test_dir_for, with_store, TEST_DIR_COUNTER};
+use super::{profile_dir, profile_dir_name, test_dir_for, with_store, TEST_DIR_COUNTER};
 
 #[test]
 fn preference_files_are_isolated_between_temp_directories() {
@@ -91,9 +91,9 @@ fn load_returns_default_when_file_missing() {
 fn failed_update_does_not_publish_candidate_to_cache() {
     // The store's directory is a *file*, so every path under it is
     // unreadable — the write fails at the I/O layer.
-    let app_data_file = test_dir();
-    std::fs::write(&app_data_file, "not a directory").unwrap();
-    let store = PreferencesStore::new(app_data_file.clone());
+    let app_data_file = profile_dir();
+    std::fs::write(app_data_file.path(), "not a directory").unwrap();
+    let store = PreferencesStore::new(app_data_file.path().to_path_buf());
 
     let loaded = store.load().unwrap();
     assert_eq!(loaded.default_provider, None);
@@ -110,7 +110,7 @@ fn failed_update_does_not_publish_candidate_to_cache() {
     );
     assert_eq!(store.load().unwrap().default_provider, None);
 
-    std::fs::remove_file(app_data_file).unwrap();
+    // The guard removes the sentinel file when the test ends.
 }
 
 #[test]

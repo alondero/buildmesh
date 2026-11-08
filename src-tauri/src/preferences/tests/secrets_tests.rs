@@ -281,9 +281,9 @@ fn dev_and_stable_profiles_do_not_share_stored_keys() {
     // credential vault; the profile (the data-dir leaf, i.e. the bundle id)
     // must be part of the entry name. The namespace follows the store, so
     // each profile's store addresses its own entries.
-    let root = super::test_dir();
-    let stable = root.join("com.alond.buildmesh");
-    let dev = root.join("com.alond.buildmesh.dev");
+    let root = super::profile_dir();
+    let stable = root.path().join("com.alond.buildmesh");
+    let dev = root.path().join("com.alond.buildmesh.dev");
     std::fs::create_dir_all(&stable).unwrap();
     std::fs::create_dir_all(&dev).unwrap();
 
@@ -308,7 +308,7 @@ fn dev_and_stable_profiles_do_not_share_stored_keys() {
     let stable_store = restart(&stable_store);
     assert_eq!(account_key(&stable_store, "minimax").as_deref(), Some(KEY));
 
-    let _ = std::fs::remove_dir_all(&root);
+    // The guard removes the profile root when the test ends.
 }
 
 #[cfg(windows)]
