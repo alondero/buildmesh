@@ -386,9 +386,9 @@ interface UIState extends GridControls {
   // (`AgentNodeView.onOpenSpawnMenu`) resolves the target mesh id
   // before opening; `null` here means "closed" and nothing else.
   canvasSpawnMenuMeshId: number | null;
-  canvasSpawnMenuOptions: { providerId?: string; initialPrompt?: string; promptLibrary?: boolean } | null;
+  canvasSpawnMenuOptions: { providerId?: string; initialPrompt?: string } | null;
   canvasSpawnMenuRequestId: number;
-  openCanvasSpawnMenu: (meshId: number, options?: { providerId?: string; initialPrompt?: string; promptLibrary?: boolean }) => void;
+  openCanvasSpawnMenu: (meshId: number, options?: { providerId?: string; initialPrompt?: string }) => void;
   closeCanvasSpawnMenu: () => void;
 
   // Agent node currently under an OS file-drag, or null. Drives the terminal

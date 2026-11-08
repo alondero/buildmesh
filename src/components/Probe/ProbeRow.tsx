@@ -83,12 +83,12 @@ export interface ProbeRowProps {
    * typo (`'issus'`) is caught at the call site instead of silently
    * breaking the selectors that downstream tests query.
    */
-  dataAttr: 'issue' | 'pr';
+  dataAttr: 'issue' | 'pr' | 'prompt';
   /** Value for the data attribute — the issue / PR number. */
   rowKey: string | number;
 
   /** `#NN` prefix rendered in cyan font-mono. */
-  number: number;
+  number?: number;
   /** Title text — also the link body. */
   title: string;
   /**
@@ -120,6 +120,7 @@ export interface ProbeRowProps {
    * collapse happens from the title column.
    */
   body?: string | null;
+  bodyFormat?: 'markdown' | 'text';
 
   /**
    * Tab-specific actions on the right (split spawn button, merge
@@ -167,6 +168,7 @@ export function ProbeRow({
   isExpanded,
   onToggle,
   body,
+  bodyFormat = 'markdown',
   rightSlot,
   belowSlot,
   metaSlot,
@@ -192,6 +194,7 @@ export function ProbeRow({
     <div
       data-issue-row={dataAttr === 'issue' ? rowKey : undefined}
       data-pr-row={dataAttr === 'pr' ? rowKey : undefined}
+      data-prompt-row={dataAttr === 'prompt' ? rowKey : undefined}
       className="relative flex flex-col gap-1 rounded-md transition-colors hover:bg-bg-card focus-within:bg-bg-card"
     >
       {/* Left-edge status stripe. Always rendered so the row never
@@ -202,19 +205,20 @@ export function ProbeRow({
         aria-hidden="true"
         className={`absolute left-0 top-0 bottom-0 w-[3px] rounded-l-md ${stripeClass}`}
       />
-      <div className="flex items-start gap-2 px-2.5 py-2 pl-3">
+      <div className={`flex items-start gap-2 px-2.5 py-2 pl-3 ${dataAttr === 'prompt' ? 'flex-wrap' : ''}`}>
         {/* Left column — clickable to expand/collapse. The title
             `<a>` and the ↗ icon `<a>` (both via `<SafeLink>`) live
             here, each with stopPropagation so the row handler
             doesn't fire when the user navigates to GitHub. The body
             moved OUT of this column (see below) so it can span the
             full row width. */}
-        <div className="flex-1 min-w-0">
+        <div className={`${dataAttr === 'prompt' ? 'flex-[1_1_120px]' : 'flex-1'} min-w-0`}>
           <div
             ref={focusRef}
             role="button"
             tabIndex={0}
             aria-expanded={hasBody ? isExpanded : undefined}
+            aria-controls={hasBody ? `${dataAttr}-body-${rowKey}` : undefined}
             aria-disabled={!hasBody || undefined}
             className={`flex-1 min-w-0 rounded-sm focus-visible:outline-none ${
               hasBody
@@ -245,9 +249,9 @@ export function ProbeRow({
                   ▸
                 </span>
               )}
-              <span className="text-2xs text-accent-cyan font-mono font-medium tabular-nums">
+              {number !== undefined && <span className="text-2xs text-accent-cyan font-mono font-medium tabular-nums">
                 #{number}
-              </span>
+              </span>}
               {/* Title link. `min-w-0 flex-1` on the link AND `min-w-0`
                   on the parent flex are required for the `truncate`
                   class to actually take effect — see the
@@ -256,8 +260,8 @@ export function ProbeRow({
                   into the action buttons. */}
               <SafeLink
                 url={url}
-                className="text-xs text-text-primary font-medium hover:text-accent-cyan ml-0.5 truncate min-w-0 flex-1 transition-colors"
-                title="Open on GitHub"
+                className={`text-xs text-text-primary font-medium hover:text-accent-cyan ml-0.5 min-w-0 flex-1 transition-colors ${dataAttr === 'prompt' ? 'break-words' : 'truncate'}`}
+                title={url ? 'Open on GitHub' : title}
               >
                 {title}
               </SafeLink>
@@ -300,11 +304,13 @@ export function ProbeRow({
       {hasBody &&
         (isExpanded ? (
           <div
+            id={`${dataAttr}-body-${rowKey}`}
             data-issue-body-expanded={dataAttr === 'issue' ? true : undefined}
             data-pr-body-expanded={dataAttr === 'pr' ? true : undefined}
+            data-prompt-body-expanded={dataAttr === 'prompt' ? true : undefined}
             className="px-2.5 pb-2 pl-3"
           >
-            <div className="max-h-48 overflow-y-auto overflow-x-hidden text-2xs leading-relaxed text-text-secondary break-words rounded-md border border-border-subtle bg-bg-input px-2 py-1.5">
+            <div className={`${dataAttr === 'prompt' ? '' : 'max-h-48 overflow-y-auto overflow-x-hidden'} text-xs leading-relaxed text-text-secondary break-words rounded-md border border-border-subtle bg-bg-input px-2 py-1.5`}>
               {/* Rendered markdown (was raw `whitespace-pre-wrap` text —
                   GitHub bodies are markdown, not plain text). Markdown
                   supplies its own block layout, so the panel drops
@@ -314,15 +320,17 @@ export function ProbeRow({
                   The panel stays inert — SafeLink's stopPropagation plus
                   the absent wrapper onClick mean a link click can't
                   collapse the row. */}
-              <MarkdownText source={body} />
+              {bodyFormat === 'text' ? <p className="whitespace-pre-wrap">{body}</p> : <MarkdownText source={body} />}
             </div>
           </div>
         ) : (
           <div
+            id={`${dataAttr}-body-${rowKey}`}
             role="button"
             tabIndex={0}
             aria-expanded={false}
-            aria-label={`Expand ${dataAttr === 'pr' ? 'pull request' : 'issue'} #${rowKey} description`}
+            aria-label={dataAttr === 'prompt' ? `Expand ${title} prompt` : `Expand ${dataAttr === 'pr' ? 'pull request' : 'issue'} #${rowKey} description`}
+            aria-controls={`${dataAttr}-body-${rowKey}`}
             className="px-2.5 pb-2 pl-3 rounded-sm cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-cyan"
             onClick={onToggle}
             onKeyDown={(e) => {

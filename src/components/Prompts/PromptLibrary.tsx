@@ -1,157 +1,165 @@
 import { useEffect, useRef, useState } from 'react';
 import type { SavedPrompt } from '../../types/generated/SavedPrompt';
+import type { Mesh } from '../../types/generated/Mesh';
+import type { AgentNode } from '../../types/generated/AgentNode';
 import type { SpawnOption } from '../../lib/groups';
 import { BUILT_IN_PROMPTS, searchPrompts } from '../../lib/promptLibrary';
 import { deleteSavedPrompt, listSavedPrompts, savePrompt } from '../../lib/tauri/preferences';
 import { getDefaultProvider } from '../../lib/tauri/provider';
+import { useProbeResource, type ProbeLoader } from '../../lib/probeResource';
+import { enterMesh, focusNode } from '../../lib/navigation';
 import { formatError } from '../../lib/errorUtils';
-import { SpawnButtonCluster } from '../Sidebar/SpawnButtonCluster';
+import { useAgentNodeStore } from '../../stores/agentNodeStore';
+import { useMeshStore } from '../../stores/meshStore';
+import { ProbeToolbar } from '../Probe/ProbeToolbar';
+import { ProbeTabBody } from '../Probe/ProbeTabBody';
+import { ProbeRow } from '../Probe/ProbeRow';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
+import { PromptActions } from './PromptActions';
+import { PromptEditor, PromptLaunchDialog, promptLaunchLocation, type PromptLaunch } from './PromptDialogs';
+import { PromptSpawnButton } from './PromptSpawnButton';
 
+export const loadPrompts: ProbeLoader<SavedPrompt[]> = () => listSavedPrompts();
 const EMPTY: SavedPrompt = { id: '', name: '', body: '' };
-const fieldClass = 'w-full rounded-md border border-border-default bg-bg-input px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-cyan';
 const buttonClass = 'min-h-6 rounded-md border border-border-default px-2 py-1 text-xs text-text-secondary hover:bg-bg-card-hover disabled:opacity-40';
+interface Editor { prompt: SavedPrompt; mode: 'new' | 'edit' | 'duplicate' }
 
-export function PromptLibrary({ meshId, providers, initialPrompt = '', retryingNode = false, onSpawn, onDirtyChange }: {
-  meshId: number;
-  providers: SpawnOption[];
-  initialPrompt?: string;
-  retryingNode?: boolean;
-  onSpawn: (body: string, providerId: string, altKey: boolean, configurationId?: string, loginId?: string) => Promise<void>;
-  onDirtyChange: (dirty: boolean) => void;
-}) {
-  const initial = { ...EMPTY, body: initialPrompt };
-  const [saved, setSaved] = useState<SavedPrompt[]>([]);
-  const [loaded, setLoaded] = useState(false);
-  const [loadAttempt, setLoadAttempt] = useState(0);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+export function PromptLibrary({ mesh, providers }: { mesh: Mesh | null; providers: SpawnOption[] }) {
+  // Content is Host-owned; changing launch context must not refetch over edits.
+  const resource = useProbeResource(loadPrompts, { meshId: null }, 'prompt-library');
+  const { data: saved, error: loadError, loading } = resource.state;
+  const meshes = useMeshStore(state => state.meshes);
   const [query, setQuery] = useState('');
-  const [baseline, setBaseline] = useState(initial);
-  const [draft, setDraft] = useState(initial);
-  const [pending, setPending] = useState<SavedPrompt | null>(null);
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [launching, setLaunching] = useState(false);
-  const [menuOpen, setMenuOpen] = useState(false);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [editor, setEditor] = useState<Editor | null>(null);
+  const [deleting, setDeleting] = useState<SavedPrompt | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [launch, setLaunch] = useState<PromptLaunch | null>(null);
+  const [spawningId, setSpawningId] = useState<string | null>(null);
+  const [success, setSuccess] = useState<{ node: AgentNode; meshName: string } | null>(null);
+  const [deletingBusy, setDeletingBusy] = useState(false);
   const operation = useRef(false);
-  const dirty = draft.name !== baseline.name || draft.body !== baseline.body;
-  const custom = saved.some(prompt => prompt.id === draft.id);
-  const canSave = loaded && draft.name.trim() !== '' && draft.body.trim() !== '' && (!custom || dirty);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const promptProviders = providers.filter(option => option.capabilities?.accepts_initial_prompt ?? option.harness_id !== 'terminal');
+  const busy = spawningId !== null || deletingBusy;
 
-  useEffect(() => { onDirtyChange(dirty); }, [dirty, onDirtyChange]);
-  useEffect(() => {
-    let current = true;
-    setLoadError(null);
-    listSavedPrompts().then(prompts => {
-      if (current) { setSaved(prompts); setLoaded(true); }
-    }).catch(err => { if (current) setLoadError(formatError(err)); });
-    return () => { current = false; };
-  }, [loadAttempt]);
-
-  const adopt = (prompt: SavedPrompt) => {
-    setBaseline(prompt); setDraft(prompt); setPending(null); setConfirmDelete(false); setError(null);
-  };
-  const choose = (prompt: SavedPrompt) => {
-    if (dirty) setPending(prompt);
-    else adopt(prompt);
-  };
-  const run = async (action: () => Promise<void>, launch = false) => {
+  const spawn = async (request: PromptLaunch) => {
     if (operation.current) return;
     operation.current = true;
-    setBusy(true); setMenuOpen(false); setError(null);
-    setLaunching(launch);
-    try { await action(); }
-    catch (err) { setError(formatError(err)); }
-    finally { operation.current = false; setBusy(false); setLaunching(false); }
+    setSpawningId(request.prompt.id); setError(null); setSuccess(null);
+    let node = request.node;
+    let providerId = request.providerId;
+    try {
+      const body = (request.body ?? request.prompt.body).trim();
+      if (!body) throw new Error('Enter a prompt before spawning.');
+      if (node) {
+        const current = useAgentNodeStore.getState().nodesById[node.id];
+        if (!current || current.status === 'archived') throw new Error('This agent is no longer available. Close this dialog to start a fresh agent.');
+        if (!['idle', 'error', 'suspended'].includes(current.status) || current.provider !== node.provider) {
+          throw new Error('This agent has changed since the failed launch. View the agent before retrying.');
+        }
+      }
+      if (!node) {
+        providerId ??= await getDefaultProvider(request.mesh.id);
+        if (!promptProviders.some(option => option.id === providerId)) {
+          throw new Error('Choose an agent that supports an initial prompt from the arrow menu.');
+        }
+        if (!useMeshStore.getState().meshesById.has(request.mesh.id)) throw new Error('This Mesh is no longer available.');
+        // A fresh create uses the Mesh defaults. Never read the focused agent,
+        // inherit its checkout, or let a delayed completion change selection.
+        node = await useAgentNodeStore.getState().createAgentNode(request.mesh.id, request.mesh.name,
+          request.mesh.path, 'main', providerId, request.mesh.use_worktree, request.configurationId, body, request.loginId);
+      }
+      await useAgentNodeStore.getState().spawnAgent(node.id, node.provider, { prefill: body });
+      if (mounted.current) { setLaunch(null); setSuccess({ node, meshName: request.mesh.name }); }
+    } catch (cause) {
+      if (mounted.current) setLaunch({ ...request, providerId, node, error: formatError(cause) });
+    } finally {
+      operation.current = false;
+      if (mounted.current) setSpawningId(null);
+    }
   };
-  const save = () => run(async () => {
-    const prompt = await savePrompt(custom ? draft.id : null, draft.name, draft.body);
-    setSaved(prompts => custom ? prompts.map(item => item.id === prompt.id ? prompt : item) : [...prompts, prompt]);
-    adopt(prompt);
-  });
-  const remove = () => run(async () => {
-    setConfirmDelete(false);
-    await deleteSavedPrompt(draft.id);
-    setSaved(prompts => prompts.filter(item => item.id !== draft.id));
-    adopt(EMPTY);
-  });
-  const spawn = (providerId: string, altKey: boolean, configurationId?: string, loginId?: string) =>
-    run(() => onSpawn(draft.body.trim(), providerId, altKey, configurationId, loginId), true);
-  const promptProviders = providers.filter(option => option.capabilities?.accepts_initial_prompt ?? option.harness_id !== 'terminal');
 
-  return (
-    <div data-testid="prompt-library" className="min-w-0 space-y-3" onKeyDown={event => {
-      if (event.key !== 'Escape' || !menuOpen || event.nativeEvent.isComposing) return;
-      // Own Escape before document listeners can dismiss the enclosing modal.
-      event.preventDefault();
-      event.stopPropagation();
-      setMenuOpen(false);
-      event.currentTarget.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')?.focus();
-    }}>
-      {loadError && <div role="alert" className="text-sm text-status-error break-words">Could not load saved prompts: {loadError}{' '}
-        <button type="button" className="underline min-h-6" onClick={() => setLoadAttempt(value => value + 1)}>Retry</button>
-      </div>}
-      {error && <p role="alert" className="text-sm text-status-error break-words">{error}</p>}
-      <div className="grid min-w-0 gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)]">
-        <div className="min-w-0 space-y-2">
-          <div className="flex gap-2">
-            <input aria-label="Search prompts" type="search" placeholder="Search prompts…" value={query} onChange={event => setQuery(event.target.value)} className={`${fieldClass} min-w-0`} />
-            <button type="button" disabled={busy} onClick={() => choose(EMPTY)} className={`${buttonClass} shrink-0`}>New prompt</button>
-          </div>
-          <div className="max-h-44 sm:max-h-80 overflow-y-auto overflow-x-hidden space-y-3" aria-label="Prompt library">
-            {!loaded && !loadError && <p role="status" className="text-xs text-text-secondary">Loading saved prompts…</p>}
-            {[{ title: 'Your prompts', prompts: saved }, { title: 'Built-in prompts', prompts: BUILT_IN_PROMPTS }].map(group => (
-              <div key={group.title}>
-                <h3 className="text-2xs font-medium text-text-secondary mb-1">{group.title}</h3>
-                {group.title === 'Your prompts' && loaded && saved.length === 0 && <p className="text-xs text-text-muted">Save a prompt to reuse it in any project.</p>}
-                {searchPrompts(group.prompts, query).map(prompt => (
-                  <button key={prompt.id} type="button" aria-pressed={draft.id === prompt.id} disabled={busy}
-                    onClick={() => choose(prompt)} className={`block w-full text-left rounded-md px-2 py-2 text-sm break-words disabled:opacity-40 ${draft.id === prompt.id ? 'bg-bg-selection text-text-primary' : 'text-text-secondary hover:bg-bg-card-hover'}`}>
-                    {prompt.name}
-                  </button>
-                ))}
-              </div>
-            ))}
-            {searchPrompts([...saved, ...BUILT_IN_PROMPTS], query).length === 0 && <p className="text-sm text-text-secondary">No prompts match your search.</p>}
-          </div>
-        </div>
-        <div className="min-w-0 space-y-2">
-          {pending && <div role="alert" className="rounded-md border border-border-default p-2 text-xs text-text-secondary">
-            Discard your unsaved prompt changes?
-            <div className="flex flex-wrap gap-2 mt-2">
-              <button type="button" className={buttonClass} onClick={() => setPending(null)}>Keep editing</button>
-              <button type="button" className={buttonClass} onClick={() => adopt(pending)}>Discard changes</button>
-            </div>
-          </div>}
-          <label className="block text-xs text-text-secondary">Prompt name
-            <input maxLength={120} value={draft.name} disabled={busy} onChange={event => setDraft({ ...draft, name: event.target.value })} className={`${fieldClass} mt-1`} />
-          </label>
-          <label className="block text-xs text-text-secondary">Initial prompt
-            <textarea value={draft.body} disabled={busy} onChange={event => setDraft({ ...draft, body: event.target.value })} placeholder="What should the agent do?" className={`${fieldClass} mt-1 h-44 resize-y`} />
-          </label>
-          <p className="text-2xs text-text-secondary">Edit for this launch, or save to reuse. Text is sent as written.</p>
-          <div className="flex flex-wrap items-center gap-2">
-            <button type="button" disabled={!canSave || busy} onClick={save} className={buttonClass}>{custom ? 'Save changes' : draft.id ? 'Save a copy' : 'Save prompt'}</button>
-            {dirty && <button type="button" disabled={busy} onClick={() => adopt(baseline)} className={buttonClass}>Reset changes</button>}
-            {custom && <button type="button" disabled={busy} onClick={() => setConfirmDelete(true)} className={`${buttonClass} text-status-error`}>Delete prompt</button>}
-          </div>
-          {confirmDelete && <ConfirmDialog title="Delete prompt" message={`Delete “${baseline.name}” from your library?`}
-            confirmLabel="Confirm delete" onCancel={() => setConfirmDelete(false)} onConfirm={remove} />}
-          <div className="flex flex-wrap justify-end pt-2">
-            {retryingNode ? <button type="button" disabled={busy || !draft.body.trim()} className={buttonClass}
-              onClick={() => { void spawn('', false); }}>Retry launch</button> :
-            <SpawnButtonCluster providers={promptProviders} dropdownKey={`prompt-${meshId}`} primaryLabel="Spawn" primaryAriaLabel="Spawn with prompt"
-              isOpen={menuOpen} onToggleDropdown={() => setMenuOpen(value => !value)} disabled={busy || !draft.body.trim() || promptProviders.length === 0}
-              isSpawning={launching} getDefaultProvider={() => getDefaultProvider(meshId)} onSelectProvider={spawn}
-              onSpawnDefault={altKey => { void run(async () => {
-                await onSpawn(draft.body.trim(), await getDefaultProvider(meshId), altKey);
-              }, true); }} />}
-          </div>
-          {retryingNode && <p className="text-xs text-text-secondary">The agent node was created. Retry sends this prompt to the same node.</p>}
-          {promptProviders.length === 0 && <p className="text-xs text-text-secondary">Install an agent CLI or add a provider in Settings to spawn with a prompt.</p>}
-        </div>
-      </div>
+  const save = async (name: string, body: string) => {
+    if (!editor || saved === null) throw new Error('Load your library before saving a prompt.');
+    const prompt = await savePrompt(editor.mode === 'edit' ? editor.prompt.id : null, name, body);
+    resource.mutate(prompts => editor.mode === 'edit'
+      ? prompts.map(item => item.id === prompt.id ? prompt : item) : [...prompts, prompt]);
+    if (mounted.current) {
+      setQuery(''); setExpanded(current => ({ ...current, [prompt.id]: true })); setEditor(null);
+      requestAnimationFrame(() => {
+        if (mounted.current) document.querySelector<HTMLElement>(`[data-prompt-row="${prompt.id}"] [aria-expanded]`)?.focus();
+      });
+    }
+  };
+
+  const remove = async () => {
+    if (!deleting || operation.current) return;
+    operation.current = true; setDeletingBusy(true); setDeleting(null); setError(null);
+    try {
+      await deleteSavedPrompt(deleting.id);
+      resource.mutate(prompts => prompts.filter(item => item.id !== deleting.id));
+      searchRef.current?.focus();
+    } catch (cause) { setError(formatError(cause)); }
+    finally { operation.current = false; setDeletingBusy(false); }
+  };
+
+  const groups = [{ title: 'Your prompts', prompts: saved ?? [] }, { title: 'Built-in prompts', prompts: BUILT_IN_PROMPTS }];
+  const matches = groups.map(group => ({ ...group, prompts: searchPrompts(group.prompts, query) }));
+  return <div data-testid="prompt-library" className="flex h-full min-h-0 min-w-0 flex-col">
+    <ProbeToolbar className="shrink-0" trailing={<button type="button" className={buttonClass} disabled={busy || saved === null}
+      onClick={() => setEditor({ prompt: EMPTY, mode: 'new' })}>New prompt</button>}>
+      <input ref={searchRef} aria-label="Search prompts" type="search" placeholder="Search prompts…" value={query} onChange={event => setQuery(event.target.value)}
+        className="min-h-7 w-full min-w-0 rounded-md border border-border-default bg-bg-input px-2 text-xs text-text-primary focus:outline-none focus:border-accent-cyan" />
+    </ProbeToolbar>
+    <div className="shrink-0 space-y-1 border-b border-border-subtle px-3 py-2 text-xs text-text-secondary">
+      {mesh ? <p data-testid="prompt-launch-context" className="break-words">Fresh spawn · {promptLaunchLocation(mesh)}</p>
+        : <label className="block">Select a Mesh to spawn
+          <select aria-label="Spawn target Mesh" value="" onChange={event => { if (event.target.value) enterMesh(Number(event.target.value)); }}
+            className="mt-1 min-h-7 w-full min-w-0 rounded-md border border-border-default bg-bg-input px-2 text-xs text-text-primary">
+            <option value="">Select a Mesh…</option>
+            {meshes.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+          </select>
+        </label>}
+      {!mesh && <p>Your library is available in every Mesh.</p>}
+      {mesh && promptProviders.length === 0 && <p>Install an agent CLI or add a provider in Settings to spawn.</p>}
     </div>
-  );
+    {loadError && <div role="alert" className="shrink-0 break-words px-3 py-2 text-xs text-status-error">Could not load saved prompts: {loadError}{' '}
+      <button type="button" className="min-h-6 underline" onClick={() => void resource.reload()}>Retry</button>
+    </div>}
+    {error && <p role="alert" className="shrink-0 break-words px-3 py-2 text-xs text-status-error">{error}</p>}
+    {success && <div role="status" className="shrink-0 break-words px-3 py-2 text-xs text-text-secondary">Started {success.node.name} in {success.meshName}.{' '}
+      <button type="button" className="min-h-6 underline" onClick={() => focusNode(success.node.id, { view: 'mesh', scope: 'node' })}>View agent</button>
+    </div>}
+    <ProbeTabBody data-testid="prompt-library-body" className="space-y-3">
+      {loading && <p role="status" className="text-xs text-text-secondary">Loading saved prompts…</p>}
+      {!loading && saved?.length === 0 && !query && <p className="text-xs text-text-secondary">Save your own with New prompt, or try a built-in below.</p>}
+      {matches.filter(group => group.prompts.length > 0).map(group => <section key={group.title} aria-label={group.title}>
+        <h3 className="mb-1 text-xs font-medium text-text-secondary">{group.title}</h3>
+        <div className="space-y-2">{group.prompts.map(prompt => {
+          const custom = saved?.some(item => item.id === prompt.id) ?? false;
+          return <ProbeRow key={prompt.id} dataAttr="prompt" rowKey={prompt.id} title={prompt.name} url="" iconAriaLabel=""
+            isExpanded={expanded[prompt.id] ?? false} onToggle={() => setExpanded(current => ({ ...current, [prompt.id]: !current[prompt.id] }))}
+            body={prompt.body} bodyFormat="text" rightSlot={<div className="flex max-w-full items-center gap-1">
+              <PromptSpawnButton key={`${mesh?.id ?? 'none'}-${prompt.id}`} meshId={mesh?.id ?? null} promptId={prompt.id} name={prompt.name}
+                providers={promptProviders} busy={spawningId === prompt.id} disabled={busy || !mesh || promptProviders.length === 0}
+                onSpawn={(providerId, configurationId, loginId) => { if (mesh) void spawn({ prompt, mesh, providerId, configurationId, loginId }); }} />
+              <PromptActions name={prompt.name} custom={custom} disabled={busy || saved === null}
+                onEdit={() => setEditor({ prompt, mode: 'edit' })}
+                onDuplicate={() => setEditor({ prompt: { ...prompt, name: `${prompt.name.slice(0, 113)} (copy)` }, mode: 'duplicate' })}
+                onDelete={() => setDeleting(prompt)} />
+            </div>} belowSlot={expanded[prompt.id] && <button type="button" className={`${buttonClass} mb-1`} disabled={busy || !mesh}
+              onClick={() => { if (mesh) setLaunch({ prompt, mesh }); }}>Customise for this launch</button>} />;
+        })}</div>
+      </section>)}
+      {matches.every(group => group.prompts.length === 0) && !loading && <p className="text-sm text-text-secondary">No prompts match your search.</p>}
+    </ProbeTabBody>
+    {editor && <PromptEditor prompt={editor.prompt} mode={editor.mode} onSave={save} onClose={() => setEditor(null)} />}
+    {deleting && <ConfirmDialog title="Delete prompt" message={`Delete “${deleting.name}” from your library?`} confirmLabel="Confirm delete"
+      onCancel={() => { if (!deletingBusy) setDeleting(null); }} onConfirm={remove} />}
+    {launch && <PromptLaunchDialog launch={launch} providers={promptProviders} busy={spawningId !== null} onClose={() => setLaunch(null)}
+      onSpawn={(body, providerId, configurationId, loginId) => void spawn({ ...launch, body, providerId, configurationId, loginId })} />}
+  </div>;
 }

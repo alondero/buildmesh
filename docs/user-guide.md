@@ -965,31 +965,39 @@ current text visible so you can retry editing before leaving the tool.
 
 ## Reuse prompts when spawning agents
 
-Open a project's spawn menu in the sidebar and choose **Spawn from prompt…**.
-The canvas spawn dialog offers the same action. The dialog names the target
-project so you can check where the new agent will work.
+Open **Prompts** from the tool picker or search for **Open Prompts**. The
+**Choose a prompt…** shortcut in a project's spawn menu opens the same Probe
+with that Mesh selected. The canvas spawn dialog offers the same shortcut.
 
-Search the library by name or prompt text, then select a built-in or saved
-prompt to preview it. **Spawn** uses the project's default agent; the adjacent
-arrow offers the usual agent, Launch Configuration and login choices. Normal
-clicks follow the project's worktree setting; Alt-click (Option-click on macOS)
-inverts that setting. Plain Terminal cannot receive an initial prompt.
+Search by title or prompt text. Expand a row to read and copy the complete
+prompt, or use its **Spawn** button immediately. **Spawn** uses the selected
+Mesh's default agent; the adjacent arrow offers the usual agent, Launch
+Configuration and login choices. Every launch creates a fresh agent using the
+Mesh's spawn settings: Worktree Nodes start from its configured base ref; Root
+Nodes use its folder. The Mesh heading and launch summary identify the target.
+The focused agent's checkout, changes and conversation are never inherited.
+Plain Terminal cannot receive an initial prompt. If it is your default, choose
+an agent from the arrow menu.
 
-Edit the text for a single launch without changing your library. To reuse it,
-give it a name and choose **Save prompt**. Built-ins offer **Save a copy**;
-your saved prompts offer **Save changes** and **Delete prompt** with confirmation.
-Saved prompts are shared across projects in this Buildmesh profile and survive
-restarts. **Reset changes** restores the selected prompt. Closing the dialog
-or selecting another prompt asks before discarding edits. Save failures keep
-your draft available for retry.
+Choose **New prompt**, enter a title and prompt, then **Save prompt**. The row's
+**Actions** menu offers **Duplicate** and, for your saved prompts, **Edit saved
+prompt** and **Delete prompt** with confirmation. Built-ins remain unchanged.
+Saved prompts are shared across Meshes in this Buildmesh profile and survive
+restarts. You can browse and create prompts without a selected Mesh; select
+one in the Probe to enable spawning.
+
+For a single-use variation, expand the row and choose **Customise for this
+launch**. Its dialog names the launch target and never saves your changes to
+the library. Closing either editor asks before discarding edits. Save and
+launch failures retain the draft for retry.
 
 Prompt text is sent as written, without placeholder substitution. The
 issue and pull request templates under **Settings → Prompts** remain separate.
-If the project's default is Terminal, choose an agent from the arrow menu.
-If creating the node fails, correct the error in the dialog and retry. If the
-node was created but launch failed, **Retry launch** sends your current prompt
-to that same node with its original configuration. Keep the dialog open to
-retain any unsaved prompt edits for this retry.
+The Probe stays open after spawning and offers **View agent**. If creating the
+node fails, correct the error in the launch dialog and try again. If the node
+was created but launch failed, **Retry launch** sends your current prompt to
+that same node with its original configuration. Keep the dialog open to retain
+any unsaved prompt edits for this retry.
 
 ## Launch Configurations
 

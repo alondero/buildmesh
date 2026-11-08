@@ -23,6 +23,7 @@ import type { LaunchTarget } from '../../src/types/generated/LaunchTarget';
 import type { OpenCodeConsoleStatus } from '../../src/types/generated/OpenCodeConsoleStatus';
 import type { OpenPr } from '../../src/types/generated/OpenPr';
 import type { GitStatus } from '../../src/types/generated/GitStatus';
+import type { SavedPrompt } from '../../src/types/generated/SavedPrompt';
 
 /** Fresh wire responses for each browser, checked by the root tsc gate. */
 export function buildDefaultFixtures() {
@@ -153,6 +154,7 @@ export function buildDefaultFixtures() {
   return {
     list_meshes: meshes,
     list_agent_nodes: agentNodes,
+    list_saved_prompts: [] satisfies SavedPrompt[],
     get_default_provider: 'anthropic',
     list_providers: providers,
     list_routing_options: providers,

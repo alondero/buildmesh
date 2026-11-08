@@ -18,7 +18,7 @@ beforeAll(preloadProbeTabs, 60_000);
 afterEach(() => vi.restoreAllMocks());
 
 it('registers a component, scoped loader, icon and context lens for every destination', async () => {
-  expect(PROBE_TAB_ORDER).toHaveLength(11);
+  expect(PROBE_TAB_ORDER).toHaveLength(12);
   for (const definition of Object.values(PROBE_TAB_DEFINITIONS)) {
     expect(definition.Component).toBeDefined();
     expect(definition.load).toBeTypeOf('function');

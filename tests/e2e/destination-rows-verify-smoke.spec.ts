@@ -18,7 +18,7 @@ const destinations = [
   ['files', 'Project Files'], ['review', 'Agent Changes'],
   ['properties', 'Project Settings'], ['worktrees', 'Repository'],
   ['issues', 'GitHub Issues'], ['pulls', 'GitHub Pull Requests'],
-  ['circuits', 'Circuits'], ['sessions', 'Agent History'],
+  ['circuits', 'Circuits'], ['prompts', 'Prompts'], ['sessions', 'Agent History'],
   ['scratchpad', 'Notes'], ['usage', 'Usage'], ['notifications', 'Notifications'],
 ] as const;
 

@@ -29,6 +29,10 @@ interface IconProps {
   className?: string;
 }
 
+export function PromptsIcon({ className }: IconProps) {
+  return <Svg className={className}><path d="M8 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2h-3" /><rect x="8" y="2" width="8" height="4" rx="1" /><path d="M7 11h10M7 15h7" /></Svg>;
+}
+
 /** Shared SVG wrapper — pins the stroke idiom so each glyph is just its
  *  path data. */
 function Svg({ className, children }: IconProps & { children: React.ReactNode }) {

@@ -318,6 +318,7 @@ describe('useProbeContext (issue #1456)', () => {
       'files',
       'issues',
       'notifications',
+      'prompts',
       'properties',
       'pulls',
       'review',
