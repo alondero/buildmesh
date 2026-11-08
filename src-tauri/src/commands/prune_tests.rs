@@ -1177,7 +1177,10 @@ impl PinnedWorktree {
     /// `the_removal_rides_out_a_working_directory_that_is_still_pinned`
     /// reproduces (issue #2220).
     fn kill_tree(&mut self) {
-        crate::process_util::kill_process_tree_contained(self.job.as_ref(), self.locker_pid());
+        crate::process_util::kill_process_tree_contained(
+            self.job.as_ref(),
+            Some(self.locker_pid()),
+        );
         let _ = self.locker.kill();
     }
 

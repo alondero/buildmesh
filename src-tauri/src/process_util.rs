@@ -226,6 +226,12 @@ pub fn kill_process_tree(_pid: u32) {}
 /// descendants `taskkill /T` cannot see, then `taskkill /T` and the direct
 /// kill as fallbacks for the rare spawn case where job assignment failed.
 ///
+/// The job is terminated whatever the pid is. The shell handle can already be
+/// gone - a shell that exited leaves `process_id()` empty - while the
+/// descendants it spawned keep running, and those descendants are the
+/// processes that pin a worktree's directory. Gating the termination on a pid
+/// would let exactly the processes the job exists to contain survive.
+///
 /// `taskkill /T` alone is not enough for a tree that contains a grandchild
 /// (a shell that launched an agent, or a dev server the agent backgrounded):
 /// it walks the *live* parent→child links, so a descendant whose parent has
@@ -236,11 +242,13 @@ pub fn kill_process_tree(_pid: u32) {}
 /// Shared by the agent teardown and the worktree-removal regression, so the
 /// regression exercises the sequence production uses rather than only its
 /// weakest fallback.
-pub fn kill_process_tree_contained(job: Option<&JobHandle>, pid: u32) {
+pub fn kill_process_tree_contained(job: Option<&JobHandle>, pid: Option<u32>) {
     if let Some(job) = job {
         job.terminate();
     }
-    kill_process_tree(pid);
+    if let Some(pid) = pid {
+        kill_process_tree(pid);
+    }
 }
 
 /// A Windows Job Object that contains an agent's entire process tree.
@@ -840,3 +848,11 @@ mod tests {
         );
     }
 }
+
+// The kill seam's own regression (issue #2220) lives in a sibling file, so a
+// test body is never added to this module. The `#[path]` module needs an
+// entry in `RUST_PATH_INCLUDES` (scripts/harness-check.mjs) so a scoped
+// check selects it.
+#[cfg(test)]
+#[path = "process_util_tests.rs"]
+mod process_util_tests;
