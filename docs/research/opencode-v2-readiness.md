@@ -160,6 +160,21 @@ are source-validated and unit-tested, not yet accepted by a live 2.2.6 app run.
   in `POST /api/session` and `POST /api/session/:id/model`; Buildmesh now
   passes `provider/model#variant` through both the session API and the
   background `run --model` path.
+- **Agent selection via the session API (issue #2716 P1).** The V2 full TUI
+  has no `--agent` flag; `POST /api/session` accepts `agent` at creation and
+  `POST /api/session/:id/agent` switches an existing session
+  (`{ "agent": "build" }`). Buildmesh carries the configured agent in
+  `prepare_identity` before the TUI starts — the create body, the resume
+  switch, and the regenerate-fork target all persist it — and passes
+  `run --agent` for background inference. The interactive argv stays
+  flag-free (`agent_override_via_session_api`). Malformed names fail in
+  `validate_agent_name` before any session-API request; unknown names fail
+  with the daemon's error before the PTY starts. Unit-tested against
+  `v2.2.3` fixtures; a manual `opencode2 api --standalone POST /api/session
+  --data '{"id":"ses_testagent1","agent":"build"}'` against `v2.2.3` returned
+  `data.agent: "build"`, confirming creation persists the agent through the
+  real daemon. A live 2.2.6 app run that persists a configured agent
+  through Buildmesh's `prepare_identity` is still an open acceptance gate.
 - **`run` changed in 2.2.6.** It waits for background shell/subagent/image jobs
   started by the prompt (no time limit), and can emit `background_wait`. The
   managed background config still denies tool use, so the existing JSON

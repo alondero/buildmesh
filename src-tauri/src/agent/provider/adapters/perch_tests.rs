@@ -13,6 +13,7 @@ fn config(
         effort: effort.map(str::to_string),
         extra_args: None,
         permission_mode: permission_mode.map(str::to_string),
+        agent: None,
     }
 }
 

@@ -216,6 +216,7 @@ fn mcode_interactive_recipe_carries_model_before_positional_prompt() {
         effort: None,
         extra_args: None,
         permission_mode: None,
+        agent: None,
     };
     for platform in [Platform::Windows, Platform::Macos, Platform::Linux] {
         let prepared = MCODE.prepare_launch(HarnessLaunchInput {
@@ -247,6 +248,7 @@ fn mcode_resume_recipe_carries_session_and_model_before_prompt() {
         effort: None,
         extra_args: None,
         permission_mode: None,
+        agent: None,
     };
     for platform in [Platform::Windows, Platform::Macos, Platform::Linux] {
         let prepared = MCODE.prepare_launch(HarnessLaunchInput {
@@ -282,6 +284,7 @@ fn mcode_recipe_without_model_preserves_native_default() {
         effort: None,
         extra_args: None,
         permission_mode: None,
+        agent: None,
     };
     for session in [
         SessionIdModeRef::None,

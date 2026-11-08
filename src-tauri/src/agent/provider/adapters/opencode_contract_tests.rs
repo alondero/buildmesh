@@ -154,6 +154,79 @@ fn model_args_use_long_form() {
     assert_eq!(args, vec!["--model", "anthropic/claude-sonnet-4-5"]);
 }
 
+#[test]
+fn agent_args_use_long_form_and_never_dangle() {
+    use crate::agent::provider::AgentProvider;
+    assert_eq!(OPENCODE.agent_args("build"), vec!["--agent", "build"]);
+    assert!(
+        OPENCODE.agent_args("").is_empty(),
+        "an empty name must not emit a dangling --agent that would swallow the next token"
+    );
+}
+
+#[test]
+fn interactive_recipe_carries_agent_flag() {
+    use crate::agent::capabilities::ResolvedAgentConfig;
+    use crate::agent::launch::{HarnessLaunchInput, SessionIdModeRef};
+    use crate::models::EnvType;
+    let config = ResolvedAgentConfig {
+        agent: Some("build".into()),
+        ..Default::default()
+    };
+    let prepared = OPENCODE.prepare_launch(HarnessLaunchInput {
+        routing: None,
+        node_id: None,
+        platform: Platform::Linux,
+        runtime: EnvType::Windows,
+        session: SessionIdModeRef::None,
+        config: &config,
+        prefill: None,
+        sandbox: false,
+    });
+    assert!(prepared.recipe.base_args.contains(&"--agent".to_string()));
+    assert!(prepared.recipe.base_args.contains(&"build".to_string()));
+    assert!(prepared.capabilities.supports_agent);
+}
+
+#[test]
+fn background_carries_run_agent() {
+    use crate::agent::provider::AgentProvider;
+    use crate::preferences::launch_configurations::{capture, LaunchOverrides};
+    let prefs = crate::preferences::AppPreferences::default();
+    let mut plan = capture(&prefs, "opencode", &LaunchOverrides::default()).unwrap();
+    plan.agent = Some("build".into());
+    let launch = crate::agent::background::resolve_plan(plan, &prefs).unwrap();
+    assert!(launch.args.contains(&"--agent".to_string()));
+    assert!(launch.args.contains(&"build".to_string()));
+    // Malformed agents fail before the background spawn, like the
+    // interactive path.
+    let mut bad = capture(&prefs, "opencode", &LaunchOverrides::default()).unwrap();
+    bad.agent = Some("has space".into());
+    let error = crate::agent::background::resolve_plan(bad, &prefs)
+        .err()
+        .expect("malformed agent must fail background resolution");
+    assert!(error.contains("agent"), "{error}");
+    // The trait default keeps background and interactive spellings in sync.
+    assert_eq!(
+        OPENCODE.background_agent_args("build"),
+        OPENCODE.agent_args("build")
+    );
+    assert!(OPENCODE.background_agent_args("").is_empty());
+}
+
+#[test]
+fn agent_names_validate_before_spawn() {
+    use crate::agent::provider::AgentProvider;
+    assert!(OPENCODE.validate_agent_override("build").is_ok());
+    assert!(OPENCODE.validate_agent_override("plan").is_ok());
+    for malformed in ["", "  ", "has space", "tab\tname", "carriage\rname"] {
+        assert!(
+            OPENCODE.validate_agent_override(malformed).is_err(),
+            "{malformed:?} must be rejected before spawn"
+        );
+    }
+}
+
 /// Issue #2151: the base recipe is bare — `--auto` is the OpenCode
 /// analogue of AGY's `--dangerously-skip-permissions` (see the module
 /// docstring) and now comes from the effective permission mode in
@@ -551,6 +624,7 @@ fn fresh_recipe_forwards_model_and_prompt_without_session_id() {
         effort: None,
         extra_args: None,
         permission_mode: None,
+        agent: None,
     };
     let input = HarnessLaunchInput {
         routing: None,

@@ -48,7 +48,7 @@ const capabilities = {
   produces_readable_transcript: true,
   supports_model_override: true,
   supports_effort_override: true,
-  supports_extra_args: true,
+  supports_extra_args: true, supports_agent: false,
   supports_prefill: true,
   is_plain_terminal: false,
   effort_control: 'inline_config',

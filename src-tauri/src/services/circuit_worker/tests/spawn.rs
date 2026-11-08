@@ -141,6 +141,7 @@ fn circuit_review_spawn_uses_frozen_plan_before_graph_parent_and_defaults() {
             model: Some("gpt-6-luna".into()),
             effort: Some("low".into()),
             permission_mode: None,
+            agent: None,
         },
     );
     let plan =
@@ -167,6 +168,7 @@ fn circuit_review_spawn_uses_frozen_plan_before_graph_parent_and_defaults() {
             effort: Some("high".into()),
             extra_args: Some("mutable-args".into()),
             timeout_seconds: Some(90),
+            agent: None,
         },
         Some("opencode"),
     );
@@ -199,6 +201,7 @@ fn review_spawn_cascade_applies_reviewer_precedence() {
             effort: Some("circuit-effort".into()),
             extra_args: None,
             timeout_seconds: None,
+            agent: None,
         },
         Some("parent-provider"),
     );

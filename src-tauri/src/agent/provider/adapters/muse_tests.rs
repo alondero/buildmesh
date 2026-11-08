@@ -148,6 +148,7 @@ fn muse_recipe_appends_reasoning_effort_arg_when_resolved() {
         effort: Some("ultra".into()),
         extra_args: None,
         permission_mode: None,
+        agent: None,
     };
     let input = HarnessLaunchInput {
         routing: None,
@@ -254,6 +255,7 @@ fn default_prepare_fresh_launch_carries_disable_approval_with_model_and_prefill(
         effort: None,
         extra_args: None,
         permission_mode: None,
+        agent: None,
     };
     let input = HarnessLaunchInput {
         routing: None,
@@ -437,6 +439,7 @@ fn composed_argv_never_carries_a_flag_buildmesh_declined_to_model() {
         // Buildmesh composes around it.
         extra_args: None,
         permission_mode: None,
+        agent: None,
     };
     let session_id = "12345678-1234-4234-8234-123456789abc";
     let modes = [

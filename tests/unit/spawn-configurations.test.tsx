@@ -21,7 +21,7 @@ const option: SpawnOption = {
     supports_passive_turn_watcher: false,
     attention_capability: { kind: 'none' },
     supports_model_override: true, supports_effort_override: true,
-    supports_extra_args: true, supports_prefill: true, is_plain_terminal: false,
+    supports_extra_args: true, supports_agent: false, supports_prefill: true, is_plain_terminal: false,
     effort_control: { kind: 'inline_config', key: 'effort', allowed: ['low', 'high', 'max'] },
     available_on: ['windows'],
   },
@@ -303,7 +303,7 @@ describe('Spawn configurations', () => {
 
   it('does not expose effort or extra arguments when unsupported', async () => {
     vi.mocked(api.getLaunchTargets).mockResolvedValue([{ ...target, efforts: [], supports_extra_args: false }]);
-    const limited = { ...option, capabilities: { ...option.capabilities!, supports_effort_override: false, supports_extra_args: false, effort_control: { kind: 'none' as const } } };
+    const limited = { ...option, capabilities: { ...option.capabilities!, supports_effort_override: false, supports_extra_args: false, supports_agent: false, effort_control: { kind: 'none' as const } } };
     render(<GroupedProviderMenu providers={[limited]} onSelect={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
     await waitFor(() => expect((screen.getByRole('menuitem', { name: /New configuration/ }) as HTMLButtonElement).disabled).toBe(false));

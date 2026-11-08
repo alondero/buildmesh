@@ -12,6 +12,7 @@ fn prompted_launch_keeps_settings_before_the_positional_prompt() {
         effort: Some("high".into()),
         extra_args: Some("--verbose".into()),
         permission_mode: Some(PERMISSION_MODE_PROMPT.into()),
+        agent: None,
     };
     for platform in [Platform::Windows, Platform::Macos, Platform::Linux] {
         for session in [
@@ -76,6 +77,7 @@ fn permission_mode_changes_argv_of_next_spawn() {
             effort: None,
             extra_args: None,
             permission_mode: mode.map(str::to_string),
+            agent: None,
         };
         let input = HarnessLaunchInput {
             routing: None,

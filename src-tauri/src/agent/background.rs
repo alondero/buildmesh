@@ -133,6 +133,10 @@ pub(crate) fn resolve_plan(
         adapter.validate_model_override(model)?;
         args.extend(adapter.background_model_args(model));
     }
+    if let Some(agent) = &plan.agent {
+        adapter.validate_agent_override(agent)?;
+        args.extend(adapter.background_agent_args(agent));
+    }
     if let Some(effort) = &plan.effort {
         args.extend(adapter.effort_args(effort));
     }

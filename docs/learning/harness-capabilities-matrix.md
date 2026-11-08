@@ -89,29 +89,30 @@ Legend: ✅ advertised, ❌ not advertised. Column shorthand:
 - **Transcript** — `produces_readable_transcript`; the transcript reader can parse this harness (Coordinator Node Digest, [Node Glance](../development/node-glance.md), archive picker).
 - **Archive** — the derived `resumable` flag (`resume` **and** `transcript`); surfaces the harness in the archived-node resume picker.
 - **Model** — `supports_model_override` (`--model` or equivalent).
+- **Agent** — `supports_agent` (`--agent` on OpenCode 1, session-API `agent` on OpenCode 2, `run --agent` for background; issue #1552 / #2716).
 - **Effort** — `supports_effort_override` (see [Effort control vocabulary](#effort-control-vocabulary)).
 - **Extra args** — `supports_extra_args`; verbatim CLI flags from configuration are forwarded.
 - **Prefill** — `supports_prefill`; a seed prompt is delivered on the launch command line. Every other harness except Terminal still takes issue, PR and prompt spawns (`accepts_initial_prompt`): it launches plain and the prompt is typed into its terminal once the TUI has booted.
 - **Plain shell** — `is_plain_terminal`; all LLM paths are skipped.
 
-| Harness | Resume | Auto-resume | Attn hook | Watcher | Transcript | Archive | Model | Effort | Extra args | Prefill | Plain shell | Notes |
+| Harness | Resume | Auto-resume | Attn hook | Watcher | Transcript | Archive | Model | Agent | Effort | Extra args | Prefill | Plain shell | Notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| Claude Code | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Full hook event set under skip-permissions |
-| Codex | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Hook needs Codex 0.154.0+ and project trust |
-| Cursor | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | Completion and background signals only |
-| Antigravity | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Hook needs CLI 1.0.0+; workspace trust |
-| OpenCode | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | Attention arrives through the project plugin |
-| OpenCode 2 | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | Session API model/variant/fork; native child sessions tracked as background work; private server; native runtime only |
-| Kimi Code | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ | ❌ | ❌ | Hook needs 0.27.0+; no transcript reader |
-| Grok Code | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Hook validated against 1.0.5 |
-| MiniMax Code | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | Session-only `--model` verified in native Windows help; `UserPromptSubmit` resumes work using the 0.6.13 hook contract; see the [capability review](mcode-harness-capabilities.md) for delivery evidence and platform limits |
-| DeepSeek Harness | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | Capabilities deliberately gated (no validated profile) |
-| Command Code | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Passive watcher replaces a native hook |
-| Freebuff | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | No model or effort override; initial prompts are typed after startup |
-| Meta Muse | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Native on Windows since Muse 1.3.0; workspace trust pre-provisioned (#1706); `--reasoning-effort` closed vocabulary (#1704) |
-| Cline | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Native Provider; hook delivers turn completion only (no clean-exit dispatch); reader over `<id>.messages.json` (#1776) |
-| Perch | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ | Resume via `--thread`; closed `--effort`; [deep dive](perch-harness-capabilities.md) |
-| Terminal | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | Plain shell; the only `PlainShell` launch mode |
+| Claude Code | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | Full hook event set under skip-permissions |
+| Codex | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | Hook needs Codex 0.154.0+ and project trust |
+| Cursor | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | Completion and background signals only |
+| Antigravity | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | Hook needs CLI 1.0.0+; workspace trust |
+| OpenCode | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | Attention arrives through the project plugin |
+| OpenCode 2 | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | Session API model/variant/agent/fork; native child sessions tracked as background work; private server; native runtime only |
+| Kimi Code | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | Hook needs 0.27.0+; no transcript reader |
+| Grok Code | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | Hook validated against 1.0.5 |
+| MiniMax Code | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | Session-only `--model` verified in native Windows help; `UserPromptSubmit` resumes work using the 0.6.13 hook contract; see the [capability review](mcode-harness-capabilities.md) for delivery evidence and platform limits |
+| DeepSeek Harness | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | Capabilities deliberately gated (no validated profile) |
+| Command Code | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | Passive watcher replaces a native hook |
+| Freebuff | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | No model or effort override; initial prompts are typed after startup |
+| Meta Muse | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | Native on Windows since Muse 1.3.0; workspace trust pre-provisioned (#1706); `--reasoning-effort` closed vocabulary (#1704) |
+| Cline | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | Native Provider; hook delivers turn completion only (no clean-exit dispatch); reader over `<id>.messages.json` (#1776) |
+| Perch | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | Resume via `--thread`; closed `--effort`; [deep dive](perch-harness-capabilities.md) |
+| Terminal | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | Plain shell; the only `PlainShell` launch mode |
 
 Ten harnesses are archive-resumable (Resume **and** Transcript): Claude Code,
 Codex, Cursor, Antigravity, OpenCode, Grok Code, MiniMax Code, Command Code, Meta

@@ -176,7 +176,7 @@ for (const size of [{ width: 900, height: 600 }, { width: 1280, height: 800 }, {
               requires_attention_hook: false, attention_capability: { kind: 'none' },
               supports_passive_turn_watcher: false, produces_readable_transcript: false,
               supports_model_override: false, supports_effort_override: false,
-              supports_extra_args: false, supports_prefill: false,
+              supports_extra_args: false, supports_agent: false, supports_prefill: false,
               is_plain_terminal: false, effort_control: { kind: 'none' }, available_on: ['windows'],
             },
           } satisfies ProviderInfo],

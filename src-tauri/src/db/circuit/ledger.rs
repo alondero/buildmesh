@@ -677,6 +677,7 @@ fn pin_review_launches(
             model: model.clone().filter(|_| !preset),
             effort: effort.clone().filter(|_| !preset),
             extra_args: extra_args.clone(),
+            agent: None,
         };
         let mut launch_preferences = preferences.clone();
         if let Some(plan) = inherited_configuration
@@ -2557,6 +2558,7 @@ mod reviewer_tests {
                         model: Some("gpt-6-luna".into()),
                         effort: Some("low".into()),
                         extra_args: None,
+                        agent: None,
                     },
                 )
                 .unwrap(),
@@ -2661,6 +2663,7 @@ mod reviewer_tests {
                 model: Some("gpt-6-luna".into()),
                 effort: Some("low".into()),
                 permission_mode: None,
+                agent: None,
             },
         );
         let run = create_circuit_run_prepared_locked(
@@ -2741,6 +2744,7 @@ mod reviewer_tests {
                 model: Some("gpt-6-luna".into()),
                 effort: Some("low".into()),
                 permission_mode: None,
+                agent: None,
             },
         );
         let first = create_node_circuit_run_with_recovery_locked(
@@ -2890,6 +2894,7 @@ mod reviewer_tests {
                 model: Some("gpt-6-luna".into()),
                 effort: Some("low".into()),
                 permission_mode: None,
+                agent: None,
             },
         );
         let first = create_node_circuit_run_with_recovery_locked(

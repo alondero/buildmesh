@@ -37,6 +37,8 @@ pub struct LaunchTarget {
     pub manual_model: bool,
     pub supports_model: bool,
     pub supports_extra_args: bool,
+    #[serde(default)]
+    pub supports_agent: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub route: Option<super::ProviderPairing>,
@@ -77,6 +79,7 @@ pub fn targets_for(
                 manual_model: true,
                 supports_model: caps.supports_model_override,
                 supports_extra_args: caps.supports_extra_args,
+                supports_agent: caps.supports_agent,
                 route: None,
                 route_attached: false,
                 default_model: None,

@@ -798,6 +798,35 @@ pub trait AgentProvider: Send + Sync {
         self.model_args(model)
     }
 
+    /// Validate agent / persona name syntax at save and spawn boundaries.
+    /// Adapters with a constrained grammar override this; unknown names
+    /// remain the harness's responsibility (the session API / CLI fails
+    /// before the PTY starts, which is the #2716 acceptance gate).
+    fn validate_agent_override(&self, _agent: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Args for the interactive agent / persona selector.
+    /// Default is empty — every harness that doesn't override inherits
+    /// "no agent flag"; the descriptor's `supports_agent` is the gate.
+    /// An empty name must never emit a dangling `--agent` that would
+    /// swallow the next argv token as the agent (issue #1552).
+    fn agent_args(&self, _agent: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Some TUIs apply an agent to durable session state before launch
+    /// instead of taking a CLI flag (OpenCode 2's session API). The
+    /// descriptor still advertises `supports_agent`; only the transport
+    /// differs, mirroring `model_override_via_session_api`.
+    fn agent_override_via_session_api(&self) -> bool {
+        false
+    }
+
+    fn background_agent_args(&self, agent: &str) -> Vec<String> {
+        self.agent_args(agent)
+    }
+
     /// A pure, adapter-owned recipe for one-shot background inference.
     /// Defaults to unavailable; a headless CLI flag alone does not establish
     /// prompt delivery, final-answer extraction, or non-interactive completion.

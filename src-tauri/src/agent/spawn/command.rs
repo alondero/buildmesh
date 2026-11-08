@@ -80,6 +80,9 @@ pub(super) fn build_spawn_command_with_adapter(
     if let Some(model) = config.model.as_deref() {
         adapter.validate_model_override(model)?;
     }
+    if let Some(agent) = config.agent.as_deref() {
+        adapter.validate_agent_override(agent)?;
+    }
 
     // Compose the harness's launch contribution: recipe + capability
     // descriptor + env policy, all from the same adapter. The
@@ -171,6 +174,7 @@ pub(crate) fn cascade_inputs_for<'a>(
     mesh_model: Option<&'a str>,
     mesh_effort: Option<&'a str>,
     app_default: Option<&'a crate::preferences::HarnessConfigValue>,
+    explicit_agent: Option<&'a str>,
 ) -> crate::agent::capabilities::AgentConfigInputs<'a> {
     /// Trim; collapse empty / whitespace-only to `None`. Mirrors
     /// `capabilities::normalize_non_empty` at the spawn seam (issue
@@ -203,6 +207,11 @@ pub(crate) fn cascade_inputs_for<'a>(
             mesh: None,
             application: app_default.and_then(|v| v.permission_mode.as_deref()),
         },
+        agent: crate::agent::capabilities::FieldInputs {
+            explicit: explicit_agent.and_then(non_empty_trim),
+            mesh: None,
+            application: app_default.and_then(|v| v.agent.as_deref()),
+        },
     }
 }
 
@@ -227,11 +236,19 @@ pub(crate) fn resolve_spawn_config(
     explicit_effort: Option<&str>,
     explicit_extra_args: Option<&str>,
     app_default: Option<&crate::preferences::HarnessConfigValue>,
+    explicit_agent: Option<&str>,
 ) -> crate::agent::capabilities::ResolvedAgentConfig {
     let capabilities = crate::agent::capabilities::capabilities_for(provider.adapter());
     crate::agent::capabilities::resolve_agent_config(
         &capabilities,
-        cascade_inputs_for(explicit_model, explicit_effort, None, None, app_default),
+        cascade_inputs_for(
+            explicit_model,
+            explicit_effort,
+            None,
+            None,
+            app_default,
+            explicit_agent,
+        ),
         explicit_extra_args,
     )
 }

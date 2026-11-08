@@ -178,6 +178,8 @@ pub struct LaunchOverrides {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub extra_args: Option<String>,
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 /// Immutable, secret-free launch facts. Credentials are read from the account at launch.
@@ -194,6 +196,8 @@ pub struct ResolvedLaunchPlan {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub extra_args: Option<String>,
+    #[serde(default)]
+    pub agent: Option<String>,
     /// The Harness Login this launch uses; absent means the default login.
     /// Frozen with the home path so a resume returns to the home that holds
     /// the session even after the login is renamed or removed.
@@ -320,6 +324,8 @@ fn resolve_plan(
     let effort = nonblank(overrides.effort.as_deref()).or_else(|| nonblank(configured_effort));
     let extra = nonblank(overrides.extra_args.as_deref())
         .or_else(|| configuration.and_then(|c| nonblank(c.extra_args.as_deref())));
+    let agent = nonblank(overrides.agent.as_deref())
+        .or_else(|| configuration.and_then(|c| nonblank(c.agent.as_deref())));
     let mut config = resolve_agent_config(
         &caps,
         AgentConfigInputs {
@@ -344,6 +350,11 @@ fn resolve_plan(
                 explicit: None,
                 mesh: None,
                 application: None,
+            },
+            agent: FieldInputs {
+                explicit: agent.as_deref(),
+                mesh: None,
+                application: app.as_ref().and_then(|c| c.agent.as_deref()),
             },
         },
         extra.as_deref(),
@@ -477,6 +488,7 @@ fn resolve_plan(
         model: config.model,
         effort: config.effort,
         extra_args: config.extra_args,
+        agent: config.agent,
         harness_login,
     })
 }
@@ -580,6 +592,7 @@ pub fn snapshot(plan: ResolvedLaunchPlan) -> super::spawn_configurations::SpawnC
         model: plan.model.clone(),
         effort: plan.effort.clone(),
         extra_args: plan.extra_args.clone(),
+        agent: plan.agent.clone(),
         resolved: Some(plan),
         generated: None,
         ..Default::default()

@@ -291,6 +291,17 @@ pub(super) fn default_prepare<A: AgentProvider + ?Sized>(
             recipe.base_args.extend(adapter.model_args(model));
         }
     }
+    // Agent / persona selector (issue #1552 / #2716). Same defence-in-depth
+    // shape as the model branch: re-assert the descriptor on the forward,
+    // and never splice a dangling `--agent` for an empty name. A
+    // session-API harness (OpenCode 2) carries the value in durable
+    // session state instead — `prepare_session` persists it before the
+    // TUI starts, so the interactive argv stays flag-free.
+    if capabilities.supports_agent && !adapter.agent_override_via_session_api() {
+        if let Some(agent) = input.config.agent.as_deref().filter(|s| !s.is_empty()) {
+            recipe.base_args.extend(adapter.agent_args(agent));
+        }
+    }
     if !matches!(capabilities.effort_control, EffortControlKind::None) {
         if let Some(effort) = input.config.effort.as_deref().filter(|s| !s.is_empty()) {
             recipe.base_args.extend(adapter.effort_args(effort));

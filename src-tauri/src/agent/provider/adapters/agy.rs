@@ -594,6 +594,7 @@ mod tests {
             effort: Some("high".to_string()),
             extra_args: None,
             permission_mode: None,
+            agent: None,
         };
         let input = HarnessLaunchInput {
             routing: None,

@@ -68,6 +68,7 @@ fn default_prepare_emits_no_session_id_or_model() {
             effort: None,
             extra_args: None,
             permission_mode: None,
+            agent: None,
         },
         prefill: None,
         sandbox: false,

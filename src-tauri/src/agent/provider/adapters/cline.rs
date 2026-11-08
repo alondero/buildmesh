@@ -737,6 +737,7 @@ mod tests {
                     effort: Some("xhigh".to_string()),
                     extra_args: Some("--verbose".to_string()),
                     permission_mode: None,
+                    agent: None,
                 };
                 let input = HarnessLaunchInput {
                     routing: None,

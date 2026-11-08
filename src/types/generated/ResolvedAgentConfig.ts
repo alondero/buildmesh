@@ -35,4 +35,12 @@ extra_args: string | null,
  * with the harness's unattended default (today's flags) — see
  * `default_prepare`.
  */
-permission_mode: string | null, };
+permission_mode: string | null, 
+/**
+ * Capability-masked agent / persona name (issue #1552 / #2716), or
+ * `None` if no layer supplied one or the harness doesn't accept an
+ * agent selector. Downstream callers forward it via
+ * [`crate::agent::provider::AgentProvider::agent_args`] (V1 argv) or
+ * the V2 session API, without re-consulting the capability flag.
+ */
+agent: string | null, };

@@ -13,7 +13,7 @@ describe('Launch Configuration editor', () => {
   it('saves and reopens a MiniMax Code session model reference', async () => {
     const target: LaunchTarget = {
       id: 'mcode', harness_id: 'mcode', harness_name: 'MiniMax Code', provider_name: 'Native authentication',
-      models: [], efforts: [], route_attached: false, manual_model: true, supports_model: true, supports_extra_args: true,
+      models: [], efforts: [], route_attached: false, manual_model: true, supports_model: true, supports_extra_args: true, supports_agent: false,
     };
     const value: SpawnConfiguration = {
       id: 'launch/mcode-review', name: 'MiniMax review', spawn_option_id: 'mcode', model: null, effort: null, extra_args: null,
@@ -40,7 +40,7 @@ describe('Launch Configuration editor', () => {
     const claude: LaunchTarget = {
       id: 'claude-wsl-ubuntu', harness_id: 'claude-wsl-ubuntu', harness_name: 'Claude Code (WSL: Ubuntu)', provider_name: 'Native authentication',
       models: [], efforts: ['low', 'medium', 'high', 'xhigh', 'max'], route_attached: false,
-      manual_model: true, supports_model: true, supports_extra_args: true,
+      manual_model: true, supports_model: true, supports_extra_args: true, supports_agent: false,
     };
     render(<LaunchConfigurationEditor
       value={{ id: '', name: '', spawn_option_id: 'claude-wsl-ubuntu', model: null, effort: null, extra_args: null }}

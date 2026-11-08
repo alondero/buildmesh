@@ -249,6 +249,7 @@ mod tests {
                     application: None,
                 },
                 permission_mode: crate::agent::capabilities::FieldInputs::default(),
+                agent: crate::agent::capabilities::FieldInputs::default(),
             },
             None,
         );
@@ -585,6 +586,7 @@ mod tests {
                         effort: Some(effort.into()),
                         extra_args: None,
                         permission_mode: None,
+                        agent: None,
                     },
                     prefill: None,
                     sandbox: false,

@@ -23,6 +23,9 @@ pub struct SpawnConfiguration {
     pub extra_args: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub generated: Option<super::launch_configurations::GeneratedLaunch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -60,15 +63,17 @@ pub fn validate(mut value: SpawnConfiguration) -> Result<SpawnConfiguration, Str
     let normalized = super::validate_harness_default(
         option.harness_id(),
         HarnessConfigValue {
-            model: value.model,
-            effort: value.effort,
+            model: value.model.clone(),
+            effort: value.effort.clone(),
             // Saved recipes carry no permission slot (issue #2151 adds
             // only the per-harness Settings default).
             permission_mode: None,
+            agent: value.agent.clone(),
         },
     )?;
     value.model = normalized.model;
     value.effort = normalized.effort;
+    value.agent = normalized.agent;
     value.extra_args = value
         .extra_args
         .as_deref()
@@ -77,6 +82,9 @@ pub fn validate(mut value: SpawnConfiguration) -> Result<SpawnConfiguration, Str
         .map(str::to_string);
     if value.model.is_some() && !caps.supports_model_override {
         return Err("This harness does not support model overrides".into());
+    }
+    if value.agent.is_some() && !caps.supports_agent {
+        return Err("This harness does not support agent overrides".into());
     }
     if value.extra_args.is_some() && !caps.supports_extra_args {
         return Err("This harness does not support extra arguments".into());

@@ -2118,6 +2118,7 @@ fn permission_mode_changes_argv_of_next_spawn() {
             effort: None,
             extra_args: None,
             permission_mode: mode.map(str::to_string),
+            agent: None,
         };
         let input = HarnessLaunchInput {
             routing: None,
