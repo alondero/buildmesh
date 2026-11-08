@@ -782,7 +782,11 @@ round-trip. Codex shares only the writer, and only on its native arm.
   directory — can never land on one name. On unix it is created `0o600` and the
   rename carries that onto the target: `File::create` would inherit
   `0o666 & !umask`, which would have widened `.claude/settings.local.json` inside
-  the user's own repository among others.
+  the user's own repository among others. On Windows the rename is refused with
+  `ERROR_ACCESS_DENIED` while another writer replaces the same target, so the
+  replace is retried for a bounded window; each attempt is still one atomic
+  rename of the same temp file, so a reader sees one writer's complete payload
+  (issue #2626).
 - `read_document` treats a missing file as an empty document and refuses a
   malformed one through `refuse_malformed`, **one** wording for every harness and
   every format. Before issue #2235 that answer had drifted: AGY reported

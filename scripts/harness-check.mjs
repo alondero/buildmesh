@@ -77,6 +77,9 @@ export function frontendInScope(paths) {
 // Rust diff itself, not only the one CI happens to run (review of PR #2232).
 export const RUST_PATH_INCLUDES = {
   'src-tauri/src/agent/launch_tests.rs': 'agent::launch::tests',
+  // The owner keeps its inline `mod tests` for the cases that already live
+  // there, so the new sibling takes its own module name.
+  'src-tauri/src/agent/managed_config_replace_tests.rs': 'agent::managed_config::replace_tests',
   'src-tauri/src/agent/provider/adapters/anthropic_tests.rs': 'agent::provider::adapters::anthropic::tests',
   'src-tauri/src/agent/provider/adapters/commandcode_tests.rs': 'agent::provider::adapters::commandcode::tests',
   'src-tauri/src/agent/provider/adapters/cursor_tests.rs': 'agent::provider::adapters::cursor::tests',
