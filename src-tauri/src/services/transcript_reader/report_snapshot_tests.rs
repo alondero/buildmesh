@@ -2524,3 +2524,152 @@ fn a_report_handoff_never_claims_native_lifecycle_or_owned_work_for_any_harness(
         );
     }
 }
+
+/// A quiet Circuit poll re-reads the same report on every tick. The parsed
+/// snapshot must be reused, and any real source change must still invalidate it.
+#[test]
+fn unchanged_report_reads_reuse_the_parsed_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    write_claude_report(&path, "First answer");
+    let cache = report_cache::ReportCache::default();
+
+    let first = read_file_cached(&path, TranscriptFormat::ClaudeCode, &cache).unwrap();
+    assert_eq!(cache.misses(), 1, "the first read parses the file");
+
+    let second = read_file_cached(&path, TranscriptFormat::ClaudeCode, &cache).unwrap();
+    assert_eq!(
+        cache.misses(),
+        1,
+        "an unchanged source is served from the report cache"
+    );
+    assert_eq!(second, first, "a cache hit preserves the whole snapshot");
+}
+
+#[test]
+fn changed_replaced_and_truncated_reports_invalidate_the_cached_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    write_claude_report(&path, "First answer");
+    let cache = report_cache::ReportCache::default();
+    let first = read_file_cached(&path, TranscriptFormat::ClaudeCode, &cache).unwrap();
+    assert_eq!(cache.misses(), 1);
+
+    // A newer answer moves the length and the stamp.
+    write_claude_report(&path, "Second answer, longer");
+    let second = read_file_cached(&path, TranscriptFormat::ClaudeCode, &cache).unwrap();
+    assert_eq!(cache.misses(), 2, "a changed source reparses");
+    assert_eq!(second.text, "Second answer, longer");
+    assert_ne!(second.revision, first.revision);
+
+    // Replacement with equal length still invalidates through the stamp.
+    write_claude_report(&path, "Third answer!");
+    bump_modified(&path);
+    let replaced = read_file_cached(&path, TranscriptFormat::ClaudeCode, &cache).unwrap();
+    assert_eq!(cache.misses(), 3, "a replaced source reparses");
+    assert_eq!(replaced.text, "Third answer!");
+    assert_ne!(replaced.revision, second.revision);
+
+    // Truncation must never serve the previous snapshot.
+    fs::write(&path, "").unwrap();
+    bump_modified(&path);
+    assert_eq!(
+        read_file_cached(&path, TranscriptFormat::ClaudeCode, &cache).unwrap_err(),
+        ReportReadError::NoReport
+    );
+    fs::remove_file(&path).unwrap();
+    assert_eq!(
+        read_file_cached(&path, TranscriptFormat::ClaudeCode, &cache).unwrap_err(),
+        ReportReadError::Unreadable
+    );
+}
+
+/// Grok's clock and native turn boundary live in a companion events file that
+/// the transcript stamp cannot see. A cached snapshot must still be rejected
+/// when only the companion changes.
+#[test]
+fn changed_companion_invalidates_the_cached_report() {
+    let (_dir, chat, events) = grok_session();
+    let cache = report_cache::ReportCache::default();
+    let first = read_file_cached(&chat, TranscriptFormat::Grok, &cache).unwrap();
+    assert_eq!(cache.misses(), 1);
+
+    let second = read_file_cached(&chat, TranscriptFormat::Grok, &cache).unwrap();
+    assert_eq!(cache.misses(), 1, "quiet repeat is cached");
+    assert_eq!(second, first);
+
+    append(
+        &events,
+        "{\"ts\":\"2026-10-12T15:38:00.000Z\",\"type\":\"turn_started\",\"turn_number\":2}\n",
+    );
+    assert_eq!(
+        read_file_cached(&chat, TranscriptFormat::Grok, &cache).unwrap_err(),
+        ReportReadError::NoNativeCompletion,
+        "a companion-only change must invalidate the cached report"
+    );
+}
+
+#[test]
+fn report_cache_never_retains_an_oversized_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("huge.jsonl");
+    let cache = report_cache::ReportCache::default();
+    let snapshot = ReportSnapshot {
+        text: "x".repeat(report_cache::MAX_RETAINED_BYTES + 1),
+        revision: "revision".into(),
+        published_at_ms: 0,
+        turn_finished: false,
+        source: ReportSource::File {
+            path: path.clone(),
+            length: 0,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+            companion: None,
+        },
+    };
+    cache.put(
+        report_cache::Key {
+            format: TranscriptFormat::ClaudeCode,
+            path: path.clone(),
+        },
+        report_cache::Stamp {
+            length: 0,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+        },
+        snapshot,
+    );
+    assert!(
+        !cache.contains(&path),
+        "a report over the retained-byte cap must be served uncached"
+    );
+    assert!(cache.retained_bytes() <= report_cache::MAX_RETAINED_BYTES);
+}
+
+fn write_claude_report(path: &Path, text: &str) {
+    let record = serde_json::json!({
+        "type": "assistant",
+        "timestamp": "2026-09-27T22:30:00Z",
+        "message": {"id": "review", "role": "assistant", "content": [{"type": "text", "text": text}]}
+    });
+    fs::write(path, format!("{record}\n")).unwrap();
+    bump_modified(path);
+}
+
+/// Force a distinct modification time so the test does not depend on the
+/// filesystem clock's resolution between two immediate writes. The base is far
+/// in the past, so a rewritten file cannot move backwards onto an earlier
+/// stamp.
+fn bump_modified(path: &Path) {
+    thread_local! {
+        static TICK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+    let tick = TICK.with(|tick| {
+        let next = tick.get() + 1;
+        tick.set(next);
+        next
+    });
+    let modified =
+        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + tick);
+    let file = fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.set_times(fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+}

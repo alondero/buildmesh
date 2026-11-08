@@ -573,6 +573,12 @@ impl TranscriptAdapter for McodeAdapter {
         })
     }
 
+    fn observes_background_tasks(&self) -> bool {
+        // MiniMax Code writes completion out of band while the session stays
+        // idle, so only this reader has the gap the probe exists to close.
+        true
+    }
+
     fn stalled_background_task(
         &self,
         lines: &str,

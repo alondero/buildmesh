@@ -31,6 +31,10 @@ pub(crate) struct CodexAdapter;
 #[path = "codex_failure_tests.rs"]
 mod failure_tests;
 
+#[cfg(test)]
+#[path = "codex_location_tests.rs"]
+mod location_cache_tests;
+
 impl TranscriptAdapter for CodexAdapter {
     fn id(&self) -> &'static str {
         "codex"
@@ -39,10 +43,12 @@ impl TranscriptAdapter for CodexAdapter {
     fn locate(&self, ctx: LocateCtx<'_>) -> Option<PathBuf> {
         // Session ids are UUIDs, so searching every Harness Login home of the
         // runtime finds the one rollout without knowing which login ran it.
+        // Reads of a known session are frequent; the positive result is cached
+        // against the same directory list so only a changed runtime/login set
+        // rediscovers it.
         let runtime = env::runtime_for_spawn_path(ctx.node_path);
-        crate::services::codex_session::sessions_dirs(runtime, ctx.node_path)
-            .iter()
-            .find_map(|dir| find_codex_rollout_in(dir, ctx.session_id))
+        let dirs = crate::services::codex_session::sessions_dirs(runtime, ctx.node_path);
+        locate_codex_rollout(codex_location_cache::production(), &dirs, ctx.session_id)
     }
 
     fn parse(
@@ -157,6 +163,120 @@ pub(crate) fn find_codex_rollout_in(sessions_dir: &Path, session_id: &str) -> Op
         }
     }
     None
+}
+
+/// Resolve a known session through the bounded positive location cache.
+///
+/// A session id is stable for the life of a run, so after the first successful
+/// walk the rollout path is reused until it stops existing. The cached entry
+/// also keeps the directory list it was found in: a runtime or Harness Login
+/// change makes the key miss, and a deleted or relocated rollout fails the
+/// `is_file` check, so both rediscover. Misses are never cached — a transcript
+/// created after an earlier negative lookup must still be found.
+fn locate_codex_rollout(
+    cache: &codex_location_cache::CodexLocationCache,
+    dirs: &[PathBuf],
+    session_id: &str,
+) -> Option<PathBuf> {
+    if session_id.is_empty() {
+        return None;
+    }
+    if let Some(path) = cache.get(session_id, dirs) {
+        return Some(path);
+    }
+    let found = dirs
+        .iter()
+        .find_map(|dir| find_codex_rollout_in(dir, session_id))?;
+    cache.put(session_id, dirs, found.clone());
+    Some(found)
+}
+
+/// Bounded positive cache of Codex rollout locations.
+///
+/// Only successful lookups are stored; a missing rollout is a transient state
+/// (Codex starts writing moments after the session id is captured) rather than
+/// a durable answer. Entries are keyed by session id and validated against the
+/// runtime/login directory set plus the file's continued existence.
+mod codex_location_cache {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::{LazyLock, Mutex};
+
+    const CAPACITY: usize = 256;
+
+    struct Entry {
+        dirs: Vec<PathBuf>,
+        path: PathBuf,
+    }
+
+    /// Injectable so tests drive their own cache instead of racing the
+    /// process-global one.
+    #[derive(Default)]
+    pub(super) struct CodexLocationCache {
+        entries: Mutex<HashMap<String, Entry>>,
+    }
+
+    static CACHE: LazyLock<CodexLocationCache> = LazyLock::new(CodexLocationCache::default);
+
+    pub(super) fn production() -> &'static CodexLocationCache {
+        &CACHE
+    }
+
+    impl CodexLocationCache {
+        fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Entry>> {
+            self.entries
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+
+        pub(super) fn get(&self, session_id: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
+            let path = {
+                let cache = self.lock();
+                let entry = cache.get(session_id)?;
+                // A different runtime/login set is a different resolution, even
+                // for the same session id.
+                if entry.dirs.as_slice() != dirs {
+                    return None;
+                }
+                entry.path.clone()
+            };
+            if path.is_file() {
+                return Some(path);
+            }
+            // Deleted or relocated: drop the stale answer and rediscover below.
+            // Compare the path rather than stat again under the lock, so a
+            // concurrent rediscovery is not discarded.
+            let mut cache = self.lock();
+            if cache
+                .get(session_id)
+                .is_some_and(|entry| entry.dirs.as_slice() == dirs && entry.path == path)
+            {
+                cache.remove(session_id);
+            }
+            None
+        }
+
+        pub(super) fn put(&self, session_id: &str, dirs: &[PathBuf], path: PathBuf) {
+            let mut cache = self.lock();
+            if cache.len() >= CAPACITY && !cache.contains_key(session_id) {
+                // The active node set turns over; starting over keeps the bound
+                // simple and costs one walk per live session afterwards.
+                cache.clear();
+            }
+            cache.insert(
+                session_id.to_owned(),
+                Entry {
+                    dirs: dirs.to_vec(),
+                    path,
+                },
+            );
+        }
+
+        #[cfg_attr(not(test), expect(dead_code, reason = "Test cache observation"))]
+        pub(super) fn contains(&self, session_id: &str) -> bool {
+            self.lock().contains_key(session_id)
+        }
+    }
 }
 
 /// Immediate subdirectories of `dir`, sorted by name descending. Date-named

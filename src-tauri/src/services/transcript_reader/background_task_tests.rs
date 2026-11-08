@@ -1,5 +1,32 @@
 use super::*;
 
+/// The 2-second Circuit loop probes quiet sessions, so a reader that can never
+/// report a background-task gap must be rejected before locating or opening a
+/// transcript. The counter is thread-local, so this test's own calls are the
+/// only ones it sees.
+#[test]
+fn unsupported_reader_is_gated_before_transcript_discovery() {
+    let dir = tempfile::tempdir().unwrap();
+    // A transcript we could locate would still be insufficient: the gate must
+    // stop the probe before discovery, not after a file read returned `None`.
+    std::fs::write(dir.path().join("session.jsonl"), "{}\n").unwrap();
+    assert_eq!(take_transcript_locations(), 0, "clean counter");
+    assert_eq!(
+        stalled_background_task(
+            TranscriptFormat::ClaudeCode,
+            Some("session"),
+            dir.path().to_str().unwrap(),
+            400,
+        ),
+        None
+    );
+    assert_eq!(
+        take_transcript_locations(),
+        0,
+        "an unsupported reader must not perform transcript discovery"
+    );
+}
+
 #[test]
 fn minimax_wake_reads_work_before_tail_window() {
     let dir = tempfile::tempdir().unwrap();

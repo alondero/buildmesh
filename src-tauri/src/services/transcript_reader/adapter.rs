@@ -130,6 +130,18 @@ pub(crate) trait TranscriptReader: Send + Sync {
         false
     }
 
+    /// Whether this harness can record a finished background task it cannot
+    /// deliver to an idle session on its own (issue #2105).
+    ///
+    /// This is the capability gate for [`Self::stalled_background_task`]. The
+    /// Circuit worker probes on every quiet poll tick, so the caller checks this
+    /// *before* locating or opening a transcript: the default `false` keeps a
+    /// harness without such a gap from paying for a full-history read only to
+    /// receive the default `None`.
+    fn observes_background_tasks(&self) -> bool {
+        false
+    }
+
     /// A finished background task this harness recorded but cannot deliver to an
     /// idle session on its own (issue #2105).
     ///
