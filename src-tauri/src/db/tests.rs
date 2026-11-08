@@ -1530,7 +1530,7 @@ fn reader_pool_exhaustion_is_a_typed_busy_error() {
 /// was promised.
 ///
 /// The test drives the pool's **injected clock** rather than a stopwatch: the
-/// notifier advances the clock by one tick per wakeup, and the assertion is
+/// notifier advances the clock by one tick at a time, and the assertion is
 /// that the wait ended at the deadline — one budget of clock, not one budget
 /// per wakeup. A wall-clock ceiling would fail on a loaded runner even when
 /// the implementation is correct.
@@ -1541,6 +1541,34 @@ fn reader_pool_exhaustion_is_a_typed_busy_error() {
 /// the scheduler's. Without the pacing, a waiter that the runner had not
 /// scheduled yet would find the clock already past the deadline — a correct
 /// implementation failing on a busy machine.
+///
+/// **The clock and the condvar wait must not disagree about time** (issue
+/// #2552). The pool spends the clock's remaining budget as a *real* timeout,
+/// so a tick that is small in real terms makes the wait end on the runner's
+/// clock rather than on the deadline: the notifier thread can be scheduled
+/// late, the real timeout expires first, and a pool that behaved correctly
+/// fails the test. The tick and the notification are what keep that apart:
+///
+/// - The tick is a **second**, so the real timeout the pool spends is seconds
+///   too and the notifier has seconds of slack to deliver its wakeups. The
+///   wait still costs milliseconds, because the notifier wakes the waiter
+///   long before the timeout is due.
+/// - The notifier keeps waking the waiter until the waiter has **read** the
+///   tick it handed out. A single notification can be dropped: parking_lot
+///   does not buffer notifications, so a wakeup that lands between the
+///   waiter's clock read and its park leaves the waiter waiting out the real
+///   timeout instead of the deadline.
+///
+/// The notifier also gives up rather than wait forever: a pool that stops
+/// reading the clock has to fail this test, not hang it, and a pool that
+/// reads past one deadline is spending more than one budget on the wait —
+/// the shape a pool that re-arms its budget on each wakeup takes — so the
+/// test reports that as soon as it sees it.
+///
+/// With both in place the readings are the waiter's own: they advance a tick
+/// at a time and stop at the deadline. The assertion is therefore about the
+/// pool — one deadline, not one per wakeup — and not about how quickly the
+/// runner scheduled two threads.
 #[test]
 fn reader_pool_wait_ends_at_one_deadline_however_often_it_is_woken() {
     let temp = tempfile::tempdir().unwrap();
@@ -1553,23 +1581,29 @@ fn reader_pool_wait_ends_at_one_deadline_however_often_it_is_woken() {
 
     // The pool's clock: the test advances it, so "time passing" is a fact the
     // test owns rather than something the runner's scheduling decides. The
-    // clock counts ticks, and `seen` records the last tick the waiter read —
-    // that is the deadline the pool ended the wait on.
-    let budget = std::time::Duration::from_millis(300);
-    let tick = std::time::Duration::from_millis(100);
+    // clock counts ticks, and each reading is recorded, so the test can see
+    // *when* the pool looked at the time and not only what it saw.
+    //
+    // The tick is a second rather than the hundred milliseconds an earlier
+    // version used: the pool spends the clock's remaining budget as a real
+    // condvar timeout, so a small tick made the wait end on the runner's
+    // clock instead of on the deadline (issue #2552).
+    let budget = std::time::Duration::from_secs(3);
+    let tick = std::time::Duration::from_secs(1);
     let tick_ms = tick.as_millis() as u64;
+    let budget_ticks = budget.as_millis() as u64 / tick_ms;
     let base = std::time::Instant::now();
     let ticks = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let reads = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let seen = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let readings = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<u64>::new()));
     let clock = {
         let ticks = ticks.clone();
-        let reads = reads.clone();
         let seen = seen.clone();
+        let readings = readings.clone();
         move || {
             let tick = ticks.load(Ordering::Relaxed);
             seen.store(tick, Ordering::Relaxed);
-            reads.fetch_add(1, Ordering::Relaxed);
+            readings.lock().push(tick);
             base + std::time::Duration::from_millis(tick * tick_ms)
         }
     };
@@ -1577,34 +1611,65 @@ fn reader_pool_wait_ends_at_one_deadline_however_often_it_is_woken() {
         super::ReaderPool::open_sized_with_clock(&db_path, 1, budget, std::sync::Arc::new(clock))
             .unwrap();
     let held = readers.checkout().unwrap();
+    // The successful checkout read the clock as well; the readings that
+    // matter are the ones the failing wait takes.
+    readings.lock().clear();
 
     // The notifier: a bounded burst of spurious wakeups, each advancing the
-    // clock by one tick. Bounded, so a waiter that re-armed its budget on
-    // every wakeup would still finish the test rather than hang in it.
+    // clock by one tick. Bounded, and abandoned when the waiter stops reading
+    // the clock, so a waiter that re-armed its budget on each wakeup still
+    // finishes the test rather than hanging in it.
     let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     std::thread::scope(|scope| {
         let readers = &readers;
         let ticks = ticks.clone();
-        let reads = reads.clone();
+        let seen = seen.clone();
+        let readings = readings.clone();
         let notifier_done = done.clone();
         scope.spawn(move || {
             for step in 1..=20u64 {
                 if notifier_done.load(Ordering::Relaxed) {
                     break;
                 }
-                let before = reads.load(Ordering::Relaxed);
                 ticks.store(step, Ordering::Relaxed);
-                readers.ready.notify_one();
-                // Hand out the next tick only once the waiter has read the
-                // clock again: the clock advances with the waiter, never
-                // ahead of it.
-                for _ in 0..100 {
-                    if reads.load(Ordering::Relaxed) > before
-                        || notifier_done.load(Ordering::Relaxed)
-                    {
+                // Keep waking the waiter until it has read this tick. One
+                // notification can be dropped — parking_lot does not buffer
+                // notifications — so a wakeup that lands between the waiter's
+                // clock read and its park would leave the waiter waiting out
+                // the real timeout instead of the deadline (issue #2552).
+                //
+                // The waiter gets the whole budget plus a tick of real time to
+                // read the clock, and the burst stops when it does not: a pool
+                // that stops reading the clock has to fail this test, not hang
+                // it.
+                let give_up = std::time::Instant::now() + budget + tick;
+                let mut observed = false;
+                while std::time::Instant::now() < give_up {
+                    let seen = seen.load(Ordering::Relaxed);
+                    if seen >= step {
+                        observed = true;
                         break;
                     }
+                    // The pool has read past one deadline: it is spending
+                    // more than one budget on the wait. Stop handing out
+                    // ticks, so the wait ends on the pool's own timeout and
+                    // the test reports that instead of stretching across the
+                    // burst.
+                    let overrun = {
+                        let readings = readings.lock();
+                        match readings.first() {
+                            Some(start) => seen > start + budget_ticks + 1,
+                            None => false,
+                        }
+                    };
+                    if overrun {
+                        break;
+                    }
+                    readers.ready.notify_one();
                     std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                if !observed {
+                    break;
                 }
             }
         });
@@ -1623,7 +1688,25 @@ fn reader_pool_wait_ends_at_one_deadline_however_often_it_is_woken() {
     // One deadline, not one per wakeup: the waiter reached the deadline and
     // stopped there, however often the pool was woken. The tick in flight
     // when the deadline was reached is the only slack allowed.
-    let waited = std::time::Duration::from_millis(seen.load(Ordering::Relaxed) * tick_ms);
+    //
+    // The readings are the waiter's own: the notifier hands out one tick at
+    // a time and only after the waiter has read the previous one, so the
+    // readings advance a tick at a time. The first reading at or past the
+    // deadline is therefore the deadline itself.
+    let readings = readings.lock().clone();
+    let started = readings[0];
+    let deadline_tick = started + budget_ticks;
+    let decision = readings
+        .iter()
+        .position(|tick| *tick >= deadline_tick)
+        .unwrap_or_else(|| {
+            panic!("the waiter never reached the deadline, its readings were {readings:?}")
+        });
+    assert!(
+        readings.len() >= 5,
+        "the waiter must have been woken repeatedly, its readings were {readings:?}"
+    );
+    let waited = std::time::Duration::from_millis((readings[decision] - started) * tick_ms);
     assert!(
         waited >= budget,
         "the waiter must have reached the deadline, the clock reached {waited:?} \
@@ -1633,6 +1716,15 @@ fn reader_pool_wait_ends_at_one_deadline_however_often_it_is_woken() {
         waited <= budget + tick,
         "the wait must end at ONE deadline, not one per wakeup: the clock reached {waited:?} \
          for a {budget:?} budget"
+    );
+    // The wait as a whole — the reading the timeout path takes included — must
+    // stay inside one deadline plus the tick in flight. A pool that spends a
+    // budget per wakeup keeps reading the clock past that.
+    let span = std::time::Duration::from_millis((readings[readings.len() - 1] - started) * tick_ms);
+    assert!(
+        span <= budget + tick,
+        "the wait must end at ONE deadline, not one per wakeup: the pool's readings were \
+         {readings:?}"
     );
 
     drop(held);
