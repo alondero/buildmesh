@@ -30,6 +30,7 @@ programs for you.
   - [Removing a hook](#removing-a-hook)
 - [Worktrees, branches, and review](#worktrees-branches-and-review)
 - [Project Settings and Repository](#project-settings-and-repository)
+- [Reuse prompts when spawning agents](#reuse-prompts-when-spawning-agents)
 - [Launch Configurations](#launch-configurations)
 - [Use more than one Codex login](#use-more-than-one-codex-login)
 - [Settings that matter](#settings-that-matter)
@@ -960,6 +961,34 @@ Typing saves after a short pause, and switching projects flushes pending
 typing to its original project. Saves for the same project run in order;
 returning to it waits for the latest save to finish. A save failure keeps the
 current text visible so you can retry editing before leaving the tool.
+
+## Reuse prompts when spawning agents
+
+Open a project's spawn menu in the sidebar and choose **Spawn from prompt…**.
+The canvas spawn dialog offers the same action. The dialog names the target
+project so you can check where the new agent will work.
+
+Search the library by name or prompt text, then select a built-in or saved
+prompt to preview it. **Spawn** uses the project's default agent; the adjacent
+arrow offers the usual agent, Launch Configuration and login choices. Normal
+clicks follow the project's worktree setting; Alt-click (Option-click on macOS)
+inverts that setting. Plain Terminal cannot receive an initial prompt.
+
+Edit the text for a single launch without changing your library. To reuse it,
+give it a name and choose **Save prompt**. Built-ins offer **Save a copy**;
+your saved prompts offer **Save changes** and **Delete prompt** with confirmation.
+Saved prompts are shared across projects in this Buildmesh profile and survive
+restarts. **Reset changes** restores the selected prompt. Closing the dialog
+or selecting another prompt asks before discarding edits. Save failures keep
+your draft available for retry.
+
+Prompt text is sent as written, without placeholder substitution. The
+issue and pull request templates under **Settings → Prompts** remain separate.
+If the project's default is Terminal, choose an agent from the arrow menu.
+If creating the node fails, correct the error in the dialog and retry. If the
+node was created but launch failed, **Retry launch** sends your current prompt
+to that same node with its original configuration. Keep the dialog open to
+retain any unsaved prompt edits for this retry.
 
 ## Launch Configurations
 

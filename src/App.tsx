@@ -85,6 +85,7 @@ function App() {
   const createMeshOpen = useUIStore((s) => s.createMeshOpen);
   const closeCreateMesh = useUIStore((s) => s.closeCreateMesh);
   const canvasSpawnMenuMeshId = useUIStore((s) => s.canvasSpawnMenuMeshId);
+  const canvasSpawnMenuRequestId = useUIStore((s) => s.canvasSpawnMenuRequestId);
   // Paste absolute file paths into the hovered agent terminal on OS file drop.
   useFileDropToTerminal();
 
@@ -426,7 +427,7 @@ function App() {
           always sets a specific mesh id (resolved in AgentNodeView's
           onOpenSpawnMenu callback) and `null` strictly means "closed". */}
       {canvasSpawnMenuMeshId !== null && (
-        <CanvasSpawnMenu meshId={canvasSpawnMenuMeshId} />
+        <CanvasSpawnMenu key={canvasSpawnMenuRequestId} meshId={canvasSpawnMenuMeshId} />
       )}
       <WindowCloseGuard />
       <ShortcutCheatsheet open={cheatsheetOpen} onClose={() => useUIStore.getState().closeCheatsheet()} />

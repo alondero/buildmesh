@@ -93,7 +93,7 @@ export interface AgentNodeState {
   /// auto-spawn is skipped because the node is already `spawning`.
   /// Omitted / whitespace means Fresh (Terminal auto-spawns as before).
   /// `loginId` is the Harness Login picked in the spawn menu's login submenu.
-  selectProviderForMesh: (meshId: number, meshName: string, meshPath: string, providerId: string, useWorktree?: boolean, initialPrompt?: string, configurationId?: string, loginId?: string) => Promise<AgentNode>;
+  selectProviderForMesh: (meshId: number, meshName: string, meshPath: string, providerId: string, useWorktree?: boolean, initialPrompt?: string, configurationId?: string, loginId?: string, onCreated?: (node: AgentNode) => void) => Promise<AgentNode>;
   deleteAgentNode: (id: number) => Promise<void>;
   /// Backend-driven retirement. The Circuit worker's `CloseAgentNode` effect
   /// and cancelled-run cleanup delete the row directly and emit `node-deleted`;

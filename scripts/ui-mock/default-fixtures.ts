@@ -181,7 +181,7 @@ export function buildDefaultFixtures() {
       circuit_agent_pool_size: null, circuit_classifier_provider: null,
       harness_defaults: {}, spawn_configurations: [], deleted_launch_configurations: [],
       detached_provider_routes: [], harness_logins: [], worktree_directory: null, confirm_before_quit: true,
-      issue_spawn_prompt: null, pr_spawn_prompt: null,
+      issue_spawn_prompt: null, pr_spawn_prompt: null, saved_prompts: [],
     } satisfies AppPreferences,
     get_probe_spawn_prompt_defaults: {
       issue_template: 'Implement issue #{{number}}{{title_suffix}}: {{url}}',

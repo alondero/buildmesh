@@ -529,6 +529,17 @@ pub struct AppPreferences {
     /// as `None`.
     #[serde(default)]
     pub pr_spawn_prompt: Option<String>,
+    /// User-authored initial prompts, shared across this profile's projects.
+    #[serde(default)]
+    pub saved_prompts: Vec<SavedPrompt>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "SavedPrompt.ts")]
+pub struct SavedPrompt {
+    pub id: String,
+    pub name: String,
+    pub body: String,
 }
 
 /// Default for [`AppPreferences::confirm_before_quit`] (issue #1501).

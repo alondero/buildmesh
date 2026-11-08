@@ -36,6 +36,7 @@ pub mod launch_catalog;
 pub mod launch_configurations;
 pub mod migrations;
 pub mod model;
+pub mod prompt_library;
 pub mod recovery;
 pub mod resolver;
 pub(crate) mod secrets;

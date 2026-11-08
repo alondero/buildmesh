@@ -809,6 +809,27 @@ describe('useAgentNodeStore', () => {
   });
 
   describe('selectProviderForMesh', () => {
+    it('notifies creation before launch, so launch failure cannot retry creating the same node', async () => {
+      const newNode = {
+        id: 42, mesh_id: 7, name: 'm', path: '/p', branch: 'main',
+        env: 'windows', provider: 'anthropic', status: 'idle', created_at: '',
+        use_worktree: true, position: 0,
+      };
+      const created = vi.fn();
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'create_agent_node') return Promise.resolve(newNode);
+        if (cmd === 'spawn_agent') {
+          expect(created).toHaveBeenCalledTimes(1);
+          return Promise.reject(new Error('CLI failed'));
+        }
+        return Promise.resolve(null);
+      });
+      await expect(useAgentNodeStore.getState().selectProviderForMesh(
+        7, 'm', '/p', 'anthropic', true, 'Inspect this project', undefined, undefined, created,
+      )).rejects.toThrow('CLI failed');
+      expect(created).toHaveBeenCalledTimes(1);
+      expect(useAgentNodeStore.getState().nodesById[42].status).toBe('error');
+    });
     // The whole point of pulling this orchestration out of Sidebar.handleSelectProvider
     // (issue #283): the create-then-activate-then-select-mesh sequence enforces ONE
     // invariant — "only switch active mesh/node if creation succeeded" — and the

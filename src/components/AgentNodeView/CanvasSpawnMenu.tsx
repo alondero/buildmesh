@@ -35,7 +35,9 @@
  * surfaces can be open independently and the panel needs its own
  * click-outside scope.
  */
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
+import { PromptLibrary } from '../Prompts/PromptLibrary';
+import type { AgentNode } from '../../types/generated/AgentNode';
 import { Modal, ModalCloseButton } from '../shared/Modal';
 import { GroupedProviderMenu } from '../Providers/GroupedProviderMenu';
 import { SafeLink } from '../shared/SafeLink';
@@ -64,6 +66,13 @@ export function CanvasSpawnMenu({ meshId }: CanvasSpawnMenuProps) {
   const selectProviderForMesh = useAgentNodeStore((s) => s.selectProviderForMesh);
   const providerList = useProviderList();
   const options = useUIStore(s => s.canvasSpawnMenuOptions);
+  const [libraryOpen, setLibraryOpen] = useState(options?.promptLibrary ?? false);
+  const [promptDirty, setPromptDirty] = useState(false);
+  const [retryNode, setRetryNode] = useState<AgentNode | null>(null);
+  const [requestId] = useState(() => useUIStore.getState().canvasSpawnMenuRequestId);
+  const closeThisDialog = () => {
+    if (useUIStore.getState().canvasSpawnMenuRequestId === requestId) close();
+  };
 
   // The mesh disappeared between open request and render (delete /
   // refetch race). Reset the store flag and bail — the next open
@@ -120,14 +129,17 @@ export function CanvasSpawnMenu({ meshId }: CanvasSpawnMenuProps) {
     <Modal
       onClose={close}
       labelledBy="canvas-spawn-menu-title"
-      maxWidth="max-w-sm"
+      maxWidth={libraryOpen ? 'max-w-3xl' : 'max-w-sm'}
+      dirty={promptDirty}
+      className="flex flex-col max-h-[90vh] p-4"
     >
-      <div className="flex items-start justify-between mb-3">
+      <div className="flex shrink-0 items-start justify-between gap-3 mb-3">
         <h2 id="canvas-spawn-menu-title" className="text-sm font-semibold text-text-primary">
           Spawn agent in {targetMesh.name}
         </h2>
         <ModalCloseButton onClose={close} />
       </div>
+      <div className="min-h-0 min-w-0 overflow-y-auto overflow-x-hidden">
       {noAgent && (
         <div
           data-testid="canvas-spawn-menu-empty-state"
@@ -147,6 +159,20 @@ export function CanvasSpawnMenu({ meshId }: CanvasSpawnMenuProps) {
           </SafeLink>
         </div>
       )}
+      {libraryOpen ? <PromptLibrary key={meshId} meshId={meshId} providers={providerList} initialPrompt={options?.initialPrompt} retryingNode={retryNode !== null}
+        onDirtyChange={setPromptDirty}
+        onSpawn={async (body, providerId, altKey, configurationId, loginId) => {
+          if (retryNode) {
+            await useAgentNodeStore.getState().spawnAgent(retryNode.id, retryNode.provider, { prefill: body });
+          } else {
+            await selectProviderForMesh(targetMesh.id, targetMesh.name, targetMesh.path, providerId,
+              altKey ? !targetMesh.use_worktree : targetMesh.use_worktree, body, configurationId, loginId, setRetryNode);
+          }
+          closeThisDialog();
+        }} /> : <>
+      <button type="button" onClick={() => setLibraryOpen(true)} className="mb-3 min-h-8 w-full rounded-md border border-border-default px-3 py-2 text-left text-sm text-text-primary hover:bg-bg-card-hover">
+        Spawn from prompt…
+      </button>
       <GroupedProviderMenu
         providers={providerList}
         initialProviderId={options?.providerId}
@@ -161,6 +187,8 @@ export function CanvasSpawnMenu({ meshId }: CanvasSpawnMenuProps) {
         // comment claiming the opposite of what `onClose={close}`
         // actually did.
       />
+      </>}
+      </div>
     </Modal>
   );
 }

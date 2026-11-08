@@ -54,6 +54,7 @@ pub mod opencode_oauth;
 pub mod pr;
 pub mod preferences;
 pub mod project_detect;
+pub mod prompt_library;
 pub mod prune;
 pub mod remote;
 pub mod scratchpad;
