@@ -69,7 +69,10 @@ export const PROBE_TAB_DEFINITIONS = {
   files: {
     discovery: { group: 'code', order: 0 },
     command: {
-      label: 'Open Files',
+      // Issue #1548 — the row was "Open Files" while the header read "Project
+      // Files", which broke ADR-0030's one-name rule for the third destination
+      // the issue had not enumerated. The row now follows its header.
+      label: 'Open Project Files',
       subtitle: 'Browse the project explorer',
       keywords: ['project', 'explorer', 'file tree'],
     },
@@ -230,7 +233,14 @@ export const PROBE_TAB_DEFINITIONS = {
     },
     icon: PullsIcon,
     ...probeTabAdapter(() => import('../components/Probe/GitPullRequestsTab').then(m => ({ Component: m.GitPullRequestsTab, load: m.loadPulls }))),
-    label: 'Pull Requests',
+    // Issue #1548 — the header was "Pull Requests" while the palette row read
+    // "Open GitHub Pull Requests", which broke ADR-0030's one-name rule
+    // ("Open <Header>"). The header now carries the same "GitHub" qualifier as
+    // its sibling destination ("GitHub Issues"), so the row, the inspector
+    // header and the palette tile all read "GitHub Pull Requests". The id
+    // stays `pulls` — ADR-0030 keeps `probe-<tab>` ids stable for callers and
+    // deep links.
+    label: 'GitHub Pull Requests',
     lens: 'mesh',
     followsSelection: true,
     baseline: 'mesh',

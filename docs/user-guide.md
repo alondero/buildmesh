@@ -184,7 +184,8 @@ The first successful loop is: **install → configure → spawn → inspect → 
 
 Use **More** at the right of the title bar to open **Project Files**,
 **Agent Changes**, **Project Settings**, **Repository**, **GitHub Issues**,
-**Pull Requests**, **Circuits**, **Agent History**, or **Notes** in the inspector.
+**GitHub Pull Requests**, **Circuits**, **Agent History**, or **Notes** in the
+inspector.
 More and the command palette's empty search show compact rows with a name and
 icon. The highlighted row marks the current choice; hover a tool for optional
 help. In the palette, Up/Down move through the rows and wrap at either end;
@@ -208,13 +209,13 @@ or Escape to close the menu and return focus to **More**. Clicking outside also
 closes the menu. On short windows, scroll the menu to reach every tool.
 
 The inspector groups **Project Files** and **Agent Changes** under **Files &
-changes**, and **GitHub Issues** and **Pull Requests** under **GitHub**. Switch
-subviews inside the panel. The header shows the tool name, then its current
-scope. Host-wide tools apply across projects; Mesh and Agent tools follow your
-selection. Click or tap the scope line, or focus it and press Enter or Space,
-to read full names and scope behavior. Escape closes the details while focus is
-inside the disclosure. Clicking or tapping outside, or moving focus away,
-also closes them. Files
+changes**, and **GitHub Issues** and **GitHub Pull Requests** under **GitHub**.
+Switch subviews inside the panel. The header shows the tool name, then its
+current scope. Host-wide tools apply across projects; Mesh and Agent tools
+follow your selection. Click or tap the scope line, or focus it and press Enter
+or Space, to read full names and scope behavior. Escape closes the details while
+focus is inside the disclosure. Clicking or tapping outside, or moving focus
+away, also closes them. Files
 shows the working tree, while Agent Changes
 compares against HEAD or the selected repository's base merge point. Commands
 still open the exact requested view. The last Files subview is restored when
@@ -289,8 +290,8 @@ clears the Mesh selection.
 
 Open the same control to choose a Mesh. The list shows every Mesh with a tick
 beside the current one. Choosing a Mesh moves the canvas to that Mesh's nodes
-and retargets the Mesh-scoped tools in the inspector — Files, Properties,
-Worktree Manager, GitHub Issues and Archived Nodes all follow. Choosing the
+and retargets the Mesh-scoped tools in the inspector — Project Files, Project
+Settings, Repository, GitHub Issues and Archived Nodes all follow. Choosing the
 Mesh you are already in returns the canvas to its grid. Escape or a click
 outside closes the list and returns focus to the control, leaving the scope
 unchanged.

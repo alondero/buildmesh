@@ -63,7 +63,11 @@ the scope pills of (B) folded in as per-group scope notes.
   `_AssertDiscoveryExhaustive` check fails the build until it is placed).
 - Pre-existing header/row label drift (`Worktree Manager` vs `Open
   Worktrees`, `Pull Requests` vs `Open GitHub Pull Requests`) is unchanged
-  by this decision and tracked separately.
+  by this decision and tracked separately. **Resolved 2026-11-08:** #1460
+  renamed the worktree destination to `Repository` and #1548 renamed the
+  pull-request destination to `GitHub Pull Requests`, so both destinations now
+  satisfy the `Open <Header>` pattern. `tests/unit/probe-destination-names.test.ts`
+  pins the pattern for each destination the registry lists.
 - Group headings are navigation aids, not task destinations: they are not
   part of the one-name rule and must not leak lens jargon (Host/Mesh/Agent)
   into user copy.
