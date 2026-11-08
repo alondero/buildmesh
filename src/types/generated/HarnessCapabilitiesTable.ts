@@ -716,6 +716,7 @@ export const HARNESS_CATALOG = {
       "attention_capability": {
         "events": [
           "turn_completed",
+          "question_requested",
           "permission_requested"
         ],
         "kind": "hook",

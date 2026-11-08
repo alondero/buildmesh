@@ -101,7 +101,7 @@ Legend: ✅ advertised, ❌ not advertised. Column shorthand:
 | Cursor | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | Completion and background signals only |
 | Antigravity | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Hook needs CLI 1.0.0+; workspace trust |
 | OpenCode | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | Attention arrives through the project plugin |
-| OpenCode 2 | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | Session API model/fork; private server; native runtime only |
+| OpenCode 2 | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | Session API model/variant/fork; native child sessions tracked as background work; private server; native runtime only |
 | Kimi Code | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ | ❌ | ❌ | Hook needs 0.27.0+; no transcript reader |
 | Grok Code | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Hook validated against 1.0.5 |
 | MiniMax Code | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | Session-only `--model` verified in native Windows help; `UserPromptSubmit` resumes work using the 0.6.13 hook contract; see the [capability review](mcode-harness-capabilities.md) for delivery evidence and platform limits |
@@ -180,7 +180,7 @@ Non-boolean detail for the nine harnesses with a native attention hook
 | Cursor | Skip permissions | Turn completed, background | 1.0.0 | — |
 | Antigravity | Skip permissions | Turn completed, background | 1.0.0 | Workspace trust |
 | OpenCode | Permission ask | Turn completed, question, permission | — | — |
-| OpenCode 2 | Permission ask | Turn completed, permission; busy clears attention | 2.2.3 | Native runtime; question/child contracts unverified |
+| OpenCode 2 | Permission ask | Turn completed, question, permission; busy clears attention | 2.2.3 | Native runtime; native child sessions tracked as owned work |
 | Kimi Code | Permission ask | Turn completed, input required, question, permission | 0.27.0 | — |
 | Grok Code | Permission ask | Turn completed, input required, question, permission | 1.0.5 | Global hook directory |
 | MiniMax Code | Skip permissions (pinned: `permissionMode: bypassPermissions`) | Turn completed | 0.4.12 | — |

@@ -198,6 +198,83 @@ fn api_preparation_creates_with_model_and_updates_a_distinct_regenerate_fork() {
 }
 
 #[test]
+fn model_refs_accept_one_variant_and_reject_malformed_suffixes() {
+    use serde_json::json;
+    assert_eq!(
+        model_ref("openrouter/particle-ai/particle-1").unwrap(),
+        json!({"providerID":"openrouter","id":"particle-ai/particle-1"})
+    );
+    assert_eq!(
+        model_ref("anthropic/claude-sonnet-4-5#high").unwrap(),
+        json!({"providerID":"anthropic","id":"claude-sonnet-4-5","variant":"high"})
+    );
+    for invalid in [
+        "",
+        "/",
+        "anthropic",
+        "anthropic/",
+        "/sonnet",
+        "anthropic/sonnet#",
+        "anthropic/sonnet#a#b",
+        "anthropic#x/sonnet",
+    ] {
+        assert!(model_ref(invalid).is_err(), "{invalid} must be rejected");
+    }
+    assert!(OPENCODE2.validate_model_override("openai/gpt#high").is_ok());
+    assert!(OPENCODE2.validate_model_override("openai/gpt#").is_err());
+}
+
+#[test]
+fn session_api_creation_and_update_carry_model_variants() {
+    use serde_json::json;
+    let mut create_calls = Vec::new();
+    prepare_identity(
+        SessionIdModeRef::Assign("ses_assigned"),
+        Some("openai/gpt#high"),
+        &mut |_, path, body| {
+            create_calls.push((path.to_string(), body));
+            Ok(json!({"data":{"id":"ses_assigned"}}))
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        create_calls,
+        [(
+            "/api/session".into(),
+            json!({"id":"ses_assigned","model":{"providerID":"openai","id":"gpt","variant":"high"}})
+        )]
+    );
+    let mut resume_calls = Vec::new();
+    prepare_identity(
+        SessionIdModeRef::Resume {
+            id: "ses_parent",
+            cause: ResumeCause::Explicit,
+        },
+        Some("openai/gpt#high"),
+        &mut |method, path, body| {
+            resume_calls.push((method.to_string(), path.to_string(), body));
+            Ok(if method == "GET" {
+                json!({"data":{"id":"ses_parent"}})
+            } else {
+                json!(null)
+            })
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        resume_calls,
+        [
+            ("GET".into(), "/api/session/ses_parent".into(), json!(null)),
+            (
+                "POST".into(),
+                "/api/session/ses_parent/model".into(),
+                json!({"model":{"providerID":"openai","id":"gpt","variant":"high"}})
+            )
+        ]
+    );
+}
+
+#[test]
 fn resume_recovers_a_persisted_identity_after_a_failed_first_create() {
     use serde_json::json;
     for model in [None, Some("openai/gpt")] {
@@ -384,7 +461,10 @@ fn fresh_and_resume_use_standalone_assigned_identity_without_v1_flags() {
         assert!(prepared.capabilities.supports_model_override);
     }
     assert!(model_ref("claude-sonnet-5-5").is_err());
-    assert!(model_ref("anthropic/model#variant").is_err());
+    assert_eq!(
+        model_ref("anthropic/model#variant").unwrap(),
+        serde_json::json!({"providerID":"anthropic","id":"model","variant":"variant"})
+    );
     assert_eq!(
         model_ref("custom/vendor/model").unwrap(),
         serde_json::json!({"providerID":"custom","id":"vendor/model"})

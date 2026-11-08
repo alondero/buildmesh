@@ -200,9 +200,10 @@ Each V2 node starts with `--standalone`, so it owns a private server and does
 not attach to OpenCode's shared background service. Buildmesh does not disable
 or reconfigure that service. Model updates and regenerate forks use a separate
 bounded `api --standalone` invocation before the terminal starts; an API error
-aborts the launch. A model must be an available `provider/model`; model IDs may
-contain another slash. A `provider.no-route` error means that model is not
-available to the CLI's current login.
+aborts the launch. A model must be an available `provider/model`, optionally
+with a `#variant` suffix; model IDs may contain another slash. A
+`provider.no-route` error means that model is not available to the CLI's
+current login.
 
 Buildmesh writes `.opencode/buildmesh-attention2/index.ts` and an independent
 `.opencode/buildmesh2/<node-id>/opencode.json` selected by `OPENCODE_CONFIG`.
