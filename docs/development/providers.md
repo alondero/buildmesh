@@ -402,7 +402,16 @@ reach the disk. `preferences::recovery` owns the bytes: `classify` is pure and
 returns a content-free `CorruptionInfo` (a corrupt file may still hold API
 keys, so no diagnostic may echo a value), every successful write refreshes an
 owner-only `preferences.json.bak`, and `restore_backup` / `reset_to_defaults`
-archive the current bytes before replacing them. Surface the state as a
+archive the current bytes before replacing them. The replacement itself is a
+temp-file-then-`MoveFileExW(MOVEFILE_REPLACE_EXISTING)` write, and Windows
+refuses it while the destination is held by a handle that does not share
+delete access — an antivirus scanner walking the profile directory is one
+such holder, and a reader that still has the file open is another.
+`persist_bytes` therefore retries that refusal
+(`ERROR_ACCESS_DENIED`, `ERROR_SHARING_VIOLATION`, `ERROR_LOCK_VIOLATION`)
+within a bounded budget: each attempt writes a fresh temporary file and
+moves it over the target in one step, so a transient holder delays a
+settings write rather than losing it. Surface the state as a
 *successful* `get_preferences_health` call — never as an `Err` string the UI
 has to pattern-match, and never as a `failed` resource status, because the
 read itself did succeed.

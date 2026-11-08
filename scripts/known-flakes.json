@@ -1,4 +1,1 @@
-{
-  "commands::prune::prune_tests::blocked_removal_names_the_stage_that_failed": 2220,
-  "commands::prune::prune_tests::remove_worktree_fails_while_process_pins_it": 2220
-}
+{}

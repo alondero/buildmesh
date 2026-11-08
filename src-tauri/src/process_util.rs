@@ -221,6 +221,36 @@ pub fn kill_process_tree(pid: u32) {
 #[cfg(not(target_os = "windows"))]
 pub fn kill_process_tree(_pid: u32) {}
 
+/// Kill a process tree the way the agent teardown does: the **Job Object
+/// first**, because it is a containment boundary and reaches the detached
+/// descendants `taskkill /T` cannot see, then `taskkill /T` and the direct
+/// kill as fallbacks for the rare spawn case where job assignment failed.
+///
+/// The job is terminated whatever the pid is. The shell handle can already be
+/// gone - a shell that exited leaves `process_id()` empty - while the
+/// descendants it spawned keep running, and those descendants are the
+/// processes that pin a worktree's directory. Gating the termination on a pid
+/// would let exactly the processes the job exists to contain survive.
+///
+/// `taskkill /T` alone is not enough for a tree that contains a grandchild
+/// (a shell that launched an agent, or a dev server the agent backgrounded):
+/// it walks the *live* parent→child links, so a descendant whose parent has
+/// already exited is not reached, and it leaves that descendant holding the
+/// worktree's directory — which is what blocks a worktree's removal on
+/// close.
+///
+/// Shared by the agent teardown and the worktree-removal regression, so the
+/// regression exercises the sequence production uses rather than only its
+/// weakest fallback.
+pub fn kill_process_tree_contained(job: Option<&JobHandle>, pid: Option<u32>) {
+    if let Some(job) = job {
+        job.terminate();
+    }
+    if let Some(pid) = pid {
+        kill_process_tree(pid);
+    }
+}
+
 /// A Windows Job Object that contains an agent's entire process tree.
 ///
 /// `taskkill /T` walks the *live* parent→child links at the instant it runs, so
@@ -284,8 +314,23 @@ mod job_ffi {
 
     pub const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
     pub const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: i32 = 9;
+    pub const JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION: i32 = 1;
     pub const PROCESS_TERMINATE: u32 = 0x0001;
     pub const PROCESS_SET_QUOTA: u32 = 0x0100;
+
+    /// `JOBOBJECT_BASIC_ACCOUNTING_INFORMATION`: how many processes the job
+    /// has seen and how many are running now.
+    #[repr(C)]
+    pub struct BasicAccountingInformation {
+        pub total_user_time: i64,
+        pub total_kernel_time: i64,
+        pub this_period_total_user_time: i64,
+        pub this_period_total_kernel_time: i64,
+        pub total_page_fault_count: u32,
+        pub total_processes: u32,
+        pub active_processes: u32,
+        pub total_terminated_processes: u32,
+    }
 
     #[link(name = "kernel32")]
     extern "system" {
@@ -298,6 +343,13 @@ mod job_ffi {
         ) -> i32;
         pub fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
         pub fn TerminateJobObject(job: Handle, exit_code: u32) -> i32;
+        pub fn QueryInformationJobObject(
+            job: Handle,
+            class: i32,
+            info: *mut c_void,
+            len: u32,
+            return_len: *mut u32,
+        ) -> i32;
         pub fn OpenProcess(access: u32, inherit: i32, pid: u32) -> Handle;
         pub fn CloseHandle(handle: Handle) -> i32;
     }
@@ -377,6 +429,57 @@ impl JobHandle {
 
     #[cfg(not(target_os = "windows"))]
     pub fn terminate(&self) {}
+
+    /// How many processes are running inside the job right now.
+    ///
+    /// This is the precise answer to "is the tree still alive?": it counts the
+    /// processes, so it covers the ways a process pins a directory that the
+    /// other signals miss.
+    /// `taskkill /T` cannot see a descendant whose parent already exited, and
+    /// a file-handle probe cannot see a process that holds the tree only as
+    /// its *working directory* — and that alone is enough to block a
+    /// worktree's removal with "the process cannot access the file because
+    /// it is being used by another process" (os error 32) (issue #2220).
+    ///
+    /// `None` when Windows refuses the query, which the caller must read as
+    /// "unknown" rather than "empty".
+    #[cfg(target_os = "windows")]
+    pub fn active_process_count(&self) -> Option<u32> {
+        use job_ffi::*;
+        let mut info = BasicAccountingInformation {
+            total_user_time: 0,
+            total_kernel_time: 0,
+            this_period_total_user_time: 0,
+            this_period_total_kernel_time: 0,
+            total_page_fault_count: 0,
+            total_processes: 0,
+            active_processes: 0,
+            total_terminated_processes: 0,
+        };
+        let mut returned: u32 = 0;
+        // SAFETY: `info` is a `JOBOBJECT_BASIC_ACCOUNTING_INFORMATION`, the
+        // layout the queried class documents, and its exact size is passed
+        // along with a buffer for the returned length.
+        let ok = unsafe {
+            QueryInformationJobObject(
+                self.handle as Handle,
+                JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+                &mut info as *mut BasicAccountingInformation as *mut std::os::raw::c_void,
+                std::mem::size_of::<BasicAccountingInformation>() as u32,
+                &mut returned,
+            )
+        };
+        if ok == 0 {
+            None
+        } else {
+            Some(info.active_processes)
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub fn active_process_count(&self) -> Option<u32> {
+        None
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -745,3 +848,11 @@ mod tests {
         );
     }
 }
+
+// The kill seam's own regression (issue #2220) lives in a sibling file, so a
+// test body is not added to this module. The `#[path]` module needs an
+// entry in `RUST_PATH_INCLUDES` (scripts/harness-check.mjs) so a scoped
+// check selects it.
+#[cfg(test)]
+#[path = "process_util_tests.rs"]
+mod process_util_tests;

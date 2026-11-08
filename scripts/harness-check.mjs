@@ -220,6 +220,10 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/commands/circuit_tests.rs': 'commands::circuit::tests',
   'src-tauri/src/services/circuit_control/control_tests.rs': 'services::circuit_control::tests',
   'src-tauri/src/services/circuit_control/cancellation_tests.rs': 'services::circuit_control::cancellation::tests',
+  // The kill seam's own regression (issue #2220) is a `#[path]`-included
+  // sibling of `process_util.rs`, so its tests run under the module that
+  // declares it rather than under a module named after the file.
+  'src-tauri/src/process_util_tests.rs': 'process_util::process_util_tests',
 };
 
 // A Rust production file whose tests live in a sibling `<stem>_tests` module
