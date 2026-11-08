@@ -49,11 +49,11 @@ function setup(overrides: Partial<React.ComponentProps<typeof NodeCreationForm>>
 describe('NodeCreationForm', () => {
   it('opens the prompt library for this mesh through the keyboard-accessible menu action', async () => {
     const { onSelectProvider, onToggleDropdown } = setup({ isDropdownOpen: true });
-    const action = screen.getByRole('menuitem', { name: 'Spawn from prompt…' });
+    const action = screen.getByRole('menuitem', { name: 'Choose a prompt…' });
     expect(action.tabIndex).toBe(0);
     await userEvent.keyboard('{Enter}');
-    expect(useUIStore.getState().canvasSpawnMenuMeshId).toBe(MESH.id);
-    expect(useUIStore.getState().canvasSpawnMenuOptions).toEqual({ promptLibrary: true });
+    expect(useUIStore.getState().probeTab).toBe('prompts');
+    expect(useUIStore.getState().probeOpen).toBe(true);
     expect(onToggleDropdown).toHaveBeenCalledWith(MESH);
     expect(onSelectProvider).not.toHaveBeenCalled();
   });

@@ -388,8 +388,9 @@ function ProbePanelContent() {
 /** Resolve the adapter after applying the shared context guard. */
 function ProbeTabBody({ tab }: { tab: ProbeTab }) {
   const context = useProbeContext();
-  const { Component } = PROBE_TAB_DEFINITIONS[tab];
-  if (!context.hasRequiredContext) return <ProbeContextEmptyState context={context} />;
+  const definition: ProbeTabDefinition = PROBE_TAB_DEFINITIONS[tab];
+  const { Component } = definition;
+  if (!context.hasRequiredContext && !definition.allowsMissingContext) return <ProbeContextEmptyState context={context} />;
   return <Component />;
 }
 

@@ -148,6 +148,24 @@ remediation. The cheap catalog reads the default WSL distribution only if
 startup has already observed it; it never initializes discovery itself.
 Failed preferences disable writes, and retries/unmount invalidate stale reads.
 
+### Prompts library and fresh launches
+
+Prompts is a Mesh-following destination with mixed ownership: saved prompts
+belong to the profile, while spawning uses the selected Mesh's normal defaults.
+The registry's `allowsMissingContext` permits browsing and authoring without a
+Mesh; only launch controls require a target. The shared library resource keeps
+one Host-wide read identity across Mesh selection changes. Focused agent paths
+and conversations are never inputs to a prompt launch.
+
+`PromptLibrary` reuses `ProbeRow` for disclosure and full-width text, with one
+body scroller and a pinned search/create toolbar. Authoring and launch-only
+customisation use separate dirty-aware modal dialogs. Launch requests capture
+the displayed Mesh before resolving a default agent. They create and spawn
+through the Agent Node store without changing selection; success offers an
+explicit View agent action. A failed launch retains its created node and draft
+in the retry dialog, so retry does not allocate another node. Spawn shortcuts
+open this destination instead of mounting a library inside the Spawn Menu.
+
 ## Notifications
 
 The Notifications Probe puts actionable problems before recent toast activity.

@@ -138,7 +138,7 @@ describe('ui-shot mock mode', () => {
         '--steps', resolve(repoRoot, 'tests/integration/ui-shot-probe-header.steps.mjs'),
       ]);
       expect(result.code, result.stderr).toBe(0);
-      expect(result.stdout).toContain('11 two-row Probe headers at 240px');
+      expect(result.stdout).toContain('12 two-row Probe headers at 240px');
     } finally {
       await rm(folder, { recursive: true, force: true });
     }

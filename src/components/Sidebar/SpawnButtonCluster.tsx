@@ -127,6 +127,8 @@ interface SpawnButtonClusterProps {
    *  passes when `mesh.use_worktree` is true). Omitted everywhere else. */
   menuFooter?: ReactNode;
   menuLeadingAction?: GroupedProviderMenuProps['leadingAction'];
+  /** Portals the picker for surfaces inside clipped scroll regions. */
+  portalMenu?: boolean;
 }
 
 export function SpawnButtonCluster({
@@ -145,6 +147,7 @@ export function SpawnButtonCluster({
   mode = 'spawn',
   menuFooter,
   menuLeadingAction,
+  portalMenu = false,
 }: SpawnButtonClusterProps) {
   // Cache the default provider id for the tooltip + quick-spawn icon so
   // we don't refetch on every render. The parent passes a fresh closure
@@ -333,6 +336,7 @@ export function SpawnButtonCluster({
           // the id onto its outer div — the menu's accessible name comes
           // from its `aria-label`, which is the user-facing contract).
           menuId={menuId}
+          anchorRef={portalMenu ? triggerRef : undefined}
         />
       )}
     </div>

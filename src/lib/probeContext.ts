@@ -1,6 +1,6 @@
 import { readProjectFiles, readAgentChanges } from './probePathReads';
 import { readGitPruneInfo } from './gitPruneInfo';
-import { FilesIcon, ReviewIcon, UsageIcon, BellIcon, WorktreesIcon, PropertiesIcon, CircuitsIcon, IssuesIcon, PullsIcon, ArchiveIcon, NotesIcon, type ProbeIcon } from '../components/Probe/probeIcons';
+import { FilesIcon, ReviewIcon, UsageIcon, BellIcon, WorktreesIcon, PropertiesIcon, CircuitsIcon, IssuesIcon, PullsIcon, ArchiveIcon, NotesIcon, PromptsIcon, type ProbeIcon } from '../components/Probe/probeIcons';
 import type { ComponentType } from 'react';
 import { probeTabAdapter } from './probeTabAdapter';
 import type { ProbeLoader } from './probeResource';
@@ -54,6 +54,8 @@ export interface ProbeTabDefinition {
   baseline: ProbeBaseline;
   /** True when the destination contains edits or other stateful actions. */
   stateful: boolean;
+  /** Mixed-ownership tools may still browse global content without a Mesh. */
+  allowsMissingContext?: boolean;
   /** Explicit decision for a destination that reads a secondary ownership. */
   mixedOwnership?: string;
 }
@@ -206,6 +208,23 @@ export const PROBE_TAB_DEFINITIONS = {
     followsSelection: true,
     baseline: 'mesh',
     stateful: true,
+  },
+  prompts: {
+    discovery: { group: 'automate', order: 1 },
+    command: {
+      label: 'Open Prompts',
+      subtitle: 'Reuse prompts to start fresh agents',
+      keywords: ['prompt library', 'saved prompts', 'templates', 'spawn'],
+    },
+    icon: PromptsIcon,
+    ...probeTabAdapter(() => import('../components/Probe/PromptsProbeTab').then(m => ({ Component: m.PromptsProbeTab, load: m.loadPrompts }))),
+    label: 'Prompts',
+    lens: 'mesh',
+    followsSelection: true,
+    baseline: 'mesh',
+    stateful: true,
+    allowsMissingContext: true,
+    mixedOwnership: 'The library is shared across Meshes. Only fresh spawning needs the selected Mesh; a focused agent never supplies its checkout or conversation.',
   },
   issues: {
     discovery: { group: 'github', order: 0 },

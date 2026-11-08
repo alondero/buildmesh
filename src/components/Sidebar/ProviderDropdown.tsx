@@ -1,9 +1,11 @@
-import { useRef, type ReactNode } from 'react';
+import { useRef, type ReactNode, type RefObject } from 'react';
+import { createPortal } from 'react-dom';
 import { GroupedProviderMenu, type GroupedProviderMenuProps } from '../Providers/GroupedProviderMenu';
 import { SafeLink } from '../shared/SafeLink';
 import { hasSpawnableAgent, type SpawnOption } from '../../lib/groups';
 import { PREREQUISITES_URL } from '../../lib/urls';
 import { useViewportClamp } from '../../hooks/useViewportClamp';
+import { useAnchoredPosition } from '../../hooks/useAnchoredPosition';
 
 // `SpawnOption` is the frontend view of the Spawn Option wire shape
 // (issue #583) — produced by `mapBackendProviders` and consumed by the
@@ -51,9 +53,11 @@ interface ProviderDropdownProps {
    * it without supplying a value.
    */
   menuId?: string;
+  /** Escape a Probe's scroll clipping while retaining the shared menu. */
+  anchorRef?: RefObject<HTMLElement | null>;
 }
 
-export function ProviderDropdown({ dropdownKey, providers, onSelect, onClose, menuId, mode, footer, leadingAction }: ProviderDropdownProps) {
+export function ProviderDropdown({ dropdownKey, providers, onSelect, onClose, menuId, mode, footer, leadingAction, anchorRef }: ProviderDropdownProps) {
   // Issue #575 / ADR-0016 — render the harness-grouped, always-expanded
   // Spawn Menu. The backend-derived list is grouped by `group_key`
   // (== `harness_id`): each native harness is a clickable parent, and
@@ -69,8 +73,10 @@ export function ProviderDropdown({ dropdownKey, providers, onSelect, onClose, me
   // if limited, spawn — so this augments rather than replaces the menu.
   const noAgent = !hasSpawnableAgent(providers);
   const menuRef = useRef<HTMLDivElement>(null);
-  useViewportClamp(menuRef, [providers]);
-  return (
+  const unusedRef = useRef<HTMLDivElement>(null);
+  useViewportClamp(anchorRef ? unusedRef : menuRef, [providers]);
+  useAnchoredPosition(anchorRef ?? unusedRef, menuRef, !!anchorRef, { align: 'end' });
+  const dropdown = (
     <div
       ref={menuRef}
       id={menuId}
@@ -89,7 +95,7 @@ export function ProviderDropdown({ dropdownKey, providers, onSelect, onClose, me
       // surface, with the inner `GroupedProviderMenu` adding its own
       // label for the menu itself.
       aria-label="Select a provider"
-      className="absolute right-0 top-full mt-1 z-50 bg-bg-overlay border border-border-default rounded-md shadow-md min-w-[200px] max-h-[400px] overflow-y-auto animate-scale-in origin-top-right"
+      className={`${anchorRef ? 'fixed z-[100]' : 'absolute right-0 top-full mt-1 z-50'} bg-bg-overlay border border-border-default rounded-md shadow-md min-w-[200px] max-w-[calc(100vw-8px)] max-h-[400px] overflow-y-auto animate-scale-in origin-top-right`}
     >
       {noAgent && (
         <div
@@ -120,4 +126,5 @@ export function ProviderDropdown({ dropdownKey, providers, onSelect, onClose, me
       <GroupedProviderMenu providers={providers} onSelect={onSelect} onClose={onClose} mode={mode} footer={footer} leadingAction={leadingAction} />
     </div>
   );
+  return anchorRef ? createPortal(dropdown, document.body) : dropdown;
 }
