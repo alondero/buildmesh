@@ -92,6 +92,14 @@ provider's account console, quota documentation, or subscription settings instea
 Custom providers and externally managed billing omit the link. The browser uses
 its own login; choose the same account or workspace as the meter.
 
+OpenCode Go usage follows your OpenCode login automatically. In OpenCode 2,
+connect **OpenCode Console** and select the workspace with your Go subscription.
+OpenCode 1 uses the **OpenCode Go** API key saved by its own connection flow.
+The Usage tab shows the 5-hour, weekly, and monthly quotas with local reset
+dates and times. A separate Buildmesh Console sign-in is not required. If a
+native session expires, open OpenCode to renew it, then refresh usage. An expired
+API key must be replaced in OpenCode; signing in again does not renew that key.
+
 ### Add a custom API provider
 
 1. Open **Settings → Providers → Add provider → Other / custom**.

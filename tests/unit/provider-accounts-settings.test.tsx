@@ -101,6 +101,14 @@ describe('Accounts & Usage settings (issue #537)', () => {
     expect(screen.getByText('MiniMax')).toBeTruthy();
   });
 
+  it('directs OpenCode Go authentication to the native CLI', async () => {
+    mockBackend();
+    render(<AppSettingsModal onClose={() => {}} initialTab="providers" />);
+    expect(await screen.findByText(/Connect OpenCode Console in OpenCode 2/)).toBeTruthy();
+    expect(screen.queryByTestId('opencode-sign-in')).toBeNull();
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === 'get_opencode_console_status')).toBe(false);
+  });
+
   it('creates a custom Claude-compatible provider with a slugified id (name + key only)', async () => {
     // Issue #881 (Settings sub-pane redesign, a9b59dd) — this test
     // exercises the longest path through the modal (mount → find builtins
