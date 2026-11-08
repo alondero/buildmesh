@@ -74,10 +74,10 @@ pub(crate) fn test_dir_for(id: usize) -> PathBuf {
 ///
 /// The claim proves the name belongs to this run, and the removal rides out
 /// the window in which Windows is still releasing a handle - so a test that
-/// fails part-way through still leaves nothing behind in `%TEMP%`. The
-/// leftovers are what a later run collides with, and a fixture that builds
-/// `%TEMP%\buildmesh_*` by hand has the same leak whether or not it has
-/// failed yet (issue #2220).
+/// fails part-way through still runs the removal instead of leaving its
+/// directory behind. The leftovers are what a later run collides with, and a
+/// fixture that builds `%TEMP%\buildmesh_*` by hand has the same leak
+/// whether or not it has failed yet (issue #2220).
 pub(crate) struct ProfileDir(PathBuf);
 
 impl ProfileDir {

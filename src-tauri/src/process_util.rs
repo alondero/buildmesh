@@ -850,7 +850,7 @@ mod tests {
 }
 
 // The kill seam's own regression (issue #2220) lives in a sibling file, so a
-// test body is never added to this module. The `#[path]` module needs an
+// test body is not added to this module. The `#[path]` module needs an
 // entry in `RUST_PATH_INCLUDES` (scripts/harness-check.mjs) so a scoped
 // check selects it.
 #[cfg(test)]

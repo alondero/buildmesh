@@ -1830,8 +1830,8 @@ fn removal_failure_names_the_operation_that_failed() {
 fn the_removal_rides_out_a_working_directory_that_is_still_pinned() {
     use std::process::Stdio;
 
-    /// The pinning process, contained so that a failed assertion cannot leave
-    /// it — or the `ping` it spawns — holding the tree.
+    /// The pinning process, contained so that a failed assertion does not
+    /// leave it — or the `ping` it spawns — holding the tree.
     struct Contained {
         child: std::process::Child,
         job: Option<crate::process_util::JobHandle>,
@@ -1842,7 +1842,7 @@ fn the_removal_rides_out_a_working_directory_that_is_still_pinned() {
             let _ = self.child.kill();
             let _ = self.child.wait();
             // Closing the job terminates whatever is still inside it, so a
-            // survivor never keeps the tree pinned after the test.
+            // survivor does not keep the tree pinned after the test.
             self.job.take();
         }
     }

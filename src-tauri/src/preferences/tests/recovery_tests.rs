@@ -823,5 +823,5 @@ fn the_atomic_replacement_rides_out_a_transient_holder() {
         "the replacement must land whole, not half-written"
     );
     // The guard removes the profile directory when the test ends, so the run
-    // leaves nothing behind in %TEMP%.
+    // does not leave it behind in %TEMP%.
 }
