@@ -358,8 +358,27 @@ pub(crate) fn from_file(path: &Path, format: TranscriptFormat) -> Option<ReportS
 }
 
 fn read_file(path: &Path, format: TranscriptFormat) -> Result<ReportSnapshot, ReportReadError> {
+    read_file_cached(path, format, report_cache::production())
+}
+
+fn read_file_cached(
+    path: &Path,
+    format: TranscriptFormat,
+    cache: &report_cache::ReportCache,
+) -> Result<ReportSnapshot, ReportReadError> {
     use ReportReadError as E;
     let metadata = fs::metadata(path).map_err(|_| E::Unreadable)?;
+    let stamp = report_cache::Stamp {
+        length: metadata.len(),
+        modified: metadata.modified().map_err(|_| E::Unreadable)?,
+    };
+    let key = report_cache::Key {
+        format,
+        path: path.to_path_buf(),
+    };
+    if let Some(snapshot) = cache.get(&key, &stamp) {
+        return Ok(snapshot);
+    }
     let mut file = fs::File::open(path).map_err(|_| E::Unreadable)?;
     if metadata.len() == 0 {
         return Err(E::NoReport);
@@ -453,12 +472,13 @@ fn read_file(path: &Path, format: TranscriptFormat) -> Result<ReportSnapshot, Re
         turn_finished,
         source: ReportSource::File {
             path: path.into(),
-            length: metadata.len(),
-            modified: metadata.modified().map_err(|_| E::Unreadable)?,
+            length: stamp.length,
+            modified: stamp.modified,
             companion,
         },
     };
     if snapshot.is_current() {
+        cache.put(key, stamp, snapshot.clone());
         Ok(snapshot)
     } else {
         Err(E::ChangedDuringRead)
@@ -485,6 +505,194 @@ fn record_time(format: TranscriptFormat, value: &serde_json::Value) -> Option<i6
             .ok()
             .map(|time| time.timestamp_millis())
     })
+}
+
+/// A bounded cache of successfully parsed file-backed reports.
+///
+/// A quiet Circuit poll re-reads the same transcript every tick. The parsed
+/// snapshot is pure once its source is stable, so it is keyed by the source
+/// identity and served only while the file's length and modification time still
+/// match. A hit still runs [`ReportSnapshot::is_current`] (which also covers a
+/// Grok companion events file) before it is returned, so the pre/post-read
+/// stability fence stays in place. Errors are never cached: a missing,
+/// malformed, partial or changed source must be re-evaluated every time.
+mod report_cache {
+    use super::{ReportSnapshot, TranscriptFormat};
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{LazyLock, Mutex};
+    use std::time::SystemTime;
+
+    /// Entries retained before the cache starts over.
+    pub(super) const CAPACITY: usize = 32;
+    /// Approximate heap bytes retained before the cache starts over.
+    pub(super) const MAX_RETAINED_BYTES: usize = 4 * 1024 * 1024;
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    pub(super) struct Key {
+        pub(super) format: TranscriptFormat,
+        pub(super) path: PathBuf,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(super) struct Stamp {
+        pub(super) length: u64,
+        pub(super) modified: SystemTime,
+    }
+
+    struct Entry {
+        stamp: Stamp,
+        snapshot: ReportSnapshot,
+        retained_bytes: usize,
+    }
+
+    #[derive(Default)]
+    struct State {
+        entries: HashMap<Key, Entry>,
+        retained_bytes: usize,
+        /// Reads that had no usable cached snapshot. Tests use it to prove a
+        /// quiet repeat is served rather than reparsed.
+        misses: u64,
+    }
+
+    /// Injectable so a test can drive its own cache instead of racing the
+    /// process-global one or exercising a test-only fork of the production
+    /// synchronisation.
+    pub(super) struct ReportCache {
+        state: Mutex<State>,
+    }
+
+    impl Default for ReportCache {
+        fn default() -> Self {
+            Self {
+                state: Mutex::new(State::default()),
+            }
+        }
+    }
+
+    static CACHE: LazyLock<ReportCache> = LazyLock::new(ReportCache::default);
+
+    pub(super) fn production() -> &'static ReportCache {
+        &CACHE
+    }
+
+    impl ReportCache {
+        /// The cached snapshot only when the source stamp still matches and the
+        /// snapshot itself is still current. A stale entry is dropped so the
+        /// next call reparses instead of retrying it.
+        pub(super) fn get(&self, key: &Key, stamp: &Stamp) -> Option<ReportSnapshot> {
+            let snapshot = {
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let stamp_moved = state
+                    .entries
+                    .get(key)
+                    .is_some_and(|entry| entry.stamp != *stamp);
+                if stamp_moved {
+                    if let Some(previous) = state.entries.remove(key) {
+                        state.retained_bytes =
+                            state.retained_bytes.saturating_sub(previous.retained_bytes);
+                    }
+                    state.misses += 1;
+                    return None;
+                }
+                match state.entries.get(key) {
+                    Some(entry) => Some(entry.snapshot.clone()),
+                    None => {
+                        state.misses += 1;
+                        None
+                    }
+                }
+            }?;
+            if snapshot.is_current() {
+                return Some(snapshot);
+            }
+            self.remove_if(key, stamp);
+            None
+        }
+
+        pub(super) fn put(&self, key: Key, stamp: Stamp, snapshot: ReportSnapshot) {
+            let retained_bytes = key.path.as_os_str().len()
+                + snapshot.text.len()
+                + snapshot.revision.len()
+                + std::mem::size_of::<Entry>();
+            // A single oversized report is not worth evicting the whole working
+            // set for; serve it uncached instead of breaking the bound.
+            if retained_bytes > MAX_RETAINED_BYTES {
+                return;
+            }
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(previous) = state.entries.remove(&key) {
+                state.retained_bytes = state.retained_bytes.saturating_sub(previous.retained_bytes);
+            }
+            if state.entries.len() >= CAPACITY
+                || state.retained_bytes + retained_bytes > MAX_RETAINED_BYTES
+            {
+                // Reports are read for the nodes a poll is currently observing,
+                // so after a quiet-to-active switch the old set is mostly
+                // inactive.
+                state.entries.clear();
+                state.retained_bytes = 0;
+            }
+            state.retained_bytes += retained_bytes;
+            state.entries.insert(
+                key,
+                Entry {
+                    stamp,
+                    snapshot,
+                    retained_bytes,
+                },
+            );
+        }
+
+        fn remove_if(&self, key: &Key, stamp: &Stamp) {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state
+                .entries
+                .get(key)
+                .is_some_and(|entry| entry.stamp == *stamp)
+            {
+                if let Some(previous) = state.entries.remove(key) {
+                    state.retained_bytes =
+                        state.retained_bytes.saturating_sub(previous.retained_bytes);
+                }
+            }
+        }
+
+        #[cfg_attr(not(test), expect(dead_code, reason = "Test cache observation"))]
+        pub(super) fn misses(&self) -> u64 {
+            self.state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .misses
+        }
+
+        #[cfg_attr(not(test), expect(dead_code, reason = "Test cache bounds"))]
+        pub(super) fn retained_bytes(&self) -> usize {
+            self.state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .retained_bytes
+        }
+
+        #[cfg_attr(not(test), expect(dead_code, reason = "Test cache observation"))]
+        pub(super) fn contains(&self, path: &Path) -> bool {
+            self.state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .entries
+                .keys()
+                .any(|key| key.path == path)
+        }
+    }
 }
 
 #[cfg(test)]
