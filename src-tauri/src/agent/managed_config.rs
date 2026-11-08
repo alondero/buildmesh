@@ -13,6 +13,9 @@
 //!
 //! - [`atomic_write`] is the only temp-file-then-rename writer, with a
 //!   process-unique temp name so two concurrent provisions cannot collide.
+//! - The replace in [`atomic_write`] is retried while the destination is
+//!   momentarily locked, so two writers replacing the same target do not lose
+//!   the race on Windows (issue #2626).
 //! - [`read_document`] treats a missing file as an empty document and refuses
 //!   a malformed one with the single [`refuse_malformed`] wording.
 //! - [`carries_anchors`] is the one ownership test: an entry is Buildmesh's
@@ -29,6 +32,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 /// Backs the temp-file suffix in [`atomic_write`].
 ///
@@ -379,6 +383,111 @@ fn open_temp(path: &Path, first: PathBuf) -> std::io::Result<(PathBuf, std::fs::
     ))
 }
 
+/// The Windows error codes that mean "the destination file is locked right
+/// now".
+///
+/// `5` is `ERROR_ACCESS_DENIED`. On Windows `std::fs::rename` is
+/// `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`, and replacing a target another
+/// thread is replacing at that very instant is refused with it (issue #2626).
+/// `32` (`ERROR_SHARING_VIOLATION`) and `33` (`ERROR_LOCK_VIOLATION`) are the
+/// neighbouring refusals, raised when the destination is held open by another
+/// process.
+#[cfg(windows)]
+const DESTINATION_LOCKED_CODES: &[i32] = &[5, 32, 33];
+
+/// Whether `error` is the transient "the destination is locked right now"
+/// refusal a retry can clear.
+///
+/// Windows only: a unix rename is not refused by a locked destination, so
+/// there is no lock to wait out there, and the same numbers mean unrelated
+/// errors (`5` is `EIO`). The predicate is a parameter of
+/// [`replace_with_retry`] so the retry *policy* stays testable on any
+/// platform while the classification stays where it belongs.
+#[cfg(windows)]
+fn destination_is_locked(error: &std::io::Error) -> bool {
+    error
+        .raw_os_error()
+        .is_some_and(|code| DESTINATION_LOCKED_CODES.contains(&code))
+}
+
+/// Unix counterpart of [`destination_is_locked`]: a locked destination does not
+/// refuse a rename here, so the retry does not engage.
+#[cfg(not(windows))]
+fn destination_is_locked(_error: &std::io::Error) -> bool {
+    false
+}
+
+/// How a refused replace is retried.
+#[derive(Clone, Copy)]
+struct ReplacePolicy {
+    /// How many attempts to make in all, the first one included.
+    attempts: u32,
+    /// The wait before each retry.
+    backoff: Duration,
+    /// The largest random share added to that wait.
+    jitter: Duration,
+}
+
+/// The production policy: 20 attempts, a 20 ms backoff and a 10 ms jitter.
+///
+/// The jitter is what keeps two writers that lost the same race from waking
+/// up together and colliding again: without it the losers wait as long as
+/// each other, so the next round repeats the collision.
+const REPLACE_POLICY: ReplacePolicy = ReplacePolicy {
+    attempts: 20,
+    backoff: Duration::from_millis(20),
+    jitter: Duration::from_millis(10),
+};
+
+/// The random share added to a retry wait, in `0..jitter`.
+fn jitter_share(jitter: Duration) -> Duration {
+    let millis = jitter.as_millis() as u64;
+    if millis == 0 {
+        return Duration::ZERO;
+    }
+    Duration::from_millis(rand::random_range(0..millis))
+}
+
+/// Replace the target with the temp file, retrying while the destination is
+/// momentarily locked.
+///
+/// Each attempt is one `rename` of the same already-fsynced temp file over
+/// the target, so the target holds either the previous file or one writer's
+/// complete payload. The retry exists because the refusal is transient by
+/// nature: on Windows the destination is locked for as long as another
+/// writer's replace is in flight, which is a window of milliseconds rather
+/// than a permanent condition. A refused replace leaves both the source and
+/// the destination intact, so the same rename can simply be tried again.
+///
+/// `rename`, `sleep` and `is_locked` are injected so the policy can be driven
+/// deterministically by a test instead of by a race.
+fn replace_with_retry<R, S, P>(
+    policy: &ReplacePolicy,
+    mut sleep: S,
+    mut rename: R,
+    mut is_locked: P,
+) -> std::io::Result<()>
+where
+    R: FnMut() -> std::io::Result<()>,
+    S: FnMut(Duration),
+    P: FnMut(&std::io::Error) -> bool,
+{
+    let attempts = policy.attempts.max(1);
+    for attempt in 0..attempts {
+        let error = match rename() {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        // A refusal the retry does not recognise is the caller's problem, and
+        // the last attempt has no wait left to spend.
+        if !is_locked(&error) || attempt + 1 >= attempts {
+            return Err(error);
+        }
+        sleep(policy.backoff + jitter_share(policy.jitter));
+    }
+    Err(std::io::Error::other("the replace was never attempted"))
+}
+
 /// Persist `content` to `path` atomically: write a process-unique sibling temp
 /// file, fsync it, then rename it over the target.
 ///
@@ -390,6 +499,13 @@ fn open_temp(path: &Path, first: PathBuf) -> std::io::Result<(PathBuf, std::fs::
 /// the user's file untouched and the temp file as the only residue; a rename
 /// failure cleans the temp file up and returns the error.
 ///
+/// The rename is retried while the destination is momentarily locked, because
+/// two writers replacing the same target at the same instant make Windows
+/// refuse one of them with `ERROR_ACCESS_DENIED` (issue #2626). Each attempt
+/// is still one atomic rename of the same temp file, so a reader sees one
+/// writer's complete payload, and the refusal leaves the previous file in
+/// place until one writer's replace lands.
+///
 /// On unix the temp file is created `0o600`, which the rename carries onto the
 /// target. `File::create` would inherit `0o666 & !umask` — typically `0o644` —
 /// and four of the writers this replaced built their temp file with
@@ -400,6 +516,19 @@ fn open_temp(path: &Path, first: PathBuf) -> std::io::Result<(PathBuf, std::fs::
 /// stricter of the two keeps every managed file at or below the permissions it
 /// had before.
 pub fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
+    atomic_write_with_replace(path, content, |temp, path| std::fs::rename(temp, path))
+}
+
+/// Persist `content` to `path` atomically, ending with `replace`.
+///
+/// `replace` is the rename the write ends with, so it is the one step a test
+/// can drive: it sees each attempt, and it can release a destination that
+/// refused the rename — the contention the retry exists for — without a
+/// thread racing the clock.
+fn atomic_write_with_replace<R>(path: &Path, content: &str, mut replace: R) -> std::io::Result<()>
+where
+    R: FnMut(&Path, &Path) -> std::io::Result<()>,
+{
     use std::io::Write;
 
     let (temp, mut file) = open_temp(path, temp_path(path))?;
@@ -407,7 +536,13 @@ pub fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
     file.sync_all()?;
     // Windows cannot rename over a file that is still open.
     drop(file);
-    if let Err(error) = std::fs::rename(&temp, path) {
+    let replaced = replace_with_retry(
+        &REPLACE_POLICY,
+        std::thread::sleep,
+        || replace(&temp, path),
+        destination_is_locked,
+    );
+    if let Err(error) = replaced {
         if let Err(cleanup) = std::fs::remove_file(&temp) {
             tracing::warn!(
                 "managed_config: failed to clean up temp file {:?}: {cleanup}",
@@ -418,6 +553,10 @@ pub fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "managed_config_replace_tests.rs"]
+mod replace_tests;
 
 #[cfg(test)]
 mod tests {

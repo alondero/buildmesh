@@ -1778,7 +1778,13 @@ mod tests {
     /// unrelated CLI. The cascade itself is explicit > application.
     #[test]
     fn resolver_masks_agent_to_agent_capable_harnesses_only() {
-        for (caps, keeps) in [(opencode_caps(), true), (opencode2_caps(), true), (anthropic_caps(), false), (codex_caps(), false), (terminal_caps(), false)] {
+        for (caps, keeps) in [
+            (opencode_caps(), true),
+            (opencode2_caps(), true),
+            (anthropic_caps(), false),
+            (codex_caps(), false),
+            (terminal_caps(), false),
+        ] {
             let inputs = AgentConfigInputs {
                 agent: FieldInputs {
                     explicit: Some("build"),

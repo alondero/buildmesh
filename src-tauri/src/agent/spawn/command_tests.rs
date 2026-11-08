@@ -862,8 +862,7 @@ fn capability_recipe_coherence() {
             .first()
             .cloned()
             .unwrap_or_default();
-        let has_agent_flag =
-            !agent_flag.is_empty() && args.iter().any(|a| a == &agent_flag);
+        let has_agent_flag = !agent_flag.is_empty() && args.iter().any(|a| a == &agent_flag);
         assert_eq!(
             has_agent_flag || adapter.agent_override_via_session_api(),
             caps.supports_agent,
@@ -1199,8 +1198,7 @@ fn cascade_inputs_for_independent_fields() {
     assert_eq!(model_only.effort.application, Some("high"));
 
     // Explicit effort only — model falls through to the app default.
-    let effort_only =
-        cascade_inputs_for(None, Some("low"), None, None, Some(&app_default), None);
+    let effort_only = cascade_inputs_for(None, Some("low"), None, None, Some(&app_default), None);
     assert_eq!(effort_only.model.explicit, None);
     assert_eq!(effort_only.model.application, Some("opus-4-1"));
     assert_eq!(effort_only.effort.explicit, Some("low"));
