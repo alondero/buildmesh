@@ -169,15 +169,50 @@ pub fn group_into_hunks(lines: &[DiffLine], context: usize) -> Vec<Vec<DiffLine>
         .collect()
 }
 
-/// Build a single DiffHunk for a group of diff lines, computing syntax
-/// highlighting and hunk header metadata (old_start / new_start).
+/// Which whole-hunk HTML a caller needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HunkHighlight {
+    /// Per-line HTML only — what the desktop, mobile web, and Android diff
+    /// views render. The legacy whole-hunk fields stay empty, so no unused
+    /// HTML is built or sent (issue #2726).
+    LinesOnly,
+    /// Also build the legacy whole-hunk `old_highlighted` / `new_highlighted`
+    /// HTML. Retained for callers that still consume that representation;
+    /// no current production path requests it.
+    #[allow(dead_code)] // compatibility path, exercised by the payload test
+    Sides,
+}
+
+/// Build a single DiffHunk for a group of diff lines, computing per-line
+/// syntax highlighting and hunk header metadata (old_start / new_start).
+///
+/// This is the lean path: the whole-hunk HTML fields stay empty because no
+/// current client reads them (issue #2726). Use [`build_hunk_with`] with
+/// [`HunkHighlight::Sides`] when that representation is required.
 pub fn build_hunk(group: &[DiffLine], highlight_path: &str) -> DiffHunk {
+    build_hunk_with(group, highlight_path, HunkHighlight::LinesOnly)
+}
+
+/// Build a single DiffHunk, choosing whether to also generate the legacy
+/// whole-hunk HTML.
+pub fn build_hunk_with(
+    group: &[DiffLine],
+    highlight_path: &str,
+    whole_hunk_html: HunkHighlight,
+) -> DiffHunk {
     #[cfg(test)]
     // allow-test-in-production: the hunk counter is the seam the counts-only read is measured with.
     super::work_metrics::hunk();
-    let (old_highlighted, new_highlighted) = build_sides(group);
-    let old_hl = highlight_content(&old_highlighted, highlight_path);
-    let new_hl = highlight_content(&new_highlighted, highlight_path);
+    let (old_hl, new_hl) = match whole_hunk_html {
+        HunkHighlight::LinesOnly => (String::new(), String::new()),
+        HunkHighlight::Sides => {
+            let (old_highlighted, new_highlighted) = build_sides(group);
+            (
+                highlight_content(&old_highlighted, highlight_path),
+                highlight_content(&new_highlighted, highlight_path),
+            )
+        }
+    };
     // hunk header: oldest new/old line number in this group, plus the
     // count of remove/add lines (matches the previous single-hunk
     // convention; consumers that want total hunk length can read lines.len()).
@@ -226,6 +261,20 @@ pub fn diff_against_base(
     base_ref: &str,
     only: Option<&str>,
     cancel: Option<&AtomicBool>,
+) -> Result<DiffResult, DiffError> {
+    diff_against_base_with(repo_path, base_ref, only, cancel, HunkHighlight::LinesOnly)
+}
+
+/// [`diff_against_base`], choosing whether hunks also carry the legacy
+/// whole-hunk HTML. The default read (`diff_against_base`) is the lean path;
+/// this explicit variant exists for the payload/work comparison and for a
+/// caller that still needs the old representation (issue #2726).
+pub fn diff_against_base_with(
+    repo_path: &str,
+    base_ref: &str,
+    only: Option<&str>,
+    cancel: Option<&AtomicBool>,
+    hunk_html: HunkHighlight,
 ) -> Result<DiffResult, DiffError> {
     // Reject path traversal at the core so every caller inherits it — the
     // desktop IPC path and the mobile /diff route both land here. The HTTP
@@ -281,18 +330,17 @@ pub fn diff_against_base(
         let additions = lines.iter().filter(|l| l.line_type == "add").count();
         let deletions = lines.iter().filter(|l| l.line_type == "remove").count();
         let groups = group_into_hunks(&lines, CONTEXT_LINES);
-        // Per-hunk poll — `build_hunk` does three syntect highlight
-        // passes per hunk (the costliest step on a busy worktree), so
-        // a single huge file would otherwise pin a worker for seconds
-        // after cancellation. The check is one atomic load; syntect
-        // dominates the cost by orders of magnitude.
+        // Per-hunk poll — the per-line syntect pass is the costliest step
+        // on a busy worktree, so a single huge file would otherwise pin a
+        // worker for seconds after cancellation. The check is one atomic
+        // load; syntect dominates the cost by orders of magnitude.
         let hunks = groups
             .iter()
             .map(|g| {
                 if cancel_requested(cancel) {
                     return Err(());
                 }
-                Ok(build_hunk(g, &rel))
+                Ok(build_hunk_with(g, &rel, hunk_html))
             })
             .collect::<Result<Vec<_>, ()>>()
             .map_err(|_| DiffError::Cancelled)?;
