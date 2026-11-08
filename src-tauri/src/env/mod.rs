@@ -205,13 +205,9 @@ pub(crate) mod test_helpers {
                         return Ok(());
                     }
                     // Only the transient "still being released" refusal is
-                    // worth another attempt. `ERROR_ACCESS_DENIED` (5),
-                    // `ERROR_SHARING_VIOLATION` (32) and
-                    // `ERROR_LOCK_VIOLATION` (33) are the Windows codes for a
-                    // handle that is on its way out; anything else is reported
-                    // at once rather than retried.
-                    let transient = matches!(error.raw_os_error(), Some(5) | Some(32) | Some(33));
-                    if !transient || attempt + 1 >= ATTEMPTS {
+                    // worth another attempt; anything else is reported at once
+                    // rather than retried.
+                    if !is_transient_removal_error(&error) || attempt + 1 >= ATTEMPTS {
                         return Err(error);
                     }
                     std::thread::sleep(std::time::Duration::from_millis(BACKOFF_MS));
@@ -219,6 +215,32 @@ pub(crate) mod test_helpers {
                 }
             }
         }
+    }
+
+    /// Whether the error is the transient "a handle is on its way out" kind.
+    ///
+    /// The codes are the Win32 ones: `ERROR_ACCESS_DENIED` (5),
+    /// `ERROR_SHARING_VIOLATION` (32) and `ERROR_LOCK_VIOLATION` (33) are what
+    /// Windows reports while the last handle to a just-killed process's file is
+    /// still being released.
+    ///
+    /// The check is Windows-only because `raw_os_error()` is a POSIX `errno`
+    /// everywhere else, where 5 is `EIO` — a real I/O error, not a handle on
+    /// its way out — and retrying it would hide a failure.
+    #[cfg(windows)]
+    fn is_transient_removal_error(error: &std::io::Error) -> bool {
+        const ERROR_ACCESS_DENIED: i32 = 5;
+        const ERROR_SHARING_VIOLATION: i32 = 32;
+        const ERROR_LOCK_VIOLATION: i32 = 33;
+        matches!(
+            error.raw_os_error(),
+            Some(ERROR_ACCESS_DENIED) | Some(ERROR_SHARING_VIOLATION) | Some(ERROR_LOCK_VIOLATION)
+        )
+    }
+
+    #[cfg(not(windows))]
+    fn is_transient_removal_error(_error: &std::io::Error) -> bool {
+        false
     }
 
     /// Per-test scratch directory under %TEMP%, claimed through `claim_dir` so

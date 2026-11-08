@@ -547,8 +547,25 @@ struct ReplaceFailure {
 /// `ERROR_SHARING_VIOLATION` (32) and `ERROR_LOCK_VIOLATION` (33) are the
 /// same condition seen through its other entry points. Anything else — a full
 /// disk, a read-only directory — is not transient, and is reported at once.
+///
+/// The check is Windows-only because `raw_os_error()` is a POSIX `errno`
+/// everywhere else, where 5 is `EIO` — a real I/O error, not a handle on its
+/// way out — and retrying it would hide a failure behind a settings write that
+/// never lands.
+#[cfg(windows)]
 fn is_transient_replace_error(error: &std::io::Error) -> bool {
-    matches!(error.raw_os_error(), Some(5) | Some(32) | Some(33))
+    const ERROR_ACCESS_DENIED: i32 = 5;
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    const ERROR_LOCK_VIOLATION: i32 = 33;
+    matches!(
+        error.raw_os_error(),
+        Some(ERROR_ACCESS_DENIED) | Some(ERROR_SHARING_VIOLATION) | Some(ERROR_LOCK_VIOLATION)
+    )
+}
+
+#[cfg(not(windows))]
+fn is_transient_replace_error(_error: &std::io::Error) -> bool {
+    false
 }
 
 /// One attempt: write the temp file, flush it, and move it over the target.
