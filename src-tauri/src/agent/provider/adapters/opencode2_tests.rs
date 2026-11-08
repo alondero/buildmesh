@@ -361,7 +361,11 @@ fn session_api_carries_agent_on_create_switch_and_fork_before_the_tui_starts() {
     assert_eq!(
         fork_calls,
         [
-            ("POST".into(), "/api/session/ses_parent/fork".into(), json!({})),
+            (
+                "POST".into(),
+                "/api/session/ses_parent/fork".into(),
+                json!({})
+            ),
             (
                 "POST".into(),
                 "/api/session/ses_sibling/agent".into(),
