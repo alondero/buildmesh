@@ -189,6 +189,9 @@ mod circuit_prune_tests;
 #[cfg(test)]
 mod seam_tests;
 
+#[cfg(test)]
+mod test_support_tests;
+
 use once_cell::sync::OnceCell;
 pub use rusqlite::Result as SqlResult;
 use rusqlite::{Connection, OpenFlags};

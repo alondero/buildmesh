@@ -146,6 +146,11 @@ struct OpenPrFixture {
 
 fn open_pr_fixture() -> OpenPrFixture {
     let _db = crate::db::test_support::isolated_file();
+    // The run id is reserved before the run exists: the worker's cancellation
+    // registry is process-wide and keyed by run id, so a run id another
+    // database could also hand out would let this file's cancellation
+    // invalidate another test's effect batch (issue #2663).
+    crate::db::test_support::seed_unique_circuit_run_ids();
     let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let dir = tempfile::tempdir().unwrap();
     let mesh = crate::db::create_mesh(
@@ -181,6 +186,11 @@ fn open_pr_fixture() -> OpenPrFixture {
         "{}",
     )
     .unwrap();
+    assert!(
+        run_id >= crate::db::test_support::reserved_run_id_floor(),
+        "the recovery tests cancel this run id in a process-wide registry, so it must be one no \
+         other database holds: {run_id}"
+    );
     crate::db::set_circuit_run_state(run_id, "running").unwrap();
 
     let intent = EffectIntent {
@@ -855,6 +865,12 @@ struct DispatchFixture {
 
 fn dispatch_fixture() -> DispatchFixture {
     let _db = crate::db::test_support::isolated_file();
+    // The run id is reserved before the run exists: the recovery test below
+    // cancels it in the worker's process-wide cancellation registry, which is
+    // keyed by run id, so a run id another database could also hand out would
+    // let that cancellation invalidate another test's effect batch (issue
+    // #2663).
+    crate::db::test_support::seed_unique_circuit_run_ids();
     let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let dir = tempfile::tempdir().unwrap();
     let mesh = crate::db::create_mesh(
@@ -908,6 +924,11 @@ fn dispatch_fixture() -> DispatchFixture {
         "{}",
     )
     .unwrap();
+    assert!(
+        run_id >= crate::db::test_support::reserved_run_id_floor(),
+        "the recovery tests cancel this run id in a process-wide registry, so it must be one no \
+         other database holds: {run_id}"
+    );
     crate::db::set_circuit_run_state(run_id, "running").unwrap();
     let intent = EffectIntent {
         node_id: "open_pr".into(),

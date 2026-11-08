@@ -27,7 +27,13 @@ fn step(node_id: &str, status: &str, attempt: i32, error: Option<&str>) -> Circu
 }
 
 /// An implementation node with a node-started review run.
+///
+/// The run id is reserved before the run exists. Cancelling a run writes to the
+/// worker's process-wide cancellation registry, which is keyed by run id, so a
+/// run id another database could also hand out would let this file's
+/// cancellation invalidate another test's effect batch (issue #2663).
 fn review_run() -> (i64, i64) {
+    crate::db::test_support::seed_unique_circuit_run_ids();
     let mesh = crate::db::create_mesh(
         "circuit-control",
         &format!("/tmp/circuit-control-{}", std::process::id()),
@@ -53,6 +59,11 @@ fn review_run() -> (i64, i64) {
     .unwrap();
     crate::db::update_agent_node_status(node.id, SessionStatus::Ready).unwrap();
     let run = crate::db::create_node_circuit_run(node.id, None, 3, None).unwrap();
+    assert!(
+        run >= crate::db::test_support::reserved_run_id_floor(),
+        "this file cancels the run id in a process-wide registry, so it must be one no other \
+         database holds: {run}"
+    );
     (node.id, run)
 }
 
