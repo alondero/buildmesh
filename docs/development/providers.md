@@ -683,8 +683,8 @@ OpenCode 2 selects its managed project override through `OPENCODE_CONFIG` in
 the adapter's `launch_environment`; V1 does not read that per-node file.
 `new_session_id` supplies its `ses_` vocabulary. The blocking `prepare_session`
 seam runs before command construction and uses a private session API to apply
-the model or fork a regenerate. A returned fork id is persisted before argv is
-built. `model_override_via_session_api` keeps `--model` out of the full TUI;
+the model (including an optional `#variant`) or fork a regenerate. A returned
+fork id is persisted before argv is built. `model_override_via_session_api` keeps `--model` out of the full TUI;
 `background_model_args` retains the separate `run` CLI contract. Both launch
 paths call adapter-owned executable validation. The API adapter escapes JSON
 for Windows PowerShell's native argument marshaller and encodes cmd

@@ -29,6 +29,7 @@ impl AgentProvider for OpenCode2Adapter {
                     AttentionCapability::Hook {
                         events: vec![
                             LifecycleKind::TurnCompleted,
+                            LifecycleKind::QuestionRequested,
                             LifecycleKind::PermissionRequested,
                         ],
                         launch_mode: AttentionLaunchMode::PermissionAsk,
@@ -287,11 +288,27 @@ fn prepare_identity(
 }
 
 fn model_ref(model: &str) -> Result<serde_json::Value, String> {
-    let (provider, id) = model
+    let invalid =
+        || "OpenCode 2 model must be provider/model or provider/model#variant".to_string();
+    let (provider, rest) = model
         .split_once('/')
-        .filter(|(p, m)| !p.trim().is_empty() && !m.trim().is_empty() && !m.contains('#'))
-        .ok_or("OpenCode 2 model must be provider/model without a #variant")?;
-    Ok(serde_json::json!({"providerID": provider, "id": id}))
+        .filter(|(provider, id)| !provider.trim().is_empty() && !id.trim().is_empty())
+        .ok_or_else(invalid)?;
+    if provider.contains('#') {
+        return Err(invalid());
+    }
+    let (id, variant) = match rest.split_once('#') {
+        Some((id, variant)) if !id.is_empty() && !variant.is_empty() && !variant.contains('#') => {
+            (id, Some(variant))
+        }
+        Some(_) => return Err(invalid()),
+        None => (rest, None),
+    };
+    let mut model = serde_json::json!({"providerID": provider, "id": id});
+    if let Some(variant) = variant {
+        model["variant"] = serde_json::Value::String(variant.into());
+    }
+    Ok(model)
 }
 
 /// Windows PowerShell's legacy native-argument marshaller consumes JSON quotes.

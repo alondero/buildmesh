@@ -714,6 +714,10 @@ mod tests {
         capabilities_for(&crate::agent::provider::adapters::OPENCODE)
     }
 
+    fn opencode2_caps() -> HarnessCapabilities {
+        capabilities_for(&crate::agent::provider::adapters::OPENCODE2)
+    }
+
     fn terminal_caps() -> HarnessCapabilities {
         capabilities_for(&crate::agent::provider::adapters::TERMINAL)
     }
@@ -758,6 +762,44 @@ mod tests {
 
     fn perch_caps() -> HarnessCapabilities {
         capabilities_for(&crate::agent::provider::adapters::PERCH)
+    }
+
+    #[test]
+    fn opencode2_capabilities_pin_the_v2_contract() {
+        use crate::agent::session_lifecycle::LifecycleKind;
+
+        let caps = opencode2_caps();
+        assert_eq!(caps.harness_id, "opencode2");
+        assert!(caps.supports_resume);
+        assert!(caps.auto_resume_on_startup);
+        assert!(caps.requires_attention_hook);
+        assert!(caps.produces_readable_transcript);
+        assert!(caps.supports_model_override);
+        assert!(!caps.supports_effort_override);
+        assert!(!caps.supports_extra_args);
+        assert!(caps.supports_prefill);
+        assert!(!caps.is_plain_terminal);
+        assert!(caps.background_inference.is_some());
+        assert!(matches!(
+            &caps.attention_capability,
+            AttentionCapability::Hook {
+                events,
+                launch_mode: AttentionLaunchMode::PermissionAsk,
+                trust: None,
+                min_version: Some(version),
+            } if version.as_str() == "2.2.3"
+                && events.contains(&LifecycleKind::TurnCompleted)
+                && events.contains(&LifecycleKind::QuestionRequested)
+                && events.contains(&LifecycleKind::PermissionRequested)
+        ));
+        assert_eq!(
+            caps.available_on,
+            vec![
+                "windows".to_string(),
+                "macos".to_string(),
+                "linux".to_string()
+            ]
+        );
     }
 
     /// Inventory pin (issue #1149 step 1) — every adapter's capability
