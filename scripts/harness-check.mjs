@@ -97,6 +97,7 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/services/interruption_recovery_tests.rs': 'services::interruption_recovery::tests',
   'src-tauri/src/services/transcript_reader/interruption_tests.rs': 'services::transcript_reader::interruption::tests',
   'src-tauri/src/services/transcript_reader/readers/codex_failure_tests.rs': 'services::transcript_reader::readers::codex::failure_tests',
+  'src-tauri/src/services/transcript_reader/readers/codex_location_tests.rs': 'services::transcript_reader::readers::codex::location_cache_tests',
   'src-tauri/src/commands/agent_spawn_menu_tests.rs': 'commands::agent::spawn_menu_tests',
   'src-tauri/src/circuit/lineage_tests.rs': 'circuit::lineage::tests',
   'src-tauri/src/db/circuit/overview_tests.rs': 'db::circuit::overview::tests',
