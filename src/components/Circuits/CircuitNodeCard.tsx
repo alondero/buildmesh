@@ -97,14 +97,17 @@ export function CircuitNodeCard({ data }: NodeProps<CircuitFlowNode>) {
         <span className={`${accent.text}`}>
           <CategoryGlyph category={category} className="w-4 h-4" />
         </span>
-        <span className={`text-xs font-semibold truncate ${accent.text}`}>
+        {/* Issue #2739 — the card's title strip names the node, so it is a
+            functional label; the id and the config summary under it are
+            metadata. */}
+        <span className={`text-label font-semibold truncate ${accent.text}`}>
           {specFor(circuitNode.type.type).label}
         </span>
       </div>
 
       <div className="px-2 py-1.5">
-        <div className="text-2xs font-mono text-text-muted">{circuitNode.id}</div>
-        <div className="text-xs text-text-secondary truncate" title={configSummary(circuitNode.type)}>
+        <div className="text-meta font-mono text-text-muted truncate">{circuitNode.id}</div>
+        <div className="text-meta text-text-secondary truncate" title={configSummary(circuitNode.type)}>
           {configSummary(circuitNode.type)}
         </div>
 

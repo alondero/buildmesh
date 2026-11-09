@@ -87,7 +87,7 @@ function ProbeTabLoadingShell() {
     <div className="flex-1 flex items-center justify-center text-text-muted">
       <div className="flex flex-col items-center gap-2">
         <span className="inline-block h-5 w-5 animate-spin rounded-full border-2 border-text-muted border-t-transparent" />
-        <span className="text-xs text-text-muted">Loading…</span>
+        <span className="text-meta text-text-muted">Loading…</span>
       </div>
     </div>
   );
@@ -248,7 +248,7 @@ function ProbePanelContent() {
               <span
                 data-testid="probe-context-title"
                 title={activeDef.label}
-                className="text-sm text-text-primary font-semibold truncate"
+                className="text-label text-text-primary font-semibold truncate"
               >
                 {activeDef.label}
               </span>
@@ -287,7 +287,7 @@ function ProbePanelContent() {
                 >
                   <span
                     data-testid="probe-context-subject-name"
-                    className="truncate min-w-0 text-sm font-medium text-text-primary"
+                    className="truncate min-w-0 text-label font-medium text-text-primary"
                   >
                     {scopeLabel}
                   </span>
@@ -299,7 +299,7 @@ function ProbePanelContent() {
                   {context.detailLabel && (
                     <span
                       data-testid="probe-context-subject-detail"
-                      className="truncate min-w-0 text-xs text-text-secondary"
+                      className="truncate min-w-0 text-meta text-text-secondary"
                     >
                       · {context.detailLabel}
                     </span>
@@ -311,7 +311,7 @@ function ProbePanelContent() {
                 <div
                   data-testid="probe-context-details"
                   tabIndex={-1 /* Keep text clicks inside the blur boundary so the help stays open. */}
-                  className="absolute top-full left-0 right-0 z-20 max-h-[50vh] overflow-y-auto p-2 rounded-md border border-border-strong bg-bg-overlay text-xs text-text-secondary break-words shadow-sm"
+                  className="absolute top-full left-0 right-0 z-20 max-h-[50vh] overflow-y-auto p-2 rounded-md border border-border-strong bg-bg-overlay text-meta text-text-secondary break-words shadow-sm"
                 >
                   {context.mode === 'following'
                     ? scopeTitle

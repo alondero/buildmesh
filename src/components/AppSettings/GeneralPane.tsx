@@ -29,6 +29,10 @@ import {
   setTextScale,
 } from '../../lib/textScale';
 import { useTextScale } from '../../hooks/useTextScale';
+import { useTypeDensity } from '../../hooks/useTypeDensity';
+import { useWindowZoom } from '../../hooks/useWindowZoom';
+import { setTypeDensity, type TypeDensity } from '../../lib/typeDensity';
+import { setWindowZoom, WINDOW_ZOOM_STEPS } from '../../lib/webviewZoom';
 import { useExitPromptStore } from '../../stores/exitPromptStore';
 import { optimisticToggle } from '../../lib/optimisticToggle';
 import { useBlurCommit } from '../../hooks/useBlurCommit';
@@ -100,6 +104,137 @@ function InterfaceTextSizeControl() {
         </button>
         <span aria-hidden="true" className="text-base leading-none text-text-muted">A</span>
       </div>
+    </>
+  );
+}
+
+/**
+ * Text density — issue #2739.
+ *
+ * A second lever beside the interface text size, and deliberately separate
+ * from it. The slider makes text bigger; the density chooses which of the
+ * two type ladders the app renders with. Comfortable (the default) sets a
+ * functional label at 13px — the size the interface reads at. Compact sets it
+ * at 11.375px and the metadata role at 9.75px. Compact is a ladder, not a
+ * restoration of the old screens: before the roles existed every surface
+ * chose its own size, so this dialog's chrome follows the label ladder in
+ * both densities.
+ *
+ * Like the theme radio, this is not a dirty draft: `setTypeDensity` writes
+ * localStorage and the `data-type-density` attribute synchronously, so
+ * there is no half-saved state for a "Discard changes?" prompt to protect.
+ */
+function TypeDensityControl() {
+  const density = useTypeDensity();
+
+  return (
+    <fieldset
+      id="type-density-radio-group"
+      aria-label="Text density"
+      className="flex flex-wrap gap-2"
+    >
+      {(['comfortable', 'compact'] as const).map((name) => (
+        <label
+          key={name}
+          className={`flex items-center gap-2 px-4 py-2 rounded-md text-label cursor-pointer border transition-colors ${
+            density === name
+              ? 'bg-bg-card border-accent-cyan text-text-primary'
+              : 'bg-bg-card border-border-subtle text-text-secondary hover:border-border-default'
+          }`}
+        >
+          <input
+            type="radio"
+            name="type-density"
+            value={name}
+            checked={density === name}
+            onChange={() => setTypeDensity(name as TypeDensity)}
+            className="accent-accent-cyan"
+            data-testid={`type-density-radio-${name}`}
+          />
+          <span className="capitalize">{name}</span>
+        </label>
+      ))}
+    </fieldset>
+  );
+}
+
+/**
+ * Window zoom — the 200% enlargement path (issue #2739).
+ *
+ * The interface text size tops out at 150%: past that the dense chrome
+ * clips rather than reflows, and this app has no room to reflow. The window
+ * zoom is the platform's own zoom — `set_webview_zoom`, which scales the
+ * whole webview so chrome, labels and content grow together and nothing has
+ * to be re-laid-out to fit.
+ *
+ * It is NOT a terminal setting. Terminals keep their own 8–18px xterm size
+ * from the title bar's Zoom control, and the app already claims
+ * Ctrl/Cmd + 0 / + / − for that (issue #667), which is why the platform's
+ * own zoom hotkeys are left off and the zoom is set here instead.
+ *
+ * The failure path matters more than the happy path: the command is
+ * desktop-only (Android does not implement it) and needs a capability that
+ * a mis-built binary may not carry. Either way the user is told the zoom did
+ * not take effect rather than being left to believe it did — and the radio
+ * falls back to the zoom the window really has, so it never claims a size
+ * the window is not at.
+ */
+function WindowZoomControl() {
+  const zoom = useWindowZoom();
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const choose = async (percent: number) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await setWindowZoom(percent);
+    } catch (e) {
+      setError(formatError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <fieldset
+        id="window-zoom-radio-group"
+        aria-label="Window zoom"
+        className="flex flex-wrap gap-2"
+      >
+        {WINDOW_ZOOM_STEPS.map((percent) => (
+          <label
+            key={percent}
+            className={`flex items-center gap-2 px-4 py-2 rounded-md text-label cursor-pointer border transition-colors ${
+              zoom === percent
+                ? 'bg-bg-card border-accent-cyan text-text-primary'
+                : 'bg-bg-card border-border-subtle text-text-secondary hover:border-border-default'
+            }`}
+          >
+            <input
+              type="radio"
+              name="window-zoom"
+              value={percent}
+              checked={zoom === percent}
+              disabled={busy}
+              onChange={() => void choose(percent)}
+              className="accent-accent-cyan disabled:opacity-50"
+              data-testid={`window-zoom-radio-${percent}`}
+            />
+            <span>{percent}%</span>
+          </label>
+        ))}
+      </fieldset>
+      {error && (
+        <p
+          className="mt-2 text-meta text-text-secondary"
+          role="alert"
+          data-testid="window-zoom-error"
+        >
+          {error}
+        </p>
+      )}
     </>
   );
 }
@@ -324,7 +459,7 @@ export function GeneralPane() {
             {(['dark', 'light'] as const).map((name) => (
               <label
                 key={name}
-                className={`flex items-center gap-2 px-4 py-2 rounded-md text-base cursor-pointer border transition-colors ${
+                className={`flex items-center gap-2 px-4 py-2 rounded-md text-label cursor-pointer border transition-colors ${
                   themeDraft === name
                     ? 'bg-bg-card border-accent-cyan text-text-primary'
                     : 'bg-bg-card border-border-subtle text-text-secondary hover:border-border-default'
@@ -364,6 +499,44 @@ export function GeneralPane() {
           }
         >
           <InterfaceTextSizeControl />
+        </SettingsRow>
+
+        {/* Text density sits beside the text size because the two answer
+            different questions: the slider asks "how big?", the density asks
+            "which ladder?" — comfortable (13px functional labels) or compact
+            (11.375px functional labels). */}
+        <SettingsRow
+          label="Text density"
+          summary="How large the app's functional labels — task names, action labels, form labels — are drawn."
+          details={
+            <>
+              Comfortable draws a functional label at 13px, the size the interface
+              reads at. Compact draws it at 11.375px for workflows that want the
+              denser presentation. Terminals are unaffected either way.
+            </>
+          }
+        >
+          <TypeDensityControl />
+        </SettingsRow>
+
+        {/* Window zoom is the 200% path. It is a platform zoom, so it moves the
+            chrome and the content together instead of clipping them. */}
+        <SettingsRow
+          label="Window zoom"
+          summary="Enlarge the whole window, chrome and content together."
+          layout="stacked"
+          details={
+            <>
+              The interface text size stops at 150%, because past that the dense
+              chrome clips instead of reflowing. This setting is the supported
+              way to go further: the platform zooms the whole window, so
+              everything grows together and no content is lost. Terminals keep
+              their own Zoom size, and Ctrl/Cmd + 0 / + / − still changes the
+              terminal font, not the window.
+            </>
+          }
+        >
+          <WindowZoomControl />
         </SettingsRow>
       </SettingsSection>
 

@@ -13,6 +13,7 @@
     "core:window:allow-is-maximized",
     "core:window:allow-is-focused",
     "core:window:allow-start-dragging",
+    "core:webview:allow-set-webview-zoom",
     "opener:default",
     "dialog:default",
     "global-shortcut:allow-register",

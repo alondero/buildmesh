@@ -93,7 +93,9 @@ export function BlockedCleanupDialog() {
               className="rounded-md border border-border-subtle bg-bg-card p-3"
               data-testid="blocked-cleanup-entry"
             >
-              <div className="text-xs font-semibold text-text-primary">{entry.node_name}</div>
+              {/* Issue #2739 — the node name is the thing the user acts on, so
+                  it is a functional label, not metadata. */}
+              <div className="text-label font-semibold text-text-primary truncate">{entry.node_name}</div>
               <p className="text-2xs font-mono text-text-secondary bg-bg-surface border border-border-subtle rounded-md px-2 py-1 mt-1 break-all">
                 {entry.worktree_path}
               </p>

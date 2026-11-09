@@ -106,14 +106,14 @@ export function ProviderDropdown({ dropdownKey, providers, onSelect, onClose, me
           // the surrounding text must not close the dropdown either).
           onClick={(e) => e.stopPropagation()}
         >
-          <p className="text-xs font-medium text-text-primary">No agent CLIs found</p>
-          <p className="mt-1 text-2xs text-text-muted leading-relaxed">
+          <p className="text-meta font-medium text-text-primary">No agent CLIs found</p>
+          <p className="mt-1 text-micro text-text-muted leading-relaxed">
             Install one of Claude Code, Codex, Antigravity, or OpenCode, or add a
             provider key in Settings&nbsp;&rarr;&nbsp;Providers.
           </p>
           <SafeLink
             url={PREREQUISITES_URL}
-            className="mt-1.5 inline-block text-2xs text-text-secondary hover:text-text-primary hover:underline"
+            className="mt-1.5 inline-block text-micro text-text-secondary hover:text-text-primary hover:underline"
             title="Open the setup instructions on GitHub"
           >
             View setup instructions&nbsp;&#8599;

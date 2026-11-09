@@ -242,14 +242,14 @@ export function ProbeRow({
                 <span
                   aria-hidden
                   className={
-                    'text-text-muted text-2xs w-3 text-center shrink-0 transition-transform duration-150 ' +
+                    'text-text-muted text-micro w-3 text-center shrink-0 transition-transform duration-150 ' +
                     (isExpanded ? 'rotate-90' : '')
                   }
                 >
                   ▸
                 </span>
               )}
-              {number !== undefined && <span className="text-2xs text-accent-cyan font-mono font-medium tabular-nums">
+              {number !== undefined && <span className="text-micro text-accent-cyan font-mono font-medium tabular-nums">
                 #{number}
               </span>}
               {/* Title link. `min-w-0 flex-1` on the link AND `min-w-0`
@@ -260,7 +260,7 @@ export function ProbeRow({
                   into the action buttons. */}
               <SafeLink
                 url={url}
-                className={`text-xs text-text-primary font-medium hover:text-accent-cyan ml-0.5 min-w-0 flex-1 transition-colors ${dataAttr === 'prompt' ? 'break-words' : 'truncate'}`}
+                className={`text-label text-text-primary font-medium hover:text-accent-cyan ml-0.5 min-w-0 flex-1 transition-colors ${dataAttr === 'prompt' ? 'break-words' : 'truncate'}`}
                 title={url ? 'Open on GitHub' : title}
               >
                 {title}
@@ -269,7 +269,7 @@ export function ProbeRow({
                 <SafeLink
                   url={url}
                   ariaLabel={iconAriaLabel}
-                  className="text-text-muted hover:text-accent-cyan transition-colors text-xs shrink-0 leading-none"
+                  className="text-text-muted hover:text-accent-cyan transition-colors text-micro shrink-0 leading-none"
                   title="Open on GitHub"
                 >
                   ↗
@@ -310,7 +310,7 @@ export function ProbeRow({
             data-prompt-body-expanded={dataAttr === 'prompt' ? true : undefined}
             className="px-2.5 pb-2 pl-3"
           >
-            <div className={`${dataAttr === 'prompt' ? '' : 'max-h-48 overflow-y-auto overflow-x-hidden'} text-xs leading-relaxed text-text-secondary break-words rounded-md border border-border-subtle bg-bg-input px-2 py-1.5`}>
+            <div className={`${dataAttr === 'prompt' ? '' : 'max-h-48 overflow-y-auto overflow-x-hidden'} text-meta leading-relaxed text-text-secondary break-words rounded-md border border-border-subtle bg-bg-input px-2 py-1.5`}>
               {/* Rendered markdown (was raw `whitespace-pre-wrap` text —
                   GitHub bodies are markdown, not plain text). Markdown
                   supplies its own block layout, so the panel drops
@@ -340,7 +340,7 @@ export function ProbeRow({
               }
             }}
           >
-            <p className="text-2xs text-text-muted line-clamp-2 leading-relaxed">
+            <p className="text-micro text-text-muted line-clamp-2 leading-relaxed">
               {body}
             </p>
           </div>

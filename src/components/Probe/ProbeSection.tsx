@@ -55,14 +55,14 @@ export function ProbeSection({
     >
       <header className="space-y-1">
         <h3
-          className={`text-2xs uppercase tracking-wide break-words ${
+          className={`text-micro uppercase tracking-wide break-words ${
             danger ? 'text-status-error' : 'text-text-muted'
           }`}
         >
           {title}
         </h3>
         {description && (
-          <p className="text-2xs text-text-muted break-words">{description}</p>
+          <p className="text-micro text-text-muted break-words">{description}</p>
         )}
       </header>
       {children}
@@ -80,7 +80,7 @@ export function ProbeSection({
  */
 export function ProbeScopeNote({ children }: { children: ReactNode }) {
   return (
-    <p className="text-2xs text-text-muted break-words" data-testid="probe-scope-note">
+    <p className="text-micro text-text-muted break-words" data-testid="probe-scope-note">
       {children}
     </p>
   );

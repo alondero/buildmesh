@@ -149,6 +149,38 @@
   --text-lg: calc(1.125rem * var(--ui-text-scale));
   --text-xl: calc(1.25rem * var(--ui-text-scale));
   --text-2xl: calc(1.5rem * var(--ui-text-scale));
+
+  /* Type roles — issue #2739. The ladder above says how BIG a step is; these
+     three say what a piece of text IS. A role is a contract, not a size:
+
+       label  a functional label — the name of the thing you are acting on.
+              Task/agent names, action labels, form labels, tab labels. It
+              identifies something, so it is set at the size the interface
+              reads at (13px, the root size) and never shrunk below it.
+       meta   supporting metadata — context that describes a label without
+              being the label. Secondary lines, helper text, timestamps.
+       micro  microcopy — section eyebrows, counts, gutter labels. It is
+              decoration around a label, so it sits at the app's 10px floor
+              and is never load-bearing on its own.
+
+     The roles are separate tokens rather than sizes chosen at each call
+     site, so "is this a label or is it metadata?" is answered once, in the
+     theme, instead of once per component. Each still multiplies by
+     `--ui-text-scale`, so the accessibility slider moves the whole ladder
+     together, and the sizes are written in px because the policy is stated
+     in px (13px root) — rem would make the contract depend on a value
+     nothing is allowed to move.
+
+     Comfortable is the default. The Compact preference below restates the
+     same label and metadata ladder one step down for anyone who wants the
+     old, denser presentation. */
+  --text-label: calc(13px * var(--ui-text-scale));
+  --text-label--line-height: 1.45;
+  --text-meta: calc(11.375px * var(--ui-text-scale));
+  --text-meta--line-height: 1.45;
+  --text-micro: calc(10px * var(--ui-text-scale));
+  --text-micro--line-height: 1.4;
+
   --font-size-base: 13px; /* html/body base below; not a Tailwind namespace */
 
   /* Spacing (4px base) */
@@ -198,6 +230,37 @@
     from { opacity: 0; transform: translateX(12px); }
     to   { opacity: 1; transform: translateX(0); }
   }
+}
+
+/* Compact type density — issue #2739. Settings → General → Appearance writes
+   `data-type-density="compact"` on <html>; `src/lib/typeDensity.ts` owns the
+   value and `src/lib/theme.ts` is the pattern it follows. Comfortable is the
+   default and needs no attribute at all, so this block is the only place the
+   dense variant exists.
+
+   The compact ladder is the label and metadata ladder one step down: a
+   functional label at 11.375px, supporting metadata at 9.75px, microcopy at
+   the app's 10px floor.
+
+   Compact is a LADDER, not a restoration of the old screens: before the roles
+   existed every surface chose its own size, so a surface that used to be
+   micro-sized now reads at the label size, and a surface that used to be drawn
+   at the interface size (the Settings chrome) follows the label ladder too.
+   What the ladder guarantees — and what the tests pin — is the size of each
+   role.
+
+   The rules are unlayered so they outrank the `text-label` / `text-meta`
+   utilities Tailwind generates from the @theme block above, and each one
+   restates `--ui-text-scale` because the theme is the only place that knows
+   the ladder. */
+:root[data-type-density='compact'] .text-label {
+  font-size: calc(11.375px * var(--ui-text-scale));
+  line-height: 1.4286;
+}
+
+:root[data-type-density='compact'] .text-meta {
+  font-size: calc(9.75px * var(--ui-text-scale));
+  line-height: 1.3333;
 }
 
 /* Light theme override — issue #734.

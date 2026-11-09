@@ -256,7 +256,7 @@ export function ProbeToolRail({ narrow }: { narrow: boolean }) {
                 title={def.label}
                 data-testid={`probe-rail-tab-${tab}`}
                 onClick={() => openProbeTab(tab)}
-                className={`relative flex items-center gap-1.5 h-7 rounded-md text-xs font-medium transition-colors min-w-0 ${
+                className={`relative flex items-center gap-1.5 h-7 rounded-md text-label font-medium transition-colors min-w-0 ${
                   narrow ? 'flex-none w-7 justify-center' : 'px-2'
                 } ${
                   active
@@ -310,7 +310,7 @@ export function ProbeToolRail({ narrow }: { narrow: boolean }) {
               aria-label={group.title}
               className={groupIndex === TOOL_DISCOVERY_GROUPS.length - 1 ? '' : 'mb-1.5'}
             >
-              <span className="block mt-1 mb-1 text-2xs font-semibold uppercase tracking-[0.14em] text-text-muted">
+              <span className="block mt-1 mb-1 text-micro font-semibold uppercase tracking-[0.14em] text-text-muted">
                 {group.title}
               </span>
               {/* Single column at narrow widths: a 2-column grid truncates
