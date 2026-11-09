@@ -70,6 +70,16 @@ Owners live in `src/lib/streams/`. An owner owns four things:
 Consumers read the typed update. They do **not** call `listen` for a
 stream they do not own, and they do not match raw payloads.
 
+The subscription lifecycle is `idle` → `attaching` → `attached`, with the
+last release returning to `idle`. Each registration owns its notifications
+and settlement. Releasing it retires that ownership before calling its
+unlisten handle: an old notification cannot reach new consumers, an old
+registration success is immediately unlistened, and an old failure cannot
+clear a replacement's attachment. The slot is claimed before calling `attach`
+so synchronous re-entry also shares one registration. A current registration
+failure allows the next subscriber to retry. The broader
+[state-machine inventory](state-machines.md) maps adjacent lifecycles.
+
 | Stream | Owner | Consumers |
 | --- | --- | --- |
 | `circuit-run-updated` | `src/lib/streams/circuitRunStream.ts` | agent-node store, run overview, next-steps panel, evidence history, flow editor, Probe tab |
@@ -99,6 +109,9 @@ structural guard that keeps "one owner per stream" true.
 `tests/unit/live-event-streams.test.ts` pins each owner's payload →
 typed-update conversion (including the "not my run" case) and its
 subscription contract.
+`tests/unit/stream-subscription-lifecycle.test.ts` controls registration
+settlement to cover replacement, stale notifications, failure/retry,
+synchronous re-entry and teardown.
 Run `npx vitest run tests/unit/tauri-ipc-seam.test.ts` and `npm run lint` when
 changing these seams. The decision rationale is in
 [ADR-0010](../adr/0010-tauri-ipc-wrapper-over-codegen.md).
