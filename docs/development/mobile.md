@@ -346,6 +346,38 @@ route validates text size. Whether the harness can take an initial prompt is
 the rule in services::agent_node, shared with the desktop commands.
 Mobile never races terminal startup by injecting the idea as keystrokes.
 
+## Phone events connection lifecycle
+
+`useWsEvents` owns one connection for its mounted screen, including the ticket
+mint before a WebSocket exists. Its explicit states are `idle`, `minting`,
+`socket`, `backoff`, `rate-limited`, `unauthorized`, and `disposed`.
+
+Foreground and network-return events cannot start another mint while one is
+pending, or replace a socket that is connecting, open, or closing. A socket
+failure retires its handlers and closes it before the next attempt. Error and
+close callbacks from the same attempt consume one backoff slot; the ladder is
+1/2/4/8 seconds, capped, and a successful open resets it. Foreground/network
+return may bypass a pending delay.
+
+Each mint has a 15-second deadline covering ticket acquisition and any wait for
+shared cookie recovery. Expiry cancels its ticket fetch and takes the ordinary
+backoff path; late success or failure from that attempt has no authority over
+the replacement. The transport accepts an optional abort signal, checks it
+before retrying a rate-limited mint or replaying after cookie recovery, and
+leaves shared cookie recovery running for other callers.
+
+A mint rejected for authentication calls the screen's recovery handler once
+and ends that connection. A 429 pauses after the transport's bounded retry;
+foreground/network return can try again, while the list poll remains the
+fallback. Unmount retires the whole lifecycle before releasing its socket or
+timer. Late ticket success/failure and queued socket callbacks cannot publish,
+report auth failure, or re-arm a timer for a departed screen.
+
+`tests/unit/mobile-events-reconnect.test.tsx` covers this contract through the
+hook with controlled ticket promises, fake sockets, and fake time. The terminal
+screen has a separate bounded reconnect/countdown policy. See the
+[state-machine inventory](state-machines.md) for both owners.
+
 ## Phone polling lifecycle
 
 `useVisibilityPolling` (`src/mobile/useVisibilityPolling.ts`) is the single owner of

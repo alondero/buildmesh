@@ -146,6 +146,16 @@ describe("WS ticket 429 back-off (issue #552)", () => {
     expect((caught as ApiError).status).toBe(500);
   });
 
+  it('does not retry a mint cancelled during the rate-limit wait', async () => {
+    fetchMock.mockResolvedValueOnce(rateLimited('1'));
+    const controller = new AbortController();
+    await expect(mintWsTicketWithBackoff({ surface: 'events', node_id: null }, {
+      signal: controller.signal,
+      sleep: async () => { controller.abort(); },
+    })).rejects.toMatchObject({ name: 'AbortError' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("terminalWsUrl goes through the backoff helper", async () => {
     // The URL builders must use the backoff helper so a 429 from a brief
     // reconnect storm never surfaces to the screen — the AC's user-visible

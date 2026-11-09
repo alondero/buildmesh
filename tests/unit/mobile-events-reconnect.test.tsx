@@ -66,13 +66,14 @@ vi.mock("../../src/mobile/api", async (importOriginal) => {
   };
 });
 
-import { eventsWsUrl } from "../../src/mobile/api";
+import { ApiError, eventsWsUrl } from "../../src/mobile/api";
 
 const noop = () => {};
 
 describe("useWsEvents reconnect on foreground/online", () => {
   beforeEach(() => {
     sockets = [];
+    vi.mocked(eventsWsUrl).mockReset().mockResolvedValue("ws://test/ws/events?ticket=x");
     vi.stubGlobal("WebSocket", FakeWebSocket);
   });
 
@@ -93,6 +94,106 @@ describe("useWsEvents reconnect on foreground/online", () => {
     expect(eventsWsUrl).toHaveBeenCalledTimes(1);
     expect(sockets.length).toBe(1);
     utils.unmount();
+  });
+
+  it.each(['mount', 'reconnect'] as const)('owns the pending ticket across foreground/network bursts (%s)', async when => {
+    let resolveTicket!: (url: string) => void;
+    const ticket = new Promise<string>(resolve => { resolveTicket = resolve; });
+    if (when === 'mount') vi.mocked(eventsWsUrl).mockReturnValueOnce(ticket);
+    const view = renderHook(() => useWsEvents(noop, noop));
+    if (when === 'reconnect') {
+      await waitFor(() => expect(sockets).toHaveLength(1));
+      vi.mocked(eventsWsUrl).mockReturnValueOnce(ticket);
+      act(() => {
+        sockets[0].simulateDrop();
+        window.dispatchEvent(new Event('online'));
+      });
+    }
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+      window.dispatchEvent(new Event('online'));
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await act(async () => resolveTicket('ws://test/ws/events?ticket=pending'));
+    expect(eventsWsUrl).toHaveBeenCalledTimes(when === 'mount' ? 1 : 2);
+    expect(sockets).toHaveLength(when === 'mount' ? 1 : 2);
+    view.unmount();
+    expect(sockets.every(socket => socket.readyState === FakeWebSocket.CLOSED)).toBe(true);
+  });
+
+  it.each([401, 429, 500])('ignores ticket rejection after unmount (%s)', async status => {
+    vi.useFakeTimers();
+    try {
+      let rejectTicket!: (error: unknown) => void;
+      vi.mocked(eventsWsUrl).mockReturnValueOnce(new Promise((_, reject) => { rejectTicket = reject; }));
+      const onAuthError = vi.fn();
+      const view = renderHook(() => useWsEvents(noop, onAuthError));
+      view.unmount();
+      await act(async () => rejectTicket(new ApiError(status, 'retired request')));
+      expect(onAuthError).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+      expect(sockets).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('ignores a queued message from a socket after unmount', async () => {
+    const receive = vi.fn();
+    const view = renderHook(() => useWsEvents(receive, noop));
+    await waitFor(() => expect(sockets).toHaveLength(1));
+    const lateMessage = sockets[0].onmessage;
+    view.unmount();
+    act(() => lateMessage?.({ data: JSON.stringify({ type: 'attention-cleared', session_id: 7 }) }));
+    expect(receive).not.toHaveBeenCalled();
+  });
+
+  it.each(['success', 'auth failure'] as const)('retries a stalled mint and ignores its late %s', async outcome => {
+    vi.useFakeTimers();
+    let resolveOld!: (url: string) => void;
+    let rejectOld!: (error: unknown) => void;
+    vi.mocked(eventsWsUrl).mockReturnValueOnce(new Promise((resolve, reject) => {
+      resolveOld = resolve;
+      rejectOld = reject;
+    }));
+    const receive = vi.fn();
+    const onAuthError = vi.fn();
+    const view = renderHook(() => useWsEvents(receive, onAuthError));
+    try {
+      const oldSignal = vi.mocked(eventsWsUrl).mock.calls[0][0]!;
+      await act(async () => vi.advanceTimersByTimeAsync(15000));
+      expect(oldSignal.aborted).toBe(true);
+      expect(sockets).toHaveLength(0);
+      // The timeout takes the ordinary reconnect ladder; network return
+      // can bypass that slot without waiting for the old promise to settle.
+      act(() => window.dispatchEvent(new Event('online')));
+      await act(async () => { await Promise.resolve(); });
+      expect(eventsWsUrl).toHaveBeenCalledTimes(2);
+      expect(sockets).toHaveLength(1);
+      await act(async () => {
+        if (outcome === 'success') resolveOld('ws://retired-ticket');
+        else rejectOld(new ApiError(401, 'retired session'));
+      });
+      act(() => sockets[0].onmessage?.({ data: JSON.stringify({ type: 'circuit-run-updated', run_id: 7 }) }));
+      expect(sockets).toHaveLength(1);
+      expect(receive).toHaveBeenCalledTimes(1);
+      expect(onAuthError).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it('aborts a pending ticket and ignores late success on unmount', async () => {
+    let resolveTicket!: (url: string) => void;
+    vi.mocked(eventsWsUrl).mockReturnValueOnce(new Promise(resolve => { resolveTicket = resolve; }));
+    const view = renderHook(() => useWsEvents(noop, noop));
+    const signal = vi.mocked(eventsWsUrl).mock.calls[0][0]!;
+    view.unmount();
+    expect(signal.aborted).toBe(true);
+    await act(async () => resolveTicket('ws://retired-ticket'));
+    expect(sockets).toHaveLength(0);
   });
 
   it('delivers Circuit Run invalidations to the screen for an immediate refresh', async () => {
@@ -138,39 +239,83 @@ describe("useWsEvents reconnect on foreground/online", () => {
     utils.unmount();
   });
 
-  // Same dedup contract as the terminal WS: a real browser fires BOTH
-  // `error` and `close` for one failed connection. Without dedup the
-  // `attempt` counter ticks twice per failure and two reconnect timers
-  // race against each other (1s + 2s for the first failure). We wait
-  // 2.1s — past the 1s timer (dedup case AND first-half of no-dedup
-  // case both reach eventsWsUrl=2 by then) AND past the 2s timer that
-  // ONLY the no-dedup path schedules. With dedup, eventsWsUrl stays at 2;
-  // without dedup, it climbs to 3.
   it("advances the attempt counter once when onerror and onclose both fire for one failure", async () => {
     const utils = await mountAndConnect();
-    // 1 connect so far (mount).
-    expect(eventsWsUrl).toHaveBeenCalledTimes(1);
+    vi.useFakeTimers();
+    try {
+      // Retain both callbacks: the browser may already have queued close.
+      const error = sockets[0].onerror;
+      const close = sockets[0].onclose;
+      act(() => { error?.(); close?.(); });
+      expect(vi.getTimerCount()).toBe(1);
+      await act(async () => vi.advanceTimersByTimeAsync(2100));
+      expect(eventsWsUrl).toHaveBeenCalledTimes(2);
+      expect(sockets).toHaveLength(2);
+    } finally {
+      utils.unmount();
+      vi.useRealTimers();
+    }
+  });
 
-    // Fire both events on socket 0 — both reach scheduleReconnect
-    // unless the dedup flag in connect() filters the second one.
+  it('ends an unauthorized connection even if the screen has not unmounted yet', async () => {
+    vi.mocked(eventsWsUrl).mockRejectedValueOnce(new ApiError(401, 'session rejected'));
+    const onAuthError = vi.fn();
+    const view = renderHook(() => useWsEvents(noop, onAuthError));
+    await waitFor(() => expect(onAuthError).toHaveBeenCalledTimes(1));
     act(() => {
-      sockets[0].simulateError();
-      sockets[0].simulateDrop();
+      window.dispatchEvent(new Event('online'));
+      document.dispatchEvent(new Event('visibilitychange'));
     });
+    expect(eventsWsUrl).toHaveBeenCalledTimes(1);
+    view.unmount();
+  });
 
-    // Wait long enough that BOTH a 1s timer (would fire either way)
-    // AND a 2s timer (only schedules in the no-dedup path) have run.
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 2100));
-    });
+  it('pauses a rate-limited mint until foreground or network return', async () => {
+    vi.useFakeTimers();
+    const view = renderHook(() => useWsEvents(noop, noop));
+    try {
+      // The first mint was started synchronously; fail the next one.
+      await act(async () => { await Promise.resolve(); });
+      vi.mocked(eventsWsUrl).mockRejectedValueOnce(new ApiError(429, 'server busy'));
+      act(() => sockets[0].simulateDrop());
+      await act(async () => vi.advanceTimersByTimeAsync(20000));
+      expect(eventsWsUrl).toHaveBeenCalledTimes(2);
+      expect(vi.getTimerCount()).toBe(0);
+      act(() => window.dispatchEvent(new Event('online')));
+      await act(async () => { await Promise.resolve(); });
+      expect(eventsWsUrl).toHaveBeenCalledTimes(3);
+      expect(sockets).toHaveLength(2);
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
 
-    // Dedup: only the 1s timer fired → eventsWsUrl = 2, one socket opened.
-    // No dedup: the 2s leftover timer also fired → eventsWsUrl = 3,
-    // a leaked parallel socket exists. The asserts below fail in that case.
-    expect(eventsWsUrl).toHaveBeenCalledTimes(2);
-    expect(sockets.length).toBe(2);
-
-    utils.unmount();
+  it('backs off after a mint failure and resets the ladder after a socket opens', async () => {
+    vi.useFakeTimers();
+    vi.mocked(eventsWsUrl).mockRejectedValueOnce(new Error('offline'));
+    const view = renderHook(() => useWsEvents(noop, noop));
+    try {
+      await act(async () => { await Promise.resolve(); });
+      await act(async () => vi.advanceTimersByTimeAsync(999));
+      expect(eventsWsUrl).toHaveBeenCalledTimes(1);
+      await act(async () => vi.advanceTimersByTimeAsync(1));
+      expect(sockets).toHaveLength(1);
+      act(() => sockets[0].simulateDrop());
+      await act(async () => vi.advanceTimersByTimeAsync(1999));
+      expect(eventsWsUrl).toHaveBeenCalledTimes(2);
+      await act(async () => vi.advanceTimersByTimeAsync(1));
+      expect(sockets).toHaveLength(2);
+      act(() => { sockets[1].simulateOpen(); sockets[1].simulateDrop(); });
+      await act(async () => vi.advanceTimersByTimeAsync(1000));
+      expect(sockets).toHaveLength(3);
+      act(() => sockets[2].simulateDrop());
+      view.unmount();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
   });
 
   it("removes the foreground/online listeners on unmount", async () => {

@@ -39,6 +39,11 @@ export interface StreamSubscription<T> {
   reset(): void;
 }
 
+type BackendSubscription =
+  | { kind: 'idle' }
+  | { kind: 'attaching'; owner: symbol }
+  | { kind: 'attached'; owner: symbol; unlisten: () => void };
+
 /**
  * Build a stream subscription over one backend event.
  *
@@ -52,55 +57,55 @@ export function createStreamSubscription<T>(
   attach: (notify: (update: T) => void) => Promise<() => void>,
 ): StreamSubscription<T> {
   const consumers = new Set<(update: T) => void>();
-  let backendUnlisten: (() => void) | null = null;
-  let attaching: Promise<void> | null = null;
-  // Bumped whenever the subscription is torn down, so a backend
-  // registration that resolves AFTER the last consumer left is released
-  // instead of leaving a live handler nobody owns.
-  let generation = 0;
-
-  const notify = (update: T): void => {
-    // Copy first: a consumer may release itself while being notified.
-    for (const consumer of [...consumers]) consumer(update);
-  };
+  let backend: BackendSubscription = { kind: 'idle' };
+  const ownsRegistration = (owner: symbol) => backend.kind !== 'idle' && backend.owner === owner;
 
   const releaseBackend = (): void => {
-    generation += 1;
-    attaching = null;
-    const unlisten = backendUnlisten;
-    backendUnlisten = null;
+    const previous = backend;
+    backend = { kind: 'idle' };
     // The handle is cleared before the call, so a throwing handle still
     // leaves the subscription in a releasable state. The error is NOT
     // swallowed: the caller (the agent-node store's rollback) reports
     // it and keeps unregistering the rest.
-    unlisten?.();
+    if (previous.kind === 'attached') previous.unlisten();
   };
 
   const ensureAttached = (): void => {
-    if (attaching !== null) return;
-    const current = ++generation;
+    if (backend.kind !== 'idle') return;
+    const owner = Symbol(label);
+    // Claim the slot before calling external code: attach may notify or
+    // subscribe synchronously. Every callback belongs to this registration,
+    // including notifications delivered before its promise resolves.
+    backend = { kind: 'attaching', owner };
+    const notify = (update: T): void => {
+      for (const consumer of [...consumers]) {
+        if (!ownsRegistration(owner)) return;
+        consumer(update);
+      }
+    };
+    const failed = (cause: unknown): void => {
+      // A retired rejection must not clear a replacement's attachment slot.
+      if (ownsRegistration(owner)) backend = { kind: 'idle' };
+      console.warn(`[${label}] subscription failed:`, cause);
+    };
     let pending: Promise<() => void>;
     try {
       pending = attach(notify);
     } catch (cause) {
-      console.warn(`[${label}] subscription failed:`, cause);
+      failed(cause);
       return;
     }
-    attaching = pending.then(
+    void pending.then(
       (unlisten) => {
-        if (generation !== current || consumers.size === 0) {
+        if (!ownsRegistration(owner)) {
           // Everyone left before the backend registration resolved.
           unlisten?.();
           return;
         }
-        backendUnlisten = unlisten;
+        backend = { kind: 'attached', owner, unlisten };
       },
-      (cause: unknown) => {
-        console.warn(`[${label}] subscription failed:`, cause);
-        // Allow a later consumer to retry the registration.
-        attaching = null;
-      },
-    );
+      failed,
+    ).catch(failed);
   };
 
   return {

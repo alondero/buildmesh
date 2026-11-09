@@ -38,6 +38,8 @@ For the Circuit side-effect inventory and restart/replay policy, see the
 For the Rust backend's seams — which module owns git access, why the stepper is
 pure, where the large files still are — see the
 [Rust module map](module-map.md).
+For implicit and explicit workflow states across desktop, backend, web mobile
+and Android, see the [state-machine inventory](state-machines.md).
 For a Codex model-switch report checkpoint, see the
 [run 293 investigation](../archive/2026-10/circuit-run-293-codex-context.md).
 For Settings keyboard behavior, compact sidebar targets and the theme inventory,
