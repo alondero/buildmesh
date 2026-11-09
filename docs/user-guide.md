@@ -980,9 +980,10 @@ Open **Prompts** from the tool picker or search for **Open Prompts**. The
 with that Mesh selected. The canvas spawn dialog offers the same shortcut.
 
 Search by title or prompt text. Expand a row to read and copy the complete
-prompt, or use its **Spawn** button immediately. **Spawn** uses the selected
-Mesh's default agent; the adjacent arrow offers the usual agent, Launch
-Configuration and login choices. Every launch creates a fresh agent using the
+prompt, or use its spawn button immediately. The button shows the selected
+Mesh's default agent icon and starts that agent; hover or focus it to reveal
+the agent's name. The adjacent arrow offers the usual agent,
+Launch Configuration and login choices. Every launch creates a fresh agent using the
 Mesh's spawn settings: Worktree Nodes start from its configured base ref; Root
 Nodes use its folder. The Mesh heading and launch summary identify the target.
 The focused agent's checkout, changes and conversation are never inherited.

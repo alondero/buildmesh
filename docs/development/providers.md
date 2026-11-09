@@ -920,7 +920,7 @@ own placement and the action performed after a pick:
 
 | Context | Adapter | Shared menu behavior |
 |---|---|---|
-| Mesh sidebar, Issues and Pull Requests Probes | `SpawnButtonCluster` / `ProviderDropdown` | Harness → login → configuration; forwards configuration and login to node creation |
+| Mesh sidebar, Issues, Pull Requests and Prompts Probes | `SpawnButtonCluster` / `ProviderDropdown` | Harness → login → configuration; the main half shows the resolved default's mark and forwards configuration and login to node creation |
 | Canvas, command palette and PR reviewer dialog | `CanvasSpawnMenu`, `PrReviewerSpawnDialog` | Same selection ladder in a dialog |
 | Automated review loop | `AgentReviewButton` | Same ladder; excludes Terminal and decorates incompatible reviewers, including loaded recipes |
 | Regenerate in sidebar or node header | `RegenerateProviderMenu` | Adds Current to the shared navigation; explicit alternatives replace the launch plan |

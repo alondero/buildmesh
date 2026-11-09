@@ -25,7 +25,7 @@ export function PromptSpawnButton({ meshId, promptId, name, providers, busy, dis
       root.current?.querySelector<HTMLButtonElement>('[aria-haspopup="menu"]')?.focus();
     }
   }}>
-    <SpawnButtonCluster providers={providers} dropdownKey={key} primaryLabel="Spawn"
+    <SpawnButtonCluster providers={providers} dropdownKey={key}
       primaryAriaLabel={`Spawn ${name}`} isOpen={open} onToggleDropdown={() => setOpen(value => !value)} portalMenu={portalMenu}
       isSpawning={busy} disabled={disabled} getDefaultProvider={meshId === null ? undefined : () => getDefaultProvider(meshId)}
       onSpawnDefault={() => { setOpen(false); onSpawn(); }}
