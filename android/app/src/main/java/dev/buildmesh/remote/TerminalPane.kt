@@ -3,6 +3,7 @@ package dev.buildmesh.remote
 import android.annotation.SuppressLint
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.view.KeyEvent
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -11,9 +12,19 @@ import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Notes
+import androidx.compose.material.icons.outlined.Keyboard
+import androidx.compose.material.icons.outlined.KeyboardHide
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.layout.onSizeChanged
@@ -28,22 +39,37 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.webkit.WebViewAssetLoader
 import java.util.Base64
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
 /**
- * The quick keys the terminal's own row offers.
+ * The quick keys the terminal's own row offers: the keys a soft keyboard
+ * lacks, which the agent's own menus and completion are driven by.
+ *
+ * Each key's bytes come from [terminalKeyBytes], so the arrows follow the
+ * agent's cursor-key mode exactly as a hardware keyboard's arrows do.
  *
  * The approval keys are deliberately absent: a pending request is answered from
  * the band above the terminal, which names the request it answers. A bare `y`
  * in a quick-key row cannot say which request it would approve, so it would
  * approve whichever prompt the agent happens to show next.
  */
-val terminalQuickKeys = listOf(
-    "Esc" to "\u001b", "Tab" to "\t", "Shift+Tab" to "\u001b[Z", "Ctrl+C" to "\u0003", "Enter" to "\r",
-    "↑" to "\u001b[A", "↓" to "\u001b[B", "←" to "\u001b[D", "→" to "\u001b[C",
-)
+val terminalQuickKeys: List<Pair<String, (TerminalInputModes) -> String>> = listOf(
+    QuickKey("Esc", KeyEvent.KEYCODE_ESCAPE), QuickKey("Tab", KeyEvent.KEYCODE_TAB),
+    QuickKey("Shift+Tab", KeyEvent.KEYCODE_TAB, shift = true),
+    QuickKey("Ctrl+C", KeyEvent.KEYCODE_C, char = 'c'.code, ctrl = true), QuickKey("Enter", KeyEvent.KEYCODE_ENTER),
+    QuickKey("↑", KeyEvent.KEYCODE_DPAD_UP), QuickKey("↓", KeyEvent.KEYCODE_DPAD_DOWN),
+    QuickKey("←", KeyEvent.KEYCODE_DPAD_LEFT), QuickKey("→", KeyEvent.KEYCODE_DPAD_RIGHT),
+).map { key ->
+    key.label to { modes: TerminalInputModes ->
+        checkNotNull(terminalKeyBytes(key.keyCode, key.char, shift = key.shift, ctrl = key.ctrl, modes = modes))
+    }
+}
+
+private class QuickKey(val label: String, val keyCode: Int, val char: Int = 0,
+                       val shift: Boolean = false, val ctrl: Boolean = false)
 
 /**
  * One node's terminal.
@@ -53,15 +79,26 @@ val terminalQuickKeys = listOf(
  * person is answered from the screen that shows its prompt (issue #2609).
  * The band is read from the node row's own lifecycle and answers through the
  * desktop's `y\r` / `n\r` keystrokes.
+ *
+ * Typing goes straight into the agent's own input box (issue #2747): a tap on
+ * the terminal opens the keyboard on [TerminalSurface], which sends each key
+ * as it is typed. The xterm display itself stays display-only.
  */
 @SuppressLint("SetJavaScriptEnabled")
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun TerminalPane(api: BuildmeshApi, nodeId: Long, vm: BuildmeshViewModel) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope { Dispatchers.Main.immediate }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var status by remember { mutableStateOf("Loading terminal…") }
-    var input by remember(nodeId) { mutableStateOf("") }
+    // The Compose sheet's draft survives closing the sheet and recreation, so
+    // dismissing it by accident never loses a long prompt.
+    var draft by rememberSaveable(nodeId) { mutableStateOf("") }
+    var composing by rememberSaveable(nodeId) { mutableStateOf(false) }
+    // Read from the phone's xterm, which tracks the modes the agent switched
+    // on in its output (the desktop snapshot replays them on connect).
+    var modes by remember(nodeId) { mutableStateOf(TerminalInputModes()) }
     var cols by remember { mutableIntStateOf(80) }
     var rows by remember { mutableIntStateOf(24) }
     var ready by remember { mutableStateOf(false) }
@@ -85,6 +122,15 @@ fun TerminalPane(api: BuildmeshApi, nodeId: Long, vm: BuildmeshViewModel) {
             }, onUnauthorized = vm::unauthorized)
     }
     fun resize() { socket.send(buildJsonObject { put("type", "resize"); put("cols", cols); put("rows", rows) }.toString()) }
+    // Input reports disconnection instead of silently queueing keystrokes.
+    fun sendInput(bytes: String): Boolean = socket.send(bytes).also {
+        if (!it) vm.notice("Input was not sent. Reconnect the terminal.")
+    }
+    // The surface adopts the WebView as its child, so it lives exactly as long
+    // as that WebView; a second surface for the same view would find it
+    // already parented. Sends go through the latest socket.
+    val send by rememberUpdatedState<(String) -> Boolean>({ sendInput(it) })
+    val surface = remember(view) { TerminalSurface(context, view, modes = { modes }, send = { send(it) }) }
 
     // The node's own row is the source of the request: the desktop's
     // semantic-turn banner reads the same lifecycle, so the phone shows the
@@ -123,6 +169,14 @@ fun TerminalPane(api: BuildmeshApi, nodeId: Long, vm: BuildmeshViewModel) {
             } }
             @JavascriptInterface fun scrollState(atBottom: Boolean) { scope.launch {
                 liveTail = atBottom
+            } }
+            // A plain tap on the terminal (not a link, not a drag) types into
+            // the agent's own input box.
+            @JavascriptInterface fun focusInput() { scope.launch {
+                if (status == "Connected") surface.showKeyboard()
+            } }
+            @JavascriptInterface fun modes(applicationCursorKeys: Boolean, bracketedPaste: Boolean) { scope.launch {
+                modes = TerminalInputModes(applicationCursorKeys, bracketedPaste)
             } }
             @JavascriptInterface fun openUrl(url: String) { scope.launch {
                 val uri = url.toUri().normalizeScheme()
@@ -169,19 +223,81 @@ fun TerminalPane(api: BuildmeshApi, nodeId: Long, vm: BuildmeshViewModel) {
             }
         }
         SemanticTurnBand(request, reply)
-        AndroidView(factory = { view }, modifier = Modifier.fillMaxWidth().weight(1f).onSizeChanged { viewport = it })
-        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 6.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            terminalQuickKeys.forEach { (label, sequence) ->
-                TextButton(enabled = status == "Connected", onClick = {
-                    if (!socket.send(sequence)) vm.notice("Input was not sent. Reconnect the terminal.")
-                }) { Text(label) }
+        AndroidView(factory = { surface }, modifier = Modifier.fillMaxWidth().weight(1f).onSizeChanged { viewport = it })
+        // One row: the keyboard toggle and Compose first, then the keys a soft
+        // keyboard lacks. There is no second prompt box — typing goes into
+        // the agent's own input, which is where its menus and completion are.
+        val connected = status == "Connected"
+        val keyboardOpen = WindowInsets.isImeVisible
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(enabled = connected, onClick = { if (keyboardOpen) surface.hideKeyboard() else surface.showKeyboard() }) {
+                if (keyboardOpen) Icon(Icons.Outlined.KeyboardHide, contentDescription = "Hide keyboard")
+                else Icon(Icons.Outlined.Keyboard, contentDescription = "Type into the agent")
+            }
+            TextButton(enabled = connected, onClick = { surface.hideKeyboard(); composing = true }) {
+                Icon(Icons.AutoMirrored.Outlined.Notes, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Compose")
+            }
+            VerticalDivider(Modifier.height(24.dp))
+            terminalQuickKeys.forEach { (label, bytes) ->
+                TextButton(enabled = connected, onClick = { sendInput(bytes(modes)) }) { Text(label) }
             }
         }
-        Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(colors = buildmeshTextFieldColors(), value = input, onValueChange = { input = it }, label = { Text("Terminal input") }, modifier = Modifier.weight(1f), maxLines = 3)
-            Button(shape = MaterialTheme.shapes.small, enabled = status == "Connected", onClick = {
-                if (socket.send(input + "\r")) input = "" else vm.notice("Input was not sent. Reconnect the terminal.")
-            }) { Text("Send") }
+    }
+
+    if (composing) TerminalComposeSheet(
+        draft = draft, onDraft = { draft = it }, enabled = status == "Connected",
+        onDismiss = { composing = false },
+        onInsert = { submit ->
+            if (sendInput(composePaste(draft, modes))) {
+                draft = ""
+                composing = false
+                // Enter goes separately, after the paste has settled in the
+                // agent's box (see COMPOSE_SUBMIT_GAP_MS).
+                if (submit) scope.launch { delay(COMPOSE_SUBMIT_GAP_MS); sendInput("\r") }
+            }
+        },
+    )
+}
+
+/**
+ * Long prompts, swipe typing and dictation.
+ *
+ * Typing in the terminal asks the keyboard for one character at a time, which
+ * turns off autocorrect, swipe and the keyboard's microphone. This sheet gives
+ * them back for writing prose, then puts the text into the agent's own input
+ * box: **Send** also presses Enter, **Insert** leaves it in the box to edit or
+ * complete there.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TerminalComposeSheet(
+    draft: String, onDraft: (String) -> Unit, enabled: Boolean,
+    onDismiss: () -> Unit, onInsert: (submit: Boolean) -> Unit,
+) {
+    val focus = remember { FocusRequester() }
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 16.dp).imePadding(),
+            verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Compose", style = MaterialTheme.typography.titleLarge)
+            Text("Goes into the agent's own input box. Your keyboard's autocorrect, swipe and microphone work here.",
+                style = MaterialTheme.typography.bodySmall)
+            OutlinedTextField(colors = buildmeshTextFieldColors(), value = draft, onValueChange = onDraft,
+                label = { Text("Message to the agent") }, minLines = 3, maxLines = 8,
+                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences, autoCorrectEnabled = true),
+                modifier = Modifier.fillMaxWidth().focusRequester(focus))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
+                TextButton(enabled = enabled && draft.isNotBlank(), onClick = { onInsert(false) }) { Text("Insert") }
+                Button(shape = MaterialTheme.shapes.small, enabled = enabled && draft.isNotBlank(), onClick = { onInsert(true) }) { Text("Send") }
+            }
+        }
+        // The sheet's content lives in its own window and attaches after the
+        // first frame; requesting focus before that throws, so wait for it.
+        LaunchedEffect(Unit) {
+            withFrameNanos { }
+            focus.requestFocus()
         }
     }
 }
