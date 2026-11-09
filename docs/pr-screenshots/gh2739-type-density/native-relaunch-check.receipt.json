@@ -1,12 +1,12 @@
 {
   "phase": "check",
-  "appPid": "47328",
-  "at": "2026-11-09T13:56:12.287Z",
+  "appPid": "2668",
+  "at": "2026-11-09T14:52:59.889Z",
   "stored": {
     "zoom": "200",
     "textScale": null,
     "density": null,
-    "terminalFontSize": null
+    "terminalFontSize": "16"
   },
   "viewport": {
     "innerWidth": 640,
@@ -15,8 +15,14 @@
   },
   "reappliedAtBoot": true,
   "devicePixelRatio": 3,
-  "meshName": null,
-  "probeTitle": null,
+  "fixture": {
+    "meshId": 1,
+    "name": "readability-check-mesh-with-a-long-name",
+    "agentName": "readability-relaunch-agent-with-a-long-name"
+  },
+  "agentFound": true,
+  "meshName": 13,
+  "gridName": 13,
   "settingsOpened": true,
   "settingsClosed": true
 }

@@ -1,7 +1,12 @@
 {
   "phase": "set",
-  "appPid": "80200",
-  "at": "2026-11-09T13:55:42.585Z",
+  "appPid": "52060",
+  "at": "2026-11-09T14:52:32.727Z",
+  "fixture": {
+    "meshId": 1,
+    "meshName": "readability-check-mesh-with-a-long-name",
+    "agentNodeId": 4
+  },
   "before": {
     "innerWidth": 1280,
     "innerHeight": 800,
@@ -15,7 +20,7 @@
   "stored": {
     "zoom": "200",
     "textScale": null,
-    "terminalFontSize": null
+    "terminalFontSize": "16"
   },
   "cssViewportBelowMinimum": {
     "innerWidth": 640,

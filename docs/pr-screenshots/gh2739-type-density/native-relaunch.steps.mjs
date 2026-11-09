@@ -1,14 +1,14 @@
 /**
- * Real-relaunch verification — issue #2739 (review finding 3).
+ * Real-relaunch verification — issue #2739 (review findings 3 and 5).
  *
  * The first native run proved the window zoom *persists* through a reload. A
  * reload is not a relaunch: WebView2's zoom factor belongs to the controller,
- * so it survives a reload even if the boot path did nothing at all. A relaunch
+ * so it survives a reload even when the boot path re-applies nothing. A relaunch
  * is the real test — a fresh webview starts at 1x, so the stored zoom is only
  * in force afterwards if `applyWindowZoomAtBoot()` actually re-applied it.
  *
  * The run is split in two because the relaunch is a process-level event that
- * the page cannot perform on itself:
+ * the page has no way to perform on itself:
  *
  *   phase 'set'   drive the real Settings control to 200% (which stores the
  *                 choice) and record the viewport it produces.
@@ -16,7 +16,13 @@
  *                 is still 200, that the fresh webview is BELOW the app's
  *                 minimum width, and that the device pixel ratio says 3 —
  *                 the platform zoom itself is in force, not just a narrow
- *                 layout. Then open and close a dialog at that zoom.
+ *                 layout. Then open and close a dialog at that zoom, and
+ *                 measure the label of a REAL agent node in the grid.
+ *
+ * The fixture is a mesh with a long name AND an agent node in it. A mesh with
+ * no node renders no grid header at all, so "the agent name is still 13px"
+ * could not be measured without one — the same gap the native verification
+ * run had before it grew an agent node.
  *
  * Each phase archives its receipt next to the images:
  *   native-relaunch-set.receipt.json
@@ -35,6 +41,8 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
+const MESH_NAME = 'readability-relaunch-mesh-with-a-long-name';
+const AGENT_NAME = 'readability-relaunch-agent-with-a-long-name';
 const TEXT_SCALE_KEY = 'buildmesh.text-scale';
 const DENSITY_KEY = 'buildmesh.type-density';
 const ZOOM_KEY = 'buildmesh.window-zoom';
@@ -48,6 +56,8 @@ const MIN_CSS_WIDTH = 900;
  * in force, not just a narrow layout.
  */
 const ZOOMED_DEVICE_PIXEL_RATIO = 3;
+/** The functional-label size at the default text scale (src/App.css). */
+const LABEL_SIZE = 13;
 
 const PHASE = process.env.BUILDMESH_RELAUNCH_PHASE === 'check' ? 'check' : 'set';
 const OUT_DIR = resolve(process.cwd(), 'docs/pr-screenshots/gh2739-type-density');
@@ -105,12 +115,72 @@ async function closeSettings(page) {
   await page.waitForTimeout(600);
 }
 
+/**
+ * The fixture mesh, found through its agent node.
+ *
+ * The mesh is NOT looked up by name: `create_test_mesh` upserts by PATH
+ * (src-tauri/src/db/mesh.rs), so every fixture created against the default
+ * temporary path lands in the SAME mesh row and keeps the name it was first
+ * given. The agent node is the unambiguous handle: it carries the mesh id it
+ * belongs to, and it has to have survived the relaunch for the check phase to
+ * have anything to measure.
+ */
+async function findFixtureMesh(invoke) {
+  const nodes = await invoke('list_agent_nodes').catch(() => null);
+  if (!Array.isArray(nodes)) return null;
+  const matches = nodes.filter((node) => node?.name === AGENT_NAME);
+  if (matches.length === 0) {
+    throw new Error(`no agent node named "${AGENT_NAME}" survived the relaunch`);
+  }
+  const meshId = matches[0].mesh_id;
+  const meshes = await invoke('list_meshes').catch(() => null);
+  const mesh = Array.isArray(meshes)
+    ? meshes.find((candidate) => candidate?.id === meshId) ?? null
+    : null;
+  return { id: meshId, name: mesh?.name ?? null };
+}
+
+/**
+ * Select the fixture mesh in the sidebar and wait for its grid header.
+ *
+ * The element id is `mesh-item-name-<id>`
+ * (src/components/Sidebar/MeshItem.tsx): a `mesh-name-` prefix matches
+ * nothing and would silently record `null` — the defect this phase exists to
+ * rule out.
+ */
+async function selectFixtureMesh(page, meshId) {
+  const item = page.locator(`[id="mesh-item-name-${meshId}"]`);
+  await item.click({ timeout: 15000 });
+  const header = page.locator('[data-testid="grid-node-header"]').first();
+  const visible = await header
+    .waitFor({ state: 'visible', timeout: 30000 })
+    .then(() => true)
+    .catch(() => false);
+  return visible;
+}
+
 export default async function ({ page, invoke }) {
   const receipt = { phase: PHASE, appPid: APP_PID, at: new Date().toISOString() };
 
-  await invoke('create_test_mesh', { name: 'readability-check-mesh-with-a-long-name' }).catch(() => null);
-
   if (PHASE === 'set') {
+    // A mesh with a long name AND an agent node in it: without the node the
+    // grid renders no header, and the check phase would have nothing to
+    // measure after the relaunch. `create_test_mesh` upserts by path, so the
+    // name may be the one an earlier fixture gave this mesh row; the id is
+    // what the run relies on.
+    const mesh = await invoke('create_test_mesh', { name: MESH_NAME }).catch(() => null);
+    if (!mesh?.id) throw new Error('the relaunch fixture mesh was not created');
+    const node = await invoke('create_agent_node', {
+      meshId: mesh.id,
+      name: AGENT_NAME,
+      path: mesh.path ?? '',
+      branch: 'main',
+      useWorktree: false,
+      provider: 'anthropic',
+    }).catch(() => null);
+    if (!node?.id) throw new Error('the relaunch fixture agent node was not created');
+    receipt.fixture = { meshId: mesh.id, meshName: mesh.name ?? null, agentNodeId: node.id };
+
     // A clean slate: a previous run's zoom would decide what this one measures.
     await resetNativeZoom(page);
     await page.evaluate(({ textScale, density, zoom }) => {
@@ -202,8 +272,27 @@ export default async function ({ page, invoke }) {
   receipt.reappliedAtBoot = true;
   receipt.devicePixelRatio = receipt.viewport.devicePixelRatio;
 
-  receipt.meshName = await fontSize(page, '[id^="mesh-name-"], [data-testid="mesh-item-name"]');
-  receipt.probeTitle = null;
+  // The agent must be FINDABLE after the relaunch, and its label must still
+  // be measured: a `null` here would mean the selector matched nothing, which
+  // is the defect this phase is here to rule out.
+  const mesh = await findFixtureMesh(invoke);
+  receipt.fixture = { meshId: mesh.id, name: mesh.name, agentName: AGENT_NAME };
+  receipt.agentFound = await selectFixtureMesh(page, mesh.id);
+  if (!receipt.agentFound) {
+    throw new Error(`no agent node was found in the grid of mesh ${mesh.id} after the relaunch`);
+  }
+  receipt.meshName = await fontSize(page, '[id^="mesh-item-name-"]');
+  receipt.gridName = await fontSize(page, '[data-testid="grid-node-header"] .text-label');
+  if (receipt.meshName === null || receipt.gridName === null) {
+    throw new Error(
+      `the label sizes were not measured after the relaunch: ${JSON.stringify({ meshName: receipt.meshName, gridName: receipt.gridName })}`,
+    );
+  }
+  if (Math.abs(receipt.gridName - LABEL_SIZE) > 0.3) {
+    throw new Error(
+      `the grid header agent name should be ${LABEL_SIZE}px, measured ${receipt.gridName}`,
+    );
+  }
 
   // The dialog still opens and closes in the zoomed window.
   await openSettings(page);

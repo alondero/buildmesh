@@ -1,5 +1,5 @@
 /**
- * Native runtime verification â€” issue #2739.
+ * Native runtime verification — issue #2739.
  *
  * Drives the REAL dev-profile app over CDP (Windows/WebView2): real Tauri IPC,
  * real Rust backend, real pixels. Where the mock comparison
@@ -8,15 +8,20 @@
  *
  *   1. the DEFAULT presentation (comfortable density, 100% text scale),
  *   2. the 150% interface text scale,
- *   3. the 200% window zoom â€” the platform's own zoom, which is the whole
+ *   3. the 200% window zoom — the platform's own zoom, which is the whole
  *      point of the enlargement path,
- *   4. that a dialog still opens and closes at every one of those sizes,
+ *   4. that a dialog still opens and closes at each of those sizes,
  *   5. that the Probe's context is still readable and an agent still findable,
+ *      with a REAL agent node in the mesh, so the grid header is measured
+ *      rather than assumed,
  *   6. that displaced actions are still reachable,
  *   7. that the settings survive a reload — the reload path only; a RELAUNCH
  *      (a fresh webview that starts at 1x) is proven by
  *      `native-relaunch.steps.mjs`,
- *   8. that the terminal font size is NOT moved by any of the three.
+ *   8. that the terminal font size is NOT moved by any of the three: it is
+ *      set to an explicit size before the run (so the check has no empty
+ *      value to pass on), and it is then changed THROUGH the app's own
+ *      title-bar Zoom control to show the independence runs both ways.
  *
  * Every interaction is RECORDED, not asserted-thrown, except the size
  * contract: an enlargement that quietly stops working is exactly the failure
@@ -32,6 +37,9 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const MESH_NAME = 'readability-check-mesh-with-a-long-name';
+/** The agent node the grid header is measured on — a name long enough that the
+ *  header has to truncate it, which is the case the issue asks about. */
+const AGENT_NAME = 'readability-check-agent-with-a-long-name';
 const TEXT_SCALE_KEY = 'buildmesh.text-scale';
 const DENSITY_KEY = 'buildmesh.type-density';
 const ZOOM_KEY = 'buildmesh.window-zoom';
@@ -60,7 +68,7 @@ async function safeClick(page, locator, label) {
   }
 }
 
-/** The CSS viewport and the device pixel ratio â€” the window zoom's fingerprint. */
+/** The CSS viewport and the device pixel ratio — the window zoom's fingerprint. */
 async function viewport(page) {
   return page.evaluate(() => ({
     innerWidth: window.innerWidth,
@@ -119,7 +127,7 @@ async function openAndCloseSettings(page, interactions) {
   if (!opened) return null;
   await page.getByRole('tab', { name: 'General' }).click({ timeout: 8000 }).catch(() => {});
   const labelSize = await fontSize(page, 'label[for="confirm-before-quit"], span.text-label');
-  // The dialog must close again â€” an enlarged surface that traps the user is
+  // The dialog must close again — an enlarged surface that traps the user is
   // not an enlargement, it is a break.
   await page.keyboard.press('Escape');
   const closed = await dialog.waitFor({ state: 'hidden', timeout: 15000 }).then(() => true).catch(() => false);
@@ -143,9 +151,30 @@ async function reachDisplacedAction(page, interactions) {
   return label;
 }
 
+/**
+ * Select the fixture mesh in the sidebar so the grid renders its agent node.
+ *
+ * "Finding an agent" is only measured if there IS an agent to find: the grid
+ * header of a node is the surface the issue names, and a mesh with no node
+ * renders no header at all.
+ */
+async function selectFixtureMesh(page, interactions, meshId) {
+  if (!meshId) return false;
+  const item = page.locator(`[id="mesh-item-name-${meshId}"]`);
+  const clicked = await safeClick(page, item, 'select the fixture mesh in the sidebar');
+  interactions.push(clicked);
+  if (!clicked.ok) return false;
+  const header = page.locator('[data-testid="grid-node-header"]').first();
+  return header
+    .waitFor({ state: 'visible', timeout: 20000 })
+    .then(() => true)
+    .catch(() => false);
+}
+
 /** One measurement pass over the surfaces the issue names. */
-async function survey(page, stage) {
+async function survey(page, stage, meshId) {
   const interactions = [];
+  const agentFound = await selectFixtureMesh(page, interactions, meshId);
   const meshName = await fontSize(page, '[id^="mesh-item-name-"]');
   const gridName = await fontSize(page, '[data-testid="grid-node-header"] .text-label');
   const probe = await openProbe(page, interactions);
@@ -154,6 +183,7 @@ async function survey(page, stage) {
 
   return {
     stage,
+    agentFound,
     meshName,
     gridName,
     probe,
@@ -173,6 +203,59 @@ function assertInteractions(surveyed, where) {
       `${where}: ${failed.map((f) => `${f.step} (${f.error ?? 'failed'})`).join('; ')}`,
     );
   }
+}
+
+/** The agent must be FINDABLE: the grid header has to have rendered. */
+function assertAgentFound(surveyed, where) {
+  if (!surveyed.agentFound || surveyed.gridName === null) {
+    throw new Error(
+      `${where}: no agent node was found in the grid (agentFound=${surveyed.agentFound}, gridName=${surveyed.gridName})`,
+    );
+  }
+}
+
+/**
+ * Change the terminal font size through the app's own title-bar Zoom control.
+ *
+ * The Zoom pill folds into the More panel at narrow widths — which is exactly
+ * the case at a 200% window zoom — so both routes are tried. The slider is a
+ * native range input, so it is driven with the keyboard and the stored value
+ * is read back: the point is that the app's own setter runs, not that the
+ * script writes localStorage.
+ */
+async function setTerminalFontSizeViaUi(page, target) {
+  const pill = page.getByTestId('titlebar-zoom');
+  if ((await pill.count()) > 0) {
+    await pill.first().click({ timeout: 8000 }).catch(() => {});
+  } else {
+    await page.getByTestId('titlebar-overflow').click({ timeout: 8000 }).catch(() => {});
+  }
+  const slider = page.getByTestId('zoom-slider');
+  const visible = await slider
+    .first()
+    .waitFor({ state: 'visible', timeout: 15000 })
+    .then(() => true)
+    .catch(() => false);
+  if (!visible) return null;
+  await slider.first().focus();
+  const wanted = Number(target);
+  const current = Number(
+    await page.evaluate((key) => localStorage.getItem(key), TERMINAL_FONT_KEY),
+  );
+  const step = wanted > current ? 'ArrowRight' : 'ArrowLeft';
+  for (let i = 0; i < 12; i += 1) {
+    const now = Number(
+      await page.evaluate((key) => localStorage.getItem(key), TERMINAL_FONT_KEY),
+    );
+    // Both sides are numbers: a string comparison never matches, and the
+    // slider would then run to the end of its range instead of stopping.
+    if (now === wanted) break;
+    await page.keyboard.press(step);
+    await page.waitForTimeout(120);
+  }
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(200);
+  return page.evaluate((key) => localStorage.getItem(key), TERMINAL_FONT_KEY);
 }
 
 /**
@@ -197,17 +280,41 @@ export default async function ({ page, invoke }) {
   const receipt = { appPid: process.env.BUILDMESH_APP_PID ?? null, at: new Date().toISOString() };
 
   // A mesh with a long name, so the label is one the sidebar has to truncate
-  // rather than a toy name that always fits.
-  await invoke('create_test_mesh', { name: MESH_NAME }).catch(() => null);
+  // rather than a toy name that always fits, and an AGENT NODE in it, so
+  // "finding an agent" is measured on the grid header rather than assumed.
+  // `create_test_mesh` upserts by path, so the row keeps the name an earlier
+  // fixture gave it; the id is what this run relies on.
+  const mesh = await invoke('create_test_mesh', { name: MESH_NAME }).catch(() => null);
+  const fixture = { meshId: mesh?.id ?? null, meshName: mesh?.name ?? null, agentNodeId: null };
+  if (mesh?.id) {
+    const node = await invoke('create_agent_node', {
+      meshId: mesh.id,
+      name: AGENT_NAME,
+      path: mesh.path ?? '',
+      branch: 'main',
+      // The node only has to render; it needs no worktree of its own.
+      useWorktree: false,
+      provider: 'anthropic',
+    }).catch(() => null);
+    fixture.agentNodeId = node?.id ?? null;
+  }
+  receipt.fixture = fixture;
+  if (!fixture.agentNodeId) {
+    throw new Error('the fixture agent node was not created — the grid header cannot be measured');
+  }
 
   // Start from a clean slate: a previous run's persisted zoom would otherwise
   // decide what this run measures.
   await resetNativeZoom(page);
-  await page.evaluate(({ textScale, density, zoom }) => {
+  await page.evaluate(({ textScale, density, zoom, terminal }) => {
     localStorage.removeItem(textScale);
     localStorage.removeItem(density);
     localStorage.removeItem(zoom);
-  }, { textScale: TEXT_SCALE_KEY, density: DENSITY_KEY, zoom: ZOOM_KEY });
+    // The terminal font size is set to an EXPLICIT value. Left unset, every
+    // stage would report `null` and the independence check would pass
+    // vacuously — proving nothing about the interface settings.
+    localStorage.setItem(terminal, '14');
+  }, { textScale: TEXT_SCALE_KEY, density: DENSITY_KEY, zoom: ZOOM_KEY, terminal: TERMINAL_FONT_KEY });
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.getByTestId('titlebar-command-search').waitFor({ state: 'visible', timeout: 30000 });
   await page.waitForTimeout(1200);
@@ -220,10 +327,16 @@ export default async function ({ page, invoke }) {
   }
 
   // ---- 1. Default --------------------------------------------------------
-  receipt.default = await survey(page, 'default');
+  receipt.default = await survey(page, 'default', fixture.meshId);
   assertInteractions(receipt.default, 'default');
+  assertAgentFound(receipt.default, 'default');
   if (Math.abs((receipt.default.meshName ?? 0) - 13) > 0.3) {
     throw new Error(`the sidebar mesh name should be 13px, measured ${receipt.default.meshName}`);
+  }
+  if (Math.abs((receipt.default.gridName ?? 0) - 13) > 0.3) {
+    throw new Error(
+      `the grid header agent name should be 13px, measured ${receipt.default.gridName}`,
+    );
   }
 
   // ---- 2. 150% interface text scale -------------------------------------
@@ -231,11 +344,17 @@ export default async function ({ page, invoke }) {
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.getByTestId('titlebar-command-search').waitFor({ state: 'visible', timeout: 30000 });
   await page.waitForTimeout(1200);
-  receipt.at150 = await survey(page, '150% text scale');
+  receipt.at150 = await survey(page, '150% text scale', fixture.meshId);
   assertInteractions(receipt.at150, '150% text scale');
+  assertAgentFound(receipt.at150, '150% text scale');
   if (Math.abs((receipt.at150.meshName ?? 0) - 19.5) > 0.4) {
     throw new Error(
       `the sidebar mesh name should be 19.5px at a 150% text scale, measured ${receipt.at150.meshName}`,
+    );
+  }
+  if (Math.abs((receipt.at150.gridName ?? 0) - 19.5) > 0.4) {
+    throw new Error(
+      `the grid header agent name should be 19.5px at a 150% text scale, measured ${receipt.at150.gridName}`,
     );
   }
 
@@ -263,7 +382,14 @@ export default async function ({ page, invoke }) {
     .catch(() => {});
   await page.waitForTimeout(800);
 
-  receipt.at200 = await survey(page, '200% window zoom');
+  receipt.at200 = await survey(page, '200% window zoom', fixture.meshId);
+  assertInteractions(receipt.at200, '200% window zoom');
+  assertAgentFound(receipt.at200, '200% window zoom');
+  if (Math.abs((receipt.at200.gridName ?? 0) - 19.5) > 0.4) {
+    throw new Error(
+      `the grid header agent name should be 19.5px at a 200% window zoom, measured ${receipt.at200.gridName}`,
+    );
+  }
 
   // The window zoom must have actually moved the platform zoom, not just the
   // stored preference: the CSS viewport halves and the device pixel ratio
@@ -297,12 +423,14 @@ export default async function ({ page, invoke }) {
   // controller, so it survives a reload even if the boot path did nothing.
   // This stage therefore proves the reload path (the density and the text
   // scale are re-applied from module load, and the zoom is still in force);
-  // the real relaunch â€” a fresh webview that starts at 1x â€” is proven by
+  // the real relaunch — a fresh webview that starts at 1x — is proven by
   // `native-relaunch.steps.mjs`.
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.getByTestId('titlebar-command-search').waitFor({ state: 'visible', timeout: 30000 });
   await page.waitForTimeout(1500);
-  receipt.afterReload = await survey(page, 'after reload');
+  receipt.afterReload = await survey(page, 'after reload', fixture.meshId);
+  assertInteractions(receipt.afterReload, 'after reload');
+  assertAgentFound(receipt.afterReload, 'after reload');
   receipt.storedAfterReload = await page.evaluate(
     ({ textScale, density, zoom, terminal }) => ({
       textScale: localStorage.getItem(textScale),
@@ -324,6 +452,9 @@ export default async function ({ page, invoke }) {
   }
 
   // ---- 5. The terminal font size is independent --------------------------
+  // The size was set to an explicit 14px before the run, so the values below
+  // are real numbers and not `null` placeholders: a check that passed on
+  // `unset` everywhere would prove nothing.
   receipt.terminalFontIndependence = {
     default: receipt.default.terminalFontSize,
     at150: receipt.at150.terminalFontSize,
@@ -333,9 +464,37 @@ export default async function ({ page, invoke }) {
   const terminalSizes = new Set(
     Object.values(receipt.terminalFontIndependence).map((value) => value ?? 'unset'),
   );
-  if (terminalSizes.size > 1) {
+  if (terminalSizes.size !== 1) {
     throw new Error(
       `the terminal font size moved with the interface settings: ${JSON.stringify(receipt.terminalFontIndependence)}`,
+    );
+  }
+  if (terminalSizes.has('unset')) {
+    throw new Error(
+      `the terminal font size was never set, so the independence check is vacuous: ${JSON.stringify(receipt.terminalFontIndependence)}`,
+    );
+  }
+
+  // ---- 6. The independence runs the other way too ------------------------
+  // The terminal font size is changed THROUGH the app's own title-bar Zoom
+  // control, at the enlarged size, and the interface type must not move.
+  const interfaceBefore = await fontSize(page, '[id^="mesh-item-name-"]');
+  const changed = await setTerminalFontSizeViaUi(page, '16');
+  const interfaceAfter = await fontSize(page, '[id^="mesh-item-name-"]');
+  receipt.terminalFontControl = {
+    requested: '16',
+    stored: changed,
+    interfaceLabelBefore: interfaceBefore,
+    interfaceLabelAfter: interfaceAfter,
+  };
+  if (Number(changed) !== 16) {
+    throw new Error(
+      `the terminal Zoom control did not take the new size: ${JSON.stringify(receipt.terminalFontControl)}`,
+    );
+  }
+  if (interfaceBefore === null || interfaceAfter === null || interfaceBefore !== interfaceAfter) {
+    throw new Error(
+      `the interface type moved with the terminal font size: ${JSON.stringify(receipt.terminalFontControl)}`,
     );
   }
 

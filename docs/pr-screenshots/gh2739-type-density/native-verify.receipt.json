@@ -1,6 +1,11 @@
 {
-  "appPid": "47328",
-  "at": "2026-11-09T13:56:24.216Z",
+  "appPid": "67468",
+  "at": "2026-11-09T15:05:20.145Z",
+  "fixture": {
+    "meshId": 1,
+    "meshName": "readability-check-mesh-with-a-long-name",
+    "agentNodeId": 5
+  },
   "startingViewport": {
     "innerWidth": 1280,
     "innerHeight": 800,
@@ -8,12 +13,13 @@
   },
   "default": {
     "stage": "default",
+    "agentFound": true,
     "meshName": 13,
-    "gridName": null,
+    "gridName": 13,
     "probe": {
       "title": 13,
       "subject": 13,
-      "detail": null,
+      "detail": 11.375,
       "text": "Project Files"
     },
     "settings": {
@@ -22,6 +28,10 @@
     "displaced": "Usage",
     "interactions": [
       {
+        "step": "select the fixture mesh in the sidebar",
+        "ok": true
+      },
+      {
         "step": "open the Probe from the omnibar",
         "ok": true
       },
@@ -51,16 +61,17 @@
       "innerHeight": 800,
       "devicePixelRatio": 1.5
     },
-    "terminalFontSize": null
+    "terminalFontSize": "14"
   },
   "at150": {
     "stage": "150% text scale",
+    "agentFound": true,
     "meshName": 19.5,
-    "gridName": null,
+    "gridName": 19.5,
     "probe": {
       "title": 19.5,
       "subject": 19.5,
-      "detail": null,
+      "detail": 17.0625,
       "text": "Project Files"
     },
     "settings": {
@@ -68,6 +79,10 @@
     },
     "displaced": "Usage",
     "interactions": [
+      {
+        "step": "select the fixture mesh in the sidebar",
+        "ok": true
+      },
       {
         "step": "open the Probe from the omnibar",
         "ok": true
@@ -98,16 +113,17 @@
       "innerHeight": 800,
       "devicePixelRatio": 1.5
     },
-    "terminalFontSize": null
+    "terminalFontSize": "14"
   },
   "at200": {
     "stage": "200% window zoom",
+    "agentFound": true,
     "meshName": 19.5,
-    "gridName": null,
+    "gridName": 19.5,
     "probe": {
       "title": 19.5,
       "subject": 19.5,
-      "detail": null,
+      "detail": 17.0625,
       "text": "Project Files"
     },
     "settings": {
@@ -115,6 +131,10 @@
     },
     "displaced": "Usage",
     "interactions": [
+      {
+        "step": "select the fixture mesh in the sidebar",
+        "ok": true
+      },
       {
         "step": "open the More panel to reach the Probe",
         "ok": true
@@ -149,7 +169,7 @@
       "innerHeight": 400,
       "devicePixelRatio": 3
     },
-    "terminalFontSize": null
+    "terminalFontSize": "14"
   },
   "zoomEffect": {
     "innerWidthBefore": 1280,
@@ -164,12 +184,13 @@
   },
   "afterReload": {
     "stage": "after reload",
+    "agentFound": true,
     "meshName": 19.5,
-    "gridName": null,
+    "gridName": 19.5,
     "probe": {
       "title": 19.5,
       "subject": 19.5,
-      "detail": null,
+      "detail": 17.0625,
       "text": "Project Files"
     },
     "settings": {
@@ -177,6 +198,10 @@
     },
     "displaced": "Usage",
     "interactions": [
+      {
+        "step": "select the fixture mesh in the sidebar",
+        "ok": true
+      },
       {
         "step": "open the More panel to reach the Probe",
         "ok": true
@@ -211,18 +236,24 @@
       "innerHeight": 400,
       "devicePixelRatio": 3
     },
-    "terminalFontSize": null
+    "terminalFontSize": "14"
   },
   "storedAfterReload": {
     "textScale": "150",
     "density": null,
     "zoom": "200",
-    "terminalFontSize": null
+    "terminalFontSize": "14"
   },
   "terminalFontIndependence": {
-    "default": null,
-    "at150": null,
-    "at200": null,
-    "afterReload": null
+    "default": "14",
+    "at150": "14",
+    "at200": "14",
+    "afterReload": "14"
+  },
+  "terminalFontControl": {
+    "requested": "16",
+    "stored": "16",
+    "interfaceLabelBefore": 19.5,
+    "interfaceLabelAfter": 19.5
   }
 }
