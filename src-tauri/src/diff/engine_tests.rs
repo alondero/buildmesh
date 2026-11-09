@@ -8,8 +8,11 @@ use std::sync::Arc;
 
 use crate::diff::cancel::{cancel_poll_count, set_cancel_poll_probe, DIFF_CANCELLED};
 use crate::diff::engine::{
-    build_hunk, build_sides, compute_file_diff, diff_against_base, group_into_hunks, CONTEXT_LINES,
+    build_hunk, build_hunk_with, build_sides, compute_file_diff, count_file_changes,
+    diff_against_base, diff_against_base_impl, diff_counts_against_base, group_into_hunks,
+    HunkHighlight, CONTEXT_LINES,
 };
+use crate::diff::work_metrics;
 use crate::diff::{changed_files_at, file_against_head};
 use crate::env::test_helpers::{commit_file, init_repo_with_commit, repo_is_dirty, TestDir};
 use crate::models::{DiffLine, DiffResult};
@@ -614,12 +617,385 @@ fn diff_against_base_flags_binary_without_hunks() {
     assert!(bin.hunks.is_empty(), "binary file must not dump byte hunks");
 }
 
+/// Issue #2726: a representative many-file change set measures the banner's
+/// before/after read. The legacy hunk HTML path and the lean full diff do
+/// per-line highlighting; the counts-only read does no hunk or highlight
+/// work, and its serialized payload is far smaller. Timings are printed for
+/// the handoff record, not asserted (scheduler noise makes a wall-clock
+/// assertion flaky); the work counters and byte sizes are deterministic.
+/// The memory figures are process-lifetime peaks with a note, not per-phase
+/// isolated deltas.
+#[test]
+fn many_file_counts_read_avoids_hunk_highlighting_and_payload() {
+    const FILES: usize = 48;
+    const LINES: usize = 24;
+
+    let tmp = DiffFixture::new();
+    let repo = init_many_file_repo(&tmp, FILES, LINES);
+    drop(repo);
+    for i in 0..FILES {
+        let mut body = String::new();
+        for line in 0..LINES {
+            let value = if line == LINES / 2 {
+                format!("file {i} line {line} CHANGED")
+            } else {
+                format!("file {i} line {line}")
+            };
+            body.push_str(&value);
+            body.push('\n');
+        }
+        std::fs::write(tmp.join("src").join(format!("file_{i}.rs")), body).unwrap();
+    }
+
+    work_metrics::take();
+    let memory_before = process_memory();
+    let started = std::time::Instant::now();
+    let legacy = diff_against_base_impl(
+        tmp.to_str().unwrap(),
+        "base",
+        None,
+        None,
+        HunkHighlight::Sides,
+    )
+    .unwrap();
+    let legacy_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let legacy_work = work_metrics::take();
+    let legacy_bytes = serde_json::to_vec(&legacy).unwrap().len();
+    drop(legacy);
+    let memory_after_legacy = process_memory();
+
+    let started = std::time::Instant::now();
+    let lean = diff_against_base(tmp.to_str().unwrap(), "base", None, None).unwrap();
+    let lean_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let lean_work = work_metrics::take();
+    let lean_bytes = serde_json::to_vec(&lean).unwrap().len();
+    let expected = lean.files.iter().fold((0usize, 0usize), |totals, file| {
+        (totals.0 + file.additions, totals.1 + file.deletions)
+    });
+    drop(lean);
+    let memory_after_lean = process_memory();
+
+    let started = std::time::Instant::now();
+    let counts = diff_counts_against_base(tmp.to_str().unwrap(), "base", None).unwrap();
+    let counts_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let counts_work = work_metrics::take();
+    let counts_bytes = serde_json::to_vec(&counts).unwrap().len();
+    let memory_after_counts = process_memory();
+
+    eprintln!(
+        "DIFF_COUNTS_BENCH {}",
+        serde_json::json!({
+            "files": FILES,
+            "legacy": {"ms": legacy_ms, "bytes": legacy_bytes, "work": legacy_work},
+            "lean": {"ms": lean_ms, "bytes": lean_bytes, "work": lean_work},
+            "counts": {"ms": counts_ms, "bytes": counts_bytes, "work": counts_work},
+            "memory": {
+                "note": "process-lifetime peaks, not per-phase deltas",
+                "before": memory_before,
+                "after_legacy": memory_after_legacy,
+                "after_lean": memory_after_lean,
+                "after_counts": memory_after_counts,
+            },
+            "totals": {"additions": counts.additions, "deletions": counts.deletions},
+        })
+    );
+
+    assert!(legacy_work[0] > 0 && legacy_work[1] > 0 && legacy_work[2] > 0);
+    assert!(lean_work[0] > 0 && lean_work[1] == 0 && lean_work[2] > 0);
+    assert_eq!(counts_work, [0, 0, 0]);
+    assert!(legacy_bytes > lean_bytes);
+    assert!(lean_bytes > counts_bytes);
+    assert_eq!((counts.additions, counts.deletions), expected);
+}
+
+/// Process working-set and peak figures, for the benchmark line above. Only
+/// Windows reports them; elsewhere the fields are JSON null.
+#[cfg(windows)]
+fn process_memory() -> serde_json::Value {
+    #[repr(C)]
+    #[derive(Default)]
+    struct Counters {
+        cb: u32,
+        faults: u32,
+        peak_working_set: usize,
+        working_set: usize,
+        peak_paged_pool: usize,
+        paged_pool: usize,
+        peak_nonpaged_pool: usize,
+        nonpaged_pool: usize,
+        pagefile: usize,
+        peak_pagefile: usize,
+        private: usize,
+    }
+    #[link(name = "psapi")]
+    extern "system" {
+        fn GetProcessMemoryInfo(process: isize, counters: *mut Counters, size: u32) -> i32;
+    }
+    let mut counters = Counters::default();
+    let size = std::mem::size_of::<Counters>() as u32;
+    counters.cb = size;
+    // -1 is the current-process pseudo handle. PeakPagefileUsage is peak
+    // committed private bytes for the process.
+    assert_ne!(unsafe { GetProcessMemoryInfo(-1, &mut counters, size) }, 0);
+    serde_json::json!({
+        "private_bytes": counters.private,
+        "peak_private_bytes": counters.peak_pagefile,
+        "peak_working_set_bytes": counters.peak_working_set,
+    })
+}
+
+#[cfg(not(windows))]
+fn process_memory() -> serde_json::Value {
+    serde_json::Value::Null
+}
+
+/// A repository with `files` small source files under `src/`, committed on a
+/// `base` branch.
+fn init_many_file_repo(dir: &std::path::Path, files: usize, lines: usize) -> git2::Repository {
+    let repo = git2::Repository::init(dir).unwrap();
+    let sig = git2::Signature::now("t", "t@example.com").unwrap();
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    for i in 0..files {
+        let mut body = String::new();
+        for line in 0..lines {
+            body.push_str(&format!("file {i} line {line}\n"));
+        }
+        std::fs::write(dir.join("src").join(format!("file_{i}.rs")), body).unwrap();
+    }
+    {
+        let mut index = repo.index().unwrap();
+        index
+            .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+            .unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let oid = repo
+            .commit(Some("HEAD"), &sig, &sig, "base tree", &tree, &[])
+            .unwrap();
+        let base_commit = repo.find_commit(oid).unwrap();
+        repo.branch("base", &base_commit, true).unwrap();
+    }
+    repo
+}
+
+/// The counts helper uses the same line-splitting rules as the full diff,
+/// including a file whose last line has no trailing newline.
+#[test]
+fn count_file_changes_matches_the_line_diff_counts() {
+    for (old, new) in [
+        ("", ""),
+        ("", "one\ntwo\n"),
+        ("one\ntwo\n", "one\ntwo\nthree\n"),
+        ("one\ntwo\nthree\n", "one\nTWO\nthree\n"),
+        ("one\ntwo\nthree\n", "one\n"),
+        ("one\nlast", "one\nlast\n"),
+        ("one\nlast\n", "one\nlast"),
+        ("one\r\ntwo\r\n", "one\r\nTWO\r\n"),
+    ] {
+        let lines = compute_file_diff(old, new);
+        let additions = lines.iter().filter(|line| line.line_type == "add").count();
+        let deletions = lines
+            .iter()
+            .filter(|line| line.line_type == "remove")
+            .count();
+        assert_eq!(
+            count_file_changes(old, new),
+            (additions, deletions),
+            "counts must match the full line diff for {old:?} -> {new:?}"
+        );
+    }
+}
+
+/// Issue #2726: the banner's counts-only read must report exactly the totals
+/// the full diff reports, for committed and uncommitted work, staged and
+/// unstaged edits, additions, deletions, modifications, a rename, an
+/// untracked file and a binary file — while doing none of the hunk or
+/// highlight work. That last part is what distinguishes this read from
+/// fetching the full diff and discarding all but its counts.
+#[test]
+fn counts_against_base_match_full_diff_without_hunk_or_highlight_work() {
+    let tmp = DiffFixture::new();
+    let repo = init_mixed_repo(&tmp);
+
+    // Committed since base: a new file and a rename-plus-edit, so the
+    // parity sum actually counts the renamed entry's lines.
+    std::fs::write(tmp.join("new.txt"), "new\nlines\n").unwrap();
+    std::fs::write(tmp.join("renamed.txt"), "alpha\nbeta\ngamma\n").unwrap();
+    std::fs::remove_file(tmp.join("rename-me.txt")).unwrap();
+    {
+        let mut index = repo.index().unwrap();
+        index
+            .remove_path(std::path::Path::new("rename-me.txt"))
+            .unwrap();
+        index.add_path(std::path::Path::new("new.txt")).unwrap();
+        index.add_path(std::path::Path::new("renamed.txt")).unwrap();
+        index.write().unwrap();
+    }
+    commit_all(&repo, "agent work");
+
+    // A staged edit, an unstaged edit and deletion, an untracked text file
+    // and a binary file — all since the base.
+    std::fs::write(tmp.join("base.txt"), "one\nTWO\nthree\nstaged\n").unwrap();
+    {
+        let mut index = repo.index().unwrap();
+        index.add_path(std::path::Path::new("base.txt")).unwrap();
+        index.write().unwrap();
+    }
+    std::fs::write(tmp.join("edit.txt"), "one\ntwo\nthree\nfour\nFIVE\n").unwrap();
+    std::fs::remove_file(tmp.join("drop.txt")).unwrap();
+    std::fs::write(tmp.join("untracked.txt"), "u1\nu2\n").unwrap();
+    std::fs::write(tmp.join("blob.bin"), [0u8, 1, 2, 0, 255, 7]).unwrap();
+    drop(repo);
+
+    work_metrics::take();
+    let full = diff_against_base(tmp.to_str().unwrap(), "base", None, None).unwrap();
+    let full_work = work_metrics::take();
+    assert!(
+        full_work[0] > 0 && full_work[2] > 0,
+        "precondition: the full diff constructs hunks and runs per-line highlights, got {full_work:?}"
+    );
+    assert_eq!(
+        full_work[1], 0,
+        "the default full diff must not generate whole-hunk HTML, got {full_work:?}"
+    );
+    let renamed = full
+        .files
+        .iter()
+        .find(|file| file.status == "renamed")
+        .unwrap_or_else(|| {
+            panic!(
+                "fixture must include a rename; got {:?}",
+                full.files
+                    .iter()
+                    .map(|file| (&file.path, &file.status))
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert!(
+        renamed.additions > 0,
+        "the rename fixture must carry a content edit so its counts are exercised"
+    );
+    assert!(
+        full.files.iter().any(|file| file.binary),
+        "fixture must include a binary file"
+    );
+
+    let counts = diff_counts_against_base(tmp.to_str().unwrap(), "base", None).unwrap();
+    assert_eq!(
+        work_metrics::take(),
+        [0, 0, 0],
+        "the counts-only walk must not construct a hunk or run a highlight"
+    );
+
+    let expected = full.files.iter().fold((0usize, 0usize), |totals, file| {
+        (totals.0 + file.additions, totals.1 + file.deletions)
+    });
+    assert_eq!(
+        (counts.additions, counts.deletions),
+        expected,
+        "counts-only totals must equal the sum of the full diff"
+    );
+    assert!(counts.additions > 0 && counts.deletions > 0);
+}
+
+/// A pre-set cancel flag short-circuits the counts-only walk with the same
+/// sentinel the full walk uses.
+#[test]
+fn diff_counts_against_base_returns_cancelled_when_flag_pre_set() {
+    let tmp = DiffFixture::new();
+    init_repo_with_base(&tmp);
+    std::fs::write(tmp.join("edit.rs"), "fn main() {}\n").unwrap();
+
+    let token = AtomicBool::new(true);
+    let result = diff_counts_against_base(tmp.to_str().unwrap(), "base", Some(&token));
+    assert_eq!(
+        result.as_ref().err().map(|error| error.to_string()),
+        Some(DIFF_CANCELLED.to_string()),
+        "pre-set flag must short-circuit with the cancellation sentinel"
+    );
+}
+
+/// The counts-only walk polls the cancel flag at every file boundary, so a
+/// flag flipped mid-walk stops it with the same sentinel. This is the seam
+/// that bounds concurrent turn-finished banners to the newest request.
+#[test]
+fn diff_counts_against_base_returns_cancelled_when_flag_flipped_mid_walk() {
+    const FLIP_AT: usize = 2;
+    const FLIP_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+    let tmp = DiffFixture::new();
+    init_repo_with_base(&tmp);
+    for i in 0..6 {
+        std::fs::write(tmp.join(format!("f{i}.txt")), format!("before {i}\n")).unwrap();
+    }
+
+    let token = Arc::new(AtomicBool::new(false));
+    let (flip_tx, flip_rx) = std::sync::mpsc::channel::<()>();
+    let (ack_tx, ack_rx) = std::sync::mpsc::channel::<()>();
+    let flipper_token = Arc::clone(&token);
+    let flipper = std::thread::spawn(move || {
+        if flip_rx.recv_timeout(FLIP_ACK_TIMEOUT).is_err() {
+            return;
+        }
+        flipper_token.store(true, Ordering::SeqCst);
+        let _ = ack_tx.send(());
+    });
+
+    set_cancel_poll_probe(Some(std::rc::Rc::new(move |poll| {
+        if poll == FLIP_AT {
+            flip_tx.send(()).expect("flipper thread is alive");
+            ack_rx
+                .recv_timeout(FLIP_ACK_TIMEOUT)
+                .expect("flipper must store the token while the walk is parked");
+        }
+    })));
+
+    let result = diff_counts_against_base(tmp.to_str().unwrap(), "base", Some(&token));
+    let polls = cancel_poll_count();
+    set_cancel_poll_probe(None);
+    if polls > FLIP_AT {
+        flipper.join().unwrap();
+    }
+
+    assert_eq!(
+        result.as_ref().err().map(|error| error.to_string()),
+        Some(DIFF_CANCELLED.to_string()),
+        "mid-walk flag flip must return the cancellation sentinel"
+    );
+    assert_eq!(
+        polls,
+        FLIP_AT + 1,
+        "the counts walk must stop at the first file boundary after the flip"
+    );
+}
+
+/// The counts-only read reports the same unavailable-repository error as the
+/// full read, so the banner's enrichment path keeps its current behaviour.
+#[test]
+fn diff_counts_against_base_reports_the_same_error_for_a_missing_repository() {
+    let tmp = DiffFixture::new();
+    let missing = tmp.join("not-a-repository");
+
+    let full_error = diff_against_base(missing.to_str().unwrap(), "base", None, None)
+        .unwrap_err()
+        .to_string();
+    let counts_error = diff_counts_against_base(missing.to_str().unwrap(), "base", None)
+        .unwrap_err()
+        .to_string();
+
+    assert_eq!(counts_error, full_error);
+    assert!(!counts_error.is_empty());
+}
+
 #[test]
 fn build_hunk_emits_per_line_highlight_aligned_with_lines() {
     let lines = compute_file_diff("let x = 1;\n", "let x = 2;\n");
     let groups = group_into_hunks(&lines, CONTEXT_LINES);
     assert!(!groups.is_empty());
     let hunk = build_hunk(&groups[0], "main.rs");
+    // The lean path keeps per-line highlighting...
+    assert!(hunk.old_highlighted.is_empty());
+    assert!(hunk.new_highlighted.is_empty());
     // One highlighted string per line, same order.
     assert_eq!(hunk.lines_highlighted.len(), hunk.lines.len());
     // Highlighted output is HTML spans, not raw source.
@@ -628,6 +1004,39 @@ fn build_hunk_emits_per_line_highlight_aligned_with_lines() {
     assert!(
         hunk.lines_highlighted.iter().any(|h| h.contains('2')),
         "expected the new value to appear in highlighted output"
+    );
+}
+
+/// Issue #2726: the desktop view reads only `lines_highlighted`; the mobile
+/// web and Android clients render `lines[].content`. The legacy whole-hunk
+/// fields stay empty on the default path, and a test-only full render
+/// produces the old representation for the payload comparison.
+#[test]
+fn lean_hunks_omit_whole_hunk_html_that_no_current_client_reads() {
+    let mut old = String::new();
+    for line in 0..40 {
+        old.push_str(&format!("let value_{line} = {line};\n"));
+    }
+    let new = old.replace("let value_20 = 20;", "let value_20 = 2000;");
+    let lines = compute_file_diff(&old, &new);
+    let groups = group_into_hunks(&lines, CONTEXT_LINES);
+    assert!(!groups.is_empty());
+
+    let lean = build_hunk(&groups[0], "main.rs");
+    assert!(lean.old_highlighted.is_empty());
+    assert!(lean.new_highlighted.is_empty());
+    assert!(!lean.lines_highlighted.is_empty());
+
+    let full = build_hunk_with(&groups[0], "main.rs", HunkHighlight::Sides);
+    assert_eq!(full.lines_highlighted, lean.lines_highlighted);
+    assert!(!full.old_highlighted.is_empty());
+    assert!(!full.new_highlighted.is_empty());
+
+    let lean_bytes = serde_json::to_vec(&lean).unwrap().len();
+    let full_bytes = serde_json::to_vec(&full).unwrap().len();
+    assert!(
+        full_bytes > lean_bytes && full_bytes - lean_bytes > 512,
+        "lean hunk should remove the whole-hunk HTML payload: {lean_bytes} vs {full_bytes} bytes"
     );
 }
 

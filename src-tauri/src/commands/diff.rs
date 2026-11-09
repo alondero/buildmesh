@@ -12,12 +12,12 @@
 //! data back.
 
 use crate::commands::git::{GitStatus, GitSummary};
-use crate::models::DiffResult;
+use crate::models::{DiffCounts, DiffResult};
 use tauri::command;
 
 /// Diff two files on disk.
 // Offloaded via `run_blocking` (issue #762 convention): file reads + the
-// line diff + three syntect highlight passes per hunk are CPU/IO work that
+// line diff + the per-line syntect pass per hunk are CPU/IO work that
 // would otherwise park a Tauri async worker.
 #[command]
 pub async fn diff_files(old_path: String, new_path: String) -> Result<DiffResult, String> {
@@ -43,8 +43,8 @@ pub async fn diff_file_against_head(
 /// Diff every file an Agent Node changed since it branched (ADR 0005). One call
 /// returns the whole change set the review panel renders as a stacked view.
 // Offloaded via `run_blocking`: the walk reads the whole working directory
-// with libgit2, reads every changed file, and runs three syntect highlight
-// passes per hunk — seconds of CPU on a busy worktree. The review panel
+// with libgit2, reads every changed file, and runs a per-line syntect pass
+// per hunk — seconds of CPU on a busy worktree. The review panel
 // re-fetches it on every `git-changed` event while an agent edits, so an
 // inline body is the single biggest pool-parker in the app (the #761/#762
 // starvation class: UI alive, keystrokes and probes frozen).
@@ -80,6 +80,22 @@ pub async fn diff_node_file_against_base(
         crate::diff::node_file_change_set(node_id, &file_path)
             .map(|files| DiffResult { files })
             .map_err(|error| error.to_string())
+    })
+    .await
+}
+
+/// The total added/removed lines in an Agent Node's change set.
+///
+/// The turn-finished banner's read (issue #2726): same merge-base baseline,
+/// file walk, binary classification and line counts as
+/// `diff_node_against_base`, without constructing hunks or running syntect.
+// Offloaded via `run_blocking` — the walk still reads repository content.
+// Issue #1181: same per-node cancel plumbing; the banner's AbortSignal drops
+// a stale local result, and a fresh request for the node stops a prior walk.
+#[command]
+pub async fn diff_node_counts_against_base(node_id: i64) -> Result<DiffCounts, String> {
+    crate::commands::run_blocking("diff_node_counts_against_base", move || {
+        crate::diff::node_change_counts(node_id).map_err(|error| error.to_string())
     })
     .await
 }

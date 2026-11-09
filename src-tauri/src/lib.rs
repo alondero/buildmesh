@@ -521,6 +521,7 @@ pub fn run() {
             commands::diff::diff_file_against_head,
             commands::diff::diff_node_against_base,
             commands::diff::diff_node_file_against_base,
+            commands::diff::diff_node_counts_against_base,
             commands::diff::node_changed_files,
             commands::diff::node_changed_summary,
             // File tree

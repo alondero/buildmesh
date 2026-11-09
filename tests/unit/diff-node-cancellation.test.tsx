@@ -1,6 +1,6 @@
 /**
- * Issue #1181 — AbortSignal plumbing for `diffNodeAgainstBase` and
- * `diffNodeFileAgainstBase`.
+ * Issue #1181 — AbortSignal plumbing for `diffNodeAgainstBase`,
+ * `diffNodeFileAgainstBase`, and `diffNodeCountsAgainstBase`.
  *
  * The Tauri 2 `invoke()` binding in this version doesn't yet forward
  * an `AbortSignal` to the Rust command, so the *actual* backend
@@ -22,7 +22,11 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
-import { diffNodeAgainstBase, diffNodeFileAgainstBase } from '../../src/lib/tauri';
+import {
+  diffNodeAgainstBase,
+  diffNodeCountsAgainstBase,
+  diffNodeFileAgainstBase,
+} from '../../src/lib/tauri';
 
 const EMPTY_DIFF = { files: [] };
 
@@ -77,6 +81,21 @@ describe('Issue #1181 — diff cancellation wrapper', () => {
       nodeId: 7,
       filePath: 'src/app.ts',
     });
+  });
+
+  it('diffNodeCountsAgainstBase short-circuits on a pre-aborted signal', async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(diffNodeCountsAgainstBase(7, controller.signal)).rejects.toBeDefined();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it('diffNodeCountsAgainstBase with a live signal reads the counts-only command', async () => {
+    const controller = new AbortController();
+    await diffNodeCountsAgainstBase(7, controller.signal);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith('diff_node_counts_against_base', { nodeId: 7 });
   });
 
   it('the wrapper rejects the abort branch with a DOMException, not a plain Error', async () => {

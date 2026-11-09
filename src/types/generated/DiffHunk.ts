@@ -9,17 +9,25 @@ import type { DiffLine } from "./DiffLine";
  */
 export type DiffHunk = { old_start: number, old_lines: number, new_start: number, new_lines: number, 
 /**
- * Full highlighted HTML for the old version of this hunk (side-by-side view)
+ * Legacy whole-hunk HTML for the old version of this hunk.
+ *
+ * The default rendering path leaves this empty: no current desktop,
+ * mobile web, or Android view reads it. It stays on the wire, as an
+ * empty string, so the payload shape remains compatible (issue #2726).
  */
 old_highlighted: string, 
 /**
- * Full highlighted HTML for the new version of this hunk (side-by-side view)
+ * Legacy whole-hunk HTML for the new version of this hunk.
+ *
+ * The default rendering path leaves this empty: no current desktop,
+ * mobile web, or Android view reads it. It stays on the wire, as an
+ * empty string, so the payload shape remains compatible (issue #2726).
  */
 new_highlighted: string, lines: Array<DiffLine>, 
 /**
- * Per-line highlighted inline HTML, aligned 1:1 with `lines`. Lets the
- * unified view colour each row with syntax highlighting while keeping its
- * own add/remove background and gutter. Empty for producers that only feed
- * the side-by-side view.
+ * Per-line highlighted inline HTML, aligned 1:1 with `lines`. The
+ * desktop unified and split views colour each row from this field while
+ * keeping their own add/remove background and gutter. The mobile web and
+ * Android clients render `lines[].content` as text.
  */
 lines_highlighted: Array<string>, };

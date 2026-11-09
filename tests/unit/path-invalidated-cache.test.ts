@@ -232,8 +232,8 @@ describe('subscribeGitPathInvalidation — minRefetchIntervalMs (issue #1165)', 
     // collapses the burst to one immediate + one trailing refetch
     // instead of one per emit. Without this throttle, every emit fires
     // `diff_node_against_base` (`commands/diff.rs`), which
-    // `run_blocking`-walks the worktree via libgit2 + 3× syntect per
-    // hunk — the #761/#762 starvation class the issue calls out.
+    // `run_blocking`-walks the worktree via libgit2 + one per-line syntect
+    // pass per hunk — the #761/#762 starvation class the issue calls out.
     const cb = vi.fn();
     subscribeGitPathInvalidation('/repo', cb, { minRefetchIntervalMs: 2_000 });
 
