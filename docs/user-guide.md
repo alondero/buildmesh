@@ -356,6 +356,16 @@ circuit runs** controls how many runs the selected mesh can admit at once.
 Settings > Autopilot > **Circuit agent pool size** adds an optional cap on agents
 across all meshes; leave it empty for no global cap, or use 0 to pause new launches.
 
+The **Activity** view opens on a summary of what the circuits on this mesh are
+doing: runs holding a slot, runs waiting to start, and finished runs that are
+still asking for a decision. The summary names whichever of those needs you
+first, so a mesh with a backlog or a failed run does not read as an all-clear —
+**No active runs** says only that no run is executing at that moment. Choose
+**Review in History** to open the finished runs that need a decision, or
+**View queue** to reorder or cancel the waiting ones. When the count of runs
+asking for attention is unavailable, the summary says so instead of reporting
+an empty mesh.
+
 Agent steps use their explicit launch configuration, then the mesh default, then
 the application default. Review agents use their configured reviewer selection.
 Settings > Providers > **Circuit classifier provider** selects the background

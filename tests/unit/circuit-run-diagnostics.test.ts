@@ -18,6 +18,7 @@ import {
   circuitGraphFacts,
   countActiveRuns,
   circuitActivityStats,
+  circuitActivitySummary,
   isActiveRunState,
   isRunStale,
   pendingAdmissionDetail,
@@ -774,5 +775,102 @@ describe('run diagnostics', () => {
       expect(queuedCopy).toContain('agent slot');
       expect(queuedCopy).not.toContain('circuit-run');
     });
+  });
+});
+
+/**
+ * The Activity view's one summary (issue #2740).
+ *
+ * The rule under test: zero active runs is a fact about execution, not a
+ * claim that no run needs a person. A state that still holds queued or
+ * human-action work has to say so, and only a state whose counts establish
+ * idleness may say so quietly.
+ */
+describe('circuit activity summary (#2740)', () => {
+  const idle = { activeCount: 0, activeAttentionCount: 0, queuedCount: 0, attentionCount: 0, outstandingAttention: 0 };
+
+  it('states the absence of execution literally when no run is running', () => {
+    const summary = circuitActivitySummary(idle);
+    expect(summary.tone).toBe('idle');
+    expect(summary.label).toBe('No active runs');
+    expect(summary.detail).toBe('Nothing running, queued, or waiting for a decision.');
+    // The idle state still owes the reader a next action.
+    expect(summary.action).toBe('manage');
+  });
+
+  it('does not present zero active runs as an all-clear while runs wait in the queue', () => {
+    const summary = circuitActivitySummary({ ...idle, queuedCount: 2 });
+    expect(summary.tone).toBe('queued');
+    expect(summary.label).toBe('No active runs');
+    expect(summary.detail).toBe('2 waiting in queue');
+    expect(summary.action).toBe('queue');
+    // The idle wording must not leak into the queued state.
+    expect(summary.detail).not.toContain('Nothing running');
+  });
+
+  it('leads with the finished runs that need a person, not with the empty slot count', () => {
+    const summary = circuitActivitySummary({ ...idle, attentionCount: 1 });
+    expect(summary.tone).toBe('attention');
+    expect(summary.label).toBe('1 finished run needs attention');
+    expect(summary.detail).toBe('No active runs · Nothing queued');
+    expect(summary.action).toBe('attention');
+  });
+
+  it('keeps the queued context visible when attention is the headline', () => {
+    const summary = circuitActivitySummary({ ...idle, attentionCount: 1, queuedCount: 2 });
+    expect(summary.tone).toBe('attention');
+    expect(summary.label).toBe('1 finished run needs attention');
+    expect(summary.detail).toBe('No active runs · 2 queued');
+    expect(summary.action).toBe('attention');
+  });
+
+  it('pluralises the attention headline', () => {
+    expect(circuitActivitySummary({ ...idle, attentionCount: 3 }).label)
+      .toBe('3 finished runs need attention');
+  });
+
+  it('reports the active set as active, because it holds slots while paused too', () => {
+    const summary = circuitActivitySummary({ ...idle, activeCount: 2, queuedCount: 1 });
+    expect(summary.tone).toBe('active');
+    // The set is `running` + `paused`, so calling it "running" would describe
+    // a parked run as work in flight.
+    expect(summary.label).toBe('2 active');
+    expect(summary.detail).toBe('1 queued');
+    expect(summary.action).toBe('queue');
+  });
+
+  it('calls out the active runs that are waiting on a person', () => {
+    const summary = circuitActivitySummary({ ...idle, activeCount: 3, activeAttentionCount: 1 });
+    expect(summary.label).toBe('3 active, 1 needs attention');
+  });
+
+  it('claims idleness only once the outstanding attention count is known to be zero', () => {
+    // The count could not be read: no run needing attention is ruled out, so
+    // the summary must not fall back to the idle wording.
+    const summary = circuitActivitySummary({ ...idle, outstandingAttention: null });
+    expect(summary.tone).toBe('unverified');
+    expect(summary.label).toBe('No active runs');
+    expect(summary.detail).toBe('The outstanding attention count could not be read.');
+    expect(summary.action).toBeNull();
+  });
+
+  it('still routes to the queue when the attention count is unreadable', () => {
+    const summary = circuitActivitySummary({ ...idle, queuedCount: 1, outstandingAttention: null });
+    expect(summary.tone).toBe('unverified');
+    expect(summary.action).toBe('queue');
+  });
+
+  it('counts mesh-wide attention the loaded window does not carry', () => {
+    // The Probe's ledger window is bounded; the mesh-wide count is not. A run
+    // asking for a decision outside the window still has to reach the summary.
+    const summary = circuitActivitySummary({ ...idle, outstandingAttention: 4 });
+    expect(summary.tone).toBe('attention');
+    expect(summary.label).toBe('4 finished runs need attention');
+    expect(summary.action).toBe('attention');
+  });
+
+  it('prefers the window count, which is the one the History filter lists', () => {
+    const summary = circuitActivitySummary({ ...idle, attentionCount: 1, outstandingAttention: 7 });
+    expect(summary.label).toBe('1 finished run needs attention');
   });
 });

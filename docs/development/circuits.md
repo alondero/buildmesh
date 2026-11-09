@@ -74,6 +74,24 @@ agent pool, disabled circuits and reservation failures. Recorded reasons describ
 the last worker check, not a promised start time. Queue retains admission order,
 keyboard/drag reordering and cancellation, with issue titles as the primary label.
 
+**Activity carries one summary, and it separates the three dimensions** (issue
+#2740). Running work, queued work and human-action work are independent facts,
+so the summary names the most urgent one first and states the rest beside it:
+finished runs needing a decision lead, then the runs holding a slot, then
+queued work. The active set is `running` plus `paused`, so the summary calls it
+**active** rather than running, and it says how many of those runs are waiting
+on a person. Zero active runs is labelled literally as **No active runs** — a
+statement about execution, not about readiness — and it is not shown as an
+all-clear while a finished run still needs a person. The idle wording appears
+only once the counts establish it: the outstanding attention count must be
+readable and zero, a failed read says the count could not be read, and a failed
+snapshot load withholds the summary entirely, because stale counts do not
+reassure. The tab's status line above the views applies the same rule to its
+own idle wording. The attention route is the existing History view filtered to
+**Needs attention**; the queued-work context and its **View queue** action stay
+where they are. The derivation lives in `circuitActivitySummary`
+(`src/components/Circuits/runDiagnostics.ts`).
+
 Run cards start collapsed. Open a card for the step timeline, reports and evidence;
 each retained step agent association offers Open, including reviewers absent
 from the workspace. The Probe uses the existing agent-history reopen command
