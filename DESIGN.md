@@ -268,6 +268,70 @@ client, which have their own scales. Rules for contributors:
 - The brand lockup (`Wordmark`) and icon glyphs sized from their box are
   pictures, not body text: they keep fixed pixel sizes.
 
+**Functional labels have roles.** The steps above say how big a size is; three
+**type roles** say what a piece of text *is*, so the decision is made once in
+the theme instead of once per component:
+
+| Role | What it is | Comfortable | Compact |
+|---|---|---|---|
+| `text-label` | A functional label — the name of the thing you act on: task and agent names, mesh names, action labels, form labels, tab labels | 13px | 11.375px |
+| `text-meta` | Supporting metadata — secondary lines, helper text, timestamps, the detail beside a label | 11.375px | 9.75px |
+| `text-micro` | Microcopy — section eyebrows, counts, badges, gutter labels | 10px | 10px |
+
+A functional label is **never** microcopy. The name of a task is the primary
+identifier in this app, so it is drawn at the interface size (13px) and reads
+without effort; metadata supports a label and never replaces one.
+
+**Compact is a ladder, not a restoration.** The compact column is the label and
+metadata ladder one step down: a functional label at 11.375px, metadata at
+9.75px, microcopy at the app's 10px floor. Before the roles existed every
+surface chose its own size, so Compact does not reproduce the old screens
+surface by surface: a place that used to be micro-sized (a menu row, a field
+label) reads at the label size, and a place that used to be drawn at the
+interface size (the Settings chrome) follows the label ladder as well. What
+Compact guarantees is the ladder itself — and that is what the tests pin.
+
+Rules for contributors:
+
+- Pick a role, not a size. Components use `text-label` / `text-meta` /
+  `text-micro`; reaching for a raw `text-xs` / `text-sm` means the role was
+  never decided.
+- The role tokens live in the `@theme` block as
+  `calc(<size> * var(--ui-text-scale))`, exactly like the size steps, so the
+  accessibility slider moves them with everything else.
+- `tests/unit/type-density.test.ts` pins the ladder, the compact sizes and the
+  13px root.
+
+**Density is a second, separate lever.** **Settings → General → Appearance →
+Text density** chooses which ladder renders: *Comfortable* (the default,
+13px functional labels) or *Compact* (the pre-contract label and metadata
+ladder in the table above). It is independent of the text scale — the scale
+multiplies whichever ladder is active — and it is a **type-only** lever like
+the scale: `rem`, spacing, control heights and the title-bar width tiers do
+not move either way. The choice is per machine and survives a restart
+(`src/lib/typeDensity.ts`, `data-type-density` on `<html>`).
+
+**Past 150% the window zoom takes over.** The text scale stops at 150% because
+the dense chrome clips rather than reflows, and this app has no room to
+reflow — several terminals share one window. **Settings → General → Appearance
+→ Window zoom** is the supported way to reach 200%: it sets the native webview
+zoom (`plugin:webview|set_webview_zoom`), so chrome, labels and content grow
+together and nothing is lost to clipping. It scales the whole window, so it is
+not a text setting, and it does not touch the terminal font — terminals keep
+their own 8–18px Zoom size, and Ctrl/Cmd + 0 / + / − still changes the
+terminal font. That chord is why the platform's own zoom hotkeys are left off
+and the zoom is set from Settings. Platform support is desktop-only: Tauri's
+`set_webview_zoom` is unsupported on Android and needs macOS 11+ / iOS 14+.
+
+The window zoom scales the **CSS viewport**, not just the type: at 200% a
+1280px window shows 640 CSS px, which is below the app's 900px minimum window
+width. The chrome survives it (the sidebar, the grid, the Probe and every
+dialog keep working, and the More panel still reaches every destination), but
+the title bar's command field is squeezed out of reach at that width — the
+narrow-header layout, which is tracked separately as #2420. A 200% zoom
+therefore wants a window of at least 1800 logical px, which a maximised
+1920px display at 100% scaling provides.
+
 **Mobile scale.** Slightly larger for touch: 13px body, 15px card titles,
 16px on text fields (prevents iOS focus auto-zoom), 11–12px metadata, 10px
 floor for micro-labels.
@@ -487,7 +551,10 @@ specificity and import order; custom properties don't.
   (focus rings, borders that carry meaning).
 - Text can be enlarged by the user without breaking the layout: the interface
   text setting scales the type tokens from 100% to 150% while `rem`, spacing
-  and control sizes stay put (see [Typography](#typography)).
+  and control sizes stay put, the text-density setting picks which type ladder
+  renders (13px functional labels, or the older 11.375px ones), and past 150%
+  the window zoom scales the whole native webview so nothing has to be
+  re-flowed to fit (see [Typography](#typography)).
 - The contract is executable: `tests/unit/theme-tokens-contrast.test.ts` and
   `tests/unit/theme-tokens-light-contrast.test.ts` recompute contrast from
   the CSS and fail the build if a token regresses; a static list in the same

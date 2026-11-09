@@ -128,6 +128,9 @@ export function buildInitScript(fixtures, handlers = defaultHandlers, { ignoredC
     'plugin:global-shortcut|register': null,
     'plugin:global-shortcut|unregister': null,
     'plugin:global-shortcut|unregister_all': null,
+    // Issue #2739 — the window-zoom control calls the native webview zoom.
+    // The mock has no webview to zoom, so the call is accepted and dropped.
+    'plugin:webview|set_webview_zoom': null,
   };
 
   const invoke = async (cmd, args) => {

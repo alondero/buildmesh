@@ -201,9 +201,9 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
           circuit={circuitPresentation} action={circuitRunAction} />
         {!activity && <ProviderIcon providerId={node.provider} className="h-3.5 w-3.5 shrink-0" />}
         <span onPointerDown={event => event.stopPropagation()} onDoubleClick={event => event.stopPropagation()}
-          title={titleNode.name} className="min-w-0 truncate text-sm font-semibold text-text-primary">
+          title={titleNode.name} className="min-w-0 truncate text-label font-semibold text-text-primary">
           <InlineEditableText value={titleNode.name} onCommit={next => renameAgentNode(titleNode.id, next)}
-            className="text-sm font-semibold text-text-primary" />
+            className="text-label font-semibold text-text-primary" />
         </span>
         {lostConversation && <MissingSessionIdBadge compact={compactHeader} />}
         {signalUnavailable && <SignalHealthBadge compact={compactHeader} health={node.signal_health} />}
@@ -214,7 +214,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
         aria-label={`${attentionOutcome.label}${outcomeCount > 1 ? ` (${outcomeCount} sessions)` : ''}. ${attentionOutcome.detail} ${outcomeCount > 1 ? 'Show next session.' : 'Show this session.'}`}
         title={attentionOutcome.detail}
         data-testid="circuit-outcome-chip" data-outcome={attentionOutcome.kind}
-        className={`flex h-6 shrink-0 items-center gap-1 rounded-full px-1.5 text-2xs font-medium ring-1 ${CIRCUIT_OUTCOME_CLASSES[attentionOutcome.tone]}`}>
+        className={`flex h-6 shrink-0 items-center gap-1 rounded-full px-1.5 text-micro font-medium ring-1 ${CIRCUIT_OUTCOME_CLASSES[attentionOutcome.tone]}`}>
         <CircuitIndicatorGlyph phase={attentionOutcome.phase} tone={attentionOutcome.tone} className="h-3 w-3 shrink-0" />
         {width >= HEADER_TIER_BREAKPOINTS.attentionLabel && <span className="truncate">{attentionOutcome.label}</span>}
         {outcomeCount > 1 && <span aria-hidden="true" className="tabular-nums">{outcomeCount}</span>}
@@ -236,7 +236,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
             ? { ...circuitPill, runId: circuitOwnership.run_id }
             : null}
           details={<>
-            <div className="truncate font-medium text-text-primary" title={node.name}>{node.name}</div>
+            <div className="truncate text-label font-medium text-text-primary" title={node.name}>{node.name}</div>
             <div className="mt-1 text-text-muted">{mesh?.name} · #{node.id} · {node.provider}</div>
             <div className="truncate text-text-muted" title={gitPath ?? undefined}>{node.use_worktree ? 'Worktree' : 'Repository root'} · {node.branch}</div>
             {/* Issue #2328 — the kebab details is the header's only git-summary
@@ -460,7 +460,7 @@ function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerL
           className="fixed bg-bg-overlay border border-border-default rounded-md shadow-md animate-scale-in origin-top-right z-[100] py-1"
           style={{ top: 0, left: 0, minWidth: KEBAB_MIN_WIDTH, width: HEADER_TIER_BREAKPOINTS.menuWidth, maxWidth: 'calc(100vw - 16px)' }}
         >
-          <div data-testid="grid-node-details" className="mb-1 border-b border-border-subtle px-3 py-2 text-xs">{details}</div>
+          <div data-testid="grid-node-details" className="mb-1 border-b border-border-subtle px-3 py-2 text-meta">{details}</div>
           <div ref={menuRef} role="menu" aria-label="Agent node actions">
           {/* Issue #1502 — Regenerate row (first, mirrors the sidebar
               context-menu order). Hover or ArrowRight/click opens the
@@ -501,7 +501,7 @@ function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerL
                     : 'Pick a Model Provider for this node (including current to kick-start)'
               }
               data-testid="grid-regenerate-trigger"
-              className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card-hover flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+              className="w-full text-left px-3 py-1.5 text-label text-text-secondary hover:bg-bg-card-hover flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
             >
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
@@ -541,7 +541,7 @@ function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerL
           <button
             role="menuitem" data-aria-menu-item
             onClick={(e) => { closeAndReturnFocus(); onOpenInExplorer(e); }}
-            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card-hover flex items-center gap-2"
+            className="w-full text-left px-3 py-1.5 text-label text-text-secondary hover:bg-bg-card-hover flex items-center gap-2"
           >
             <FolderOpenIcon className="w-3 h-3" />
             Open in file explorer
@@ -550,7 +550,7 @@ function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerL
             role="menuitem" data-aria-menu-item
             aria-pressed={isPinned}
             onClick={(e) => { closeAndReturnFocus(); onTogglePin(e); }}
-            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card-hover flex items-center gap-2"
+            className="w-full text-left px-3 py-1.5 text-label text-text-secondary hover:bg-bg-card-hover flex items-center gap-2"
           >
             <svg width="12" height="12" viewBox="0 0 24 24" fill={isPinned ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
               <path d="M12 17v5" fill="none" />
@@ -560,10 +560,10 @@ function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerL
           </button>
           <button type="button" role="menuitem" data-aria-menu-item
             onClick={() => { closeAndReturnFocus(); onDetails(); }}
-            className="w-full border-t border-border-subtle px-3 py-1.5 text-left text-xs text-text-secondary hover:bg-bg-card-hover">Agent node details</button>
+            className="w-full border-t border-border-subtle px-3 py-1.5 text-left text-label text-text-secondary hover:bg-bg-card-hover">Agent node details</button>
           <button type="button" role="menuitem" data-aria-menu-item
             onClick={() => { closeAndReturnFocus(); onChanges(); }}
-            className="w-full px-3 py-1.5 text-left text-xs text-text-secondary hover:bg-bg-card-hover">View changes</button>
+            className="w-full px-3 py-1.5 text-left text-label text-text-secondary hover:bg-bg-card-hover">View changes</button>
           {/* Circuit ownership link: opens the Circuits Probe on this exact
               run. Rendered as a menu item (not the old static pill)
               so it is keyboard-reachable and closes the menu on activation. */}
@@ -575,7 +575,7 @@ function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerL
                 closeAndReturnFocus();
                 onOpenCircuitRun(circuitRun.runId);
               }}
-              className={`w-full border-t border-border-subtle px-3 py-1.5 text-left text-xs hover:bg-bg-card-hover ${circuitRun.className}`}
+              className={`w-full border-t border-border-subtle px-3 py-1.5 text-left text-label hover:bg-bg-card-hover ${circuitRun.className}`}
             >
               {circuitRun.label}
             </button>

@@ -270,7 +270,7 @@ export function SpawnButtonCluster({
           // explicitly — but only when the icon is actually showing, so
           // the bare-`+` fallback keeps its visible "+" name (WCAG 2.5.3).
           aria-label={primaryAriaLabel ?? (showsDefaultMark && defaultOption && !isSpawning ? primaryTitle : undefined)}
-          className="group flex items-center justify-center px-2 min-w-[34px] h-[28px] text-xs font-medium text-accent-cyan hover:bg-accent-cyan/15 active:translate-y-px disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          className="group flex items-center justify-center px-2 min-w-[34px] h-[28px] text-label font-medium text-accent-cyan hover:bg-accent-cyan/15 active:translate-y-px disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           title={isSpawning ? busyLabel : primaryTitle}
         >
           {isSpawning ? <span className="truncate">{busyLabel}</span> : showsDefaultMark && defaultOption ? (

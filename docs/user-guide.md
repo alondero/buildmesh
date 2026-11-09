@@ -1222,7 +1222,7 @@ answer there too.
 
 | Settings area | Use it for |
 |---|---|
-| General | Appearance (including interface text size), quit confirmation, and the default worktree directory |
+| General | Appearance (theme, interface text size, text density and window zoom), quit confirmation, and the default worktree directory |
 | Providers | Routing defaults, plus a compact expandable row per provider account for its API key and billing mode |
 | Launch Configurations | Spawn menu order, per-harness model, effort and permission defaults, advanced provider routes, and (behind a **Show launch configurations** toggle) named recipes |
 | Autopilot | The global Circuit agent pool size |
@@ -1238,6 +1238,52 @@ app ships with; drag the slider right in 5% steps to read the app at up to
 already applied on the next launch, without a flash of the smaller size.
 Terminals keep their own size: use the title bar's **Zoom** control or
 `Ctrl + +` / `Ctrl + -`.
+
+**Text density** (Settings → General → Appearance) picks how large Buildmesh
+draws its *functional labels* — the names of your tasks and agents, action
+labels, form labels and tab labels. **Comfortable** (the default) draws them
+at 13px, the size the interface reads at. **Compact** draws them at 11.375px
+if you want the denser presentation. Supporting metadata (timestamps, helper
+text) follows one step down either way, and terminals are unaffected. Compact is
+a ladder, not a copy of the presentation Buildmesh had before this setting
+existed: before the roles existed every surface chose its own size, so some
+labels grow in Compact (the ones that used to be micro-sized) and some shrink
+(the Settings chrome, which used to be drawn at the interface size). What is
+guaranteed is the ladder itself — 11.375px labels, 9.75px metadata and a 10px
+floor for microcopy. The choice is saved per machine and is already applied on
+the next launch. To go back, pick **Comfortable**: it applies immediately and
+leaves nothing behind.
+
+**Window zoom** (Settings → General → Appearance) is how to read the app at
+200%. The interface text size stops at 150% because past that the dense chrome
+starts clipping instead of reflowing, and several terminals share one window;
+the window zoom is the platform's own zoom, so the chrome, the labels and the
+content all grow together and nothing is cut off. It scales the whole window,
+so it is not a text setting — the interface text size and the terminal's own
+font size are both left alone (the terminal's glyphs do get bigger on
+screen, because everything does, which means fewer columns and rows fit).
+Pick 100%–200% in 25% steps; the choice is saved per machine and is re-applied
+on the next launch. To go back, pick **100%**. At every launch Buildmesh puts
+the window at your saved zoom (or at 100%), so a zoom set outside the app does
+not survive a restart.
+
+Two things to know about the window zoom:
+
+- `Ctrl + +` / `Ctrl + -` / `Ctrl + 0` change the **terminal** font size, not
+  the window. That shortcut is the terminal's own, and it is why the
+  platform's built-in zoom hotkeys are not switched on — set the window zoom
+  from Settings instead.
+- The window zoom needs the native desktop app. It is not available in the
+  mobile app or on Android, and Settings says so if the platform cannot apply
+  it. A zoom the platform refuses leaves the window at its previous size —
+  the control shows the size the window really is, not the one you asked for.
+
+The window zoom scales everything, including the layout, so it needs room. At
+200% a window that is 1280px wide shows a 640px-wide layout — narrower than
+Buildmesh's own minimum, so the title bar's search box is squeezed out of reach
+(press `Ctrl + K` instead, or use the **More** menu, which still reaches every
+tool). Widen the window before choosing 200%: 1800px is enough to keep the
+full layout, which a maximised window on a 1920px display gives you.
 
 **Probe spawn prompts** (Settings → Prompts) customise the initial prompt
 for agents spawned from the Probe's GitHub Issues and Pull Requests tabs.

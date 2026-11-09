@@ -1,0 +1,22 @@
+{
+  "phase": "check",
+  "appPid": "47328",
+  "at": "2026-11-09T13:56:12.287Z",
+  "stored": {
+    "zoom": "200",
+    "textScale": null,
+    "density": null,
+    "terminalFontSize": null
+  },
+  "viewport": {
+    "innerWidth": 640,
+    "innerHeight": 400,
+    "devicePixelRatio": 3
+  },
+  "reappliedAtBoot": true,
+  "devicePixelRatio": 3,
+  "meshName": null,
+  "probeTitle": null,
+  "settingsOpened": true,
+  "settingsClosed": true
+}

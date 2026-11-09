@@ -196,7 +196,7 @@ function SettingsShell({
               ref={activeTab === tab.id ? selectedTabRef : undefined}
               onClick={() => setActiveTab(tab.id)}
               onKeyDown={event => handleTabKeyDown(event, tab.id)}
-              className={`w-full flex items-center justify-between text-left px-3 py-2 rounded-md text-base ${
+              className={`w-full flex items-center justify-between text-left px-3 py-2 rounded-md text-label ${
                 activeTab === tab.id
                   ? 'bg-bg-card text-accent-cyan font-medium'
                   : 'text-text-secondary hover:bg-bg-card-hover hover:text-text-primary'

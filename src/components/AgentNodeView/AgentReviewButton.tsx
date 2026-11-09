@@ -154,7 +154,7 @@ export function AgentReviewButton({ node, providerList, label }: { node: AgentNo
       title={!activeOwnership && !eligible ? blockedReason ?? 'Resume this agent before starting a review.' : 'Start review or circuit'}
       disabled={!activeOwnership && !eligible}
       onClick={() => { setReviewerProvider(''); setReviewerLoginId(undefined); setOpen(true); }}
-      className={`inline-flex h-6 min-w-6 items-center justify-center gap-1 rounded-md text-accent-violet-strong hover:bg-accent-violet/15 disabled:opacity-40 ${label ? 'px-1.5 text-xs font-medium' : 'p-1'}`}
+      className={`inline-flex h-6 min-w-6 items-center justify-center gap-1 rounded-md text-accent-violet-strong hover:bg-accent-violet/15 disabled:opacity-40 ${label ? 'px-1.5 text-label font-medium' : 'p-1'}`}
     ><CircuitsIcon className="h-4 w-4 shrink-0" />{label}</button>
     {open && createPortal(
       <Modal onClose={() => { if (!busy) setOpen(false); }} ariaLabel="Start review or circuit" maxWidth="max-w-sm">

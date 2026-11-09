@@ -1,0 +1,228 @@
+{
+  "appPid": "47328",
+  "at": "2026-11-09T13:56:24.216Z",
+  "startingViewport": {
+    "innerWidth": 1280,
+    "innerHeight": 800,
+    "devicePixelRatio": 1.5
+  },
+  "default": {
+    "stage": "default",
+    "meshName": 13,
+    "gridName": null,
+    "probe": {
+      "title": 13,
+      "subject": 13,
+      "detail": null,
+      "text": "Project Files"
+    },
+    "settings": {
+      "labelSize": 13
+    },
+    "displaced": "Usage",
+    "interactions": [
+      {
+        "step": "open the Probe from the omnibar",
+        "ok": true
+      },
+      {
+        "step": "open Settings",
+        "ok": true
+      },
+      {
+        "step": "the Settings dialog opens",
+        "ok": true
+      },
+      {
+        "step": "the Settings dialog closes",
+        "ok": true
+      },
+      {
+        "step": "open the More panel",
+        "ok": true
+      },
+      {
+        "step": "reach the displaced action \"Usage\"",
+        "ok": true
+      }
+    ],
+    "viewport": {
+      "innerWidth": 1280,
+      "innerHeight": 800,
+      "devicePixelRatio": 1.5
+    },
+    "terminalFontSize": null
+  },
+  "at150": {
+    "stage": "150% text scale",
+    "meshName": 19.5,
+    "gridName": null,
+    "probe": {
+      "title": 19.5,
+      "subject": 19.5,
+      "detail": null,
+      "text": "Project Files"
+    },
+    "settings": {
+      "labelSize": 19.5
+    },
+    "displaced": "Usage",
+    "interactions": [
+      {
+        "step": "open the Probe from the omnibar",
+        "ok": true
+      },
+      {
+        "step": "open Settings",
+        "ok": true
+      },
+      {
+        "step": "the Settings dialog opens",
+        "ok": true
+      },
+      {
+        "step": "the Settings dialog closes",
+        "ok": true
+      },
+      {
+        "step": "open the More panel",
+        "ok": true
+      },
+      {
+        "step": "reach the displaced action \"Usage\"",
+        "ok": true
+      }
+    ],
+    "viewport": {
+      "innerWidth": 1280,
+      "innerHeight": 800,
+      "devicePixelRatio": 1.5
+    },
+    "terminalFontSize": null
+  },
+  "at200": {
+    "stage": "200% window zoom",
+    "meshName": 19.5,
+    "gridName": null,
+    "probe": {
+      "title": 19.5,
+      "subject": 19.5,
+      "detail": null,
+      "text": "Project Files"
+    },
+    "settings": {
+      "labelSize": 19.5
+    },
+    "displaced": "Usage",
+    "interactions": [
+      {
+        "step": "open the More panel to reach the Probe",
+        "ok": true
+      },
+      {
+        "step": "open the Probe from the More panel",
+        "ok": true
+      },
+      {
+        "step": "open Settings",
+        "ok": true
+      },
+      {
+        "step": "the Settings dialog opens",
+        "ok": true
+      },
+      {
+        "step": "the Settings dialog closes",
+        "ok": true
+      },
+      {
+        "step": "open the More panel",
+        "ok": true
+      },
+      {
+        "step": "reach the displaced action \"Usage\"",
+        "ok": true
+      }
+    ],
+    "viewport": {
+      "innerWidth": 640,
+      "innerHeight": 400,
+      "devicePixelRatio": 3
+    },
+    "terminalFontSize": null
+  },
+  "zoomEffect": {
+    "innerWidthBefore": 1280,
+    "innerWidthAfter": 640,
+    "devicePixelRatioBefore": 1.5,
+    "devicePixelRatioAfter": 3
+  },
+  "cssViewportBelowMinimum": {
+    "innerWidth": 640,
+    "minimum": 900,
+    "belowMinimum": true
+  },
+  "afterReload": {
+    "stage": "after reload",
+    "meshName": 19.5,
+    "gridName": null,
+    "probe": {
+      "title": 19.5,
+      "subject": 19.5,
+      "detail": null,
+      "text": "Project Files"
+    },
+    "settings": {
+      "labelSize": 19.5
+    },
+    "displaced": "Usage",
+    "interactions": [
+      {
+        "step": "open the More panel to reach the Probe",
+        "ok": true
+      },
+      {
+        "step": "open the Probe from the More panel",
+        "ok": true
+      },
+      {
+        "step": "open Settings",
+        "ok": true
+      },
+      {
+        "step": "the Settings dialog opens",
+        "ok": true
+      },
+      {
+        "step": "the Settings dialog closes",
+        "ok": true
+      },
+      {
+        "step": "open the More panel",
+        "ok": true
+      },
+      {
+        "step": "reach the displaced action \"Usage\"",
+        "ok": true
+      }
+    ],
+    "viewport": {
+      "innerWidth": 640,
+      "innerHeight": 400,
+      "devicePixelRatio": 3
+    },
+    "terminalFontSize": null
+  },
+  "storedAfterReload": {
+    "textScale": "150",
+    "density": null,
+    "zoom": "200",
+    "terminalFontSize": null
+  },
+  "terminalFontIndependence": {
+    "default": null,
+    "at150": null,
+    "at200": null,
+    "afterReload": null
+  }
+}
