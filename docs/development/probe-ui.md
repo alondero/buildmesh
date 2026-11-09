@@ -158,7 +158,13 @@ one Host-wide read identity across Mesh selection changes. Focused agent paths
 and conversations are never inputs to a prompt launch.
 
 `PromptLibrary` reuses `ProbeRow` for disclosure and full-width text, with one
-body scroller and a pinned search/create toolbar. Authoring and launch-only
+body scroller and a pinned search/create toolbar. Each row and the customise
+dialog launch through `SpawnButtonCluster`. In spawn mode the main half shows
+the selected Mesh's default mark, or `+` before that default resolves, and the
+chevron opens the shared Spawn Menu. A word passed as `primaryLabel` leaves
+that face unchanged; the cluster test "shows the default launch mark in spawn
+mode even when the caller passes a word" pins it. Resume mode shows a verb
+instead. Authoring and launch-only
 customisation use separate dirty-aware modal dialogs. Launch requests capture
 the displayed Mesh before resolving a default agent. They create and spawn
 through the Agent Node store without changing selection; success offers an
