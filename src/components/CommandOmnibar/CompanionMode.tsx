@@ -27,7 +27,7 @@ export function CompanionMode({ initialPrompt, onBack }: { initialPrompt: string
         onKeyDown={event => {
           if (event.key === 'Enter' && prompt.trim() && !running) { event.preventDefault(); void execute(prompt); }
         }} />
-      {!running && <button type="button" disabled={!prompt.trim()} className="text-accent-violet disabled:opacity-50" onClick={() => void execute(prompt)}>Ask</button>}
+      {!running && <button type="button" disabled={!prompt.trim()} className="text-accent-violet-strong disabled:opacity-50" onClick={() => void execute(prompt)}>Ask</button>}
     </div>
     <div className="max-h-[55vh] overflow-y-auto p-4 border-t border-border-subtle space-y-3 break-words">
       {starting && <p role="status">Starting Companion…</p>}
@@ -36,11 +36,11 @@ export function CompanionMode({ initialPrompt, onBack }: { initialPrompt: string
         <ol aria-label="Companion progress" className="space-y-1 text-sm text-text-secondary">
           {task.steps.map((step, index) => <li key={index}>{step}</li>)}
         </ol>
-        <p role="status" className="text-accent-violet text-sm">{task.status}</p>
+        <p role="status" className="text-accent-violet-strong text-sm">{task.status}</p>
         {task.confirmation && <div className="rounded-md border border-accent-amber p-3 space-y-3" role="group" aria-label="Confirm Companion action">
           <p className="whitespace-pre-wrap">{task.confirmation}</p>
           <div className="flex gap-4">
-            <button ref={confirm} type="button" className="text-accent-violet" onClick={() => void respond(true)}>Confirm execution (Enter)</button>
+            <button ref={confirm} type="button" className="text-accent-violet-strong" onClick={() => void respond(true)}>Confirm execution (Enter)</button>
             <button type="button" onClick={() => void respond(false)}>Cancel action (Esc)</button>
           </div>
         </div>}

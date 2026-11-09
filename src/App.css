@@ -35,8 +35,16 @@
   --color-accent-blue: #0ea5e9;
   --color-accent-blue-dim: rgba(14, 165, 233, 0.15);
 
-  /* Accent — Violet (agent / AI actions) */
+  /* Accent — Violet (agent / AI actions).
+     `accent-violet` is the GRAPHIC accent: icons, rings, washes. It is
+     icon-safe, not text-safe — on a Mesh-tinted node header (the Mesh colour
+     at 8% over the card, #2737) it measures 3.94:1 on the Mesh the issue
+     audited and 3.45:1 at worst, under the 4.5:1 body-text floor.
+     `accent-violet-strong` is the same hue at a step that IS text-safe where
+     violet text lands (6.72:1 on the worst-case header), so labels and links
+     use it and the brand accent keeps the graphics. */
   --color-accent-violet: #8b5cf6;
+  --color-accent-violet-strong: #c4b5fd;
   --color-accent-violet-dim: rgba(139, 92, 246, 0.15);
 
   /* Accent — Semantic green/red/amber. Used by the diff view (added /
@@ -243,8 +251,12 @@
   --color-accent-blue: #0284c7;
   --color-accent-blue-dim: rgba(2, 132, 199, 0.15);
 
-  /* Accent — Violet (agent / AI actions) */
+  /* Accent — Violet (agent / AI actions). `accent-violet-strong` is the
+     text-safe step (issue #2737): the same hue darkened for AA on light
+     surfaces — 5.65:1 on the worst-case Mesh-tinted node header, against
+     3.58:1 for the graphic accent. */
   --color-accent-violet: #7c3aed;
+  --color-accent-violet-strong: #5b21b6;
   --color-accent-violet-dim: rgba(124, 58, 237, 0.15);
 
   /* Accent — Semantic green/red/amber (diff + status). */

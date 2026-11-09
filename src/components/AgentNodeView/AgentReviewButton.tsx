@@ -145,12 +145,16 @@ export function AgentReviewButton({ node, providerList, label }: { node: AgentNo
   }
 
   return <>
+    {/* The violet text step is the text-safe one (issue #2737): the label
+        lands on a Mesh-tinted node header, where the graphic accent measures
+        3.94:1 on the audited Mesh and 3.45:1 at worst. The icon inherits the
+        same colour, so the control still reads as the violet agent action. */}
     <button type="button"
       aria-label="Start review or circuit"
       title={!activeOwnership && !eligible ? blockedReason ?? 'Resume this agent before starting a review.' : 'Start review or circuit'}
       disabled={!activeOwnership && !eligible}
       onClick={() => { setReviewerProvider(''); setReviewerLoginId(undefined); setOpen(true); }}
-      className={`inline-flex h-6 min-w-6 items-center justify-center gap-1 rounded-md text-accent-violet hover:bg-accent-violet/15 disabled:opacity-40 ${label ? 'px-1.5 text-xs font-medium' : 'p-1'}`}
+      className={`inline-flex h-6 min-w-6 items-center justify-center gap-1 rounded-md text-accent-violet-strong hover:bg-accent-violet/15 disabled:opacity-40 ${label ? 'px-1.5 text-xs font-medium' : 'p-1'}`}
     ><CircuitsIcon className="h-4 w-4 shrink-0" />{label}</button>
     {open && createPortal(
       <Modal onClose={() => { if (!busy) setOpen(false); }} ariaLabel="Start review or circuit" maxWidth="max-w-sm">
@@ -159,7 +163,7 @@ export function AgentReviewButton({ node, providerList, label }: { node: AgentNo
           <p className="text-xs text-text-secondary mb-3">
             This agent is already controlled by Circuit #{activeOwnership.run_id} ({activeOwnership.state}).
           </p>
-          <button type="button" className="text-xs text-accent-violet mb-3"
+          <button type="button" className="text-xs text-accent-violet-strong mb-3"
             onClick={() => {
               setOpen(false);
               // The Probe follows mesh selection; scope it to this node's mesh
@@ -222,7 +226,7 @@ export function AgentReviewButton({ node, providerList, label }: { node: AgentNo
           {!activeOwnership && (
           <button type="button" disabled={busy || !Number.isInteger(rounds) || rounds < 1 || rounds > 10}
             onClick={() => void start()}
-            className="px-3 py-1.5 text-xs rounded-md bg-accent-violet/20 text-accent-violet disabled:opacity-40"
+            className="px-3 py-1.5 text-xs rounded-md bg-accent-violet/20 text-accent-violet-strong disabled:opacity-40"
           >{busy ? 'Starting…' : circuitId === null ? 'Start review' : 'Start Circuit'}</button>
           )}
         </div>

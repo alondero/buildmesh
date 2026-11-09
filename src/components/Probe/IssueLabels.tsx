@@ -69,7 +69,7 @@ export function IssueLabels({ meshId, issue, triggers, repositoryLabels, labelsL
       {visible.map(label => (
         <span key={label} data-issue-label={label} data-circuit-trigger-label={watched(label) ? label : undefined}
           title={tooltip(label)}
-          className={`max-w-full break-all rounded-md border px-1.5 py-px text-2xs ${watched(label) ? 'border-accent-violet/40 bg-accent-violet/10 text-accent-violet font-medium' : 'border-border-subtle bg-bg-card text-text-secondary'}`}>
+          className={`max-w-full break-all rounded-md border px-1.5 py-px text-2xs ${watched(label) ? 'border-accent-violet/40 bg-accent-violet/10 text-accent-violet-strong font-medium' : 'border-border-subtle bg-bg-card text-text-secondary'}`}>
           {watched(label) && <span aria-hidden="true">⚡ </span>}{label}
         </span>
       ))}
@@ -98,7 +98,7 @@ export function IssueLabels({ meshId, issue, triggers, repositoryLabels, labelsL
           </div>}
           {!labelsLoading && !labelsError && <div className="max-h-48 overflow-y-auto overflow-x-hidden space-y-1">
             {choices.map(label => (
-              <label key={label} title={tooltip(label)} className={`flex items-start gap-2 text-xs break-all ${watched(label) ? 'text-accent-violet' : 'text-text-secondary'}`}>
+              <label key={label} title={tooltip(label)} className={`flex items-start gap-2 text-xs break-all ${watched(label) ? 'text-accent-violet-strong' : 'text-text-secondary'}`}>
                 <input type="checkbox" checked={issue.labels.some(value => value.toLowerCase() === label.toLowerCase())} disabled={busy}
                   onChange={event => void toggle(label, event.target.checked)} className="mt-0.5 shrink-0 accent-accent-cyan disabled:opacity-40" />
                 <span>{label}{watched(label) && <span className="block text-2xs">Autopilot</span>}</span>

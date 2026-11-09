@@ -187,7 +187,7 @@ describe('GridNodeHeader contextual information and actions', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Agent node actions' }));
     const pill = screen.getByTestId('circuit-run-pill');
     expect(pill.textContent).toBe('Review workflow · #2');
-    expect(pill.className).toContain('text-accent-violet');
+    expect(pill.className).toContain('text-accent-violet-strong');
     expect(pill.getAttribute('title')).toContain('Circuit is driving');
   });
 

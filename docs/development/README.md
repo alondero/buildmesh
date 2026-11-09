@@ -121,6 +121,22 @@ when a path named in a skill does not exist.
   changes when the engineering contract calls for it.
 - Run `npm run check:docs` and the product checks appropriate to the boundary.
 
+### Changing a theme token
+
+- A colour token is declared twice in `src/App.css` — in `@theme` (dark) and
+  re-pointed by the `[data-theme="light"]` override. Change both, or the
+  utility flips at the cascade in one theme only.
+- Record the new value in `DESIGN.md`'s accent/colour table, and mirror it
+  into `src/mobile/styles.css` and `Theme.kt` if the phone client paints it.
+- The token-level contrast suites compare a foreground with a *neutral*
+  surface. When the token is painted on a composed one — the Mesh-tinted node
+  header (the Mesh colour at 8% over the card), a hover wash, a filled chip —
+  measure the composition, not the token:
+  `tests/unit/review-label-contrast.test.ts` recomposes the node header and
+  pins the Review label, the automation chip, the resume glyph, the review
+  dialog's primary action and the other violet-text surfaces in both themes
+  (issue #2737).
+
 ## Architecture documents
 
 The [October desktop UX audit](../archive/2026-10/desktop-ux-audit-2026-10.md) records ranked

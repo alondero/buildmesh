@@ -188,6 +188,7 @@ describe('light theme token coverage (#734)', () => {
     'accent-blue',
     'accent-blue-dim',
     'accent-violet',
+    'accent-violet-strong',
     'accent-violet-dim',
     'accent-green',
     'accent-red',

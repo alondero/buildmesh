@@ -9,7 +9,7 @@ export default function CompanionResponse({ response }: { response: string }) {
   return (
           <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={url => /^buildmesh:\/\/(grid|node\/\d+)$/.test(url) ? url : defaultUrlTransform(url)}
             components={{ a: ({ href, children }) => {
-              if (href && /^buildmesh:\/\/(grid|node\/\d+)$/.test(href)) return <button type="button" className="text-accent-violet underline" onClick={() => {
+              if (href && /^buildmesh:\/\/(grid|node\/\d+)$/.test(href)) return <button type="button" className="text-accent-violet-strong underline" onClick={() => {
                 if (href === 'buildmesh://grid') useUIStore.getState().setViewMode('mesh');
                 else if (!focusNode(Number(href.slice('buildmesh://node/'.length)), { view: 'single', scope: 'node' })) {
                   useCompanionStore.setState({ error: 'This node is no longer available.' });

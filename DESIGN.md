@@ -127,6 +127,7 @@ not use `text-muted` for information the user needs to act on — that is what
 | `accent-cyan-dim` / `-glow` | 15% / 8% alpha | same hue | Selected fills, hover washes |
 | `accent-blue` | `#0ea5e9` | `#0284c7` | Pressed/deep step of the accent |
 | `accent-violet` | `#8b5cf6` | `#7c3aed` | AI/agent actions only (spawn, autopilot, rename suggestion) |
+| `accent-violet-strong` | `#c4b5fd` | `#5b21b6` | The violet **as text** — labels and links on agent actions |
 | `accent-green` | `#22c55e` | `#16a34a` | Success / diff-added |
 | `accent-amber` | `#f59e0b` | `#d97706` | Warning / diff-modified / needs attention |
 | `accent-red` | `#ef4444` | `#dc2626` | Error / diff-deleted / destructive |
@@ -134,6 +135,26 @@ not use `text-muted` for information the user needs to act on — that is what
 On light backgrounds the accents darken one step (cyan-500 → cyan-600 etc.)
 because the dark-theme hues fall below 3:1 on near-white. Always consume the
 token — never hardcode the dark hex into a component.
+
+**`accent-violet` is the graphic accent, not a text colour.** It is safe for
+icons, rings and washes, but it is not safe as body text: on the node header
+the background is the user's Mesh colour at 8% over the card, and the violet
+label measured 3.94:1 on the Mesh issue #2737 audited (3.45:1 at worst) and
+4.40:1 in the light theme — under the 4.5:1 body floor.
+`accent-violet-strong` is the same hue at a step that
+clears AA on the Mesh-tinted node header (6.72:1 dark, 5.65:1 light — the
+worst case over the eight palette colours and the corners of the RGB cube) and
+on the review dialog's surfaces: use it for the label, the link and the
+primary action; keep `accent-violet` for the icon, the ring and the washes.
+
+Violet **text** uses the strong step throughout the app — the Review label, the
+automation chip, the resume glyph, the Companion pill and omnibar links, the
+watched issue-label chip, the "Edit Flow" chip. The two places the violet is
+not body text are the aria-hidden `✦` companion glyph and the diff-status
+vocabulary in `src/lib/status.ts`, whose `hex` is mirrored to the phone and so
+moves with the palette rather than with a text step.
+`tests/unit/review-label-contrast.test.ts` recomposes the Mesh-tinted header
+and pins each of those pairs — the new step passes, the graphic accent fails.
 
 ### Status
 
@@ -470,7 +491,14 @@ specificity and import order; custom properties don't.
 - The contract is executable: `tests/unit/theme-tokens-contrast.test.ts` and
   `tests/unit/theme-tokens-light-contrast.test.ts` recompute contrast from
   the CSS and fail the build if a token regresses; a static list in the same
-  test pins load-bearing text to `text-secondary`. The mobile mirror is
+  test pins load-bearing text to `text-secondary`. Token-only checks compare a
+  foreground with a *neutral* surface, so they do not measure a composed one:
+  `tests/unit/review-label-contrast.test.ts` recomposes the Mesh-tinted node
+  header (the Mesh colour at 8% over the card, then the hover wash) and
+  measures the Review label, the automation chip, the resume glyph, the review
+  dialog's primary action and the other violet-text surfaces against it, in
+  both themes, over the palette and the corners of the RGB cube (issue #2737).
+  The mobile mirror is
   checked by `tests/unit/mobile-tokens-contrast.test.ts` for AA on mobile
   surfaces; equality with desktop token values is a design convention.
   The native client's mirror is recomputed the same way by
@@ -520,6 +548,11 @@ its shorthand names but holds the **same values** as the desktop dark theme:
 | `--amber-border` / `--red-border` / `--attention-ring` | 25% status borders; 40% needs-attention ring |
 
 Retune a colour in both files in the same change.
+
+`accent-violet-strong` has no mobile counterpart: the phone client paints
+violet as a Material tertiary role and a status ring rather than as text — it
+has no Review control. Desktop-only tokens (the caption and macOS chrome
+palettes) are likewise unmapped.
 
 ## Rules for contributors
 
