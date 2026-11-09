@@ -2384,3 +2384,190 @@ describe('Autopilot Circuits IPC contract (ADR-0010 seam)', () => {
     });
   });
 });
+
+/**
+ * The Activity view's one summary (issue #2740).
+ *
+ * Zero active runs used to render "Ready for work" next to a queued backlog
+ * and a finished run that still needed a person, so the user had to reconcile
+ * three statements about three different dimensions by hand. These tests pin
+ * the one summary that keeps them apart.
+ */
+describe('CircuitsProbeTab Activity summary (#2740)', () => {
+  const FAILED_RUN: CircuitRunDetail = {
+    ...RUN_DONE,
+    run: { ...RUN_DONE.run, id: 13, state: 'failed' },
+  };
+
+  it('labels the absence of active runs when the counts are zero', async () => {
+    mockBackend({ runs: [RUN_DONE] });
+    openProbeDestination('circuits');
+
+    expect(await screen.findByTestId('circuit-activity-summary')).toBeTruthy();
+    expect(screen.getByTestId('circuit-activity-summary-label').textContent).toBe('No active runs');
+    expect(screen.getByTestId('circuit-activity-summary-detail').textContent)
+      .toBe('Nothing running, queued, or waiting for a decision.');
+    // The old copy claimed readiness from the slot count alone.
+    expect(screen.queryByText('Ready for work')).toBeNull();
+    // An idle state still owes the reader a next action.
+    fireEvent.click(screen.getByTestId('circuit-activity-manage-action'));
+    expect(screen.getByTestId('circuits-view-manage').getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('keeps queued work visible instead of presenting zero active runs as an all-clear', async () => {
+    mockBackend({ runs: [RUN_DONE], queue: QUEUE });
+    openProbeDestination('circuits');
+
+    await screen.findByTestId('circuit-activity-summary');
+    expect(screen.getByTestId('circuit-activity-summary-label').textContent).toBe('No active runs');
+    expect(screen.getByTestId('circuit-activity-summary-detail').textContent).toBe('2 waiting in queue');
+    expect(screen.getByTestId('circuit-activity-summary-detail').textContent)
+      .not.toContain('Nothing running');
+    // The queued-work context and its existing action survive.
+    const queueSummary = screen.getByTestId('circuit-activity-queue-summary');
+    expect(queueSummary.textContent).toContain('Waiting in queue');
+    expect(queueSummary.textContent).toContain('2 waiting to start');
+    fireEvent.click(screen.getByRole('button', { name: 'View queue' }));
+    expect(screen.getByTestId('circuits-view-queue').getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('leads with the finished runs that need a person and routes to the filtered History', async () => {
+    mockBackend({ runs: [RUN_DONE, FAILED_RUN] });
+    openProbeDestination('circuits');
+
+    await screen.findByTestId('circuit-activity-summary');
+    expect(screen.getByTestId('circuit-activity-summary-label').textContent)
+      .toBe('1 finished run needs attention');
+    expect(screen.getByTestId('circuit-activity-summary-detail').textContent)
+      .toBe('No active runs · Nothing queued');
+    expect(screen.queryByText('Ready for work')).toBeNull();
+
+    // The attention route leads to History, filtered to the runs that need it.
+    fireEvent.click(screen.getByTestId('circuit-activity-attention-action'));
+    expect(screen.getByTestId('circuits-view-history').getAttribute('aria-selected')).toBe('true');
+    expect((screen.getByTestId('history-attention-toggle') as HTMLInputElement).checked).toBe(true);
+    await screen.findByTestId('run-card-13');
+  });
+
+  it('keeps the queued context while attention leads the summary', async () => {
+    mockBackend({ runs: [RUN_DONE, FAILED_RUN], queue: QUEUE });
+    openProbeDestination('circuits');
+
+    await screen.findByTestId('circuit-activity-summary');
+    expect(screen.getByTestId('circuit-activity-summary-label').textContent)
+      .toBe('1 finished run needs attention');
+    expect(screen.getByTestId('circuit-activity-summary-detail').textContent)
+      .toBe('No active runs · 2 queued');
+    expect(screen.getByTestId('circuit-activity-queue-summary').textContent).toContain('Waiting in queue');
+    expect(screen.getByRole('button', { name: 'View queue' })).toBeTruthy();
+  });
+
+  it('calls out the active runs that are waiting on a person', async () => {
+    // A paused run holds a slot without making progress, and it needs the
+    // operator: the summary must not present it as plain activity.
+    const paused = { ...RUN_RUNNING, run: { ...RUN_RUNNING.run, id: 14, state: 'paused' } };
+    mockBackend({ runs: [paused] });
+    openProbeDestination('circuits');
+
+    await screen.findByTestId('circuit-activity-summary');
+    expect(screen.getByTestId('circuit-activity-summary-label').textContent)
+      .toBe('1 active, 1 needs attention');
+    expect(screen.getByTestId('circuit-activity-summary-detail').textContent).toBe('Nothing queued');
+  });
+
+  it('offers the attention route to the keyboard', async () => {
+    mockBackend({ runs: [RUN_DONE, FAILED_RUN] });
+    openProbeDestination('circuits');
+
+    const action = await screen.findByTestId('circuit-activity-attention-action');
+    expect(action.tagName).toBe('BUTTON');
+    action.focus();
+    await userEvent.keyboard('{Enter}');
+    expect(screen.getByTestId('circuits-view-history').getAttribute('aria-selected')).toBe('true');
+    expect((screen.getByTestId('history-attention-toggle') as HTMLInputElement).checked).toBe(true);
+  });
+
+  it('clears a leftover History search so the attention route shows the runs that need a person', async () => {
+    mockBackend({ runs: [RUN_DONE, FAILED_RUN] });
+    openProbeDestination('circuits');
+    await screen.findByTestId('circuit-activity-summary');
+
+    // A search term left over from an earlier History visit would filter the
+    // attention runs out of the very view the action opens.
+    fireEvent.click(screen.getByTestId('circuits-view-history'));
+    fireEvent.change(screen.getByTestId('history-search-input'), { target: { value: 'nothing matches this' } });
+    fireEvent.click(screen.getByTestId('circuits-view-activity'));
+    fireEvent.click(screen.getByTestId('circuit-activity-attention-action'));
+
+    expect(screen.getByTestId('circuits-view-history').getAttribute('aria-selected')).toBe('true');
+    expect((screen.getByTestId('history-search-input') as HTMLInputElement).value).toBe('');
+    expect((screen.getByTestId('history-attention-toggle') as HTMLInputElement).checked).toBe(true);
+    await screen.findByTestId('run-card-13');
+  });
+
+  it('states no summary at all while the snapshot is still loading', async () => {
+    mockBackend({ runs: [RUN_DONE] });
+    const releaseProbe = deferCircuitProbe();
+    openProbeDestination('circuits');
+
+    expect(await screen.findByTestId('circuits-status')).toBeTruthy();
+    expect(screen.queryByTestId('circuit-activity-summary')).toBeNull();
+    await act(async () => { releaseProbe(); });
+    await screen.findByTestId('circuit-activity-summary');
+  });
+
+  it('withholds the summary when a refresh fails, so stale counts do not read as an all-clear', async () => {
+    mockBackend({ runs: [RUN_DONE] });
+    openProbeDestination('circuits');
+    await screen.findByTestId('circuit-activity-summary');
+
+    // The next read fails. The Probe keeps the previous snapshot, so the
+    // counts on screen are stale — a stale all-clear is still an all-clear.
+    const fallback = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'list_circuit_probe') return Promise.reject(new Error('probe unavailable'));
+      return fallback?.(cmd, args) ?? Promise.resolve({ cmd });
+    });
+    await act(async () => { await emit('circuit-run-updated', {}); });
+
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('probe unavailable'));
+    expect(screen.queryByTestId('circuit-activity-summary')).toBeNull();
+    expect(screen.queryByText('Ready for work')).toBeNull();
+  });
+
+  it('names the gap when the outstanding attention count is unavailable', async () => {
+    mockBackend({ runs: [RUN_DONE], countAttentionFails: true });
+    openProbeDestination('circuits');
+
+    await screen.findByTestId('circuit-activity-summary');
+    // No run needing attention is ruled out when the count failed, so the
+    // idle wording must not appear.
+    expect(screen.getByTestId('circuit-activity-summary-detail').textContent)
+      .toBe('The outstanding attention count could not be read.');
+    expect(screen.getByTestId('circuit-activity-summary-detail').textContent)
+      .not.toContain('Nothing running');
+    expect(screen.queryByText('Ready for work')).toBeNull();
+    // The status line above the views makes the same claim about idleness, so
+    // it has to name the gap too.
+    expect(screen.getByTestId('circuits-status').textContent).toBe('Attention state unknown');
+  });
+
+  it('does not report the mesh as idle while a refresh has failed', async () => {
+    mockBackend({ runs: [RUN_DONE] });
+    openProbeDestination('circuits');
+    await screen.findByTestId('circuit-activity-summary');
+    expect(screen.getByTestId('circuits-status').textContent).toBe('1 circuit idle');
+
+    const fallback = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'list_circuit_probe') return Promise.reject(new Error('probe unavailable'));
+      return fallback?.(cmd, args) ?? Promise.resolve({ cmd });
+    });
+    await act(async () => { await emit('circuit-run-updated', {}); });
+
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('probe unavailable'));
+    // The counts on screen are the previous snapshot's, so the line reports
+    // the failed read instead of an idle mesh.
+    expect(screen.getByTestId('circuits-status').textContent).toBe('Circuits unavailable');
+  });
+});

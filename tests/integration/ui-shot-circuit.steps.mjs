@@ -13,7 +13,13 @@ export default async function ({ page }) {
   await page.getByRole('separator', { name: 'Resize probe panel' }).focus();
   await page.keyboard.press('End');
   await page.locator('[data-testid="circuits-probe-tab"]').waitFor({ state: 'visible' });
-  await expect(page.getByText('Ready for work')).toBeVisible();
+  // The fixture has no active runs, two queued runs and one finished run that
+  // needs attention. The Activity summary must name the work that needs a
+  // person instead of presenting the empty slot count as readiness (#2740).
+  await expect(page.getByTestId('circuit-activity-summary-label')).toHaveText('1 finished run needs attention');
+  await expect(page.getByTestId('circuit-activity-summary-detail')).toHaveText('No active runs · 2 queued');
+  await expect(page.getByText('Ready for work')).toHaveCount(0);
+  await expect(page.getByTestId('circuit-activity-attention-action')).toBeVisible();
   await expect(page.getByTestId('circuits-view-activity')).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByTestId('circuit-name-input')).toHaveCount(0);
   await expect(page.getByTestId('queue-run-1002')).toHaveCount(0);

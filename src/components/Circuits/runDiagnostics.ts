@@ -396,6 +396,147 @@ if (runNeedsOutstandingAttention(detail, reviewCircuitForRun(detail, reviewCircu
   return { activityCount: activeCount, activeCount, attentionCount, historyAttentionCount, activeAttentionCount, historyCount, queuedCount };
 }
 
+/**
+ * The Activity view's one summary (issue #2740).
+ *
+ * Activity mixes three independent dimensions — what is holding a slot, what is
+ * waiting to start, and what is waiting for a person — and the old copy
+ * derived its empty state from the first dimension alone. Zero active runs
+ * therefore read as "Ready for work" while a finished run was still asking
+ * for attention, so the user had to reconcile the contradictions by hand.
+ *
+ * This derivation keeps the three apart and states the most urgent one
+ * first:
+ *
+ * - **attention** wins the headline whenever a finished run needs a
+ *   decision, and the summary foregrounds the route to those runs — that is
+ *   the work a person has to act on.
+ * - **active** is the headline while runs hold slots. The set is `running`
+ *   plus `paused`, so it is called active rather than running: a run parked
+ *   on the operator is not making progress, and the count says so when one
+ *   of the active runs is asking for a decision.
+ * - **queued** and **idle** both label the absence of execution
+ *   literally ("No active runs"). Zero active runs is a fact about
+ *   execution, not a claim that everything is fine — so the idle copy
+ *   appears only once the counts establish it.
+ *
+ * The outstanding attention count carries what the loaded window does not:
+ * when that count could not be read, "no run needs a decision" is not
+ * established, and the summary says so instead of going quiet.
+ *
+ * Each state is pinned by the cases in
+ * `tests/unit/circuit-run-diagnostics.test.ts`.
+ */
+export type CircuitActivityTone = 'attention' | 'active' | 'queued' | 'idle' | 'unverified';
+
+export type CircuitActivityAction = 'attention' | 'queue' | 'manage';
+
+export interface CircuitActivitySummary {
+  /** Which dimension leads. `unverified` means attention could not be established. */
+  tone: CircuitActivityTone;
+  /** The headline. It does not claim success from the absence of active runs. */
+  label: string;
+  /** The supporting detail: the active / queued / attention breakdown. */
+  detail: string;
+  /** The next action the summary foregrounds, or null when there is none. */
+  action: CircuitActivityAction | null;
+}
+
+export interface CircuitActivitySummaryInput {
+  /** Runs holding a slot (`running` + `paused`). */
+  activeCount: number;
+  /** Live runs asking for a decision — paused, blocked or awaiting a review. */
+  activeAttentionCount: number;
+  /** Runs waiting to start. */
+  queuedCount: number;
+  /** Finished runs asking for a decision, as the History filter lists them. */
+  attentionCount: number;
+  /**
+   * Outstanding attention on the mesh, or `null` when the count could not be
+   * read. `0` means the mesh has none; `null` means "not established", which
+   * is not the same claim.
+   */
+  outstandingAttention: number | null;
+}
+
+function pluralRuns(count: number): string {
+  return count === 1 ? 'run' : 'runs';
+}
+
+function attentionLabel(count: number): string {
+  return `${count} finished ${pluralRuns(count)} need${count === 1 ? 's' : ''} attention`;
+}
+
+/**
+ * The active set, with the runs that are waiting on a person called out.
+ *
+ * A paused or blocked run holds a slot without making progress, so counting
+ * it as plain activity would read as work in flight. The header's count
+ * already reports the two together; the summary says which of the active
+ * runs are waiting.
+ */
+function activeLabel(activeCount: number, activeAttentionCount: number): string {
+  if (activeCount === 0) return 'No active runs';
+  if (activeAttentionCount === 0) return `${activeCount} active`;
+  return `${activeCount} active, ${activeAttentionCount} need${activeAttentionCount === 1 ? 's' : ''} attention`;
+}
+
+export function circuitActivitySummary(input: CircuitActivitySummaryInput): CircuitActivitySummary {
+  const { activeCount, activeAttentionCount, queuedCount, attentionCount, outstandingAttention } = input;
+  const activeText = activeLabel(activeCount, activeAttentionCount);
+  const queuedLabel = queuedCount > 0 ? `${queuedCount} queued` : 'Nothing queued';
+
+  // Attention leads whenever a finished run is asking for a decision. The
+  // loaded window is counted first, because its number is the one the History
+  // filter will show; the mesh-wide count is the fallback for attention that
+  // the window does not carry.
+  const attention = attentionCount > 0 ? attentionCount : outstandingAttention;
+  if (attention !== null && attention > 0) {
+    return {
+      tone: 'attention',
+      label: attentionLabel(attention),
+      detail: `${activeText} · ${queuedLabel}`,
+      action: 'attention',
+    };
+  }
+
+  if (outstandingAttention === null) {
+    // The count failed, so no run needing attention is ruled out.
+    // State what is known and name the gap instead of implying an all-clear.
+    return {
+      tone: 'unverified',
+      label: activeText,
+      detail: 'The outstanding attention count could not be read.',
+      action: queuedCount > 0 ? 'queue' : null,
+    };
+  }
+
+  if (activeCount > 0) {
+    return {
+      tone: 'active',
+      label: activeText,
+      detail: queuedLabel,
+      action: queuedCount > 0 ? 'queue' : null,
+    };
+  }
+
+  if (queuedCount > 0) {
+    return {
+      tone: 'queued',
+      label: 'No active runs',
+      detail: `${queuedCount} waiting in queue`,
+      action: 'queue',
+    };
+  }
+
+  return {
+    tone: 'idle',
+    label: 'No active runs',
+    detail: 'Nothing running, queued, or waiting for a decision.',
+    action: 'manage',
+  };
+}
+
 /** Quiet threshold before a live run reads as stalled. Matches the
  * worker's lost-turn watchdog window (60s) so the UI and the worker
  * agree on what "quiet" means. */
