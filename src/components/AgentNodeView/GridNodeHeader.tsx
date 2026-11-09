@@ -67,7 +67,10 @@ interface GridNodeHeaderProps {
 }
 
 const CIRCUIT_OUTCOME_CLASSES: Record<CircuitIndicatorTone, string> = {
-  automation: 'bg-accent-violet/15 text-accent-violet ring-accent-violet/40',
+  // The automation chip is violet text on a violet wash, over a Mesh-tinted
+  // header — the graphic accent measures 2.93:1 there (issue #2737), so the
+  // label uses the text-safe violet step. The ring stays the graphic accent.
+  automation: 'bg-accent-violet/15 text-accent-violet-strong ring-accent-violet/40',
   warning: 'bg-accent-amber/15 text-accent-amber ring-accent-amber/40',
   success: 'bg-accent-green/10 text-accent-green ring-accent-green/30',
   error: 'bg-status-error-bg text-status-error ring-status-error/40',
@@ -223,7 +226,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
         <AgentReviewButton node={node} providerList={providerList}
           label={width >= HEADER_TIER_BREAKPOINTS.reviewLabel ? 'Review' : undefined} />
         {canResume && <button type="button" onClick={handleResume} aria-label="Resume agent" title="Resume agent"
-          data-testid="grid-resume-button" className="flex h-6 w-6 items-center justify-center rounded-md text-accent-violet hover:bg-accent-violet/10">↻</button>}
+          data-testid="grid-resume-button" className="flex h-6 w-6 items-center justify-center rounded-md text-accent-violet-strong hover:bg-accent-violet/10">↻</button>}
         <KebabActions key={node.id} isPinned={node.is_pinned} onTogglePin={handleTogglePin}
           onOpenInExplorer={handleOpenInExplorer} node={node} providerList={providerList}
           isRegenerateDisabled={regen.isRegenerateDisabled} hasRegenerateTargets={regen.hasRegenerateTargets}

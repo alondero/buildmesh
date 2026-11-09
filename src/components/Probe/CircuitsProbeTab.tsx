@@ -1218,7 +1218,7 @@ export function CircuitsProbeTab() {
                         type="button"
                         onClick={() => openCircuitEditor(circuit.id)}
                         data-testid={`circuit-edit-flow-${circuit.id}`}
-                        className="px-2 py-0.5 rounded-md bg-accent-violet/15 text-accent-violet hover:bg-accent-violet/25"
+                        className="px-2 py-0.5 rounded-md bg-accent-violet/15 text-accent-violet-strong hover:bg-accent-violet/25"
                       >
                         Edit Flow
                       </button>

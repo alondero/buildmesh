@@ -516,7 +516,7 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
               addToast('Resume failed', formatError(err), 'error');
             });
           }}
-          className="h-[24px] w-[24px] shrink-0 flex items-center justify-center rounded-md text-text-secondary hover:text-accent-violet hover:bg-bg-card-hover text-xs transition-colors"
+          className="h-[24px] w-[24px] shrink-0 flex items-center justify-center rounded-md text-text-secondary hover:text-accent-violet-strong hover:bg-bg-card-hover text-xs transition-colors"
           title="Resume agent"
           aria-label={`Resume ${node.name}`}
           data-testid="resume-button"
