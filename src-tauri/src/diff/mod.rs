@@ -8,17 +8,20 @@
 //!
 //! The split:
 //!
-//! - [`engine`] — the line diff, the hunk grouping and the baseline walk.
+//! - [`engine`] — the line diff, the hunk grouping, the baseline walk and
+//!   the counts-only walk.
 //! - [`highlight`] — the syntect themes and the HTML escaping rules.
 //! - [`baseline`] — which repository and which ref a change set is read
 //!   against.
 //! - [`cancel`] — the per-node cancellation registry.
 //!
-//! The **counts** over a change set are not here: they are a git fact, so
-//! they live with the git read that produces the list —
+//! The **status counts** over a change set are not here: they are a git fact,
+//! so they live with the git read that produces the list —
 //! [`crate::git::state::summarize_statuses`] is the one implementation of the
 //! change-set counting policy, and [`node_changed_summary`] folds the very
-//! same list the file tree renders (issue #2527, Move B).
+//! same list the file tree renders (issue #2527, Move B). The line totals a
+//! caller wants without hunks — [`node_change_counts`] — are here, walking
+//! the same baseline and splitting lines the same way (issue #2726).
 //!
 //! The git side of the diff — the baseline tree, the delta walk and the
 //! line counts — stays in [`crate::git`], which owns every `git2` use. The
@@ -26,10 +29,11 @@
 //! [`crate::git::diff::resolve_base_tree`], and both readers hang off that
 //! one seam.
 //!
-//! Nothing here changes the diff's output: the same `difference_rs` line
-//! diff, the same `CONTEXT_LINES` grouping, the same hunk headers and the
-//! same escaping. The wire types (`models::DiffResult` and friends) are
-//! unchanged.
+//! The line diff, grouping, headers and escaping are unchanged. The default
+//! hunk rendering is lean: `old_highlighted` / `new_highlighted` stay empty
+//! because no current client reads them, while per-line `lines_highlighted`
+//! is preserved (issue #2726). The wire types (`models::DiffResult` and
+//! friends) keep their shape.
 
 pub mod baseline;
 pub mod cancel;
@@ -43,49 +47,6 @@ use crate::git::state::{ChangedFile, StatusSummary};
 use crate::models::{DiffCounts, DiffResult, FileDiff};
 
 use cancel::DIFF_CANCELLED;
-
-/// Test-only counters for the work a diff read performs (issue #2726).
-///
-/// The banner must read line totals without constructing a hunk or running a
-/// syntax highlight. These counters are the seam its work-counter test reads,
-/// so "discard the full diff later" cannot masquerade as "never built it".
-#[cfg(test)]
-// allow-test-in-production: the counters are the seam the counts-only banner test reads.
-pub(crate) mod work_metrics {
-    use std::cell::Cell;
-
-    thread_local! {
-        static COUNTS: Cell<[usize; 3]> = const { Cell::new([0; 3]) };
-    }
-
-    fn increment(index: usize) {
-        COUNTS.with(|counts| {
-            let mut value = counts.get();
-            value[index] += 1;
-            counts.set(value);
-        });
-    }
-
-    /// A hunk was constructed.
-    pub fn hunk() {
-        increment(0);
-    }
-
-    /// A whole-hunk old/new HTML side was highlighted.
-    pub fn side_highlight() {
-        increment(1);
-    }
-
-    /// A per-line highlight pass ran.
-    pub fn line_highlight() {
-        increment(2);
-    }
-
-    /// `[hunks, side highlights, line highlights]` since the last read.
-    pub fn take() -> [usize; 3] {
-        COUNTS.with(|counts| counts.replace([0; 3]))
-    }
-}
 
 /// Why a diff read failed.
 #[derive(Debug)]
@@ -105,8 +66,9 @@ impl std::fmt::Display for DiffError {
         match self {
             DiffError::Db(message) => write!(f, "{message}"),
             DiffError::Git(message) => write!(f, "{message}"),
-            // The sentinel the frontend's race guard matches. It is a fixed
-            // string, not a rendered message: the guard compares it exactly.
+            // A fixed sentinel, not a rendered message, so a caller can tell
+            // cancellation from a real failure. The banner swallows the
+            // enrichment error; the overlay relies on its AbortSignal.
             DiffError::Cancelled => write!(f, "{DIFF_CANCELLED}"),
             DiffError::InvalidPath => write!(f, "invalid path"),
         }
@@ -117,9 +79,9 @@ impl std::error::Error for DiffError {}
 
 /// Diff two files on disk.
 ///
-/// Offloaded by the caller: the file reads and the three syntect highlight
-/// passes per hunk are CPU/IO work that would otherwise park a Tauri async
-/// worker (issue #762).
+/// Offloaded by the caller: the file reads and the per-line syntect pass per
+/// hunk are CPU/IO work that would otherwise park a Tauri async worker
+/// (issue #762).
 pub fn diff_files(old_path: &str, new_path: &str) -> Result<DiffResult, DiffError> {
     let old_content = std::fs::read_to_string(old_path).unwrap_or_default();
     let new_content = std::fs::read_to_string(new_path).unwrap_or_default();
@@ -250,4 +212,46 @@ fn node_baseline(node_id: i64) -> Result<baseline::NodeBaseline, DiffError> {
     let node =
         crate::db::get_agent_node_by_id(node_id).map_err(|e| DiffError::Db(e.to_string()))?;
     Ok(baseline::node_baseline(&node))
+}
+
+/// Test-only counters for the work a diff read performs (issue #2726).
+///
+/// The banner must read line totals without constructing a hunk or running a
+/// syntax highlight. These counters are the seam its work-counter test reads,
+/// so "discard the full diff later" cannot masquerade as "never built it".
+#[cfg(test)] // allow-test-in-production: the counters are the seam the counts-only banner test reads.
+pub(crate) mod work_metrics {
+    use std::cell::Cell;
+
+    thread_local! {
+        static COUNTS: Cell<[usize; 3]> = const { Cell::new([0; 3]) };
+    }
+
+    fn increment(index: usize) {
+        COUNTS.with(|counts| {
+            let mut value = counts.get();
+            value[index] += 1;
+            counts.set(value);
+        });
+    }
+
+    /// A hunk was constructed.
+    pub fn hunk() {
+        increment(0);
+    }
+
+    /// A whole-hunk old/new HTML side was highlighted.
+    pub fn side_highlight() {
+        increment(1);
+    }
+
+    /// A per-line highlight pass ran.
+    pub fn line_highlight() {
+        increment(2);
+    }
+
+    /// `[hunks, side highlights, line highlights]` since the last read.
+    pub fn take() -> [usize; 3] {
+        COUNTS.with(|counts| counts.replace([0; 3]))
+    }
 }

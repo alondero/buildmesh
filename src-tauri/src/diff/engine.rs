@@ -1,10 +1,10 @@
 //! The diff engine: line diffing, hunk grouping, and the baseline walk.
 //!
-//! This is the machinery the IPC boundary used to own. The output is
-//! byte-identical to what `commands/diff.rs` produced before the move
-//! (issue #2527): the same `difference_rs` line diff, the same
-//! `CONTEXT_LINES` grouping, the same escaping rules and the same hunk
-//! headers.
+//! This is the machinery the IPC boundary used to own. The line diff,
+//! `CONTEXT_LINES` grouping, escaping rules and hunk headers match what
+//! `commands/diff.rs` produced before the move (issue #2527). The hunk
+//! rendering is now lean: production output leaves the legacy whole-hunk
+//! HTML fields empty (issue #2726).
 
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -15,7 +15,9 @@ use crate::env::to_host_path;
 use crate::models::{DiffCounts, DiffHunk, DiffLine, DiffResult, FileDiff};
 
 use super::cancel::cancel_requested;
-use super::highlight::{highlight_content, highlight_group_lines};
+#[cfg(test)] // allow-test-in-production: the legacy whole-hunk renderer is a test seam.
+use super::highlight::highlight_content;
+use super::highlight::highlight_group_lines;
 use super::DiffError;
 
 #[cfg(test)]
@@ -96,7 +98,11 @@ pub fn count_file_changes(old_content: &str, new_content: &str) -> (usize, usize
     (additions, deletions)
 }
 
-/// Build highlighted old/new content strings from diff lines
+/// Build highlighted old/new content strings from diff lines.
+///
+/// Test-only: the production hunk path emits per-line HTML instead of these
+/// whole-hunk strings (issue #2726).
+#[cfg(test)] // allow-test-in-production: the legacy whole-hunk renderer is a test seam.
 pub fn build_sides(lines: &[DiffLine]) -> (String, String) {
     let mut old_lines: Vec<&str> = Vec::new();
     let mut new_lines: Vec<&str> = Vec::new();
@@ -172,14 +178,16 @@ pub fn group_into_hunks(lines: &[DiffLine], context: usize) -> Vec<Vec<DiffLine>
 /// Which whole-hunk HTML a caller needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HunkHighlight {
-    /// Per-line HTML only — what the desktop, mobile web, and Android diff
-    /// views render. The legacy whole-hunk fields stay empty, so no unused
-    /// HTML is built or sent (issue #2726).
+    /// Per-line HTML only. The desktop diff view renders `lines_highlighted`;
+    /// the mobile web and Android clients render `lines[].content` as text.
+    /// The legacy whole-hunk fields stay empty, so no unused HTML is built or
+    /// sent (issue #2726).
     LinesOnly,
     /// Also build the legacy whole-hunk `old_highlighted` / `new_highlighted`
-    /// HTML. Retained for callers that still consume that representation;
-    /// no current production path requests it.
-    #[allow(dead_code)] // compatibility path, exercised by the payload test
+    /// HTML. This is a test-only seam: the payload/work comparison pins the
+    /// old representation, while no production path can request it.
+    #[cfg(test)]
+    // allow-test-in-production: the payload test requests the legacy representation.
     Sides,
 }
 
@@ -187,14 +195,17 @@ pub enum HunkHighlight {
 /// syntax highlighting and hunk header metadata (old_start / new_start).
 ///
 /// This is the lean path: the whole-hunk HTML fields stay empty because no
-/// current client reads them (issue #2726). Use [`build_hunk_with`] with
-/// [`HunkHighlight::Sides`] when that representation is required.
+/// current client reads them (issue #2726). The legacy whole-hunk renderer is
+/// a test-only seam behind [`HunkHighlight::Sides`], which does not exist in
+/// production builds.
 pub fn build_hunk(group: &[DiffLine], highlight_path: &str) -> DiffHunk {
     build_hunk_with(group, highlight_path, HunkHighlight::LinesOnly)
 }
 
-/// Build a single DiffHunk, choosing whether to also generate the legacy
-/// whole-hunk HTML.
+/// Build a single DiffHunk with an explicit hunk-rendering seam.
+///
+/// Production constructs only [`HunkHighlight::LinesOnly`]; the `Sides`
+/// branch exists for tests that measure the legacy payload.
 pub fn build_hunk_with(
     group: &[DiffLine],
     highlight_path: &str,
@@ -205,6 +216,8 @@ pub fn build_hunk_with(
     super::work_metrics::hunk();
     let (old_hl, new_hl) = match whole_hunk_html {
         HunkHighlight::LinesOnly => (String::new(), String::new()),
+        #[cfg(test)]
+        // allow-test-in-production: the payload test requests the legacy representation.
         HunkHighlight::Sides => {
             let (old_highlighted, new_highlighted) = build_sides(group);
             (
@@ -262,14 +275,15 @@ pub fn diff_against_base(
     only: Option<&str>,
     cancel: Option<&AtomicBool>,
 ) -> Result<DiffResult, DiffError> {
-    diff_against_base_with(repo_path, base_ref, only, cancel, HunkHighlight::LinesOnly)
+    diff_against_base_impl(repo_path, base_ref, only, cancel, HunkHighlight::LinesOnly)
 }
 
-/// [`diff_against_base`], choosing whether hunks also carry the legacy
-/// whole-hunk HTML. The default read (`diff_against_base`) is the lean path;
-/// this explicit variant exists for the payload/work comparison and for a
-/// caller that still needs the old representation (issue #2726).
-pub fn diff_against_base_with(
+/// [`diff_against_base`] with an explicit hunk-rendering seam.
+///
+/// The production read is the lean `LinesOnly` path. The test-only `Sides`
+/// variant pins the legacy whole-hunk representation for the payload/work
+/// comparison (issue #2726).
+fn diff_against_base_impl(
     repo_path: &str,
     base_ref: &str,
     only: Option<&str>,
@@ -367,7 +381,8 @@ pub fn diff_against_base_with(
 /// same `difference_rs` line split and counts. It exists for the
 /// turn-finished banner, which displays only the two totals (issue #2726).
 ///
-/// `cancel` is polled at every file boundary, exactly like the full walk.
+/// `cancel` is polled at every file boundary. The full walk also polls
+/// between hunks, which this read never reaches.
 pub fn diff_counts_against_base(
     repo_path: &str,
     base_ref: &str,

@@ -1,6 +1,6 @@
 /**
- * Issue #1181 — AbortSignal plumbing for `diffNodeAgainstBase` and
- * `diffNodeFileAgainstBase`.
+ * Issue #1181 — AbortSignal plumbing for `diffNodeAgainstBase`,
+ * `diffNodeFileAgainstBase`, and `diffNodeCountsAgainstBase`.
  *
  * The Tauri 2 `invoke()` binding in this version doesn't yet forward
  * an `AbortSignal` to the Rust command, so the *actual* backend

@@ -7,12 +7,14 @@
 //! fallback arms need escaping here — but they need it.
 //!
 //! The themes and the syntax set are process-wide and loaded once: they are
-//! the expensive half of a highlight, and a diff of a busy worktree runs three
-//! highlight passes per hunk.
+//! the expensive half of a highlight. A diff of a busy worktree runs one
+//! per-line pass per hunk; the legacy whole-hunk strings are a test-only
+//! seam and stay empty in production (issue #2726).
 
 use crate::models::DiffLine;
 use once_cell::sync::Lazy;
 use syntect::highlighting::ThemeSet;
+#[cfg(test)] // allow-test-in-production: whole-string highlighting is the legacy test seam.
 use syntect::html::highlighted_html_for_string;
 use syntect::parsing::SyntaxSet;
 
@@ -23,9 +25,12 @@ mod tests;
 static SYNTAX_SET: Lazy<SyntaxSet> = Lazy::new(SyntaxSet::load_defaults_newlines);
 static THEME_SET: Lazy<ThemeSet> = Lazy::new(ThemeSet::load_defaults);
 
-/// Highlight a string with syntect, returning HTML
+/// Highlight a string with syntect, returning HTML.
+///
+/// Test-only: the production diff path renders per-line HTML. The whole-hunk
+/// fields on the wire are empty in current output (issue #2726).
+#[cfg(test)] // allow-test-in-production: whole-string highlighting is the legacy test seam.
 pub fn highlight_content(content: &str, path: &str) -> String {
-    #[cfg(test)]
     // allow-test-in-production: the highlight counter is the seam the counts-only read is measured with.
     super::work_metrics::side_highlight();
     let ext = ext_for_path(path);
@@ -44,13 +49,15 @@ pub fn highlight_content(content: &str, path: &str) -> String {
 /// Resolve a whole-string highlight result, rendering the file text as text
 /// when syntect failed.
 ///
-/// `old_highlighted` / `new_highlighted` are server-generated HTML on the
-/// `DiffHunk` wire type, consumed by a diff view that injects sibling
-/// highlight fields with `dangerouslySetInnerHTML` under a `null` CSP (#830).
-/// So this arm must escape: returning raw file contents turns markup in any
-/// opened file into live script. The success arm is safe alone — syntect
-/// escapes its own output — which is why only the error arm needs escaping.
-/// Same helper as the per-line fallback (#2152).
+/// The legacy whole-hunk fields are still on the `DiffHunk` wire type. If a
+/// producer populates them, a view that injects them with
+/// `dangerouslySetInnerHTML` under a `null` CSP (#830) must receive escaped
+/// text. So this arm must escape: returning raw file contents would turn
+/// markup in any opened file into live script. The success arm is safe alone
+/// — syntect escapes its own output — which is why only the error arm needs
+/// escaping. Same helper as the per-line fallback (#2152). Test-only: the
+/// current hunk path leaves the whole-hunk fields empty (issue #2726).
+#[cfg(test)] // allow-test-in-production: whole-string highlighting is the legacy test seam.
 pub fn highlighted_or_escape(content: &str, highlighted: Result<String, syntect::Error>) -> String {
     highlighted.unwrap_or_else(|_| html_escape(content))
 }

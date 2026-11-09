@@ -28,10 +28,13 @@ mod tests;
 static DIFF_NODE_CANCEL: Lazy<Mutex<HashMap<i64, Arc<AtomicBool>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-/// Sentinel returned to the frontend so its race guard can identify
-/// "cancelled, not a real failure" and skip the `setError` branch (a
-/// genuine error must still surface).
-pub const DIFF_CANCELLED: &str = "diff_node_against_base cancelled";
+/// Sentinel returned to the frontend so a caller can distinguish
+/// "cancelled, not a real failure" from a genuine error (which must still
+/// surface). The turn-finished banner swallows it as enrichment; the overlay
+/// uses its own AbortSignal for stale local results. The text is deliberately
+/// shared by every diff read — full, per-file, and counts-only — so a caller
+/// never sees a command name it did not invoke.
+pub const DIFF_CANCELLED: &str = "diff cancelled";
 
 /// Flip any prior flag for `node_id` (so its in-flight blocking task
 /// exits at its next poll) and return a fresh flag for the new

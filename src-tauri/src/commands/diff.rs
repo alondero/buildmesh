@@ -17,7 +17,7 @@ use tauri::command;
 
 /// Diff two files on disk.
 // Offloaded via `run_blocking` (issue #762 convention): file reads + the
-// line diff + three syntect highlight passes per hunk are CPU/IO work that
+// line diff + the per-line syntect pass per hunk are CPU/IO work that
 // would otherwise park a Tauri async worker.
 #[command]
 pub async fn diff_files(old_path: String, new_path: String) -> Result<DiffResult, String> {
@@ -43,8 +43,8 @@ pub async fn diff_file_against_head(
 /// Diff every file an Agent Node changed since it branched (ADR 0005). One call
 /// returns the whole change set the review panel renders as a stacked view.
 // Offloaded via `run_blocking`: the walk reads the whole working directory
-// with libgit2, reads every changed file, and runs three syntect highlight
-// passes per hunk — seconds of CPU on a busy worktree. The review panel
+// with libgit2, reads every changed file, and runs a per-line syntect pass
+// per hunk — seconds of CPU on a busy worktree. The review panel
 // re-fetches it on every `git-changed` event while an agent edits, so an
 // inline body is the single biggest pool-parker in the app (the #761/#762
 // starvation class: UI alive, keystrokes and probes frozen).

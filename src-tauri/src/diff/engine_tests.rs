@@ -9,7 +9,7 @@ use std::sync::Arc;
 use crate::diff::cancel::{cancel_poll_count, set_cancel_poll_probe, DIFF_CANCELLED};
 use crate::diff::engine::{
     build_hunk, build_hunk_with, build_sides, compute_file_diff, count_file_changes,
-    diff_against_base, diff_against_base_with, diff_counts_against_base, group_into_hunks,
+    diff_against_base, diff_against_base_impl, diff_counts_against_base, group_into_hunks,
     HunkHighlight, CONTEXT_LINES,
 };
 use crate::diff::work_metrics;
@@ -623,6 +623,8 @@ fn diff_against_base_flags_binary_without_hunks() {
 /// work, and its serialized payload is far smaller. Timings are printed for
 /// the handoff record, not asserted (scheduler noise makes a wall-clock
 /// assertion flaky); the work counters and byte sizes are deterministic.
+/// The memory figures are process-lifetime peaks with a note, not per-phase
+/// isolated deltas.
 #[test]
 fn many_file_counts_read_avoids_hunk_highlighting_and_payload() {
     const FILES: usize = 48;
@@ -648,7 +650,7 @@ fn many_file_counts_read_avoids_hunk_highlighting_and_payload() {
     work_metrics::take();
     let memory_before = process_memory();
     let started = std::time::Instant::now();
-    let legacy = diff_against_base_with(
+    let legacy = diff_against_base_impl(
         tmp.to_str().unwrap(),
         "base",
         None,
@@ -688,6 +690,7 @@ fn many_file_counts_read_avoids_hunk_highlighting_and_payload() {
             "lean": {"ms": lean_ms, "bytes": lean_bytes, "work": lean_work},
             "counts": {"ms": counts_ms, "bytes": counts_bytes, "work": counts_work},
             "memory": {
+                "note": "process-lifetime peaks, not per-phase deltas",
                 "before": memory_before,
                 "after_legacy": memory_after_legacy,
                 "after_lean": memory_after_lean,
@@ -814,9 +817,10 @@ fn counts_against_base_match_full_diff_without_hunk_or_highlight_work() {
     let tmp = DiffFixture::new();
     let repo = init_mixed_repo(&tmp);
 
-    // Committed since base: a new file and a rename.
+    // Committed since base: a new file and a rename-plus-edit, so the
+    // parity sum actually counts the renamed entry's lines.
     std::fs::write(tmp.join("new.txt"), "new\nlines\n").unwrap();
-    std::fs::write(tmp.join("renamed.txt"), "alpha\nbeta\n").unwrap();
+    std::fs::write(tmp.join("renamed.txt"), "alpha\nbeta\ngamma\n").unwrap();
     std::fs::remove_file(tmp.join("rename-me.txt")).unwrap();
     {
         let mut index = repo.index().unwrap();
@@ -854,13 +858,22 @@ fn counts_against_base_match_full_diff_without_hunk_or_highlight_work() {
         full_work[1], 0,
         "the default full diff must not generate whole-hunk HTML, got {full_work:?}"
     );
+    let renamed = full
+        .files
+        .iter()
+        .find(|file| file.status == "renamed")
+        .unwrap_or_else(|| {
+            panic!(
+                "fixture must include a rename; got {:?}",
+                full.files
+                    .iter()
+                    .map(|file| (&file.path, &file.status))
+                    .collect::<Vec<_>>()
+            )
+        });
     assert!(
-        full.files.iter().any(|file| file.status == "renamed"),
-        "fixture must include a rename; got {:?}",
-        full.files
-            .iter()
-            .map(|file| (&file.path, &file.status))
-            .collect::<Vec<_>>()
+        renamed.additions > 0,
+        "the rename fixture must carry a content edit so its counts are exercised"
     );
     assert!(
         full.files.iter().any(|file| file.binary),
@@ -902,6 +915,60 @@ fn diff_counts_against_base_returns_cancelled_when_flag_pre_set() {
     );
 }
 
+/// The counts-only walk polls the cancel flag at every file boundary, so a
+/// flag flipped mid-walk stops it with the same sentinel. This is the seam
+/// that bounds concurrent turn-finished banners to the newest request.
+#[test]
+fn diff_counts_against_base_returns_cancelled_when_flag_flipped_mid_walk() {
+    const FLIP_AT: usize = 2;
+    const FLIP_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+    let tmp = DiffFixture::new();
+    init_repo_with_base(&tmp);
+    for i in 0..6 {
+        std::fs::write(tmp.join(format!("f{i}.txt")), format!("before {i}\n")).unwrap();
+    }
+
+    let token = Arc::new(AtomicBool::new(false));
+    let (flip_tx, flip_rx) = std::sync::mpsc::channel::<()>();
+    let (ack_tx, ack_rx) = std::sync::mpsc::channel::<()>();
+    let flipper_token = Arc::clone(&token);
+    let flipper = std::thread::spawn(move || {
+        if flip_rx.recv_timeout(FLIP_ACK_TIMEOUT).is_err() {
+            return;
+        }
+        flipper_token.store(true, Ordering::SeqCst);
+        let _ = ack_tx.send(());
+    });
+
+    set_cancel_poll_probe(Some(std::rc::Rc::new(move |poll| {
+        if poll == FLIP_AT {
+            flip_tx.send(()).expect("flipper thread is alive");
+            ack_rx
+                .recv_timeout(FLIP_ACK_TIMEOUT)
+                .expect("flipper must store the token while the walk is parked");
+        }
+    })));
+
+    let result = diff_counts_against_base(tmp.to_str().unwrap(), "base", Some(&token));
+    let polls = cancel_poll_count();
+    set_cancel_poll_probe(None);
+    if polls > FLIP_AT {
+        flipper.join().unwrap();
+    }
+
+    assert_eq!(
+        result.as_ref().err().map(|error| error.to_string()),
+        Some(DIFF_CANCELLED.to_string()),
+        "mid-walk flag flip must return the cancellation sentinel"
+    );
+    assert_eq!(
+        polls,
+        FLIP_AT + 1,
+        "the counts walk must stop at the first file boundary after the flip"
+    );
+}
+
 /// The counts-only read reports the same unavailable-repository error as the
 /// full read, so the banner's enrichment path keeps its current behaviour.
 #[test]
@@ -940,9 +1007,10 @@ fn build_hunk_emits_per_line_highlight_aligned_with_lines() {
     );
 }
 
-/// Issue #2726: the current client set reads only `lines_highlighted`. The
-/// legacy whole-hunk fields stay empty on the default path, and an explicit
-/// full render remains available and produces the old representation.
+/// Issue #2726: the desktop view reads only `lines_highlighted`; the mobile
+/// web and Android clients render `lines[].content`. The legacy whole-hunk
+/// fields stay empty on the default path, and a test-only full render
+/// produces the old representation for the payload comparison.
 #[test]
 fn lean_hunks_omit_whole_hunk_html_that_no_current_client_reads() {
     let mut old = String::new();
