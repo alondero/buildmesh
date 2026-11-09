@@ -38,6 +38,43 @@ const reportScrollState = () => {
   window.BuildmeshTerminal.scrollState(atTail);
 };
 terminal.onScroll(reportScrollState);
+// Typing is native (issue #2747): Kotlin's TerminalSurface owns the keyboard
+// and sends each key to the agent, while this xterm stays display-only so it
+// never answers the terminal queries the desktop already answers. Its hidden
+// textarea must not raise a keyboard of its own, which would type nowhere.
+terminal.textarea?.setAttribute('inputmode', 'none');
+if (terminal.textarea) terminal.textarea.readOnly = true;
+// The native side needs the modes the agent switched on, so arrows and pastes
+// it sends match what this terminal would send. Report only when one flips:
+// output arrives far more often than a mode changes.
+let reportedModes = '';
+const reportModes = () => {
+  const { applicationCursorKeysMode, bracketedPasteMode } = terminal.modes;
+  const modes = `${applicationCursorKeysMode}/${bracketedPasteMode}`;
+  if (modes === reportedModes) return;
+  reportedModes = modes;
+  window.BuildmeshTerminal.modes(applicationCursorKeysMode, bracketedPasteMode);
+};
+// A plain tap types into the agent's own input box. A link tap is claimed
+// first by attachMobileTerminalLinks (it cancels the touchend), and a drag is a
+// scroll, so only a short, still, single-finger touch opens the keyboard.
+const TAP_SLOP_PX = 8;
+const TAP_TIMEOUT_MS = 500;
+let tap = null;
+host.addEventListener('touchstart', event => {
+  const touch = event.touches[0];
+  tap = event.touches.length === 1 ? { x: touch.clientX, y: touch.clientY, time: event.timeStamp } : null;
+}, { passive: true });
+host.addEventListener('touchend', event => {
+  const start = tap;
+  tap = null;
+  const touch = event.changedTouches[0];
+  if (!start || !touch || event.defaultPrevented || event.touches.length !== 0) return;
+  if (event.timeStamp - start.time > TAP_TIMEOUT_MS) return;
+  if (Math.hypot(touch.clientX - start.x, touch.clientY - start.y) > TAP_SLOP_PX) return;
+  window.BuildmeshTerminal.focusInput();
+}, { passive: true });
+host.addEventListener('touchcancel', () => { tap = null; }, { passive: true });
 function layout() {
   // A WebView can load before Compose measures it; percentage heights retain that zero-sized root.
   document.documentElement.style.height = `${window.innerHeight}px`;
@@ -48,12 +85,13 @@ function layout() {
 }
 new ResizeObserver(layout).observe(host);
 window.addEventListener('resize', layout);
-window.buildmeshOutput = base64 => terminal.write(Uint8Array.from(atob(base64), c => c.charCodeAt(0)));
-window.buildmeshReset = () => { terminal.reset(); reportScrollState(); };
+window.buildmeshOutput = base64 => terminal.write(Uint8Array.from(atob(base64), c => c.charCodeAt(0)), reportModes);
+window.buildmeshReset = () => { terminal.reset(); reportScrollState(); reportModes(); };
 window.buildmeshLayout = layout;
 // Escape hatch for the native pane's "jump to latest" button: without it a
 // phone that panned back into the scrollback has no way to reach the live tail
 // again except dragging the whole history back.
 window.buildmeshScrollToBottom = () => terminal.scrollToBottom();
 layout();
+reportModes();
 window.BuildmeshTerminal.ready();

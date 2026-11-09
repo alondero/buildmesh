@@ -6,7 +6,10 @@ import android.app.Instrumentation
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.SystemClock
+import android.text.InputType
+import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.inputmethod.EditorInfo
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.WebView
@@ -27,7 +30,6 @@ import org.junit.Rule
 import org.junit.Test
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ConcurrentLinkedQueue
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
@@ -106,6 +108,9 @@ class TerminalRenderingTest {
                     evaluate(view, "window.BuildmeshTerminal.openUrl('javascript:alert(1)')")
                     compose.waitForIdle()
                     assertEquals("Non-HTTP links cannot launch an activity", 3, browser.hits)
+                    var typing = true
+                    compose.runOnUiThread { typing = (view.parent as View).isFocused }
+                    assertFalse("A link tap opens the link, not the keyboard", typing)
                 } finally {
                     instrumentation.removeMonitor(browser)
                 }
@@ -122,19 +127,20 @@ class TerminalRenderingTest {
         SessionStore(app).clear()
         MockWebServer().use { server ->
             server.start(java.net.InetAddress.getByName("127.0.0.1"), 0)
-            val input = CountDownLatch(1)
             val frames = ConcurrentLinkedQueue<String>()
             val live = AtomicReference<WebSocket?>()
             server.enqueue(MockResponse().setBody("{\"ticket\":\"test-socket\"}"))
             server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
                     live.set(webSocket)
-                    webSocket.send("Native snapshot\r\n\u001b[c" + "context line\r\n".repeat(6))
+                    // The snapshot replays a device-attributes query (which must
+                    // not be answered from the phone) and the agent's modes:
+                    // application cursor keys and bracketed paste.
+                    webSocket.send("Native snapshot\r\n\u001b[c\u001b[?1h\u001b[?2004h" + "context line\r\n".repeat(6))
                     webSocket.send("Live Unicode ✓\r\n".encodeUtf8())
                 }
                 override fun onMessage(webSocket: WebSocket, text: String) {
                     frames.add(text)
-                    if (text == "pwd\r") input.countDown()
                 }
             }))
             val api = BuildmeshApi(server.url("/").toString())
@@ -173,15 +179,62 @@ class TerminalRenderingTest {
                 }
                 assertTrue(frames.filter { it.startsWith('{') }.map { Json.parseToJsonElement(it).obj() }
                     .any { it.text("type") == "resize" && it.number("cols") > 10 && it.number("rows") > 5 })
+                val input = { frames.filter { !it.startsWith('{') } }
+                assertTrue("There is no second prompt box under the terminal",
+                    compose.onAllNodes(hasSetTextAction()).fetchSemanticsNodes().isEmpty())
+
+                // A plain tap on the terminal makes it the keyboard's target, and
+                // each edit the keyboard makes reaches the agent as it is made.
+                val surface = view.parent as TerminalSurface
+                compose.runOnUiThread {
+                    val now = SystemClock.uptimeMillis()
+                    listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP).forEachIndexed { offset, action ->
+                        val event = MotionEvent.obtain(now, now + offset * 50, action, view.width / 2f, view.height / 2f, 0)
+                        view.dispatchTouchEvent(event)
+                        event.recycle()
+                    }
+                }
+                compose.waitUntil(5000) {
+                    var focused = false
+                    compose.runOnUiThread { focused = surface.isFocused }
+                    focused
+                }
+                compose.runOnUiThread {
+                    // The same connection a soft keyboard is handed. Its
+                    // EditorInfo asks for suggestion-free, character input.
+                    val editor = EditorInfo()
+                    val keyboard = surface.onCreateInputConnection(editor)
+                    assertTrue(editor.inputType and InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS != 0)
+                    keyboard.commitText("/", 1)
+                    keyboard.commitText("s", 1)
+                    keyboard.setComposingText("k", 1)
+                    keyboard.finishComposingText()
+                    surface.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL))
+                    surface.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DEL))
+                }
+                compose.waitUntil(5000) { input().size >= 4 }
+                assertEquals(listOf("/", "s", "k", "\u007f"), input())
+
+                // Compose puts prose into the agent's own box: Insert leaves it
+                // there; Send presses Enter separately once the paste settled.
+                compose.onNodeWithText("Compose").performClick()
                 compose.onNode(hasSetTextAction()).performTextInput("pwd")
+                compose.onNodeWithText("Insert").performClick()
+                compose.waitUntil(5000) { compose.onAllNodes(hasSetTextAction()).fetchSemanticsNodes().isEmpty() }
+                compose.onNodeWithText("Compose").performClick()
+                compose.onNode(hasSetTextAction()).performTextInput("two\nlines")
                 compose.onNodeWithText("Send").performClick()
-                assertTrue(input.await(5, TimeUnit.SECONDS))
+                compose.waitUntil(5000) { input().size >= 7 }
+
                 listOf("Shift+Tab", "←", "→", "Enter").forEach {
                     compose.onNodeWithText(it).performScrollTo().performClick()
                 }
-                compose.waitUntil(5000) { frames.count { !it.startsWith('{') } >= 5 }
-                assertEquals("Only explicit native input reaches the PTY", listOf("pwd\r", "\u001b[Z", "\u001b[D", "\u001b[C", "\r"),
-                    frames.filter { !it.startsWith('{') })
+                compose.waitUntil(5000) { input().size >= 11 }
+                assertEquals("Only explicit native input reaches the PTY; arrows follow the agent's cursor-key mode",
+                    listOf("/", "s", "k", "\u007f",
+                        "\u001b[200~pwd\u001b[201~", "\u001b[200~two\rlines\u001b[201~", "\r",
+                        "\u001b[Z", "\u001bOD", "\u001bOC", "\r"),
+                    input())
                 // The approval keys live in the band above the terminal now,
                 // where the request they answer is named. A bare `y` in the
                 // quick-key row would approve whichever prompt the agent
