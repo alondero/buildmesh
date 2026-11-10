@@ -255,6 +255,30 @@ beforeEach(() => {
 beforeAll(preloadProbeTabs, 60_000);
 
 describe('CircuitsProbeTab', () => {
+  it('distinguishes reviews sharing one preset in history and the queue', async () => {
+    const runs = ['Fix parser', 'Improve brakes'].map((name, index) => ({
+      ...RUN_DONE,
+      run: { ...RUN_DONE.run, id: 101 + index,
+        context_json: JSON.stringify({ 'source.review_preset': '1', 'source.name': name }),
+      },
+    }));
+    mockBackend({
+      circuits: [{ ...CIRCUIT, is_preset: true, name: 'Agent review' }],
+      runs,
+      queue: runs.map(({ run }, index) => ({
+        run: { ...run, id: 201 + index, state: 'pending' },
+        circuit_name: 'Agent review', queue_rank: index + 1,
+      })),
+    });
+    openProbeDestination('circuits');
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
+    expect((await screen.findByTestId('run-subject-101')).textContent).toBe('Review: Fix parser');
+    expect(screen.getByTestId('run-subject-102').textContent).toBe('Review: Improve brakes');
+    fireEvent.click(screen.getByTestId('circuits-view-queue'));
+    expect(await screen.findByText('Review: Fix parser')).toBeTruthy();
+    expect(screen.getByText('Review: Improve brakes')).toBeTruthy();
+  });
+
   it('uses the active run allowance when the editable blueprint no longer contains review', async () => {
     mockBackend({ circuits: [CIRCUIT], runs: [{ ...RUN_RUNNING, review_round_limit: 3 }] });
     openProbeDestination('circuits');

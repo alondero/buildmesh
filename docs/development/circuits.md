@@ -4,6 +4,12 @@ Status: current
 
 ## Autopilot Circuits (spec #1205, walking skeleton #1206)
 
+The shared built-in review preset is named **Agent review**, independent of the
+first source agent. Startup normalizes existing preset names without renaming
+user-authored Circuits or rewriting run history. The run subject, queue and
+Overview tooltip identify local-preset reviews as **Review: <source name>**;
+the recorded source name remains available after its Agent Node is removed.
+
 The application automation runtime is a composable trigger-action graph. A **Circuit** is a blueprint DAG (`circuit::model::CircuitGraph`, serialised as the `graph_json` TEXT column — no per-node-kind migrations, the AST evolves inside the JSON); a **Circuit Run** is one execution (`autopilot_circuit_runs`); a **Circuit Step** is per-circuit-node state within a run (`autopilot_circuit_run_steps`, schema v34). "Node" is overloaded everywhere: *circuit node* = graph vertex, *agent node* = mesh session.
 
 - **Pure core, thin impure seam:** `stepper::advance(run, event) -> Transition {step_writes, effects}` never touches SQLite/PTY/clocks — every impure fact arrives as an event (`Tick(Capacity)`, `AgentFinished`, `AgentReady`, `AgentLost`). The seam is `services::circuit_worker`: a dedicated OS thread (2s fast tick + condvar wake for Trigger Now) that observes live state → steps → commits atomically via `db::commit_circuit_advance` (one transaction for run-state + all step upserts; `UNIQUE(run_id, node_id)` backs the upsert) → executes effects. GitHub effects live in `circuit_worker/github.rs`; spawn overrides in `circuit_worker/spawn.rs` — a new effect kind should not enlarge the loop.

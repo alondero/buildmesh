@@ -99,7 +99,16 @@ function reviewerNodeIds(nodeIndex: NodeIndex): Set<string> {
   return reviewers;
 }
 
-export function recordedLabel(context: Record<string, string>): string | null {
+/** The shared preset names the workflow; the source names an individual review. */
+export function agentReviewLabel(context: Record<string, string>, liveSourceName = ''): string | null {
+  if (context['source.review_preset'] !== '1') return null;
+  const source = (context['source.name'] ?? '').trim() || liveSourceName.trim();
+  return source === '' ? 'Agent review' : `Review: ${source}`;
+}
+
+export function recordedLabel(context: Record<string, string>, liveSourceName = ''): string | null {
+  const review = agentReviewLabel(context, liveSourceName);
+  if (review !== null) return review;
   const title = (context['issue.title'] ?? '').trim();
   if (title !== '') {
     const number = (context['issue.number'] ?? '').trim();
@@ -136,7 +145,7 @@ export function runSubject(
   const candidate = run.source_agent_node_id ?? implementation?.agent_node_id ?? null;
   if (candidate !== null) {
     const name = agentName(candidate);
-    if (name !== null) return { label: recordedLabel(context) ?? name, agentNodeId: candidate };
+    if (name !== null) return { label: recordedLabel(context, name) ?? name, agentNodeId: candidate };
   }
   return { label: recordedLabel(context), agentNodeId: null };
 }

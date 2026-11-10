@@ -58,6 +58,7 @@ fn review_blueprint_is_available_without_runs_and_ensure_preserves_its_identity(
     let rows = list_circuits_with_recent_runs_inner(&conn, mesh.id, 10).unwrap();
     assert_eq!(rows.len(), 1);
     assert!(rows[0].0.is_preset);
+    assert_eq!(rows[0].0.name, "Agent review");
     assert!(!rows[0].0.enabled);
     assert!(rows[0].1.is_empty());
     let id = rows[0].0.id;
@@ -75,6 +76,59 @@ fn review_blueprint_is_available_without_runs_and_ensure_preserves_its_identity(
     assert!(!copy.enabled);
     circuit::ledger::delete_circuits_for_mesh_inner(&conn, mesh.id).unwrap();
     assert!(get_autopilot_circuit_inner(&conn, id).unwrap().is_none());
+}
+
+#[test]
+fn review_preset_name_upgrade_preserves_runs_and_authored_circuits() {
+    let conn = isolated_test_conn();
+    let mesh = create_mesh_inner(&conn, "review names", "/tmp/review-names").unwrap();
+    circuit::ledger::ensure_review_blueprint_inner(&conn, mesh.id).unwrap();
+    let preset = list_circuits_with_recent_runs_inner(&conn, mesh.id, 10)
+        .unwrap()
+        .remove(0)
+        .0;
+    let custom = create_autopilot_circuit_inner(
+        &conn,
+        mesh.id,
+        "Review agent 3991",
+        "My custom workflow",
+        &sample_graph_json(),
+    )
+    .unwrap();
+    let context = r#"{"source.name":"Fix parser","source.review_preset":"1"}"#;
+    conn.execute(
+        "INSERT INTO autopilot_circuit_runs (circuit_id,mesh_id,trigger_identity,state,context_json)
+         VALUES (?1,?2,'manual:naming','completed',?3)",
+        params![preset.id, mesh.id, context],
+    )
+    .unwrap();
+    let run_id = conn.last_insert_rowid();
+    for old_name in ["Review agent 3991", "Built-in Review Blueprint"] {
+        conn.execute(
+            "UPDATE autopilot_circuits SET name=?2 WHERE id=?1",
+            params![preset.id, old_name],
+        )
+        .unwrap();
+        for _ in 0..2 {
+            super::init_schema(&conn).unwrap();
+            let upgraded = get_autopilot_circuit_inner(&conn, preset.id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(upgraded.name, "Agent review");
+            assert_eq!(upgraded.graph_json, preset.graph_json);
+            let run = get_circuit_run_inner(&conn, run_id).unwrap().unwrap();
+            assert_eq!(run.circuit_id, preset.id);
+            assert_eq!(run.context_json, context);
+            assert_eq!(run.state, "completed");
+            assert_eq!(
+                get_autopilot_circuit_inner(&conn, custom.id)
+                    .unwrap()
+                    .unwrap()
+                    .name,
+                custom.name
+            );
+        }
+    }
 }
 
 #[test]
@@ -1476,6 +1530,13 @@ fn node_review_borrows_source_deduplicates_and_cancels_only_reviewer() {
     assert_eq!(preset_count, 1);
     let run = get_circuit_run_inner(&conn, run_id).unwrap().unwrap();
     assert_eq!(run.source_agent_node_id, Some(source.id));
+    assert_eq!(
+        get_autopilot_circuit_inner(&conn, run.circuit_id)
+            .unwrap()
+            .unwrap()
+            .name,
+        "Agent review"
+    );
     let ctx = crate::circuit::context::CircuitContext::from_json(&run.context_json).unwrap();
     assert_eq!(ctx.source_agent_id(), Some(source.id));
     assert_eq!(ctx.get("source.base_ref"), Some(mesh.base_ref.as_str()));
