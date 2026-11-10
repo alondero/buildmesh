@@ -3,8 +3,10 @@
 use crate::env;
 use crate::process_util::command_no_window;
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
+use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tauri::command;
 use ts_rs::TS;
 
@@ -19,19 +21,78 @@ pub struct FileNode {
     pub children: Vec<FileNode>,
 }
 
-fn read_dir_recursive(
+struct ListedEntry {
+    path: PathBuf,
+    name: OsString,
+    is_dir: bool,
+}
+
+fn entry_name_is_hidden(name: &OsStr) -> bool {
+    name.to_string_lossy().starts_with('.')
+}
+
+/// Directory bit used for sorting and for the node itself.
+///
+/// Follows symlinks, matching `Path::is_dir`. `DirEntry::file_type` does not,
+/// so a link to a directory would sort and render as a file. A false result
+/// is either a non-directory or a metadata error, which is how `Path::is_dir`
+/// reports both.
+fn entry_is_directory(path: &Path) -> bool {
+    path.is_dir()
+}
+
+/// One directory classification per visible entry. Dotfiles are skipped
+/// before that stat: they are not part of the sorted result.
+///
+/// `read_dir` item errors are dropped. A failure to open the directory
+/// yields no children. A metadata failure is `is_dir == false`.
+fn list_sorted_children<F>(path: &Path, classify: &F) -> Vec<ListedEntry>
+where
+    F: Fn(&Path) -> bool,
+{
+    let mut listed = Vec::new();
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.filter_map(Result::ok) {
+            let name = entry.file_name();
+            if entry_name_is_hidden(&name) {
+                continue;
+            }
+            let child = entry.path();
+            // Classify once, before sorting, and keep the bit for the node.
+            // The comparator reads only that bit and the name.
+            let is_dir = classify(&child);
+            listed.push(ListedEntry {
+                path: child,
+                name,
+                is_dir,
+            });
+        }
+    }
+    listed.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        _ => a.name.cmp(&b.name),
+    });
+    listed
+}
+
+fn read_dir_recursive<F>(
     path: &Path,
+    is_dir: bool,
     base_path: &str,
     host_base: &str,
     depth: usize,
     max_depth: usize,
-) -> FileNode {
+    classify: &F,
+) -> FileNode
+where
+    F: Fn(&Path) -> bool,
+{
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| path.to_string_lossy().to_string());
 
-    let is_dir = path.is_dir();
     let mut children = Vec::new();
 
     // Calculate the internal path for the frontend
@@ -44,31 +105,16 @@ fn read_dir_recursive(
     };
 
     if is_dir && depth < max_depth {
-        if let Ok(entries) = fs::read_dir(path) {
-            let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-            // Sort: directories first, then alphabetically
-            entries.sort_by(|a, b| {
-                let a_is_dir = a.path().is_dir();
-                let b_is_dir = b.path().is_dir();
-                match (a_is_dir, b_is_dir) {
-                    (true, false) => std::cmp::Ordering::Less,
-                    (false, true) => std::cmp::Ordering::Greater,
-                    _ => a.file_name().cmp(&b.file_name()),
-                }
-            });
-            for entry in entries {
-                let name = entry.file_name();
-                if name.to_string_lossy().starts_with('.') {
-                    continue;
-                }
-                children.push(read_dir_recursive(
-                    &entry.path(),
-                    base_path,
-                    host_base,
-                    depth + 1,
-                    max_depth,
-                ));
-            }
+        for entry in list_sorted_children(path, classify) {
+            children.push(read_dir_recursive(
+                &entry.path,
+                entry.is_dir,
+                base_path,
+                host_base,
+                depth + 1,
+                max_depth,
+                classify,
+            ));
         }
     }
 
@@ -80,6 +126,39 @@ fn read_dir_recursive(
     }
 }
 
+fn read_listed_directory<F>(
+    path: &str,
+    max_depth: Option<usize>,
+    classify: &F,
+) -> Result<FileNode, String>
+where
+    F: Fn(&Path) -> bool,
+{
+    let host_path = env::to_host_path(path);
+    let path_obj = Path::new(&host_path);
+
+    if !path_obj.exists() {
+        return Err(format!(
+            "Path does not exist: {} (mapped from {})",
+            host_path, path
+        ));
+    }
+    if !path_obj.is_dir() {
+        return Err(format!("Path is not a directory: {}", host_path));
+    }
+
+    let depth = max_depth.unwrap_or(3);
+    // The checks above already classified the root. Pass that bit through so
+    // the walk does not stat the root again.
+    Ok(read_dir_recursive(
+        path_obj, true, path, &host_path, 0, depth, classify,
+    ))
+}
+
+fn list_directory_blocking(path: String, max_depth: Option<usize>) -> Result<FileNode, String> {
+    read_listed_directory(&path, max_depth, &entry_is_directory)
+}
+
 /// List a directory as a tree structure
 // Offloaded via `run_blocking` (issue #762 convention): `#[command(async)]`
 // ran the recursive walk on a *bounded tokio* worker, parking it for the
@@ -87,21 +166,7 @@ fn read_dir_recursive(
 #[command]
 pub async fn list_directory(path: String, max_depth: Option<usize>) -> Result<FileNode, String> {
     crate::commands::run_blocking("list_directory", move || {
-        let host_path = env::to_host_path(&path);
-        let path_obj = Path::new(&host_path);
-
-        if !path_obj.exists() {
-            return Err(format!(
-                "Path does not exist: {} (mapped from {})",
-                host_path, path
-            ));
-        }
-        if !path_obj.is_dir() {
-            return Err(format!("Path is not a directory: {}", host_path));
-        }
-
-        let depth = max_depth.unwrap_or(3);
-        Ok(read_dir_recursive(path_obj, &path, &host_path, 0, depth))
+        list_directory_blocking(path, max_depth)
     })
     .await
 }
@@ -230,6 +295,10 @@ pub(crate) fn open_host_directory_in_file_manager(host_path: &Path) -> Result<()
 pub fn get_user_config_dir() -> String {
     env::claude_dir().to_string_lossy().to_string()
 }
+
+#[cfg(test)]
+#[path = "file_tree_tests.rs"]
+mod file_tree_tests;
 
 #[cfg(test)]
 mod tests {
