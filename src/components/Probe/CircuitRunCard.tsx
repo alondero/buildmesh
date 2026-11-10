@@ -21,7 +21,9 @@
  * retained report offers it behind its own toggle.
  *
  * Runs start collapsed; attention remains visible with a Resolve action and a
- * clamped error excerpt. Expanded details show the full report and evidence.
+ * clamped error excerpt. An opened card leads with the run's stage tracker
+ * and review rounds — the summary the agent node card's Overview tab shows —
+ * then the full report and evidence.
  * `expanded` is lifted to the parent so a `circuit-run-updated` refetch
  * can't reset a card the user deliberately opened or closed.
  *
@@ -34,6 +36,8 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import { CircuitEvidenceHistory } from '../Circuits/CircuitEvidenceHistory';
 import { ReviewRoundLimit, reviewRoundLabel } from '../Circuits/ReviewRoundLimit';
 import { RunNextSteps, runNeedsNextSteps } from '../Circuits/RunNextStepsPanel';
+import { RunProgressSummary } from '../Circuits/RunProgressSummary';
+import { useCircuitRunOverview } from '../Circuits/useCircuitRunOverview';
 import { describeProblem } from '../Circuits/runNextSteps';
 import { isTerminalStepStatus } from '../Circuits/circuitVocabulary';
 import type { CircuitRunDetail } from '../../lib/tauri';
@@ -148,6 +152,23 @@ export function LiveRunDuration({ run, steps, compact = false }: { run: CircuitR
     return () => clearInterval(id);
   }, [terminal]);
   return <RunTimingSpans run={run} steps={steps} now={now} compact={compact} />;
+}
+
+/**
+ * The stage tracker and review rounds an opened card leads with — the same
+ * summary as the agent node card's Overview tab. It reads the run's own
+ * overview (the graph that run executes) only while the card is open, and
+ * stays out of the way while that read is pending or fails: everything below
+ * it comes from the Probe snapshot.
+ */
+function ExpandedRunProgress({ runId, roleLabel }: { runId: number; roleLabel: (nodeId: string) => string }) {
+  const { overview } = useCircuitRunOverview(runId);
+  if (overview === null) return null;
+  return (
+    <div className="mb-2 border-b border-border-subtle pb-2">
+      <RunProgressSummary overview={overview} roleLabel={roleLabel} />
+    </div>
+  );
 }
 
 interface CircuitRunCardProps {
@@ -497,6 +518,7 @@ export function CircuitRunCard({
       <div id={panelId} hidden={!expanded}>
         {expanded && (
           <div className="px-2 pb-2 border-t border-border-subtle pt-1.5">
+            <ExpandedRunProgress runId={run.id} roleLabel={(nodeId) => nodeRoleLabel(nodeId, nodeIndex.get(nodeId)?.type)} />
             <CircuitEvidenceHistory
               key={run.id}
               runId={run.id}
@@ -602,8 +624,10 @@ export function CircuitRunCard({
                       {stepDuration !== null && (
                         <span className="shrink-0 text-text-muted">· {formatDurationMs(stepDuration)}</span>
                       )}
+                      {/* Wraps rather than refusing to shrink: at 1.5x text a long
+                          agent name otherwise pushed the 240px Probe sideways. */}
                       {stepAgent !== null && (
-                        <span className="shrink-0 text-text-muted">
+                        <span className="min-w-0 break-words text-text-muted">
                           · agent{' '}
                           <span className="font-mono text-text-secondary">
                             {stepAgentLabel ?? `#${stepAgent}`}
