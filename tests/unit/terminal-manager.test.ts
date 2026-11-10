@@ -179,7 +179,7 @@ describe('TerminalManager', () => {
       terminalManager.dispose(1);
 
       expect(invokeSpy).toHaveBeenCalledWith('unsubscribe_agent_output', {
-        sessionId: 1,
+        sessionId: 1, channelId: expect.any(Number),
       });
     });
 

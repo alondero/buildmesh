@@ -368,7 +368,7 @@ describe('BuildRunTerminalRegistry — persistence across remount (issue: build-
     expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'build_run')).toHaveLength(1);
     expect(vi.mocked(invoke).mock.calls).toEqual(expect.arrayContaining([
       ['close_build_run', { nodeId: 83 }],
-      ['unsubscribe_build_run_output', { sessionId: 83 }],
+      ['unsubscribe_build_run_output', { sessionId: 83, channelId: expect.any(Number) }],
     ]));
 
     resolveClose();
@@ -701,7 +701,7 @@ describe('BuildRunTerminal component — survival of the user-reported bug', () 
     buildRunTerminalManager.dispose(70, 'build', true);
     expect(vi.mocked(invoke).mock.calls).toEqual(
       expect.arrayContaining([
-        ['unsubscribe_build_run_output', { sessionId: 70 }],
+        ['unsubscribe_build_run_output', { sessionId: 70, channelId: expect.any(Number) }],
       ]),
     );
   });

@@ -2,6 +2,7 @@ pub mod batch;
 #[cfg(all(test, windows))]
 mod conpty_tests;
 pub mod lifecycle;
+mod output_window;
 mod registry;
 pub mod sink;
 pub use registry::PtyRegistry;

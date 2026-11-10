@@ -403,6 +403,8 @@ pub(super) fn start_reader(
         chunk_capture.mark_captured();
     }
 
+    let sink =
+        crate::agent::output::ensure(session_id).producer(std::sync::Arc::clone(&deliberate_kill));
     std::thread::spawn(move || {
         // The SpawnTimer in the spawn pipeline stops at process *creation*
         // (`after_pty_spawn`), so the shell → agent-CLI boot tail is invisible
@@ -419,7 +421,6 @@ pub(super) fn start_reader(
         // banners). `with_batcher` drops the producer before joining —
         // joining while still holding `SyncSender` deadlocks the reader
         // on every PTY exit.
-        let sink = crate::agent::output::ensure(session_id);
         let batch_session_id = session_id;
         crate::pty::batch::with_batcher(
             move |batch| {

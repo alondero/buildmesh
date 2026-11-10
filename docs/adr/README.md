@@ -56,3 +56,5 @@ Use the next numeric filename and include:
 - [0054: The Node Glance is read on demand from the transcript readers](0054-node-glance-on-demand.md)
 
 - [0055: Circuit control workflows live behind one transport-independent module](0055-circuit-control-workflows.md)
+
+- [0056: PTY output credit belongs before Channel storage](0056-pty-output-credit-window.md)

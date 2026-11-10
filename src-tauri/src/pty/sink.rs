@@ -13,10 +13,14 @@
 //! [`BUILD_RUN`] are two independent maps of the same [`OutputSink`]
 //! type.
 
+use super::output_window::OutputWindow;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use tauri::ipc::{Channel, InvokeResponseBody};
 
 /// Cap on bytes buffered before the frontend has subscribed. Matches
@@ -60,44 +64,52 @@ fn filter_buffered_colour_queries(pending: &[u8]) -> (Vec<u8>, Vec<u8>) {
 }
 
 struct LiveOutput {
-    channel: Channel<InvokeResponseBody>,
+    window: OutputWindow,
     pending_colour_query_prefix: parking_lot::Mutex<Vec<u8>>,
 }
 
 impl LiveOutput {
-    fn new(channel: Channel<InvokeResponseBody>, pending_colour_query_prefix: Vec<u8>) -> Self {
+    fn new(
+        channel: Channel<InvokeResponseBody>,
+        pending_colour_query_prefix: Vec<u8>,
+        replay: Vec<u8>,
+    ) -> Self {
         Self {
-            channel,
+            window: OutputWindow::new(channel, replay),
             pending_colour_query_prefix: parking_lot::Mutex::new(pending_colour_query_prefix),
         }
     }
 
-    fn send(&self, data: Vec<u8>) {
-        let mut prefix = self.pending_colour_query_prefix.lock();
-        if prefix.is_empty() {
-            drop(prefix);
-            let _ = self.channel.send(InvokeResponseBody::Raw(data));
-            return;
-        }
-
-        let mut candidate = std::mem::take(&mut *prefix);
-        candidate.extend(data);
-        if let Some(query) = BUFFERED_COLOUR_QUERIES
-            .iter()
-            .find(|query| candidate.starts_with(query))
-        {
-            let remainder = candidate[query.len()..].to_vec();
-            if !remainder.is_empty() {
-                let _ = self.channel.send(InvokeResponseBody::Raw(remainder));
+    fn send(&self, data: Vec<u8>, is_current: &dyn Fn() -> bool) {
+        let data = {
+            let mut prefix = self.pending_colour_query_prefix.lock();
+            if !is_current() {
+                return;
             }
-        } else if BUFFERED_COLOUR_QUERIES
-            .iter()
-            .any(|query| query.starts_with(&candidate))
-        {
-            *prefix = candidate;
-        } else {
-            let _ = self.channel.send(InvokeResponseBody::Raw(candidate));
-        }
+            if prefix.is_empty() {
+                data
+            } else {
+                let mut candidate = std::mem::take(&mut *prefix);
+                candidate.extend(data);
+                if let Some(query) = BUFFERED_COLOUR_QUERIES
+                    .iter()
+                    .find(|query| candidate.starts_with(query))
+                {
+                    candidate[query.len()..].to_vec()
+                } else if BUFFERED_COLOUR_QUERIES
+                    .iter()
+                    .any(|query| query.starts_with(&candidate))
+                {
+                    *prefix = candidate;
+                    return;
+                } else {
+                    candidate
+                }
+            }
+        };
+        // Filtering owns only a short CPU section. Never retain its mutex
+        // while waiting for another producer or frontend decode credit.
+        self.window.send(data, is_current);
     }
 }
 
@@ -108,8 +120,8 @@ enum SinkState {
     /// chunk (see the 4 MiB trap when a noisy build script dumps output
     /// before the frontend mounts).
     Pending(VecDeque<u8>),
-    /// Live Channel. `send` uses this handle in place -- no clone.
-    Live(LiveOutput),
+    /// Shared live window; batchers wait outside the sink lock.
+    Live(Arc<LiveOutput>),
     /// Terminal disposed or node deleted. Further sends are dropped.
     /// Process exit must not enter this state.
     Closed,
@@ -130,28 +142,41 @@ impl OutputSink {
     /// Deliver `data` without cloning the Channel. Always the Channel
     /// path (or a pending buffer): the caller must not also emit JSON.
     pub fn send_owned(&self, data: Vec<u8>) {
-        {
-            let inner = self.inner.read();
-            if let SinkState::Live(live) = &*inner {
-                live.send(data);
-                return;
-            }
-            if matches!(&*inner, SinkState::Closed) {
-                return;
-            }
+        self.send_while(data, &|| true);
+    }
+
+    fn send_while(&self, data: Vec<u8>, is_current: &dyn Fn() -> bool) {
+        if !is_current() {
+            return;
         }
-        let mut inner = self.inner.write();
-        match &mut *inner {
-            SinkState::Live(live) => {
-                live.send(data);
-            }
-            SinkState::Pending(buf) => {
-                buf.extend(data);
-                while buf.len() > PENDING_CAP {
-                    buf.pop_front();
+        let live = {
+            let mut inner = self.inner.write();
+            match &mut *inner {
+                SinkState::Live(live) => Arc::clone(live),
+                SinkState::Pending(buf) => {
+                    buf.extend(data);
+                    while buf.len() > PENDING_CAP {
+                        buf.pop_front();
+                    }
+                    return;
                 }
+                SinkState::Closed => return,
             }
-            SinkState::Closed => {}
+        };
+        live.send(data, is_current);
+    }
+
+    /// Each process owns a cancellation flag, while the terminal owns the Channel.
+    pub fn producer(self: &Arc<Self>, cancelled: Arc<AtomicBool>) -> OutputProducer {
+        OutputProducer {
+            sink: Arc::clone(self),
+            cancelled,
+        }
+    }
+
+    fn wake_producers(&self) {
+        if let SinkState::Live(live) = &*self.inner.read() {
+            live.window.wake();
         }
     }
 
@@ -159,10 +184,13 @@ impl OutputSink {
         let mut inner = self.inner.write();
         let (pending, live_prefix): (Vec<u8>, Vec<u8>) = match &mut *inner {
             SinkState::Pending(buf) => (std::mem::take(buf).into(), Vec::new()),
-            SinkState::Live(live) => (
-                Vec::new(),
-                std::mem::take(&mut *live.pending_colour_query_prefix.lock()),
-            ),
+            SinkState::Live(live) => {
+                live.window.close();
+                (
+                    Vec::new(),
+                    std::mem::take(&mut *live.pending_colour_query_prefix.lock()),
+                )
+            }
             // Closed is a terminal state (terminal disposed or node
             // deleted). Do not resurrect it into Live -- the prior
             // subscription was deliberately torn down and any new
@@ -170,19 +198,45 @@ impl OutputSink {
             SinkState::Closed => return,
         };
         let (replay, replay_prefix) = filter_buffered_colour_queries(&pending);
-        if !replay.is_empty() {
-            let _ = channel.send(InvokeResponseBody::Raw(replay));
-        }
         let pending_colour_query_prefix = if live_prefix.is_empty() {
             replay_prefix
         } else {
             live_prefix
         };
-        *inner = SinkState::Live(LiveOutput::new(channel, pending_colour_query_prefix));
+        let live = Arc::new(LiveOutput::new(
+            channel,
+            pending_colour_query_prefix,
+            replay,
+        ));
+        live.window.start();
+        *inner = SinkState::Live(live);
     }
 
     pub(crate) fn close(&self) {
-        *self.inner.write() = SinkState::Closed;
+        let mut inner = self.inner.write();
+        if let SinkState::Live(live) = &*inner {
+            live.window.close();
+        }
+        *inner = SinkState::Closed;
+    }
+}
+
+/// A cancelled process may drain its old bounded reader queue, but cannot
+/// enter the live Channel or wait for credit belonging to a new process.
+#[derive(Clone)]
+pub struct OutputProducer {
+    sink: Arc<OutputSink>,
+    cancelled: Arc<AtomicBool>,
+}
+impl OutputProducer {
+    pub fn send_owned(&self, data: Vec<u8>) {
+        self.sink
+            .send_while(data, &|| !self.cancelled.load(Ordering::Acquire));
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.sink.wake_producers();
     }
 }
 
@@ -214,7 +268,53 @@ impl OutputSinks {
     }
 
     pub fn register(&self, session_id: i64, channel: Channel<InvokeResponseBody>) {
-        self.ensure(session_id).set(channel);
+        // Keep registration atomic with removal: a captured sink must not be
+        // closed between lookup and set, silently losing the new Channel.
+        let mut map = self.map.write();
+        map.entry(session_id)
+            .or_insert_with(|| Arc::new(OutputSink::new()))
+            .set(channel);
+    }
+
+    /// Wake batchers after their process cancellation flags have been set.
+    pub fn wake_producers(&self, session_id: i64) {
+        let sink = self.map.read().get(&session_id).cloned();
+        if let Some(sink) = sink {
+            sink.wake_producers();
+        }
+    }
+
+    /// Acknowledge only the matching subscription, never a replacement Channel.
+    pub fn acknowledge(&self, session_id: i64, channel_id: u32, sequence: u64) {
+        let sink = self.map.read().get(&session_id).cloned();
+        if let Some(sink) = sink {
+            let live = match &*sink.inner.read() {
+                SinkState::Live(live) if live.window.id() == channel_id => Some(Arc::clone(live)),
+                _ => None,
+            };
+            if let Some(live) = live {
+                live.window.acknowledge(sequence);
+            }
+        }
+    }
+
+    /// Cancellation is scoped to a Channel so delayed teardown cannot close its replacement.
+    pub fn unregister_channel(&self, session_id: i64, channel_id: u32) {
+        let mut map = self.map.write();
+        let closed = map.get(&session_id).is_some_and(|sink| {
+            let mut inner = sink.inner.write();
+            if let SinkState::Live(live) = &*inner {
+                if live.window.id() == channel_id {
+                    live.window.close();
+                    *inner = SinkState::Closed;
+                    return true;
+                }
+            }
+            false
+        });
+        if closed {
+            map.remove(&session_id);
+        }
     }
 
     /// Drop the session-scoped sink. Idempotent. Called only when the
@@ -252,317 +352,5 @@ pub fn unregister_node_sinks(session_id: i64) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Mutex;
-
-    fn collecting_channel(received: &Arc<Mutex<Vec<u8>>>) -> Channel<InvokeResponseBody> {
-        let rec = received.clone();
-        Channel::new(move |body| {
-            if let InvokeResponseBody::Raw(bytes) = body {
-                rec.lock().unwrap().extend_from_slice(&bytes);
-            }
-            Ok(())
-        })
-    }
-
-    fn counting_channel(hits: &Arc<AtomicUsize>) -> Channel<InvokeResponseBody> {
-        let h = hits.clone();
-        Channel::new(move |_| {
-            h.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn circuit_buffered_colour_queries_do_not_inject_late_input() {
-        let received = Arc::new(Mutex::new(Vec::new()));
-        let sink = OutputSink::new();
-        sink.send_owned(b"before\x1b]10;?".to_vec());
-        sink.send_owned(b"\x1b\\middle\x1b]11;?\x07after\x1b[31mred\x1b[0m".to_vec());
-        sink.set(collecting_channel(&received));
-        assert_eq!(
-            &*received.lock().unwrap(),
-            b"beforemiddleafter\x1b[31mred\x1b[0m"
-        );
-        sink.send_owned(b"\x1b]10;?\x1b\\".to_vec());
-        assert!(
-            received.lock().unwrap().ends_with(b"\x1b]10;?\x1b\\"),
-            "live terminal queries must still reach xterm"
-        );
-    }
-
-    #[test]
-    fn circuit_buffered_colour_query_split_at_subscribe_does_not_reply_late() {
-        let received = Arc::new(Mutex::new(Vec::new()));
-        let sink = OutputSink::new();
-        sink.send_owned(b"before\x1b]10;?".to_vec());
-        sink.set(collecting_channel(&received));
-        assert_eq!(&*received.lock().unwrap(), b"before");
-
-        sink.send_owned(b"\x1b\\after".to_vec());
-        assert_eq!(&*received.lock().unwrap(), b"beforeafter");
-
-        sink.send_owned(b"\x1b]11;?\x07".to_vec());
-        assert!(received.lock().unwrap().ends_with(b"\x1b]11;?\x07"));
-    }
-
-    #[test]
-    fn circuit_buffered_non_query_colour_osc_is_preserved_across_subscribe() {
-        let received = Arc::new(Mutex::new(Vec::new()));
-        let sink = OutputSink::new();
-        sink.send_owned(b"before\x1b]10;".to_vec());
-        sink.set(collecting_channel(&received));
-        assert_eq!(&*received.lock().unwrap(), b"before");
-
-        sink.send_owned(b"rgb:abab/cdcd/efef\x07after".to_vec());
-        assert_eq!(
-            &*received.lock().unwrap(),
-            b"before\x1b]10;rgb:abab/cdcd/efef\x07after"
-        );
-    }
-
-    #[test]
-    fn circuit_pending_colour_osc_prefix_survives_channel_replacement() {
-        let first_received = Arc::new(Mutex::new(Vec::new()));
-        let second_received = Arc::new(Mutex::new(Vec::new()));
-        let sink = OutputSink::new();
-        sink.send_owned(b"before\x1b]10;".to_vec());
-        sink.set(collecting_channel(&first_received));
-        assert_eq!(&*first_received.lock().unwrap(), b"before");
-
-        sink.set(collecting_channel(&second_received));
-        sink.send_owned(b"rgb:abab/cdcd/efef\x07after".to_vec());
-
-        assert_eq!(&*first_received.lock().unwrap(), b"before");
-        assert_eq!(
-            &*second_received.lock().unwrap(),
-            b"\x1b]10;rgb:abab/cdcd/efef\x07after"
-        );
-    }
-
-    #[test]
-    fn send_before_subscribe_flushes_in_order_on_register() {
-        let received = Arc::new(Mutex::new(Vec::new()));
-        let sink = OutputSink::new();
-        sink.send_owned(b"hel".to_vec());
-        sink.send_owned(b"lo".to_vec());
-        sink.set(collecting_channel(&received));
-        assert_eq!(&*received.lock().unwrap(), b"hello");
-    }
-
-    #[test]
-    fn send_after_subscribe_goes_to_channel_without_cloning_per_chunk() {
-        let received = Arc::new(Mutex::new(Vec::new()));
-        let sink = OutputSink::new();
-        sink.set(collecting_channel(&received));
-        sink.send_owned(b"ab".to_vec());
-        sink.send_owned(b"cd".to_vec());
-        assert_eq!(&*received.lock().unwrap(), b"abcd");
-    }
-
-    #[test]
-    fn closed_sink_drops_further_sends() {
-        let received = Arc::new(Mutex::new(Vec::new()));
-        let sink = OutputSink::new();
-        sink.set(collecting_channel(&received));
-        sink.send_owned(b"keep".to_vec());
-        sink.close();
-        sink.send_owned(b"drop".to_vec());
-        assert_eq!(&*received.lock().unwrap(), b"keep");
-    }
-
-    #[test]
-    fn ensure_returns_the_same_arc_for_a_session() {
-        let id = 9_000_201;
-        let a = AGENT.ensure(id);
-        let b = AGENT.ensure(id);
-        assert!(Arc::ptr_eq(&a, &b));
-        AGENT.unregister(id);
-    }
-
-    #[test]
-    fn register_replaces_previous_channel() {
-        let first_hits = Arc::new(AtomicUsize::new(0));
-        let second_hits = Arc::new(AtomicUsize::new(0));
-        let id = 9_000_202;
-        AGENT.register(id, counting_channel(&first_hits));
-        AGENT.register(id, counting_channel(&second_hits));
-        AGENT.ensure(id).send_owned(b"x".to_vec());
-        assert_eq!(first_hits.load(Ordering::SeqCst), 0);
-        assert_eq!(second_hits.load(Ordering::SeqCst), 1);
-        AGENT.unregister(id);
-    }
-
-    #[test]
-    fn unregister_is_idempotent() {
-        let id = 9_000_203;
-        let sink = AGENT.ensure(id);
-        AGENT.unregister(id);
-        AGENT.unregister(id);
-        sink.send_owned(b"x".to_vec()); // closed — no panic
-    }
-
-    #[test]
-    fn replacement_reader_reuses_the_live_channel() {
-        // Retry / resume / regenerate (agent) or a replacement Build/Run
-        // reader call `ensure`. That must be the same Live sink the
-        // terminal already subscribed, not a fresh Pending buffer the
-        // frontend never sees.
-        let received = Arc::new(Mutex::new(Vec::new()));
-        let id = 9_000_204;
-        BUILD_RUN.register(id, collecting_channel(&received));
-        let first_reader = BUILD_RUN.ensure(id);
-        first_reader.send_owned(b"boot".to_vec());
-
-        let replacement_reader = BUILD_RUN.ensure(id);
-        assert!(
-            Arc::ptr_eq(&first_reader, &replacement_reader),
-            "a new process incarnation must reuse the session-scoped sink"
-        );
-        replacement_reader.send_owned(b"-ok".to_vec());
-        assert_eq!(&*received.lock().unwrap(), b"boot-ok");
-        BUILD_RUN.unregister(id);
-    }
-
-    #[test]
-    fn unregister_starts_a_fresh_pending_sink() {
-        let first = Arc::new(Mutex::new(Vec::new()));
-        let second = Arc::new(Mutex::new(Vec::new()));
-        let id = 9_000_205;
-        BUILD_RUN.register(id, collecting_channel(&first));
-        BUILD_RUN.unregister(id);
-
-        BUILD_RUN.ensure(id).send_owned(b"late".to_vec());
-        assert!(
-            first.lock().unwrap().is_empty(),
-            "bytes after unregister must not reach the disposed Channel"
-        );
-
-        BUILD_RUN.register(id, collecting_channel(&second));
-        assert_eq!(
-            &*second.lock().unwrap(),
-            b"late",
-            "ensure after unregister is a new Pending sink flushed on the next subscribe"
-        );
-        BUILD_RUN.unregister(id);
-    }
-
-    #[test]
-    fn agent_and_build_run_maps_do_not_cross_talk() {
-        // Same numeric id, two surfaces. The reason the maps are separate.
-        let id = 9_000_206;
-        let agent_got = Arc::new(Mutex::new(Vec::new()));
-        let build_got = Arc::new(Mutex::new(Vec::new()));
-        AGENT.register(id, collecting_channel(&agent_got));
-        BUILD_RUN.register(id, collecting_channel(&build_got));
-
-        AGENT.ensure(id).send_owned(b"agent".to_vec());
-        BUILD_RUN.ensure(id).send_owned(b"build".to_vec());
-
-        assert_eq!(&*agent_got.lock().unwrap(), b"agent");
-        assert_eq!(&*build_got.lock().unwrap(), b"build");
-        AGENT.unregister(id);
-        BUILD_RUN.unregister(id);
-    }
-
-    #[test]
-    fn pending_buffer_truncates_to_cap_without_panicking_or_reordering() {
-        // Reproduces the noisy-build-pre-mount scenario: a batcher pushes
-        // chunks well past PENDING_CAP before the frontend subscribes.
-        // The retained tail must be the LAST PENDING_CAP bytes in arrival
-        // order, with no panic, no deadlock, and no interleaving between
-        // chunks that arrived in separate send_owned calls.
-        let id = 9_000_207;
-        let sink = OutputSink::new();
-        let chunk = vec![0xAB_u8; 64 * 1024]; // 64 KiB -- typical batcher batch
-        let chunk_count = (PENDING_CAP / chunk.len()) + 8; // ~overflow by 8 chunks
-        for n in 0..chunk_count {
-            // Stamp each chunk with its index in the low byte of its tail so
-            // we can detect reordering after truncation.
-            let mut stamped = chunk.clone();
-            let last = stamped.len() - 1;
-            stamped[last] = n as u8;
-            sink.send_owned(stamped);
-        }
-
-        let received = Arc::new(Mutex::new(Vec::new()));
-        sink.set(collecting_channel(&received));
-
-        let got = received.lock().unwrap().clone();
-        assert_eq!(
-            got.len(),
-            PENDING_CAP,
-            "subscription flush must deliver exactly the kept tail, no more"
-        );
-        // First retained byte must come from a mid-stream chunk (the leading
-        // bytes of the very first chunks were dropped). We can verify
-        // ordering by walking the trailing stamp and asserting the indexes
-        // are strictly ascending and contiguous.
-        let stamps: Vec<u8> = got
-            .iter()
-            .copied()
-            .filter(|b| *b < chunk_count as u8)
-            .collect();
-        assert!(
-            stamps.windows(2).all(|w| w[0] < w[1]),
-            "chunk stamps must remain in arrival order after truncation"
-        );
-        // The first stamp is the lowest non-dropped chunk index. Its
-        // preceding bytes (all 0xAB except the last) must be the bulk of
-        // the chunk -- the truncation can only have lopped off whole
-        // chunks plus possibly a partial tail of one.
-        assert!(
-            stamps[0] >= (chunk_count - (PENDING_CAP / chunk.len()) - 1) as u8,
-            "truncation must not retain more than PENDING_CAP worth of chunks"
-        );
-
-        BUILD_RUN.unregister(id);
-    }
-
-    #[test]
-    fn pending_buffer_single_chunk_larger_than_cap_keeps_only_its_tail() {
-        // A single oversize send (e.g. one mega-payload from a noisy tool)
-        // must keep the LAST PENDING_CAP bytes of that single chunk --
-        // dropping the leading bytes, not the trailing ones.
-        let id = 9_000_208;
-        let sink = OutputSink::new();
-        let big: Vec<u8> = (0..(PENDING_CAP * 2) as u32)
-            .map(|i| (i & 0xFF) as u8)
-            .collect();
-        sink.send_owned(big.clone());
-
-        let received = Arc::new(Mutex::new(Vec::new()));
-        sink.set(collecting_channel(&received));
-
-        let got = received.lock().unwrap().clone();
-        assert_eq!(got.len(), PENDING_CAP);
-        let expected_tail: Vec<u8> = big[big.len() - PENDING_CAP..].to_vec();
-        assert_eq!(
-            got, expected_tail,
-            "single oversize chunk must retain only its trailing PENDING_CAP bytes"
-        );
-
-        BUILD_RUN.unregister(id);
-    }
-
-    #[test]
-    fn set_on_closed_sink_does_not_resurrect_into_live() {
-        // Closed is documented terminal. A subsequent set() (e.g. a stale
-        // subscribe callback landing after disposal) must NOT bring the
-        // sink back to Live and leak bytes through the new channel.
-        let received = Arc::new(Mutex::new(Vec::new()));
-        let sink = OutputSink::new();
-        sink.set(collecting_channel(&received));
-        sink.send_owned(b"keep".to_vec());
-        sink.close();
-        sink.set(collecting_channel(&received)); // must be a no-op
-        sink.send_owned(b"drop".to_vec());
-        assert_eq!(
-            &*received.lock().unwrap(),
-            b"keep",
-            "set on a closed sink must not transition back to Live"
-        );
-    }
-}
+#[path = "sink_tests.rs"]
+mod tests;

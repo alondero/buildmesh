@@ -440,6 +440,9 @@ pub fn run() {
             agent::process::handover_to_agent,
             // Binary PTY output Channel (issue #1385). Complements the
             // `agent-output` event fallback; see `agent::output`.
+            commands::pty_output::acknowledge_pty_output,
+            #[cfg(any(debug_assertions, feature = "dev-tools"))]
+            commands::pty_output::debug_pump_pty_output,
             agent::output::subscribe_agent_output,
             agent::output::unsubscribe_agent_output,
             commands::agent::auto_resume_agent_nodes,
