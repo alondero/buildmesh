@@ -61,8 +61,9 @@ history, invalidating worker decisions observed before the edit. Views refresh
 through `circuit-run-updated`; failed saves report an error and retain the last
 persisted value.
 
-The node card of an agent a run owns also carries an Overview tab with the run's
-step rail, its actions and a manual push for stuck agent steps; see
+The node card of an agent a run owns also carries an Overview tab that leads
+with what the run is doing, its stage and review rounds, with its actions, a
+manual push for stuck agent steps and the full step rail behind it; see
 [Overview tab](agent-node-circuits.md#overview-tab).
 
 Activity shows admitted runs with issue-led names, elapsed time, current stage,

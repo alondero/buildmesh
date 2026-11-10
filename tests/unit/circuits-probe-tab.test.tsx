@@ -13,7 +13,7 @@
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
 import { reviewContinuation } from './helpers/reviewContinuation';
 import { preloadProbeTabs } from './helpers/preloadProbeTabs';
-import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, act, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
@@ -1660,6 +1660,59 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     expect(screen.getByTestId('run-step-27-reviewer').textContent).toContain('Code reviewer');
     expect(screen.getByTestId('run-review-report-27-verdict').textContent)
       .toContain('No remaining findings. Approved.');
+  });
+
+  it('opens a review run on the same stage and rounds summary as the node Overview tab', async () => {
+    const graph = {
+      version: 3,
+      nodes: [
+        { id: 'trigger', type: { type: 'manual' } },
+        { id: 'reviewer', type: { type: 'spawn_agent_node', prompt: '', name: 'Code reviewer', provider: null, model: null, effort: null, extra_args: null, timeout_seconds: null } },
+        { id: 'verdict', type: { type: 'review_verdict', target_node_id: 'reviewer' } },
+        { id: 'retry', type: { type: 'retry_limit', max_retries: 3 } },
+        { id: 'again', type: { type: 'inject_pty', prompt: '', target_node_id: 'reviewer' } },
+      ],
+      edges: [
+        { from: 'trigger', to: 'reviewer', condition: 'always' },
+        { from: 'reviewer', to: 'verdict', condition: 'always' },
+        { from: 'verdict', to: 'retry', condition: { on_outcome: 'working' } },
+        { from: 'retry', to: 'again', condition: { on_outcome: 'completed' } },
+        { from: 'again', to: 'verdict', condition: 'always' },
+      ],
+    };
+    const detail: CircuitRunDetail = {
+      run: {
+        ...RUN_DONE.run, id: 29,
+        context_json: JSON.stringify({ 'node.verdict.review_verdict': 'approved', 'node.verdict.review_verdict_attempt': '2', 'node.verdict.evaluated_output': 'Looks good.' }),
+      },
+      steps: [
+        step({ node_id: 'trigger', status: 'completed', outcome: 'completed' }),
+        step({ node_id: 'reviewer', status: 'completed', outcome: 'completed' }),
+        step({ node_id: 'verdict', status: 'completed', outcome: 'completed', attempt: 2 }),
+        step({ node_id: 'retry', status: 'completed', outcome: 'completed' }),
+        step({ node_id: 'again', status: 'completed', outcome: 'completed' }),
+      ],
+    };
+    mockBackend({ circuits: [{ ...CIRCUIT, graph_json: JSON.stringify(graph) }], runs: [detail] });
+    const fallback = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => cmd === 'circuit_run_overview'
+      ? Promise.resolve({ ...detail, circuit_name: CIRCUIT.name, graph, review_round_limit: 3, attention: { revision: 1, checkpoints: [], pushes: [] } })
+      : fallback!(cmd, args));
+    const user = userEvent.setup();
+    openProbeDestination('circuits');
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
+    // A closed card reads nothing more than the Probe snapshot.
+    await screen.findByTestId('run-toggle-29');
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === 'circuit_run_overview')).toBe(false);
+
+    await user.click(screen.getByTestId('run-toggle-29'));
+    const summary = await screen.findByTestId('run-progress-summary-29');
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('circuit_run_overview', { runId: 29 });
+    const stages = within(summary).getAllByRole('listitem').filter((item) => item.hasAttribute('data-stage-state'));
+    expect(stages.map((stage) => stage.getAttribute('data-stage-state'))).toEqual(['done']);
+    const rounds = within(within(summary).getByRole('list', { name: 'Review round results' })).getAllByRole('listitem');
+    expect(rounds.map((round) => round.getAttribute('title'))).toEqual(['Round 1: Changes requested', 'Round 2: Approved', 'Round 3: Not used']);
+    expect(within(summary).getByTestId('run-latest-review').textContent).toContain('Looks good.');
   });
 
   it('distinguishes an exhausted review from an approved one', async () => {

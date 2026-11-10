@@ -69,19 +69,44 @@ continue a failed run.
 
 The tab reads one backend snapshot (`circuit_run_overview`): the run, its steps,
 the graph pinned for that run, and the same attention data the Probe uses. It
-refreshes on `circuit-run-updated` for that run. The header carries the circuit
-name, state or review verdict, review round, elapsed time and run id, with
-Pause, Resume and Cancel while the run is live. Below it, a step rail lists the
-graph's visible circuit nodes in flow order (triggers, joins and retry counters
-are wiring and stay hidden), each marked done, current, failed, remaining or
-skipped, with the pass number for steps a loop has repeated. A branch the run
-did not take reads as skipped only once nothing left in the run can come back
-round to the step that chose it. Rows expand to the step's times, verdict,
-review report, agent link and error; the current step starts expanded. Approvals,
-Unverified checkpoints, failed-run recovery and the full Run History reuse the
-Probe's components and backend eligibility. A push, checkpoint or recovery
-decision is sent against the run revision it was offered at, so a run that has moved on
-since refuses it rather than acting on stale state.
+refreshes on `circuit-run-updated` for that run. It reads top to bottom in the
+order a person asks, with progressive disclosure for the rest:
+
+1. **What is happening.** The run state, one sentence naming who is doing what
+   (`Code reviewer is reviewing round 2`, `Waiting for your approval`, `Review
+   approved`), elapsed time and the pull request, with Pause, Resume and Cancel
+   while the run is live. `runProgressModel.runHeadline` writes the sentence.
+2. **What needs a person.** Approvals (with the blocked step's own message),
+   Unverified checkpoints and failed-run recovery, then any step that can be
+   moved on by hand. A push whose step is held by evidence is shown open; one
+   that would only save waiting sits behind a quiet toggle.
+3. **Where the run is.** A stage tracker: a review circuit reads Prepare,
+   Review and Finish (the Review stage is the reviewer plus the loop through the
+   review gate), any other circuit its visible steps. For a review, one mark
+   per allowed round with its result, the round-limit control, and the latest
+   verdict with the opening lines of its report and the full report on request.
+   The latest verdict stays in view while the next round runs, labelled with
+   the round it belongs to. Earlier rounds read as changes requested because
+   the gate only runs again after asking for changes.
+4. **Who is involved.** The agents the run has used, implementation agent
+   first, each with its role, a working-now marker and Open.
+5. **Details, collapsed.** **All steps** opens the step rail: the graph's
+   visible circuit nodes in flow order (triggers, joins and retry counters are
+   wiring and stay hidden), each marked done, current, failed, remaining or
+   skipped, with the pass number for steps a loop has repeated. A branch the run
+   did not take reads as skipped only once nothing left in the run can come back
+   round to the step that chose it. Rows expand to the step's times, verdict,
+   review report, agent link and error; the current step starts expanded. Run
+   History and the run id follow.
+
+The Probe's opened run card leads with the same stage tracker and rounds
+summary (`RunProgressSummary`), reading the run's own overview only while the
+card is open. Approvals, Unverified checkpoints, failed-run recovery and the
+full Run History reuse the Probe's components and backend eligibility. A push,
+checkpoint or recovery decision is sent against the run revision it was offered
+at, so a run that has moved on since refuses it rather than acting on stale
+state. `tests/integration/ui-shot-circuit-overview.steps.mjs` checks the layout
+in four review states at 260px and the Probe card at 240px.
 
 
 ## Completion and recovery

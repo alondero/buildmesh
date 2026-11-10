@@ -11,15 +11,17 @@ export function reviewRoundLabel(context: Record<string, string>): string {
   return `Round ${attempt}${limit ? ` of ${limit}` : ''}`;
 }
 
-export function ReviewRoundLimit({ value, busy, onChange }: {
+export function ReviewRoundLimit({ value, busy, onChange, label = 'Review rounds' }: {
   value: number;
   busy: boolean;
   onChange: (value: number) => void;
+  /** The visible label; inside a section already titled "Review rounds", "Round limit". */
+  label?: string;
 }) {
   const id = useId();
   return (
     <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-2xs">
-      <label htmlFor={id} className="text-text-secondary">Review rounds</label>
+      <label htmlFor={id} className="text-text-secondary">{label}</label>
       <select id={id} value={value} disabled={busy} onChange={(event) => onChange(Number(event.target.value))}
         title="Maximum review rounds. Lowering this lets the current round finish. Unlimited keeps allowing another round until approval."
         className="min-h-6 max-w-full rounded-md border border-border-subtle bg-bg-input px-1.5 text-text-primary disabled:opacity-40">
