@@ -1,5 +1,4 @@
 use super::*;
-use crate::process_util::command_no_window;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fs;
@@ -242,6 +241,8 @@ fn link_directory(target: &Path, link: &Path) -> std::io::Result<()> {
 fn directory_junction(target: &Path, link: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
     {
+        use crate::process_util::command_no_window;
+
         let _guard = crate::env::ENV_LOCK.lock().expect("env lock");
         let link_arg = link.to_string_lossy().into_owned();
         let target_arg = target.to_string_lossy().into_owned();
