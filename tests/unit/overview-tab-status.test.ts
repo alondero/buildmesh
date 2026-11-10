@@ -38,6 +38,15 @@ describe('Overview tab circuit status', () => {
     expect(status?.label).toBe('Running');
   });
 
+  it('identifies the source of a built-in review instead of repeating the shared preset name', () => {
+    const status = overviewTabStatus(ownership, resource({
+      overview: { ...overview, circuit_name: 'Agent review', run: { ...overview.run,
+        context_json: '{"source.review_preset":"1","source.name":"Fix parser"}',
+      } },
+    }));
+    expect(status?.detail).toContain('Review: Fix parser');
+  });
+
   it('shortens an unlimited round limit', () => {
     const status = overviewTabStatus(ownership, resource({
       overview: { ...overview, review_round_limit: 0, run: { ...overview.run, context_json: '{"retry.attempt":"7"}' } },

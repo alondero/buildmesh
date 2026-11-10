@@ -465,7 +465,7 @@ fn create_node_circuit_run_with_recovery_locked(
             max_rounds,
         );
         graph.validate()?;
-        let name = format!("Review agent {}", node_id);
+        let name = "Agent review".to_string();
         let description = "Review an existing agent and return findings until approved";
         let existing: Option<(i64, String)> = tx
             .query_row(
@@ -942,7 +942,7 @@ pub(crate) fn ensure_review_blueprint_inner(db: &Connection, mesh_id: i64) -> Sq
         .to_json()
         .map_err(rusqlite::Error::InvalidParameterName)?;
     db.execute("INSERT INTO autopilot_circuits(mesh_id,name,description,enabled,graph_json,is_preset)
-        SELECT ?1,'Built-in Review Blueprint','Review an existing agent and return findings until approved',0,?2,1
+        SELECT ?1,'Agent review','Review an existing agent and return findings until approved',0,?2,1
         WHERE EXISTS(SELECT 1 FROM meshes WHERE id=?1)
         AND NOT EXISTS(SELECT 1 FROM autopilot_circuits WHERE mesh_id=?1 AND is_preset=1)", params![mesh_id,graph])?;
     Ok(())
