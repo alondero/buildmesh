@@ -396,7 +396,7 @@ export class BuildRunTerminalRegistry {
     // `attachToDOM` is part of the same session queue, so by the time this
     // runs a late buildRun completion has already marked ptyAlive. This is the
     // single place that closes the PTY and drops its output channel.
-    const teardownTasks: Promise<unknown>[] = [api.unsubscribeBuildRunOutput(inst.sessionId)];
+    const teardownTasks: Promise<unknown>[] = [api.unsubscribeBuildRunOutput(inst.sessionId, inst.outputSubscribe ?? undefined)];
     if (inst.ptyAlive) {
       inst.ptyAlive = false;
       teardownTasks.push(api.closeBuildRun(inst.sessionId));
@@ -565,11 +565,12 @@ export class BuildRunTerminalRegistry {
 
       inst.outputSubscribe = api.subscribeBuildRunOutput(sessionId, (bytes) => {
         writer.append(sessionId, bytes);
-      }).catch((error) => { console.error(error); });
+      });
+      void inst.outputSubscribe.catch((error) => { console.error(error); });
       // Do not publish an instance until the backend channel registration has
       // settled. This lets disposal call unsubscribe in deterministic order
       // without a second free-floating promise.
-      await inst.outputSubscribe;
+      await inst.outputSubscribe.catch((error) => { console.error(error); });
 
       // Per-instance exit listener (NOT per-sessionId module-level). Each
       // instance owns its own subscription and unlistens in disposeInstance.

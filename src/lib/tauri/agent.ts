@@ -1,5 +1,6 @@
 import type { RegenerateSelection } from '../regenerate';
-import { Channel } from '@tauri-apps/api/core';
+import { subscribeRawPtyOutput, unsubscribeRawPtyOutput } from './ptyOutput';
+export { bytesFromChannelMessage } from './ptyOutput';
 import { _invoke } from './_invoke';
 import { TerminalInputQueue, type InputStall } from '../terminalInputQueue';
 import type { InputOutcome } from '../../types/generated/InputOutcome';
@@ -99,96 +100,6 @@ export const resizeAgent = (sessionId: number, rows: number, cols: number) =>
   _invoke('resize_agent', { sessionId, rows, cols });
 
 /**
- * Coerce a Tauri Channel raw-binary message into a `Uint8Array`.
- *
- * Tauri 2's Channel delivers `InvokeResponseBody::Raw` as an
- * `ArrayBuffer` on the eval fast path (<1 KiB), or a `Response` on the
- * fetch path for larger frames. Tests and older runtimes may hand us a
- * `Uint8Array` or another
- * `ArrayBufferView` directly. Anything else is ignored; the JSON
- * `agent-output` event is retained only for test injection.
- */
-export function bytesFromChannelMessage(message: unknown): Uint8Array | null {
-  if (message instanceof Uint8Array) return message;
-  if (message instanceof ArrayBuffer) return new Uint8Array(message);
-  if (ArrayBuffer.isView(message)) {
-    const view = message as ArrayBufferView;
-    return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
-  }
-  return null;
-}
-
-interface ChannelResponse {
-  arrayBuffer: () => Promise<ArrayBuffer>;
-}
-
-function isChannelResponse(message: unknown): message is ChannelResponse {
-  if (typeof message !== 'object' || message === null) return false;
-  return typeof (message as { arrayBuffer?: unknown }).arrayBuffer === 'function';
-}
-
-async function bytesFromChannelMessageAsync(message: unknown): Promise<Uint8Array | null> {
-  const bytes = bytesFromChannelMessage(message);
-  if (bytes) return bytes;
-  if (!isChannelResponse(message)) return null;
-  return new Uint8Array(await message.arrayBuffer());
-}
-
-type PtyOutputCommand = 'subscribe_agent_output' | 'subscribe_build_run_output';
-
-/**
- * Shared Channel subscriber for raw PTY bytes (issues #1385 / #1393).
- * Small frames arrive as an `ArrayBuffer`; Tauri delivers larger frames
- * as a fetch `Response` whose body must be read asynchronously.
- * No-ops in tests whose `@tauri-apps/api/core` mock omits `Channel` —
- * those suites keep using the JSON event fallback.
- */
-function subscribeRawPtyOutput(
-  command: PtyOutputCommand,
-  sessionId: number,
-  onChunk: (data: Uint8Array) => void,
-): Promise<void> {
-  if (typeof Channel !== 'function') return Promise.resolve();
-  const onChunkChannel = new Channel<ArrayBuffer | Uint8Array | ChannelResponse>();
-  // Tauri's large-raw-payload path hands the callback a Response. Its body
-  // read is asynchronous, so serialize decoding to preserve the Channel's
-  // byte order when multiple fetches are in flight.
-  let decodeQueue: Promise<void> = Promise.resolve();
-  let queuedFrames = 0;
-  onChunkChannel.onmessage = (message) => {
-    const directBytes = bytesFromChannelMessage(message);
-    // Keep the small raw-frame fast path synchronous. Apart from avoiding an
-    // extra microtask for keystroke echoes, this preserves the existing
-    // interactive latency contract. Once a Response is queued, subsequent
-    // direct frames join the queue so they cannot overtake it.
-    // The sync path still has to mirror the queued path's error handling --
-    // a throwing onChunk here would otherwise escape unhandled (the queued
-    // .catch would swallow it).
-    if (directBytes && queuedFrames === 0) {
-      try {
-        onChunk(directBytes);
-      } catch (error) {
-        console.error(`[PTY] failed to decode ${command} Channel frame:`, error);
-      }
-      return;
-    }
-    queuedFrames++;
-    decodeQueue = decodeQueue
-      .then(async () => {
-        const bytes = directBytes ?? await bytesFromChannelMessageAsync(message);
-        if (bytes) onChunk(bytes);
-      })
-      .catch((error) => {
-        console.error(`[PTY] failed to decode ${command} Channel frame:`, error);
-      })
-      .finally(() => {
-        queuedFrames--;
-      });
-  };
-  return _invoke(command, { sessionId, onChunk: onChunkChannel });
-}
-
-/**
  * Subscribe this webview to raw agent PTY bytes for `sessionId` (issue #1385).
  * Production output skips Base64+JSON.
  */
@@ -198,8 +109,8 @@ export const subscribeAgentOutput = (
 ): Promise<void> => subscribeRawPtyOutput('subscribe_agent_output', sessionId, onChunk);
 
 /** Drop the binary Channel registered by [`subscribeAgentOutput`]. Idempotent. */
-export const unsubscribeAgentOutput = (sessionId: number) =>
-  _invoke('unsubscribe_agent_output', { sessionId });
+export const unsubscribeAgentOutput = (sessionId: number, owner?: Promise<void>) =>
+  unsubscribeRawPtyOutput('subscribe_agent_output', sessionId, owner);
 
 /**
  * Subscribe this webview to raw Build/Run PTY bytes for `sessionId`
@@ -211,8 +122,8 @@ export const subscribeBuildRunOutput = (
 ): Promise<void> => subscribeRawPtyOutput('subscribe_build_run_output', sessionId, onChunk);
 
 /** Drop the binary Channel registered by [`subscribeBuildRunOutput`]. Idempotent. */
-export const unsubscribeBuildRunOutput = (sessionId: number) =>
-  _invoke('unsubscribe_build_run_output', { sessionId });
+export const unsubscribeBuildRunOutput = (sessionId: number, owner?: Promise<void>) =>
+  unsubscribeRawPtyOutput('subscribe_build_run_output', sessionId, owner);
 
 /** Reply to a remote-pane snapshot request from the HTTP server. The pair
  *  (`request_id`, `data`) is matched against an in-flight promise on the

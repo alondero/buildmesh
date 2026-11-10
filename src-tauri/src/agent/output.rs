@@ -47,8 +47,12 @@ pub fn subscribe_agent_output(session_id: i64, on_chunk: Channel<InvokeResponseB
 
 /// Drop the binary Channel for `session_id`. Idempotent.
 #[command]
-pub fn unsubscribe_agent_output(session_id: i64) {
-    unregister(session_id);
+pub fn unsubscribe_agent_output(session_id: i64, channel_id: Option<u32>) {
+    if let Some(channel_id) = channel_id {
+        crate::pty::sink::AGENT.unregister_channel(session_id, channel_id);
+    } else {
+        crate::pty::sink::AGENT.unregister(session_id);
+    }
 }
 
 #[cfg(test)] // allow-test-in-production: retain the existing source guard while its allowed owner moves; inline-test relocation is separate

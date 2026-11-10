@@ -3,7 +3,10 @@
  * `@tauri-apps/api/core`. One class, imported by every factory — do not
  * paste a new `class Channel { onmessage = ... }` into each test file.
  */
+let nextChannelId = 1;
+
 export class MockChannel<T = unknown> {
+  readonly id = nextChannelId++;
   onmessage: (message: T) => void = () => {};
   constructor(handler?: (message: T) => void) {
     if (handler) this.onmessage = handler;
