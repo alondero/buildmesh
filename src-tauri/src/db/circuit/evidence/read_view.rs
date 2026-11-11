@@ -57,20 +57,42 @@ pub(in crate::db::circuit) fn recovery_view(
             })
             .collect(),
     };
-    for step in view.steps.clone() {
-        let agent_id = step
+    // One primary-key search for every agent this run names. A per-step
+    // lookup made an evidence read quadratic, because each unverified step
+    // rebuilt this view (issue #2766). The step list is cloned so the
+    // lifecycle write can borrow `view.context` on its own.
+    let steps = view.steps.clone();
+    let blockers =
+        crate::db::agent_node::circuit_lifecycle_blockers_inner(db, &step_agent_ids(&view))?;
+    for step in steps {
+        let Some(agent_id) = step
             .agent_node_id
-            .or_else(|| view.resolve_target_agent(&step.node_id));
-        if let Some(agent_id) = agent_id {
-            if let Some(blocker) =
-                crate::db::agent_node::circuit_lifecycle_blocker_inner(db, agent_id)?
-            {
-                let encoded = serde_json::to_string(&blocker)?;
-                view.context.set_lifecycle_blocker(&step.node_id, encoded);
-            }
+            .or_else(|| view.resolve_target_agent(&step.node_id))
+        else {
+            continue;
+        };
+        if let Some(blocker) = blockers.get(&agent_id).cloned().flatten() {
+            let encoded = serde_json::to_string(&blocker)?;
+            view.context.set_lifecycle_blocker(&step.node_id, encoded);
         }
     }
     Ok(view)
+}
+
+/// Agent ids named by the view's steps, once each.
+fn step_agent_ids(view: &crate::circuit::stepper::RunView) -> Vec<i64> {
+    let mut ids = Vec::new();
+    for step in &view.steps {
+        if let Some(agent_id) = step
+            .agent_node_id
+            .or_else(|| view.resolve_target_agent(&step.node_id))
+        {
+            ids.push(agent_id);
+        }
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    ids
 }
 
 /// What a person may record against one Unverified step. Shared by the history
@@ -141,7 +163,7 @@ pub(super) fn checkpoint_actions(
         _ => vec![],
     };
     let mut actions = actions;
-    if prompt_delivery::available(db, run_id, &step.node_id, step.attempt)? {
+    if prompt_delivery::available(db, view, &step.node_id, step.attempt)? {
         actions.insert(0, CheckpointAction::ManualDelivered);
     }
     Ok(actions)
@@ -162,9 +184,12 @@ pub(super) fn evidence_view_unresolved(
     let mut coverage = Vec::new();
     {
         let graph = run_graph(db, run_id)?;
-        let context = super::super::context_store::load_logical(db, run_id)?;
         let steps = crate::db::circuit::ledger::list_circuit_run_steps_inner(db, run_id)?;
         let view = recovery_view(db, &run)?;
+        // The recovery view already loaded the stored context. Coverage reads
+        // that same runtime map, so a history read does not parse it again.
+        let agents =
+            crate::db::agent_node::agent_coverage_identities_inner(db, &step_agent_ids(&view))?;
         let continuation =
             crate::db::circuit::recovery::review_continuation_supported(&run, &graph);
         for step in steps {
@@ -172,13 +197,11 @@ pub(super) fn evidence_view_unresolved(
                 .agent_node_id
                 .or_else(|| view.resolve_target_agent(&step.node_id))
             {
-                let agent =
-                    crate::db::agent_node::get_agent_node_by_id_inner(db, agent_id).optional()?;
-                let (platform, capabilities, stored) = match agent {
+                let (platform, capabilities, stored) = match agents.get(&agent_id) {
                     Some(agent) => (
                         format!("{} host / {} launch", std::env::consts::OS, agent.env),
                         crate::services::circuit_worker::observer_policy::for_missing_agent(),
-                        Some(crate::circuit::strategy::selector_for_agent(&agent)),
+                        Some(agent.selector.clone()),
                     ),
                     None => (
                         "Agent record unavailable".to_string(),
@@ -200,7 +223,7 @@ pub(super) fn evidence_view_unresolved(
                         .or_else(|| {
                             (step.status == "unverified")
                                 .then(|| {
-                                    context
+                                    view.context
                                         .get(&format!("node.{}.observation_blocker", step.node_id))
                                 })
                                 .flatten()
@@ -208,7 +231,8 @@ pub(super) fn evidence_view_unresolved(
                         .and_then(|json| serde_json::from_str(json).ok()),
                     waits_active: run.state == "running"
                         && !matches!(step.status.as_str(), "completed" | "failed" | "cancelled"),
-                    human_waits: context
+                    human_waits: view
+                        .context
                         .get(&format!("node.{}.evidence.{}", step.node_id, step.attempt))
                         .and_then(|json| {
                             serde_json::from_str::<crate::circuit::observation::WorkEvidence>(json)
