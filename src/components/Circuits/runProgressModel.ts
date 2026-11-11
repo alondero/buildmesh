@@ -16,6 +16,8 @@ import type { AutopilotCircuitRunStep } from '../../types/generated/AutopilotCir
 import type { CircuitGraph } from '../../types/generated/CircuitGraph';
 import type { CircuitNodeKind } from '../../types/generated/CircuitNodeKind';
 import type { CircuitRunOverview } from '../../types/generated/CircuitRunOverview';
+import type { CircuitHistoryEntry } from '../../types/generated/CircuitHistoryEntry';
+import type { RecordedClassification } from '../../types/generated/RecordedClassification';
 import { isTerminalRunState } from './circuitVocabulary';
 import type { RailRow } from './runOverviewModel';
 import { stepVerdict, type VerdictTone } from './runStepPresentation';
@@ -160,6 +162,38 @@ const TONE_STATE: Record<VerdictTone, RoundState> = {
   warning: 'changes_requested',
   error: 'needs_attention',
 };
+
+/** Read only decisions recorded for this gate and round, newest decision first. */
+export function reviewRoundFeedback(entries: readonly CircuitHistoryEntry[], nodeId: string, round: number): LatestReview | null {
+  const history = entries.filter((entry) => entry.node_id === nodeId && entry.attempt === round)
+    .sort((a, b) => b.id - a.id);
+  for (const [index, entry] of history.entries()) {
+    if (entry.kind === 'operator_review') {
+      const verdict = VERDICTS[entry.disposition ?? ''];
+      if (verdict !== undefined) {
+        const note = entry.detail.replace(/^Human review [a-z_]+:\s*/, '');
+        return { round, ...verdict, report: note.trim() === '' ? null : note, byPerson: true };
+      }
+    }
+    if (entry.kind !== 'classification') continue;
+    try {
+      const record = JSON.parse(entry.detail) as RecordedClassification | null;
+      if (record?.step_id !== nodeId || record.attempt !== round) continue;
+      // The transaction records the gate's transition before its classification.
+      // Lifecycle evidence alone does not say whether the gate accepted a report:
+      // a guarded report handoff can complete it without native lifecycle proof.
+      const transition = history.slice(index + 1).find((candidate) => candidate.kind === 'step_transition');
+      if (transition?.detail !== 'completed') continue;
+      const verdict = record.interpretation === 'completed' ? VERDICTS.approved
+        : record.interpretation === 'working' || record.interpretation === 'continue' ? VERDICTS.changes_requested
+        : record.interpretation === 'blocked' ? VERDICTS.blocked : undefined;
+      if (verdict === undefined) continue;
+      const report = typeof record.report_text === 'string' && record.report_text.trim() !== '' ? record.report_text : null;
+      return { round, ...verdict, report, byPerson: false };
+    } catch { /* Old or malformed history cannot supply this round's feedback. */ }
+  }
+  return null;
+}
 
 function roundLimit(overview: OverviewLike, context: Record<string, string>): number | null {
   const parse = (value: string | undefined) => {

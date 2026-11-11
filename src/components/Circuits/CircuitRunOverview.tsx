@@ -257,7 +257,7 @@ export function CircuitRunOverview({ overview, error, onRefresh, onChanged, onOp
           <RunStageTracker stages={stages}
             detail={rounds === null ? undefined : { review: `Round ${rounds.current}${rounds.limit === null ? '' : ` of ${rounds.limit}`}` }} />
         )}
-        {rounds !== null ? <ReviewRoundsPanel rounds={rounds} control={limitControl} /> : limitControl}
+        {rounds !== null ? <ReviewRoundsPanel key={overview.run.id} rounds={rounds} control={limitControl} overview={overview} /> : limitControl}
 
         {/* 4. Who is involved */}
         {agents.length > 0 && <AgentList agents={agents} agentName={agentName} onOpen={openAgent} />}
