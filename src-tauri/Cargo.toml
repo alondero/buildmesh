@@ -49,7 +49,30 @@ rusqlite = { version = "0.41", features = ["bundled"] }
 tokio = { version = "1", features = ["full"] }
 notify = "8"
 difference-rs = "3.2"
-syntect = "5"
+# Syntax highlighting for the diff view. `default-features = false` drops
+# syntect's `default-onig` set, which pulls the Oniguruma C library
+# (`onig`/`onig_sys`) plus `yaml-rust` and `plist` for loading .tmLanguage
+# YAML and plist themes. Buildmesh only calls `SyntaxSet::load_defaults_newlines`,
+# `ThemeSet::load_defaults` and `syntect::html`, so `regex-fancy` (pure Rust,
+# built on `regex-automata`, already in the tree) replaces Oniguruma.
+# `default-syntaxes`/`default-themes` are required: they gate
+# `load_defaults_newlines`/`load_defaults` themselves, and they keep
+# `dump-load` (hence `bincode`/`flate2`) enabled.
+#
+# The invariant this feature choice rests on, checked by
+# `diff::highlight::tests::every_runtime_regex_compiles_with_the_active_engine`:
+# `fancy-regex` rejects backreferences, and the default syntax set contains
+# patterns that use them. syntect never compiles those as written — it
+# substitutes the matched text for the backreference first
+# (`MatchPattern::regex_with_refs`), and it decides to substitute from the
+# context's `uses_backrefs` flag. The guard test holds the engine to that:
+# every pattern without capture groups must compile as written, and every
+# pattern with them must compile once substituted. A grammar that breaks
+# either rule fails the test with the offending pattern instead of panicking
+# in the diff view, because syntect compiles regexes lazily and `.expect()`s
+# on failure. Keep that test passing before bumping syntect or changing the
+# engine.
+syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "html", "regex-fancy"] }
 portable-pty = "0.9"
 # Needed to implement portable-pty's `MasterPty` trait, whose methods return
 # `anyhow::Error` (already in the dep tree via portable-pty); used by the
@@ -120,7 +143,15 @@ shell-words = "1"
 # `windows-sys` versions aligned. macOS/Linux use a polling fallback (no new
 # deps) — see `http::interface_watcher`.
 reqwest = { version = "0.13", default-features = false, features = ["json", "blocking", "form", "query", "charset", "http2", "system-proxy", "rustls-no-provider"] }
-rust-embed = "8"
+# The `compression` feature stores the embedded `dist/mobile` bundle
+# compressed (deflate) instead of raw, which shrinks the binary by roughly
+# the size of the bundle. `MobileAssets::get()` still returns the
+# *decompressed* bytes, so the HTTP asset server is unaffected.
+# The feature is not free: it pulls in `include-flate` (and, through it,
+# `libflate` plus the `zstd`/`zstd-sys` C library), so the dependency tree
+# grows and `npm run check:audit:rust` covers the new entries. The asset
+# decompressor is `libflate`; the zstd decoder is linked but unused.
+rust-embed = { version = "8", features = ["compression"] }
 # Shared Rust→TS type generation (issue #359). `#[derive(TS)]` on wire structs
 # emits .ts files into ../src/types/generated/ via `cargo test`; a CI gate
 # (`git diff --exit-code`) then fails on drift. chrono-impl maps DateTime<Utc>

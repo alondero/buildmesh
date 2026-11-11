@@ -24,7 +24,7 @@ import type { AppPreferences } from '../../types/generated/AppPreferences';
 import { formatError } from '../../lib/errorUtils';
 import { backgroundInferenceOption } from '../../lib/backgroundInference';
 import { SpawnOptionPicker } from '../Providers/SpawnOptionPicker';
-import { blocksReviewCircuit } from '../Circuits/harnessCapabilities';
+import { blocksReviewCircuit } from '../Circuits/harnessReviewEligibility';
 import { SettingsRow, SettingsSection } from './SettingsRow';
 import { ResourceLoadStatus } from './ResourceLoadStatus';
 import { NO_OVERRIDE } from './settingsUtils';

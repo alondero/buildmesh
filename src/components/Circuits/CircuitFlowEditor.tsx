@@ -52,7 +52,6 @@ import {
   conditionFromHandle,
   defaultKind,
   edgeKey,
-  layoutPositions,
   makeNodeId,
   parseGraph,
   sourceOutcomes,
@@ -62,6 +61,7 @@ import {
   traversedEdgeKeys,
   type StepLike,
 } from './circuitGraphModel';
+import { layoutPositions } from './circuitLayout';
 
 // Stable component identities — redefining these per render would make
 // React Flow remount every card on any state change.

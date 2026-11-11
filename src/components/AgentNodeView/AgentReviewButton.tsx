@@ -5,7 +5,7 @@ import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { enterMesh, revealRun } from '../../lib/navigation';
 import { cancelCircuitRun, isAgentRunning, listCircuits, triggerCircuitFromNode } from '../../lib/tauri';
 import type { SpawnOption } from '../../lib/groups';
-import { blocksReviewCircuit } from '../Circuits/harnessCapabilities';
+import { blocksReviewCircuit } from '../Circuits/harnessReviewEligibility';
 import type { AutopilotCircuit } from '../../types/generated/AutopilotCircuit';
 import type { CircuitGraph } from '../../types/generated/CircuitGraph';
 import { GroupedProviderMenu } from '../Providers/GroupedProviderMenu';
