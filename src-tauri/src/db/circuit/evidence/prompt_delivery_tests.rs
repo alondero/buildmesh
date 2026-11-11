@@ -113,7 +113,9 @@ fn manual_delivery_ignores_stale_waits_and_preserves_submission_for_every_prompt
         DeliveryKind::Nudge,
     ] {
         let (mut db, identity, request) = fixture(kind);
-        assert!(available(&db, 1, "send", 1).unwrap());
+        assert!(current(&db, 1, "send", 1)
+            .map(|found| found.is_some())
+            .unwrap());
         attest_locked(&mut db, &request, &identity).unwrap();
         let status: String = db
             .query_row("SELECT status FROM autopilot_circuit_run_steps", [], |r| {
@@ -176,13 +178,17 @@ fn initial_prompt_recovery_requires_current_delivery_uncertainty_not_an_inconclu
         )
         .unwrap();
         assert!(
-            !available(&db, 1, "send", 1).unwrap(),
+            !current(&db, 1, "send", 1)
+                .map(|found| found.is_some())
+                .unwrap(),
             "delivery already acknowledged before an inconclusive report"
         );
     }
     let (mut db, mut identity, mut request) = fixture(DeliveryKind::Initial);
     assert!(
-        available(&db, 1, "send", 1).unwrap(),
+        current(&db, 1, "send", 1)
+            .map(|found| found.is_some())
+            .unwrap(),
         "explicit initial delivery failure"
     );
     db.execute(
@@ -191,7 +197,9 @@ fn initial_prompt_recovery_requires_current_delivery_uncertainty_not_an_inconclu
     )
     .unwrap();
     assert!(
-        !available(&db, 1, "send", 1).unwrap(),
+        !current(&db, 1, "send", 1)
+            .map(|found| found.is_some())
+            .unwrap(),
         "acknowledged spawn with only a report checkpoint"
     );
     request.expected_revision = revision_inner(&db, 1).unwrap();
@@ -202,7 +210,9 @@ fn initial_prompt_recovery_requires_current_delivery_uncertainty_not_an_inconclu
     )
     .unwrap();
     assert!(
-        available(&db, 1, "send", 1).unwrap(),
+        current(&db, 1, "send", 1)
+            .map(|found| found.is_some())
+            .unwrap(),
         "live-agent retry failed before attachment acknowledgement"
     );
     db.execute(
@@ -241,7 +251,9 @@ fn initial_prompt_recovery_requires_current_delivery_uncertainty_not_an_inconclu
     )
     .unwrap();
     assert!(
-        !available(&db, 1, "send", 1).unwrap(),
+        !current(&db, 1, "send", 1)
+            .map(|found| found.is_some())
+            .unwrap(),
         "an older uncertainty does not authorize a newer payload"
     );
 }
@@ -263,7 +275,9 @@ fn stale_revision_attempt_target_and_replaced_submission_cannot_attest() {
     assert!(attest_locked(&mut db, &request, &identity).is_err());
     record_prompt_submission_locked(&db, 1, "other", 1, 9, "new input").unwrap();
     request.expected_revision = revision_inner(&db, 1).unwrap();
-    assert!(!available(&db, 1, "send", 1).unwrap());
+    assert!(!current(&db, 1, "send", 1)
+        .map(|found| found.is_some())
+        .unwrap());
     assert!(attest_locked(&mut db, &request, &identity).is_err());
 }
 
@@ -556,6 +570,40 @@ fn manual_delivery_preserves_requests_and_background_work_from_the_new_turn() {
     assert!(retained.human_waits[0].resolved_at_ms.is_some());
     assert!(retained.human_waits[1].resolved_at_ms.is_none());
     assert_eq!(retained.children.get("still-working"), Some(&false));
+}
+
+#[test]
+fn current_observes_a_mid_flight_run_change() {
+    let (db, identity, _) = fixture(DeliveryKind::Inject);
+    assert_eq!(
+        current(&db, 1, "send", 1).unwrap().as_ref(),
+        Some(&identity)
+    );
+
+    db.execute("UPDATE autopilot_circuit_runs SET state='cancelled'", [])
+        .unwrap();
+    assert!(
+        current(&db, 1, "send", 1).unwrap().is_none(),
+        "a cancelled run is no longer a deliverable prompt"
+    );
+
+    let (db, _, _) = fixture(DeliveryKind::Inject);
+    db.execute(
+        "UPDATE autopilot_circuit_run_steps SET status='completed'",
+        [],
+    )
+    .unwrap();
+    assert!(
+        current(&db, 1, "send", 1).unwrap().is_none(),
+        "a completed step is no longer a deliverable prompt"
+    );
+
+    let (db, _, _) = fixture(DeliveryKind::Inject);
+    record_prompt_submission_locked(&db, 1, "other", 1, 9, "new input").unwrap();
+    assert!(
+        current(&db, 1, "send", 1).unwrap().is_none(),
+        "a newer submission retires the retained payload"
+    );
 }
 
 #[test]

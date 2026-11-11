@@ -83,6 +83,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 
+use rusqlite::Connection;
+
 use super::SqlResult;
 
 /// Reader connections opened for an isolated test database. Production opens
@@ -437,6 +439,21 @@ pub fn shared_global_db() -> SharedGlobalDb {
 #[must_use = "the guard keeps the test's database installed; bind it (`let _db = ...`) and drop it when the test ends"]
 pub fn isolated() -> IsolatedDbGuard {
     install(next_database_uri(), Vec::new())
+}
+
+/// Install a statement trace on every idle reader in the installed database.
+///
+/// The trace stays on the connection when [`super::read_conn`] returns it to
+/// the pool, so the next checkout — the one `history` and `attention` take
+/// for themselves — is counted. Returns how many readers were armed. Call
+/// this after the fixture is written and before the read under test.
+pub fn trace_readers(mut install: impl FnMut(&mut Connection)) -> usize {
+    let mut available = super::get().readers.available.lock();
+    let count = available.len();
+    for connection in available.iter_mut() {
+        install(connection);
+    }
+    count
 }
 
 /// Like [`isolated`], but the database is a real file, so every commit pays

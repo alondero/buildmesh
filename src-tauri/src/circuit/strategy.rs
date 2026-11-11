@@ -388,16 +388,22 @@ pub fn strategy_of(provider: Option<crate::models::Provider>) -> ObservationStra
     })
 }
 
+/// Pure over the stored provider and launch snapshot: safe to call while a
+/// database connection is held. A row is not required, so a narrow agent
+/// lookup can resolve the same selector the full row would.
+pub(crate) fn selector_for_launch(
+    provider: &str,
+    launch: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
+) -> HarnessSelector {
+    match launch.and_then(|configuration| configuration.resolved.as_ref()) {
+        Some(plan) => HarnessSelector::Frozen(plan.harness.harness.clone()),
+        None => HarnessSelector::Stored(provider.to_string()),
+    }
+}
+
 /// Pure over the agent row: safe to call while a database connection is held.
 pub fn selector_for_agent(agent: &crate::models::AgentNode) -> HarnessSelector {
-    match agent
-        .launch_configuration
-        .as_ref()
-        .and_then(|configuration| configuration.resolved.as_ref())
-    {
-        Some(plan) => HarnessSelector::Frozen(plan.harness.harness.clone()),
-        None => HarnessSelector::Stored(agent.provider.clone()),
-    }
+    selector_for_launch(&agent.provider, agent.launch_configuration.as_ref())
 }
 
 /// The harness that runs this agent; `None` when it is unknown.

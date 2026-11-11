@@ -244,6 +244,10 @@ impl LogicalContext {
     }
 
     /// One value of the run's context.
+    ///
+    /// Production reads the runtime [`CircuitContext`] from [`Self::runtime`].
+    /// The context-store tests still look up a single key on this logical view.
+    #[cfg(test)] // allow-test-in-production: tests look up one logical key
     pub fn get(&self, key: &str) -> Option<&str> {
         self.values.get(key).map(String::as_str)
     }
