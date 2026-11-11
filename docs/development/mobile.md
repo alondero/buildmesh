@@ -556,6 +556,20 @@ also tracks whether the viewport still sits on the live tail and offers
 **Jump to latest output** when it does not, because a panned-back terminal
 would otherwise have no way back to the running output.
 
+## The phone's terminal bounds unparsed output
+
+xterm parses `write` asynchronously and does not cap the payloads waiting on
+that parse. A PTY frame is up to 32 KiB and can arrive faster than the parser,
+so handing each frame straight to `write` retains one unparsed payload per
+frame until the stream stops. The browser screen and the Android WebView both
+feed those frames through the desktop `TerminalWriter` first. It keeps at most
+four bulk parses in flight and holds the rest behind a 4 MiB and 4096-chunk
+cap, dropping the oldest chunk. A keystroke-sized chunk still skips the queue.
+The browser screen disposes its xterm when the user leaves, because that
+terminal belongs to the visit; leaving also unregisters the writer and releases
+the scroll listener. The budgets are the ones in
+[Terminals](terminals.md#pty-output-streaming-issue-1385-1393).
+
 ## Mobile terminal socket lifecycle
 
 The mobile terminal socket is a **separate** fanout (`http::ws`), keyed by node id in one
