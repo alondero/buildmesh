@@ -584,8 +584,23 @@ pub fn load_logical(conn: &Connection, run_id: i64) -> Result<LogicalContext, Db
 /// bulky half of the context lives in the side table, and the stepper needs
 /// it to resolve `{{node.reviewer.output}}` and to read a step's evidence.
 pub fn load_logical_run(run_id: i64) -> Result<LogicalContext, DbError> {
+    #[cfg(test)]
+    // allow-test-in-production: the watchdog tick test counts this context load on the calling thread
+    LOAD_LOGICAL_RUN.with(|count| count.set(count.get() + 1));
     let db = crate::db::read_conn()?;
     load_logical(&db, run_id)
+}
+
+#[cfg(test)]
+// allow-test-in-production: the watchdog tick test counts context loads on the calling thread
+thread_local! {
+    static LOAD_LOGICAL_RUN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+// allow-test-in-production: the watchdog tick test reads the context-load count
+pub(crate) fn load_logical_run_calls() -> u64 {
+    LOAD_LOGICAL_RUN.with(|count| count.get())
 }
 
 /// The logical context of one run, read as far as it can be read.

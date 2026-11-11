@@ -142,6 +142,7 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/db/circuit/history_compaction_tests.rs': 'db::circuit::history_compaction::tests',
   'src-tauri/src/db/circuit/evidence/prompt_delivery_tests.rs': 'db::circuit::evidence::prompt_delivery::tests',
   'src-tauri/src/services/circuit_prompt_tests.rs': 'services::circuit_prompt::tests',
+  'src-tauri/src/services/circuit_triggers_interval_tests.rs': 'services::circuit_triggers::interval_tests',
   'src-tauri/src/git/branches_tests.rs': 'git::branches::tests',
   'src-tauri/src/git/diff_tests.rs': 'git::diff::tests',
   'src-tauri/src/git/fetch_origin_tests.rs': 'git::sync::fetch_origin_tests',

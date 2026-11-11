@@ -340,9 +340,9 @@ fn approvals_recovers_from_poison() {
 
 #[test]
 fn wake_condvar_recovers_from_poison() {
-    // WAKE holds a `Mutex<()>` paired with a `Condvar`. The lock
-    // itself guards nothing — only the wait/notify handshake —
-    // so poisoning it freezes the worker thread on the next
+    // WAKE holds a `Mutex<bool>` paired with a `Condvar`. The bool
+    // latches a wake that arrives while the worker is not waiting.
+    // Poisoning the mutex freezes the worker thread on the next
     // `wait_timeout`. The recovery shape is the same as for
     // APPROVALS; this test pins that path.
     let (lock, _cvar) = &*WAKE;
@@ -358,6 +358,20 @@ fn wake_condvar_recovers_from_poison() {
     // live; the `circuit_worker_smoke` integration test exercises
     // the full wait/notify handshake end-to-end.
     drop(guard);
+}
+
+#[test]
+fn a_wake_while_the_worker_is_not_waiting_stays_pending() {
+    // The interval pass trusts its schedule until a wake. Notify is not
+    // sticky: a wake that lands while the worker is inside a pass has no
+    // waiter, so the next tick must still see it or a newly enabled
+    // interval circuit stays invisible until some later cooldown.
+    let _ = take_pending_wake();
+    wake_circuit_worker();
+    assert!(
+        take_pending_wake(),
+        "a wake that arrives while the worker is in a pass must still be pending"
+    );
 }
 
 // -- blueprint contract: per-blueprint worker seam (#1469) -----------
