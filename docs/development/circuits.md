@@ -60,6 +60,12 @@ requested; approval still follows the circuit's normal completion route.
 Completed or failed runs keep their history and recovery actions; use
 **Review again** to extend an exhausted run.
 
+The numbered round boxes select the feedback shown below them in both the
+Circuit Overview and Probe run card. The latest review is selected initially;
+choosing an earlier result shows its retained report or operator note from Run
+History. Selection survives refreshes within the run. Unstarted rounds remain
+indicators, and missing feedback is stated explicitly.
+
 The allowance lives in `review.round_limit` in the run context (zero means
 unlimited), applies only to retry loops containing a review verdict, and leaves
 the pinned graph and other retry budgets intact. Each edit appends operator
