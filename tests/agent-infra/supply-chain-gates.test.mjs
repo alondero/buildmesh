@@ -626,3 +626,29 @@ test('rust advisories: the zip crate stays out of the tree (issue #2438)', () =>
   assert.match(line, /default-features = false/, 'the zip feature is back on via default features');
   assert.doesNotMatch(line, /"zip"/, 'the zip feature must not be re-enabled explicitly either');
 });
+
+test('rust advisories: the yaml-rust crate stays out of the tree (issue #2757)', () => {
+  // RUSTSEC-2024-0320 says yaml-rust is unmaintained. syntect pulls it in
+  // through its `yaml-load` feature, which the default feature set enables and
+  // this repository's feature choice drops, so the crate leaves the tree
+  // entirely. Its reviewed exception was removed with it, because a stale
+  // exception fails the gate rather than lingering against a crate the tree no
+  // longer contains.
+  //
+  // `cargo audit` is the authoritative gate and already fails if yaml-rust
+  // returns, but it needs a populated advisory database; these two assertions
+  // are the cheap local check that fails the moment the dependency line is
+  // reverted.
+  const lock = fs.readFileSync(path.join(repoRoot, 'src-tauri', 'Cargo.lock'), 'utf8');
+  assert.doesNotMatch(
+    lock,
+    /^\[\[package\]\]\r?\nname = "yaml-rust"$/m,
+    'yaml-rust is in Cargo.lock again: keep default-features = false on syntect',
+  );
+
+  const manifest = fs.readFileSync(path.join(repoRoot, 'src-tauri', 'Cargo.toml'), 'utf8');
+  const line = manifest.split('\n').find((l) => l.startsWith('syntect ='));
+  assert.ok(line, 'expected a syntect dependency line');
+  assert.match(line, /default-features = false/, 'the yaml feature is back on via default features');
+  assert.doesNotMatch(line, /"yaml-load"/, 'the yaml feature must not be re-enabled explicitly either');
+});
