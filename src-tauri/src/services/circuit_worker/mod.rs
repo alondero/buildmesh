@@ -10,7 +10,7 @@
 //! - **Fast tick** every 2s: interval pacing, capacity unblocking, and
 //!   piloted-node observation.
 //! - **Condition-variable wake**: direct IPC dispatch — Trigger Now
-//!   bumps the wake counter so a manual run starts within milliseconds.
+//!   sets the wake flag so a manual run starts within milliseconds.
 //!   (GitHub poll passes and attention-webhook wakes arrive in later
 //!   milestones; they plug into the same condvar.)
 //!
@@ -97,13 +97,13 @@ const TICK_INTERVAL: Duration = Duration::from_secs(2);
 /// pass for active Circuit runs.
 const STARTUP_DELAY: Duration = Duration::from_secs(5);
 
-/// Wake condvar. Trigger Now notifies; the worker otherwise wakes on
-/// its fast tick. Milestone 2 (#1207): PTY yields also notify (reactive
-/// gate evaluation), as do collaborator approvals.
-///
+/// Wake flag. `wake_circuit_worker` sets it under this mutex and notifies.
 /// The bool stays set when `notify_all` lands while the worker is inside
-/// a pass. A condvar notify is not sticky, and the interval pass re-reads
-/// its schedule only when it sees a wake.
+/// a pass: a condvar notify is not sticky, and the interval pass re-reads
+/// its schedule when it sees a wake. The worker clears the flag when
+/// parking, so that wake still runs the next pass without waiting out the
+/// tick. PTY output sets the flag at most once per node per 250 ms
+/// (`circuit::evaluator`). Collaborator approvals set it too.
 static WAKE: Lazy<(Mutex<bool>, Condvar)> = Lazy::new(|| (Mutex::new(false), Condvar::new()));
 
 /// Stage-2 circuit spawns are asynchronous, while cancellation and circuit
@@ -320,8 +320,8 @@ static APPROVALS: Lazy<Mutex<Vec<(i64, String)>>> = Lazy::new(|| Mutex::new(Vec:
 /// Lock one of the circuit worker's statics, recovering from a poisoned
 /// mutex instead of panicking (issue #1224).
 ///
-/// The worker holds two small state mutexes — `WAKE` (a `Mutex<bool>`
-/// latched around `Condvar::wait_timeout`) and `APPROVALS` (a `Vec<(i64,
+/// The worker holds two small state mutexes — `WAKE` (a `Mutex<bool>` set
+/// by `wake_circuit_worker` and cleared when the worker parks) and `APPROVALS` (a `Vec<(i64,
 /// String)>`). Both are guarded by app-lifetime invariants that a panic
 /// mid-write does not corrupt (the guard is dropped on unwind, leaving
 /// the inner value in a consistent empty-or-fully-formed state). `.unwrap()`
@@ -408,17 +408,49 @@ pub(crate) fn wake_circuit_worker_calls() -> u64 {
 }
 
 /// Wake the circuit worker immediately (manual trigger dispatch).
+///
+/// The flag is set under the same mutex the worker waits on, so a notify
+/// that lands while the five passes are running is still pending when the
+/// worker parks.
 pub fn wake_circuit_worker() {
     #[cfg(test)]
     // allow-test-in-production: enable tests count this wake on the calling thread
     WAKE_CALLS.with(|count| count.set(count.get() + 1));
     let (lock, cvar) = &*WAKE;
-    // Hold the lock across the notify so a worker that is about to wait
-    // cannot miss the latch: either it sees the flag before waiting, or
-    // it is already waiting and the notify wakes it.
-    let mut pending = lock_circuit_worker_static(lock);
-    *pending = true;
-    cvar.notify_all();
+    {
+        // Hold the lock across the notify so a worker about to wait either
+        // sees the flag before waiting, or is already waiting and the notify
+        // wakes it.
+        let mut pending = lock_circuit_worker_static(lock);
+        *pending = true;
+        cvar.notify_all();
+    }
+    #[cfg(test)]
+    // allow-test-in-production: output-wake tests count a wake only when this function runs.
+    crate::circuit::evaluator::note_worker_wake();
+}
+
+/// Park until `timeout`, or return immediately when a wake is already set.
+/// The flag is cleared before return. `(woke, timed_out)`.
+fn park_until_circuit_wake(wake: &(Mutex<bool>, Condvar), timeout: Duration) -> (bool, bool) {
+    let (lock, cvar) = wake;
+    let pending = match lock.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!(
+                "circuit worker mutex was poisoned by a prior panic — recovering (issue #1224)"
+            );
+            poisoned.into_inner()
+        }
+    };
+    let (mut pending, timeout_result) =
+        match cvar.wait_timeout_while(pending, timeout, |ready| !*ready) {
+            Ok(pair) => pair,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+    let woke = *pending;
+    *pending = false;
+    (woke, timeout_result.timed_out())
 }
 
 /// Consume a wake latched by [`wake_circuit_worker`].
@@ -447,6 +479,11 @@ pub(crate) fn take_pending_wake() -> bool {
 /// [`lock_circuit_worker_static`] (issue #1224); this worker just needs
 /// the panic boundary.
 pub fn start_circuit_worker(app: AppHandle) {
+    // PTY output notifies through this same flag, but a burst must not
+    // run the five passes below once per 8 KiB read. The coalescer delivers
+    // the at-most-once-per-250 ms deferred wake while this thread is in
+    // `park_until_circuit_wake`.
+    crate::circuit::evaluator::start_output_wake_coalescer();
     std::thread::Builder::new()
         .name("circuit-worker".to_string())
         .spawn(move || {
@@ -456,10 +493,9 @@ pub fn start_circuit_worker(app: AppHandle) {
             // next pass would just panic again. The panic hook in
             // lib::setup already captures the cause in panic.log.
             startup_reconcile_pass(&app);
-            let (lock, cvar) = &*WAKE;
             // The first pass reads anchors, the same as a process restart.
-            // Later iterations re-read when the wait returned early, or when
-            // a wake arrived during a pass and the notify itself was missed.
+            // Later iterations re-read when parking observed a wake, including
+            // one that arrived during a pass and whose notify had no waiter.
             let mut condvar_woke = true;
             loop {
                 let pending = take_pending_wake();
@@ -496,15 +532,13 @@ pub fn start_circuit_worker(app: AppHandle) {
                 run_worker_pass("circuits:zombie-sweep", || {
                     zombie_sweep::zombie_sweep_pass(&app);
                 });
-                // Wait for the next tick OR an immediate wake, whichever
-                // first (`wait_timeout` returns either way). A wake during
-                // this pass latches the flag even when its notify is missed;
-                // the next iteration consumes that latch. Do not skip the
-                // wait: output wakes on every PTY chunk, and skipping it
-                // would spin the tick for as long as an agent is printing.
-                let guard = lock_circuit_worker_static(lock);
-                let (_guard, wait) = cvar.wait_timeout(guard, TICK_INTERVAL).unwrap();
-                condvar_woke = !wait.timed_out();
+                // A wake during the passes above is still set. Parking returns
+                // at once so the next iteration does not sit out the 2s tick.
+                // PTY output wakes at most once per node per 250 ms, so an
+                // early return does not spin one pass per read. `woke` is
+                // what the interval schedule re-reads on.
+                let (woke, _timed_out) = park_until_circuit_wake(&WAKE, TICK_INTERVAL);
+                condvar_woke = woke;
             }
         })
         .expect("circuit-worker thread spawn failed");
