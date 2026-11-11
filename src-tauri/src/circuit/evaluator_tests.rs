@@ -570,3 +570,155 @@ fn circuit_registration_buffers_output_and_unregister_drops_it() {
     assert!(!is_circuit_piloted(id));
     assert_eq!(cleaned_tail(id), "");
 }
+
+// ── output wake floor (issue #2764) ─────────────────────────────────────
+//
+// The count moves only when `wake_circuit_worker` runs on this thread.
+// The worker then runs its five passes once per wakeup and parks on the
+// wake flag (`start_circuit_worker`). A flood that stays at one wake per
+// 250 ms window keeps the pass rate on that cadence.
+//
+// Node ids are negative so they stay outside the positive 100_000-id
+// blocks `db::test_support` hands to isolated databases.
+
+#[test]
+fn output_wake_flood_is_once_per_window_instead_of_once_per_read() {
+    let id = -910_2764;
+    register_circuit(id);
+    let t0 = Instant::now();
+    for i in 0..200 {
+        on_output_at(id, "chunk", t0 + Duration::from_micros(i));
+    }
+    assert_eq!(
+        output_wake_count(id),
+        1,
+        "200 reads in one window must notify the worker once"
+    );
+    assert_eq!(cleaned_tail(id).len(), 200 * "chunk".len());
+    on_output_at(id, "boundary", t0 + OUTPUT_WAKE_FLOOR);
+    assert_eq!(
+        output_wake_count(id),
+        2,
+        "a chunk on the floor notifies immediately"
+    );
+    assert!(
+        !deliver_due_output_wake(id, t0 + OUTPUT_WAKE_FLOOR),
+        "that notify cancels the deferred wake for the same window"
+    );
+    unregister(id);
+}
+
+#[test]
+fn output_wake_yield_inside_the_floor_is_delivered_when_the_window_ends() {
+    let id = -910_2765;
+    register_circuit(id);
+    let t0 = Instant::now();
+    on_output_at(id, "working", t0);
+    on_output_at(id, "COMPLETED yield", t0 + Duration::from_millis(249));
+    assert_eq!(
+        output_wake_count(id),
+        1,
+        "the yield is inside the open window"
+    );
+    assert!(
+        !deliver_due_output_wake(id, t0 + Duration::from_millis(249)),
+        "the deferred wake waits until the floor"
+    );
+    assert!(
+        deliver_due_output_wake(id, t0 + OUTPUT_WAKE_FLOOR),
+        "a trailing yield is observed at the end of the 250 ms window"
+    );
+    assert_eq!(output_wake_count(id), 2);
+    // The wake that closed the window starts the next one. A chunk on that
+    // instant is deferred, and dropping the node cancels it.
+    on_output_at(id, "again", t0 + OUTPUT_WAKE_FLOOR);
+    assert_eq!(output_wake_count(id), 2);
+    unregister(id);
+    assert!(!deliver_due_output_wake(
+        id,
+        t0 + OUTPUT_WAKE_FLOOR + OUTPUT_WAKE_FLOOR
+    ));
+    assert_eq!(output_wake_count(id), 2);
+}
+
+#[test]
+fn output_wake_quiet_yield_wakes_the_worker_immediately() {
+    let id = -910_2766;
+    register_circuit(id);
+    let t0 = Instant::now();
+    on_output_at(id, "COMPLETED", t0);
+    assert_eq!(output_wake_count(id), 1);
+    assert!(!deliver_due_output_wake(id, t0 + OUTPUT_WAKE_FLOOR));
+    unregister(id);
+}
+
+#[test]
+fn output_wake_one_nodes_flood_does_not_postpone_another_nodes_yield() {
+    let busy = -910_2767;
+    let quiet = -910_2768;
+    register_circuit(busy);
+    register_circuit(quiet);
+    let t0 = Instant::now();
+    on_output_at(busy, "chunk", t0);
+    on_output_at(busy, "chunk", t0 + Duration::from_millis(1));
+    on_output_at(quiet, "COMPLETED", t0 + Duration::from_millis(1));
+    assert_eq!(output_wake_count(busy), 1);
+    assert_eq!(
+        output_wake_count(quiet),
+        1,
+        "another node's open window does not delay this yield"
+    );
+    unregister(busy);
+    unregister(quiet);
+}
+
+#[test]
+fn output_wake_delivery_keeps_a_deadline_armed_for_the_next_window() {
+    let id = -910_2769;
+    register_circuit(id);
+    let t0 = Instant::now();
+    on_output_at(id, "working", t0);
+    on_output_at(id, "more", t0 + Duration::from_millis(1));
+    let claimed = t0 + OUTPUT_WAKE_FLOOR;
+    // The reader armed the next window after this delivery had already
+    // decided the open one was due. The hub now holds that later deadline.
+    let next = claimed + OUTPUT_WAKE_FLOOR;
+    lock_output_wake_hub().deadlines.insert(id, next);
+    assert!(
+        deliver_due_output_wake(id, claimed),
+        "the open window's wake is still delivered"
+    );
+    assert_eq!(
+        lock_output_wake_hub().deadlines.get(&id).copied(),
+        Some(next),
+        "finishing that wake must leave the next window armed"
+    );
+    unregister(id);
+}
+
+#[test]
+fn output_wake_hub_holds_the_deferred_deadline_until_it_is_due() {
+    let id = -910_2770;
+    register_circuit(id);
+    let t0 = Instant::now();
+    on_output_at(id, "working", t0);
+    assert!(!lock_output_wake_hub().deadlines.contains_key(&id));
+    on_output_at(id, "COMPLETED", t0 + Duration::from_millis(1));
+    assert_eq!(
+        lock_output_wake_hub().deadlines.get(&id).copied(),
+        Some(t0 + OUTPUT_WAKE_FLOOR)
+    );
+    assert!(!deliver_due_output_wake(
+        id,
+        t0 + Duration::from_millis(249)
+    ));
+    assert_eq!(
+        lock_output_wake_hub().deadlines.get(&id).copied(),
+        Some(t0 + OUTPUT_WAKE_FLOOR),
+        "an early look leaves the armed deadline in place"
+    );
+    assert!(deliver_due_output_wake(id, t0 + OUTPUT_WAKE_FLOOR));
+    assert!(!lock_output_wake_hub().deadlines.contains_key(&id));
+    assert_eq!(output_wake_count(id), 2);
+    unregister(id);
+}
