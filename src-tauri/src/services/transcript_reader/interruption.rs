@@ -4,7 +4,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::{
     fs::File,
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,11 +53,70 @@ pub(crate) fn read(node: &crate::models::AgentNode) -> Option<Option<Failure>> {
         session,
         &crate::coordinator::enrichment::transcript_dir(node),
     )?;
+    read_transcript(format, &path, session, interruption_cache::production())
+}
+
+fn read_transcript(
+    format: TranscriptFormat,
+    path: &Path,
+    session: &str,
+    cache: &interruption_cache::Cache,
+) -> Option<Option<Failure>> {
     match format {
-        TranscriptFormat::Codex => codex_file(&path),
-        TranscriptFormat::Mcode => mcode_file(&path, session),
+        TranscriptFormat::Codex => read_cached(format, path, session, cache, codex_stamp, || {
+            codex_file(path)
+        }),
+        TranscriptFormat::Mcode => read_cached(format, path, session, cache, mcode_stamp, || {
+            mcode_file(path, session)
+        }),
         _ => None,
     }
+}
+
+fn codex_stamp(path: &Path) -> Option<interruption_cache::Stamp> {
+    interruption_cache::Stamp::of_file(path)
+}
+
+/// Manifest, the runtime database, and its write-ahead log when one exists.
+/// A checkpointed store and a store with an uncheckpointed log are different
+/// stamps, so a failure that lands only in the log is not served from cache.
+fn mcode_stamp(transcript: &Path) -> Option<interruption_cache::Stamp> {
+    let (manifest, database) = mcode_store(transcript)?;
+    let mut wal = database.as_os_str().to_owned();
+    wal.push("-wal");
+    Some(interruption_cache::Stamp::parts(vec![
+        Some(interruption_cache::file_part(&manifest)?),
+        Some(interruption_cache::file_part(&database)?),
+        interruption_cache::file_part(Path::new(&wal)),
+    ]))
+}
+
+/// Serve a previous parse when the stamp still matches. The file is read only
+/// on a miss, and only a stable parse is stored: a change during the read is
+/// unavailable and is not cached.
+fn read_cached(
+    format: TranscriptFormat,
+    path: &Path,
+    session: &str,
+    cache: &interruption_cache::Cache,
+    stamp_of: impl Fn(&Path) -> Option<interruption_cache::Stamp>,
+    read_file: impl FnOnce() -> Option<Option<Failure>>,
+) -> Option<Option<Failure>> {
+    let stamp = stamp_of(path)?;
+    let key = interruption_cache::Key {
+        format,
+        path: path.to_path_buf(),
+        session_id: session.to_owned(),
+    };
+    if let Some(parsed) = cache.get(&key, &stamp) {
+        return Some(parsed);
+    }
+    let parsed = read_file()?;
+    if stamp_of(path)? != stamp {
+        return None;
+    }
+    cache.put(key, stamp, parsed.clone());
+    Some(parsed)
 }
 
 fn codex_file(path: &Path) -> Option<Option<Failure>> {
@@ -129,23 +188,30 @@ fn codex(text: &str) -> Option<Failure> {
     failure
 }
 
+fn mcode_store(transcript: &Path) -> Option<(PathBuf, PathBuf)> {
+    let manifest = transcript.with_file_name("manifest.json");
+    let database = transcript
+        .ancestors()
+        .find(|candidate| {
+            candidate.file_name().is_some_and(|name| name == "sessions")
+                && candidate
+                    .parent()
+                    .is_some_and(|parent| parent.file_name().is_some_and(|name| name == "v2"))
+        })?
+        .parent()?
+        .join("sqlite/runtime-state.sqlite");
+    Some((manifest, database))
+}
+
 fn mcode_file(transcript: &Path, session: &str) -> Option<Option<Failure>> {
+    let (manifest_path, database) = mcode_store(transcript)?;
     let manifest: serde_json::Value =
-        serde_json::from_reader(File::open(transcript.with_file_name("manifest.json")).ok()?)
-            .ok()?;
+        serde_json::from_reader(File::open(manifest_path).ok()?).ok()?;
     if manifest["sessionId"].as_str()? != session {
         return None;
     }
-    let root = transcript
-        .ancestors()
-        .find(|p| {
-            p.file_name().is_some_and(|n| n == "sessions")
-                && p.parent()
-                    .is_some_and(|p| p.file_name().is_some_and(|n| n == "v2"))
-        })?
-        .parent()?;
     let conn = Connection::open_with_flags(
-        root.join("sqlite/runtime-state.sqlite"),
+        database,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .ok()?;
@@ -232,6 +298,137 @@ fn mcode(conn: &Connection, session: &str) -> Option<Option<Failure>> {
         return None;
     }
     Some((!failure.turn.is_empty()).then_some(failure))
+}
+
+/// Parsed interruption evidence, keyed by source identity and served only while
+/// the source stamp still matches. Unavailable reads are not stored.
+mod interruption_cache {
+    use super::{Failure, TranscriptFormat};
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{LazyLock, Mutex};
+    use std::time::SystemTime;
+
+    /// Live sessions are the working set. One new session past the cap evicts a
+    /// single older entry, so crossing the cap does not re-parse every session.
+    pub(super) const CAPACITY: usize = 64;
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    pub(super) struct Key {
+        pub(super) format: TranscriptFormat,
+        pub(super) path: PathBuf,
+        pub(super) session_id: String,
+    }
+
+    /// Length and modification time of each file the read depends on. A missing
+    /// optional sibling (a SQLite `-wal`) is itself part of the stamp.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(super) struct Stamp {
+        parts: Vec<Option<(u64, SystemTime)>>,
+    }
+
+    impl Stamp {
+        pub(super) fn of_file(path: &Path) -> Option<Self> {
+            Some(Self {
+                parts: vec![Some(file_part(path)?)],
+            })
+        }
+
+        pub(super) fn parts(parts: Vec<Option<(u64, SystemTime)>>) -> Self {
+            Self { parts }
+        }
+    }
+
+    pub(super) fn file_part(path: &Path) -> Option<(u64, SystemTime)> {
+        let meta = std::fs::metadata(path).ok()?;
+        Some((meta.len(), meta.modified().ok()?))
+    }
+
+    struct Entry {
+        stamp: Stamp,
+        parsed: Option<Failure>,
+    }
+
+    #[derive(Default)]
+    struct State {
+        entries: HashMap<Key, Entry>,
+        misses: u64,
+    }
+
+    pub(super) struct Cache {
+        state: Mutex<State>,
+    }
+
+    impl Default for Cache {
+        fn default() -> Self {
+            Self {
+                state: Mutex::new(State::default()),
+            }
+        }
+    }
+
+    static CACHE: LazyLock<Cache> = LazyLock::new(Cache::default);
+
+    pub(super) fn production() -> &'static Cache {
+        &CACHE
+    }
+
+    impl Cache {
+        /// `None` is a miss. `Some` is the cached parse, including a proven
+        /// absence of a failure.
+        pub(super) fn get(&self, key: &Key, stamp: &Stamp) -> Option<Option<Failure>> {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mismatch = state
+                .entries
+                .get(key)
+                .is_some_and(|entry| entry.stamp != *stamp);
+            if mismatch {
+                state.entries.remove(key);
+                state.misses += 1;
+                return None;
+            }
+            match state.entries.get(key) {
+                Some(entry) => Some(entry.parsed.clone()),
+                None => {
+                    state.misses += 1;
+                    None
+                }
+            }
+        }
+
+        pub(super) fn put(&self, key: Key, stamp: Stamp, parsed: Option<Failure>) {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.entries.len() >= CAPACITY && !state.entries.contains_key(&key) {
+                if let Some(victim) = state.entries.keys().next().cloned() {
+                    state.entries.remove(&victim);
+                }
+            }
+            state.entries.insert(key, Entry { stamp, parsed });
+        }
+
+        #[cfg_attr(not(test), expect(dead_code, reason = "Test cache observation"))]
+        pub(super) fn misses(&self) -> u64 {
+            self.state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .misses
+        }
+
+        #[cfg_attr(not(test), expect(dead_code, reason = "Test cache bounds"))]
+        pub(super) fn len(&self) -> usize {
+            self.state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .entries
+                .len()
+        }
+    }
 }
 
 #[cfg(test)]

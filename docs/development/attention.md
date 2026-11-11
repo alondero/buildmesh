@@ -12,7 +12,12 @@ sync when a harness's hook target or payload changes.
 ### Native interruption recovery
 
 The `services::interruption_recovery` worker observes live Codex and MiniMax
-Code sessions every five seconds. `transcript_reader::interruption` reads
+Code sessions every five seconds. A repeat pass reuses the parsed result while
+the source's length and modification time are unchanged, so a quiet session is
+not read or parsed again. Codex stamps its rollout file. MiniMax Code stamps
+the session manifest, `runtime-state.sqlite`, and that file's `-wal` when one
+exists. A read that cannot prove the source stayed still is not cached, and the
+continuation decision itself is not cached. `transcript_reader::interruption` reads
 structured failures: Codex's latest `task_complete.error`, or MiniMax's
 session-bound `local_runtime_sessions` and `local_runtime_session_agent_state`
 rows with no accepted/newer ingress turn. It does not classify terminal output
