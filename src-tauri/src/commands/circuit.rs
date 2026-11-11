@@ -349,7 +349,12 @@ pub fn create_circuit(
 
 #[command]
 pub fn set_circuit_enabled(circuit_id: i64, enabled: bool) -> Result<(), String> {
-    crate::db::set_autopilot_circuit_enabled(circuit_id, enabled).map_err(|e| e.to_string())
+    crate::db::set_autopilot_circuit_enabled(circuit_id, enabled).map_err(|e| e.to_string())?;
+    // The interval pass trusts its in-memory schedule until a cooldown is
+    // due. Enabling or disabling a circuit has to wake the worker so that
+    // thread re-reads the enabled set on its next tick.
+    crate::services::circuit_worker::wake_circuit_worker();
+    Ok(())
 }
 
 /// Save a blueprint edited in the canvas editor (issue #1209): the

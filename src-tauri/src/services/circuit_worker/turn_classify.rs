@@ -949,32 +949,38 @@ pub(super) struct QuietClassifierFailure {
     pub(super) error: String,
 }
 
-pub(super) fn lost_turn_watchdog_pass(app: &AppHandle) -> Vec<QuietClassifierFailure> {
+pub(super) fn lost_turn_watchdog_pass(
+    app: &AppHandle,
+    observed_runs: Vec<super::ObservedRun>,
+) -> Vec<QuietClassifierFailure> {
+    watchdog_over(Some(app), observed_runs)
+}
+
+#[cfg(test)]
+// allow-test-in-production: the tick-reuse test drives the watchdog without an AppHandle
+pub(super) fn lost_turn_watchdog_pass_for_test(
+    observed_runs: Vec<super::ObservedRun>,
+) -> Vec<QuietClassifierFailure> {
+    watchdog_over(None, observed_runs)
+}
+
+fn watchdog_over(
+    app: Option<&AppHandle>,
+    observed_runs: Vec<super::ObservedRun>,
+) -> Vec<QuietClassifierFailure> {
     let mut failures = Vec::new();
-    let runs = match db::list_active_circuit_runs() {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("circuits: watchdog could not list active runs: {}", e);
-            return failures;
-        }
-    };
-    for active in runs {
+    for observed in observed_runs {
         // Watchdog recovers in-flight running runs even on disabled
         // circuits — a lost turn wedges a capacity slot either way.
-        if active.run.state != "running" {
+        if observed.active.run.state != "running" {
             continue;
         }
-        let steps = match load_steps(active.run.id) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        let (Ok(graph), Ok(context)) = (
-            CircuitGraph::from_json(&active.circuit_graph_json),
-            crate::db::circuit::context_store::load_logical_run(active.run.id)
-                .map(|context| context.runtime()),
-        ) else {
-            continue;
-        };
+        let super::ObservedRun {
+            active,
+            graph,
+            context,
+            steps,
+        } = observed;
         let view = RunView {
             run_id: active.run.id,
             graph,
@@ -1019,15 +1025,17 @@ pub(super) fn lost_turn_watchdog_pass(app: &AppHandle) -> Vec<QuietClassifierFai
             .flatten()
             {
                 evaluator::note_circuit_probe(agent_node_id, &result_key, generation);
-                if recover_result_turn(
-                    app,
-                    &active,
-                    &node,
-                    &recovery_target,
-                    &recovery_fence,
-                    &recovery_permit,
-                ) {
-                    continue;
+                if let Some(app) = app {
+                    if recover_result_turn(
+                        app,
+                        &active,
+                        &node,
+                        &recovery_target,
+                        &recovery_fence,
+                        &recovery_permit,
+                    ) {
+                        continue;
+                    }
                 }
             }
             // Native completion is independent of PTY animation/quietness and
@@ -1078,6 +1086,9 @@ pub(super) fn lost_turn_watchdog_pass(app: &AppHandle) -> Vec<QuietClassifierFai
                                 .is_some_and(|snapshot| snapshot.is_current())
                     },
                     || {
+                        let Some(app) = app else {
+                            return;
+                        };
                         recovery_target.publish(&recovery_permit, &active, || {
                             crate::node_turn::recover_ready(
                                 agent_node_id,
@@ -1195,6 +1206,9 @@ pub(super) fn lost_turn_watchdog_pass(app: &AppHandle) -> Vec<QuietClassifierFai
                     )
                 },
                 || {
+                    let Some(app) = app else {
+                        return;
+                    };
                     recovery_target.publish(&recovery_permit, &active, || {
                     tracing::warn!("circuits: run {} agent {} has a confirmed quiet turn; recovering missed webhook", active.run.id, agent_node_id);
                     if let (Some(stamp), Some(input)) = (&evidence.lifecycle, &evidence.input) {

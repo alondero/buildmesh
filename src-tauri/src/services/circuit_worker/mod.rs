@@ -100,7 +100,11 @@ const STARTUP_DELAY: Duration = Duration::from_secs(5);
 /// Wake condvar. Trigger Now notifies; the worker otherwise wakes on
 /// its fast tick. Milestone 2 (#1207): PTY yields also notify (reactive
 /// gate evaluation), as do collaborator approvals.
-static WAKE: Lazy<(Mutex<()>, Condvar)> = Lazy::new(|| (Mutex::new(()), Condvar::new()));
+///
+/// The bool stays set when `notify_all` lands while the worker is inside
+/// a pass. A condvar notify is not sticky, and the interval pass re-reads
+/// its schedule only when it sees a wake.
+static WAKE: Lazy<(Mutex<bool>, Condvar)> = Lazy::new(|| (Mutex::new(false), Condvar::new()));
 
 /// Stage-2 circuit spawns are asynchronous, while cancellation and circuit
 /// deletion are synchronous commands. This barrier closes the small window in
@@ -316,8 +320,8 @@ static APPROVALS: Lazy<Mutex<Vec<(i64, String)>>> = Lazy::new(|| Mutex::new(Vec:
 /// Lock one of the circuit worker's statics, recovering from a poisoned
 /// mutex instead of panicking (issue #1224).
 ///
-/// The worker holds two small state mutexes — `WAKE` (a `Mutex<()>` used
-/// only to enter `Condvar::wait_timeout`) and `APPROVALS` (a `Vec<(i64,
+/// The worker holds two small state mutexes — `WAKE` (a `Mutex<bool>`
+/// latched around `Condvar::wait_timeout`) and `APPROVALS` (a `Vec<(i64,
 /// String)>`). Both are guarded by app-lifetime invariants that a panic
 /// mid-write does not corrupt (the guard is dropped on unwind, leaving
 /// the inner value in a consistent empty-or-fully-formed state). `.unwrap()`
@@ -391,10 +395,40 @@ fn retain_active_approvals(
     (approvals, dropped)
 }
 
+#[cfg(test)]
+// allow-test-in-production: enable tests count worker wakes on the calling thread
+thread_local! {
+    static WAKE_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+// allow-test-in-production: enable tests read the worker wake count
+pub(crate) fn wake_circuit_worker_calls() -> u64 {
+    WAKE_CALLS.with(|count| count.get())
+}
+
 /// Wake the circuit worker immediately (manual trigger dispatch).
 pub fn wake_circuit_worker() {
-    let (_lock, cvar) = &*WAKE;
+    #[cfg(test)]
+    // allow-test-in-production: enable tests count this wake on the calling thread
+    WAKE_CALLS.with(|count| count.set(count.get() + 1));
+    let (lock, cvar) = &*WAKE;
+    // Hold the lock across the notify so a worker that is about to wait
+    // cannot miss the latch: either it sees the flag before waiting, or
+    // it is already waiting and the notify wakes it.
+    let mut pending = lock_circuit_worker_static(lock);
+    *pending = true;
     cvar.notify_all();
+}
+
+/// Consume a wake latched by [`wake_circuit_worker`].
+///
+/// The worker calls this once per loop. A notify that arrived while the
+/// thread was not waiting stays true until this take.
+pub(crate) fn take_pending_wake() -> bool {
+    let (lock, _cvar) = &*WAKE;
+    let mut pending = lock_circuit_worker_static(lock);
+    std::mem::replace(&mut *pending, false)
 }
 
 /// Start the dedicated Circuit worker thread. Called once from Tauri
@@ -423,7 +457,13 @@ pub fn start_circuit_worker(app: AppHandle) {
             // lib::setup already captures the cause in panic.log.
             startup_reconcile_pass(&app);
             let (lock, cvar) = &*WAKE;
+            // The first pass reads anchors, the same as a process restart.
+            // Later iterations re-read when the wait returned early, or when
+            // a wake arrived during a pass and the notify itself was missed.
+            let mut condvar_woke = true;
             loop {
+                let pending = take_pending_wake();
+                super::circuit_triggers::note_interval_wake(condvar_woke || pending);
                 // Each per-pass body is its own catch_unwind scope so
                 // a panic in the interval-pass doesn't skip the
                 // lost-turn watchdog (and vice-versa). `run_worker_pass`
@@ -436,9 +476,19 @@ pub fn start_circuit_worker(app: AppHandle) {
                 run_worker_pass("circuits:github-poll", || {
                     super::circuit_triggers::maybe_poll_github();
                 });
-                run_worker_pass("circuits:drive", || run_pass(&app));
+                // A panic in the drive pass must not hand the watchdog the
+                // previous tick's snapshot. The vec starts empty, and the
+                // assignment completes only when the pass returns.
+                let mut observed = Vec::new();
+                run_worker_pass("circuits:drive", || {
+                    observed = run_pass(&app);
+                });
+                let watchdog_observed = std::mem::take(&mut observed);
                 run_worker_pass("circuits:watchdog", || {
-                    apply_quiet_classifier_failures(&app, jobs::watchdog(app.clone()));
+                    apply_quiet_classifier_failures(
+                        &app,
+                        jobs::watchdog(app.clone(), watchdog_observed),
+                    );
                 });
                 // Issue #1793: reap piloted nodes stuck `running` with no
                 // session identity or readable report. Self-throttled, so this
@@ -447,9 +497,14 @@ pub fn start_circuit_worker(app: AppHandle) {
                     zombie_sweep::zombie_sweep_pass(&app);
                 });
                 // Wait for the next tick OR an immediate wake, whichever
-                // first (`wait_timeout` returns either way).
+                // first (`wait_timeout` returns either way). A wake during
+                // this pass latches the flag even when its notify is missed;
+                // the next iteration consumes that latch. Do not skip the
+                // wait: output wakes on every PTY chunk, and skipping it
+                // would spin the tick for as long as an agent is printing.
                 let guard = lock_circuit_worker_static(lock);
-                let _ = cvar.wait_timeout(guard, TICK_INTERVAL).unwrap();
+                let (_guard, wait) = cvar.wait_timeout(guard, TICK_INTERVAL).unwrap();
+                condvar_woke = !wait.timed_out();
             }
         })
         .expect("circuit-worker thread spawn failed");
@@ -464,14 +519,29 @@ fn should_drive_circuit_run(enabled: bool, trigger_identity: &str, review_extend
     enabled || trigger_identity.starts_with("manual:") || review_extended
 }
 
+/// A running run as the drive pass loaded it, before that pass mutates the
+/// context. The lost-turn watchdog on the same tick uses this instead of
+/// listing and parsing the run again.
+pub(super) struct ObservedRun {
+    pub active: db::ActiveCircuitRun,
+    pub graph: CircuitGraph,
+    pub context: crate::circuit::context::CircuitContext,
+    pub steps: Vec<StepView>,
+}
+
 /// One full pass over every active circuit run. Per-run failures are
 /// logged and isolated — one broken run must not starve the others.
-fn run_pass(app: &AppHandle) {
+///
+/// Returns the running runs whose graph, context and steps loaded. A failed
+/// list returns nothing: the watchdog must not list again on this tick, and
+/// the next tick retries.
+fn run_pass(app: &AppHandle) -> Vec<ObservedRun> {
+    let mut observed = Vec::new();
     let runs = match db::list_active_circuit_runs() {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("circuits: could not list active runs: {}", e);
-            return;
+            return observed;
         }
     };
     // Issue #1263: drain approvals queued for runs that vanished
@@ -634,10 +704,11 @@ fn run_pass(app: &AppHandle) {
                 continue;
             }
         }
-        if let Err(e) = drive_run(app, &active) {
+        if let Err(e) = drive_run(app, &active, &mut observed) {
             tracing::warn!("circuits: run {} pass failed: {}", active.run.id, e);
         }
     }
+    observed
 }
 
 fn record_queue_wait(run_id: i64, reason: db::circuit::evidence::QueueWaitReason) {
@@ -681,7 +752,11 @@ fn fenced_history_revision(
     db::circuit::evidence::observation_revision(run.id, &run.state, &expected)
 }
 
-fn drive_run(app: &AppHandle, active: &db::ActiveCircuitRun) -> Result<(), String> {
+fn drive_run(
+    app: &AppHandle,
+    active: &db::ActiveCircuitRun,
+    observed: &mut Vec<ObservedRun>,
+) -> Result<(), String> {
     // Undrivable-graph fail-closed: a corrupt `graph_json` previously
     // returned Err every 2s forever, holding the run's capacity slot with
     // no state change. Fail the run once with the parse error so the
@@ -738,6 +813,19 @@ fn drive_run(app: &AppHandle, active: &db::ActiveCircuitRun) -> Result<(), Strin
             return Ok(());
         }
     };
+    let steps = load_steps(active.run.id)?;
+    // Snapshot before this pass writes evidence.revision, run id, or a
+    // conflict repair. The watchdog must see the context the drive pass
+    // loaded, and the publish fence reads the database again before it
+    // publishes.
+    if active.run.state == "running" {
+        observed.push(ObservedRun {
+            active: active.clone(),
+            graph: graph.clone(),
+            context: logical.runtime(),
+            steps: steps.clone(),
+        });
+    }
     // The run's context must still be the one this pass read. The revision
     // fingerprints the whole stored context, so a change to the
     // decision-relevant half or to the bulky half both move it: an
@@ -755,7 +843,7 @@ fn drive_run(app: &AppHandle, active: &db::ActiveCircuitRun) -> Result<(), Strin
         graph,
         state: RunState::from_db_str(&active.run.state),
         context: context.clone(),
-        steps: load_steps(active.run.id)?,
+        steps,
     };
     // Repair only legacy conflicts whose source is proven by their original
     // history digest. The next ordinary observation commits the reconciliation.
