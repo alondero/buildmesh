@@ -652,3 +652,67 @@ test('rust advisories: the yaml-rust crate stays out of the tree (issue #2757)',
   assert.match(line, /default-features = false/, 'the yaml feature is back on via default features');
   assert.doesNotMatch(line, /"yaml-load"/, 'the yaml feature must not be re-enabled explicitly either');
 });
+
+function lockPackageVersions(lockText, name) {
+  const versions = [];
+  const re = /\[\[package\]\]\r?\nname = "([^"]+)"\r?\nversion = "([^"]+)"/g;
+  for (const match of lockText.matchAll(re)) {
+    if (match[1] === name) versions.push(match[2]);
+  }
+  return versions;
+}
+
+function semverParts(version) {
+  const core = version.split('-')[0].split('+')[0];
+  const parts = core.split('.').map((part) => Number(part));
+  if (parts.length === 0 || parts.some((part) => !Number.isInteger(part))) {
+    throw new Error(`could not parse Cargo package version ${version}`);
+  }
+  return parts;
+}
+
+function compareSemver(left, right) {
+  const a = semverParts(left);
+  const b = semverParts(right);
+  const length = Math.max(a.length, b.length);
+  for (let i = 0; i < length; i += 1) {
+    const delta = (a[i] ?? 0) - (b[i] ?? 0);
+    if (delta !== 0) return delta;
+  }
+  return 0;
+}
+
+// RUSTSEC-2026-0486: rustix >=1.0.0, <1.1.6. The advisory lists <1.0.0 as unaffected.
+function rustixAffectedBy0486(version) {
+  return compareSemver(version, '1.0.0') >= 0 && compareSemver(version, '1.1.6') < 0;
+}
+
+test('rust advisories: rustix stays patched for RUSTSEC-2026-0486 (issue #2761)', () => {
+  // rustix 1.0.0 through 1.1.5 mark a zero-length xattr buffer as initialized.
+  // 1.1.6 returns an empty result for that call and adds *_query for the size.
+  // xattr 1.6.1 (src/sys/linux_macos.rs) passes `&mut []` to learn the size.
+  // xattr 1.7.0 calls the query functions instead. tar 0.4.46 depends on
+  // xattr at ^1.1.3, and tauri-plugin-updater 2.14.0 depends on that tar.
+  //
+  // `cargo audit` is the authoritative gate. This check fails as soon as the
+  // lockfile moves back into the affected range, or keeps the old xattr
+  // release beside a patched rustix.
+  const lock = fs.readFileSync(path.join(repoRoot, 'src-tauri', 'Cargo.lock'), 'utf8');
+  const rustix = lockPackageVersions(lock, 'rustix');
+  assert.ok(rustix.length > 0, 'expected rustix in Cargo.lock');
+  for (const version of rustix) {
+    assert.equal(
+      rustixAffectedBy0486(version),
+      false,
+      `rustix ${version} is inside RUSTSEC-2026-0486 (>=1.0.0, <1.1.6)`,
+    );
+  }
+  if (rustix.some((version) => compareSemver(version, '1.1.6') >= 0)) {
+    for (const version of lockPackageVersions(lock, 'xattr')) {
+      assert.ok(
+        compareSemver(version, '1.7.0') >= 0,
+        `xattr ${version} still uses the pre-1.1.6 empty-buffer size query`,
+      );
+    }
+  }
+});
