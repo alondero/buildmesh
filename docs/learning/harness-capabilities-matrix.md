@@ -215,9 +215,14 @@ This is the harness half of the backend Autopilot gate
 (`src-tauri/src/autopilot/compatibility.rs`, reason `MissingAttentionHook` /
 `PlainTerminal`), so the same predicate that decides whether a Mesh may be
 Autopilot-managed also decides who may review. The frontend mirror is
-`blocksReviewCircuit` in `src/components/Circuits/harnessCapabilities.ts`. It
-gates the Agent Node title-bar review control and the two interactive reviewer
-provider pickers (the Start Review dialog and Settings → Providers).
+`blocksReviewCircuit` in `src/components/Circuits/harnessReviewEligibility.ts`.
+It reads the narrow generated artifact
+(`src/types/generated/HarnessReviewEligibility.ts`) rather than the full
+capability catalogue, because the surfaces that ask the question are rendered
+on first paint and must not carry the whole catalogue into the eager entry
+chunk (issue #2757). It gates the Agent Node title-bar review control and the
+two interactive reviewer provider pickers (the Start Review dialog and
+Settings → Providers).
 
 It deliberately does **not** gate the Circuit Inspector's provider field on a
 reviewer agent node. Authored Circuits carry their reviewer provider in the

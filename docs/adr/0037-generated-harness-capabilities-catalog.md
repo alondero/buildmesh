@@ -44,6 +44,17 @@ themselves. Three harnesses drifted silently.
    `BUILTIN_HARNESS_IDS == catalog keys ∪ aliases`.
 5. Docs: every generated label must appear as a `| <label> |` row in
    `docs/user-guide.md` and `docs/learning/harness-capabilities-matrix.md`.
+6. The catalogue is emitted as two artifacts from the same Rust rows: the full
+   `HarnessCapabilitiesTable.ts` for the Inspector, and the narrow
+   `HarnessReviewEligibility.ts` — the id vocabulary, the alias table and the
+   four review-circuit eligibility flags — for the surfaces that are rendered
+   on first paint. The split exists because the eager entry chunk has to
+   answer "may this harness start a review circuit?" without carrying the
+   whole catalogue (issue #2757). A Rust test asserts the two artifacts agree
+   flag for flag. The **TypeScript declaration** of the id vocabulary and the
+   alias table is in the narrow artifact, and the full catalogue re-exports it;
+   the full catalogue's *payload* still carries a copy of the id list, because
+   the Rust and docs gates read it from the emitted JSON.
 
 ### Authoritative declarations and launch dispatch (#2524)
 
@@ -91,3 +102,7 @@ arguments. A descriptor does not replace these operations with a generic flag.
   which the previous hand list omitted.
 - README / docs gates parse the generated JSON rather than scraping source
   text, so a regex drift cannot false-pass coverage.
+- The review-circuit eligibility predicate
+  (`src/components/Circuits/harnessReviewEligibility.ts`) reads the narrow
+  generated artifact; the Inspector's lookup helpers read the full one. Both
+  are generated data — neither may be hand-copied.

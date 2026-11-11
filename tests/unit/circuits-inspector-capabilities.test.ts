@@ -13,7 +13,6 @@ import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
-  blocksReviewCircuit,
   effortAllowedFor,
   getCapabilitiesFor,
   HARNESS_CAPABILITIES,
@@ -21,11 +20,16 @@ import {
   HARNESS_LABEL,
   HARNESS_PROFILE_ALIASES,
 } from '../../src/components/Circuits/harnessCapabilities';
+// The eligibility predicate reads the narrow generated artifact so the
+// surfaces rendered on first paint do not carry the full catalogue
+// (issue #2757, bundle size).
+import { blocksReviewCircuit } from '../../src/components/Circuits/harnessReviewEligibility';
 import type { HarnessCapabilities } from '../../src/types/generated/HarnessCapabilities';
 import {
   HARNESS_CATALOG,
   type InspectorHarnessId,
 } from '../../src/types/generated/HarnessCapabilitiesTable';
+import { HARNESS_REVIEW_ELIGIBILITY } from '../../src/types/generated/HarnessReviewEligibility';
 
 const srcRoot = join(dirname(fileURLToPath(import.meta.url)), '../../src');
 
@@ -191,6 +195,32 @@ describe('review-circuit eligibility across the shipped catalog', () => {
 
   it('excludes only the plain shell', () => {
     expect(HARNESS_IDS.filter(id => blocksReviewCircuit(id))).toEqual(['terminal']);
+  });
+});
+
+/**
+ * The narrow eligibility artifact and the full catalogue are two views of one
+ * Rust source. If a flag disagreed between them, the surfaces rendered on
+ * first paint (the node review button, the Spawn Menu) would answer
+ * differently from the Inspector, and the backend's own compatibility gate
+ * (`circuit::compatibility::harness_has_turn_signal`) would disagree with
+ * both.
+ */
+describe('the narrow eligibility artifact agrees with the full catalogue', () => {
+  it('mirrors every eligibility flag for every catalog id', () => {
+    for (const id of HARNESS_IDS) {
+      const caps = HARNESS_CAPABILITIES[id];
+      const flags = HARNESS_REVIEW_ELIGIBILITY[id];
+      expect(flags, `missing eligibility row for ${id}`).toBeDefined();
+      expect(flags.is_plain_terminal, id).toBe(caps.is_plain_terminal);
+      expect(flags.requires_attention_hook, id).toBe(caps.requires_attention_hook);
+      expect(flags.supports_passive_turn_watcher, id).toBe(caps.supports_passive_turn_watcher);
+      expect(flags.supports_result_file_handoff, id).toBe(caps.supports_result_file_handoff);
+    }
+  });
+
+  it('covers exactly the catalog ids', () => {
+    expect(Object.keys(HARNESS_REVIEW_ELIGIBILITY).sort()).toEqual([...HARNESS_IDS].sort());
   });
 });
 

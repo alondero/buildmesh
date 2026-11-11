@@ -9,9 +9,12 @@
  * Positions are NOT part of the blueprint AST: the graph_json stays
  * canonical in Rust, and layout is derived (Dagre) with an optional
  * session-scoped position map layered on top when the user drags cards.
+ *
+ * The Dagre-backed layout itself lives in `circuitLayout.ts` (issue #2757,
+ * bundle size). This module is imported eagerly by the Agent Node overview
+ * tab, so it must not pull a library only the canvas editor needs.
  */
 
-import dagre from '@dagrejs/dagre';
 import type { CircuitGraph } from '../../types/generated/CircuitGraph';
 import type { CircuitNode } from '../../types/generated/CircuitNode';
 import type { CircuitNodeKind } from '../../types/generated/CircuitNodeKind';
@@ -1046,39 +1049,5 @@ export function toGraph(
 }
 
 // ---------------------------------------------------------------------------
-// Dagre auto-layout.
+// Dagre auto-layout lives in `circuitLayout.ts`.
 // ---------------------------------------------------------------------------
-
-/** Card size used for spacing; the real card may vary a few px. */
-export const NODE_SIZE = { width: 220, height: 64 };
-
-/**
- * Lay out the whole graph with Dagre in `direction`, returning a
- * position per node id (disconnected nodes included).
- */
-export function layoutPositions(
-  graph: Pick<CircuitGraph, 'nodes' | 'edges'>,
-  direction: 'LR' | 'TB'
-): Map<string, { x: number; y: number }> {
-  const g = new dagre.graphlib.Graph();
-  g.setGraph({ rankdir: direction, nodesep: 40, ranksep: 80, marginx: 20, marginy: 20 });
-  g.setDefaultEdgeLabel(() => ({}));
-  for (const node of graph.nodes) {
-    g.setNode(node.id, { width: NODE_SIZE.width, height: NODE_SIZE.height });
-  }
-  for (const edge of graph.edges) {
-    g.setEdge(edge.from, edge.to);
-  }
-  dagre.layout(g);
-
-  const positions = new Map<string, { x: number; y: number }>();
-  for (const node of graph.nodes) {
-    const laid = g.node(node.id) as { x: number; y: number } | undefined;
-    // Dagre centres on the node; React Flow wants the top-left corner.
-    positions.set(node.id, {
-      x: (laid?.x ?? 0) - NODE_SIZE.width / 2,
-      y: (laid?.y ?? 0) - NODE_SIZE.height / 2,
-    });
-  }
-  return positions;
-}

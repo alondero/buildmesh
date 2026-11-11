@@ -20,8 +20,19 @@
  * pins which surface owns each destination at each tier, and that every one
  * stays keyboard-reachable with the right pressed/expanded state.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+
+import { preloadLazySurfaces } from '../../src/components/lazySurfaces';
+
+// The two modals are lazy surfaces, so they arrive after their chunk does.
+// This file stubs the two modal modules, so the preload resolves the stubs:
+// it settles the loader seam before the suite runs, and the `findByRole`
+// waits below are what actually carry the focus assertions. The real
+// loader-to-component binding is pinned by `tests/unit/lazy-surfaces.test.ts`,
+// which mocks nothing. See `docs/agents/engineering-reference.md` ("Async
+// UI, refresh, polling").
+beforeAll(() => preloadLazySurfaces('appSettings', 'remoteAccess'), 60_000);
 
 const windowApi = vi.hoisted(() => ({
   minimize: vi.fn(),
@@ -294,6 +305,9 @@ describe('folded utilities return focus to More when their modal closes (#2421 r
     fireEvent.click(more);
     fireEvent.click(within(screen.getByTestId('titlebar-overflow-panel')).getByTestId('titlebar-overflow-settings'));
     expect(useUIStore.getState().appSettingsOpen).toBe(true);
+    // The settings modal is a lazy surface, so it mounts once its chunk
+    // lands; the focus it records at mount is what the assertion is about.
+    await screen.findByRole('dialog', { name: 'App settings' });
     expect(modalFocusAtMount.settings).toBe(more);
   });
 
@@ -303,6 +317,7 @@ describe('folded utilities return focus to More when their modal closes (#2421 r
     fireEvent.click(more);
     fireEvent.click(within(screen.getByTestId('titlebar-overflow-panel')).getByTestId('titlebar-overflow-remote-access'));
     expect(useUIStore.getState().remoteAccessOpen).toBe(true);
+    await screen.findByRole('dialog', { name: 'Remote access' });
     expect(modalFocusAtMount.remote).toBe(more);
   });
 });

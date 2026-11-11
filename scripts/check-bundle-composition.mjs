@@ -17,6 +17,9 @@
 //     `@xterm/addon-webgl`; and the lazy `./loadUnicode11Widths` wrapper, which
 //     statically imports `@xterm/addon-unicode11` and so carries it.
 //   - `src/components/Probe/ProbePanel.tsx` `lazy()`s every Probe tab.
+//   - `src/components/lazySurfaces.ts` `lazy()`s the three cold-only surfaces
+//     that carry their own libraries: the circuit canvas editor (React Flow,
+//     d3 and dagre), the settings modal and the remote-access modal (qrcode).
 //
 // How the gate reads the build. Rollup erases bare module specifiers when it
 // bundles - the string `@xterm/addon-fit` appears nowhere in `dist/`, so a
@@ -116,6 +119,32 @@ export const FORBIDDEN = [
     stem: tab,
     why: 'ProbePanel lazy-loads it so the tab costs nothing until the user opens it',
   })),
+  // The lazy surfaces owned by `src/components/lazySurfaces.ts` (issue #2757).
+  // Each is mounted only on demand, and each carries enough code that
+  // shipping it in the entry chunk taxes every launch:
+  //
+  //   - the circuit canvas editor brings @xyflow/react, @xyflow/system and
+  //     the d3 family with it (~217 kB minified);
+  //   - the settings surface is ~105 kB of app code;
+  //   - the remote-access surface carries the `qrcode` encoder (~37 kB).
+  //
+  // A static import of any of them puts that back in the entry chunk, which
+  // is exactly what this gate exists to catch.
+  {
+    specifier: './Circuits/CircuitEditorOverlay',
+    stem: 'CircuitEditorOverlay',
+    why: 'lazySurfaces lazy-loads it so React Flow and dagre cost nothing until the canvas opens',
+  },
+  {
+    specifier: './AppSettings/AppSettingsModal',
+    stem: 'AppSettingsModal',
+    why: 'lazySurfaces lazy-loads it so the settings surface costs nothing until it opens',
+  },
+  {
+    specifier: './RemoteAccess/RemoteAccessModal',
+    stem: 'RemoteAccessModal',
+    why: 'lazySurfaces lazy-loads it so the qrcode encoder costs nothing until it opens',
+  },
 ];
 
 function parseArgs(argv) {
@@ -376,7 +405,7 @@ function main() {
   console.log('-'.repeat(72));
 
   if (report.violations.length === 0) {
-    console.log('Bundle composition OK: xterm, its addons and the Probe tabs are all split out of the entry chunk.');
+    console.log('Bundle composition OK: xterm, its addons, the Probe tabs and the lazy surfaces are all split out of the entry chunk.');
     process.exit(0);
   }
 

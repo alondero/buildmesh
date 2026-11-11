@@ -14,8 +14,19 @@
  * mock is file-local and overrides the global setup mock, which only
  * models focus tracking.
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
 import { act, fireEvent, render, renderHook, screen, within } from '@testing-library/react';
+
+import { preloadLazySurfaces } from '../../src/components/lazySurfaces';
+
+// Both modals are lazy surfaces, so they arrive after their chunk does. These
+// files stub the two modal modules, so this preload resolves the stubs: it
+// settles the loader seam before the suite runs, and the `findByRole` waits
+// below are what actually carry the assertions. The real loader-to-component
+// binding is pinned by `tests/unit/lazy-surfaces.test.ts`, which mocks
+// nothing. See `docs/agents/engineering-reference.md` ("Async UI, refresh,
+// polling").
+beforeAll(() => preloadLazySurfaces('appSettings', 'remoteAccess'), 60_000);
 
 const windowApi = vi.hoisted(() => ({
   minimize: vi.fn(),
@@ -313,19 +324,22 @@ describe('TitleBar (bespoke window chrome)', () => {
   });
 
   describe('modal wiring (icons moved from the Sidebar header)', () => {
+    // Both modals are lazy surfaces (`src/components/lazySurfaces.ts`), so the
+    // dialog arrives after the chunk does. The assertions wait for the dialog
+    // rather than assuming the import resolved inside the click's act().
     it('passes the requested Settings pane through and resets normal opens to General', async () => {
       await renderTitleBar();
       act(() => useUIStore.getState().openAppSettings('providers'));
-      expect(screen.getByRole('dialog', { name: 'App settings' }).getAttribute('data-initial-tab')).toBe('providers');
+      expect((await screen.findByRole('dialog', { name: 'App settings' })).getAttribute('data-initial-tab')).toBe('providers');
       fireEvent.click(screen.getByRole('button', { name: 'stub-close-settings' }));
       fireEvent.click(screen.getByRole('button', { name: 'Open settings' }));
-      expect(screen.getByRole('dialog', { name: 'App settings' }).getAttribute('data-initial-tab')).toBe('general');
+      expect((await screen.findByRole('dialog', { name: 'App settings' })).getAttribute('data-initial-tab')).toBe('general');
     });
     it('opens and closes the App Settings modal', async () => {
       await renderTitleBar();
       expect(screen.queryByRole('dialog')).toBeNull();
       fireEvent.click(screen.getByRole('button', { name: 'Open settings' }));
-      expect(screen.getByRole('dialog', { name: 'App settings' })).toBeTruthy();
+      expect(await screen.findByRole('dialog', { name: 'App settings' })).toBeTruthy();
       fireEvent.click(screen.getByRole('button', { name: 'stub-close-settings' }));
       expect(screen.queryByRole('dialog')).toBeNull();
     });
@@ -333,7 +347,7 @@ describe('TitleBar (bespoke window chrome)', () => {
     it('opens and closes the Remote Access modal', async () => {
       await renderTitleBar();
       fireEvent.click(screen.getByRole('button', { name: 'Open mobile remote access' }));
-      expect(screen.getByRole('dialog', { name: 'Remote access' })).toBeTruthy();
+      expect(await screen.findByRole('dialog', { name: 'Remote access' })).toBeTruthy();
       fireEvent.click(screen.getByRole('button', { name: 'stub-close-remote' }));
       expect(screen.queryByRole('dialog')).toBeNull();
     });

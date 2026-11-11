@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState, useRef } from 'react';
+import { Fragment, Suspense, useEffect, useMemo, useState, useRef } from 'react';
 import {
   DndContext, DragOverlay, PointerSensor, useSensor, useSensors, pointerWithin,
   type DragStartEvent, type DragMoveEvent, type DragEndEvent,
@@ -11,7 +11,7 @@ import { GridSplitter } from './GridSplitter';
 import { deriveVisibleNodes } from './gridFilterSort';
 import { useScope } from '../../hooks/useScope';
 import { CenterDiffOverlay } from './CenterDiffOverlay';
-import { CircuitEditorOverlay } from '../Circuits/CircuitEditorOverlay';
+import { LazyCircuitEditorOverlay } from '../lazySurfaces';
 import { NodeCard } from './NodeCard';
 import { activityMemberIds, activityRootId } from '../../lib/nodeActivities';
 import { focusNode } from '../../lib/navigation';
@@ -405,8 +405,14 @@ export function AgentNodeView() {
           terminals behind it keep running; "Back to Terminals" just hides it. */}
       {activeDiffFile && <CenterDiffOverlay diff={activeDiffFile} />}
       {/* Circuit canvas editor (#1209) — same overlay discipline: covers the
-          workspace, never unmounts the terminals underneath. */}
-      {circuitEditorOpen && <CircuitEditorOverlay />}
+          workspace, never unmounts the terminals underneath. The editor is a
+          lazy surface (`src/components/lazySurfaces.ts`): React Flow and dagre
+          are a ~217 kB chunk that only matters once the user opens the canvas. */}
+      {circuitEditorOpen && (
+        <Suspense fallback={null}>
+          <LazyCircuitEditorOverlay />
+        </Suspense>
+      )}
       <div className="flex-1 flex overflow-hidden">
         <DndContext
           sensors={sensors}

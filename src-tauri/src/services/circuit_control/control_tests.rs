@@ -162,19 +162,11 @@ fn recovering_a_failed_run_reopens_it() {
 #[test]
 fn approving_a_parked_gate_queues_the_approval_for_the_worker() {
     let _db = crate::db::test_support::isolated();
-    // The worker's approval queue is process-wide and keyed by run id, while
-    // every test database numbers its runs from 1. Starting this database's
-    // run numbering at a distinctive id keeps the test from draining another
-    // test's approval.
-    let unique = 9_000_000 + i64::from(std::process::id());
-    crate::db::write_conn()
-        .execute(
-            "INSERT INTO sqlite_sequence(name, seq) VALUES ('autopilot_circuit_runs', ?1)",
-            [unique - 1],
-        )
-        .unwrap();
+    // The worker's approval queue is process-wide and keyed by run id. `review_run`
+    // reserves this database's run ids in the band above every other database's,
+    // so the approval queued here is keyed by an id no other database hands out
+    // and this test cannot drain another test's approval (issue #2663).
     let (_, run) = review_run();
-    assert_eq!(run, unique, "the run must take the seeded id");
     advance(
         run,
         "running",

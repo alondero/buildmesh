@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { isAuthError, listNodeReviews, listProviders, startNodeReview, type Provider } from '../api';
 import type { NodeReviewOption } from '../../types/generated/NodeReviewOption';
-import { blocksReviewCircuit } from '../../components/Circuits/harnessCapabilities';
+import { blocksReviewCircuit } from '../../components/Circuits/harnessReviewEligibility';
 import { launchChoices, launchGroups } from '../spawnMenu';
 import { Sheet } from '../ui';
 
