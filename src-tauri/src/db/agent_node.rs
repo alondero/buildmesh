@@ -834,9 +834,7 @@ fn lifecycle_snapshot_json_inner(conn: &Connection, id: i64) -> SqlResult<Option
 fn blocker_from_snapshot(
     snapshot: Option<String>,
 ) -> Option<crate::circuit::observation::CircuitObservationBlocker> {
-    let Some(snapshot) = snapshot else {
-        return None;
-    };
+    let snapshot = snapshot?;
     let lifecycle = match serde_json::from_str::<
         crate::agent::session_lifecycle::LifecycleChangedPayload,
     >(&snapshot)

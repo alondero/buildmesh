@@ -57,10 +57,10 @@ pub(in crate::db::circuit) fn recovery_view(
             })
             .collect(),
     };
-    // One primary-key search for every agent this run names. A per-step
-    // lookup made an evidence read quadratic, because each unverified step
-    // rebuilt this view (issue #2766). The step list is cloned so the
-    // lifecycle write can borrow `view.context` on its own.
+    // Primary-key searches for the agents these steps name, in batches of
+    // 500. A per-step lookup made an evidence read quadratic, because each
+    // unverified step rebuilt this view (issue #2766). The step list is
+    // cloned so the lifecycle write can borrow `view.context` on its own.
     let steps = view.steps.clone();
     let blockers =
         crate::db::agent_node::circuit_lifecycle_blockers_inner(db, &step_agent_ids(&view))?;
