@@ -233,6 +233,16 @@ on that agent. The gate also passes any provider id it cannot resolve, because
 the column holds user-defined harness profile ids that resolve to a real
 executor at the spawn seam.
 
+One behaviour change came with the move to the narrow artifact (issue #2757).
+The predicate used to test membership with `normalised in HARNESS_CAPABILITIES`,
+which also matches `Object.prototype` names: a provider id of `"toString"` or
+`"constructor"` resolved to a harness that does not exist and **blocked** a
+review the app could not judge. The membership test is now against the id list
+(`HARNESS_IDS.includes(...)`), so such an id resolves to nothing and the gate
+passes it — the behaviour the paragraph above already describes. Every real
+harness id, spawn-option id, legacy id and profile alias resolves exactly as
+before.
+
 | Harness | Turn signal | Review circuit |
 |---|---|---|
 | Claude Code | Attn hook | ✅ |

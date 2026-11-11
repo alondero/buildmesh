@@ -392,7 +392,8 @@ fn write_if_changed(path: &Path, contents: &str) -> std::io::Result<()> {
 }
 
 /// Write `HarnessCapabilitiesTable.ts` and `.json` next to the ts-rs bindings,
-/// plus the narrow `HarnessReviewEligibility.ts` the eager frontend path reads.
+/// plus the narrow `HarnessReviewEligibility.ts` and `.json` the eager
+/// frontend path reads.
 pub fn export_harness_capabilities_table() -> std::io::Result<()> {
     let dir = generated_export_dir();
     let ids = catalog_ids();
@@ -402,8 +403,14 @@ pub fn export_harness_capabilities_table() -> std::io::Result<()> {
     write_if_changed(&dir.join("HarnessCapabilitiesTable.ts"), &ts)?;
     // The narrow artifact is written from the same rows, so the id set and the
     // eligibility flags cannot drift from the full catalogue (issue #2757).
+    // The `.json` twin is what the Rust test compares against the emitted
+    // `.json`, so the agreement is checked on the bytes the frontend reads.
     let eligibility_json = review_eligibility_json();
     let eligibility_ts = render_review_eligibility_ts(eligibility_json.trim_end(), &ids);
+    write_if_changed(
+        &dir.join("HarnessReviewEligibility.json"),
+        &eligibility_json,
+    )?;
     write_if_changed(&dir.join("HarnessReviewEligibility.ts"), &eligibility_ts)?;
     Ok(())
 }

@@ -83,7 +83,9 @@ export type LazySurfaceName = keyof typeof LAZY_SURFACE_LOADERS;
  *
  * The name list is required and non-empty: a call with no name would resolve
  * without loading anything, which reads like "preload them all" and is not
- * what it does.
+ * what it does. The type makes that a compile error for a TypeScript caller;
+ * the guard below makes it a loud error for one the type checker never saw,
+ * because `tsconfig.json` does not cover `tests/`.
  *
  * This mirrors the Probe tab registry's `preload` seam
  * (`src/lib/probeContext.ts`); a `React.lazy` surface is async UI, so a test
@@ -94,5 +96,8 @@ export type LazySurfaceName = keyof typeof LAZY_SURFACE_LOADERS;
 export function preloadLazySurfaces(
   ...names: [LazySurfaceName, ...LazySurfaceName[]]
 ): Promise<unknown> {
+  if (names.length === 0) {
+    throw new Error('preloadLazySurfaces needs at least one surface name');
+  }
   return Promise.all(names.map((name) => LAZY_SURFACE_LOADERS[name]()));
 }

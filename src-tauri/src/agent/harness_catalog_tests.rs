@@ -264,6 +264,12 @@ fn export_bindings_harness_capabilities_table() {
 /// them would make the frontend and the backend answer differently about
 /// whether a review circuit may run — the backend's gate is
 /// `circuit::compatibility::harness_has_turn_signal`.
+///
+/// The comparison reads the **emitted** artifacts, not the values they were
+/// built from: `ReviewEligibility::of` copies the four flags verbatim, so
+/// comparing it with the catalogue would only prove that a copy equals its
+/// source. Reading the bytes the frontend reads is what makes the assertion
+/// about the two artifacts rather than about one function.
 #[test]
 fn export_bindings_harness_review_eligibility() {
     export_harness_capabilities_table().expect("export HarnessReviewEligibility");
@@ -282,38 +288,62 @@ fn export_bindings_harness_review_eligibility() {
         "generated TS must export the eligibility table"
     );
 
-    for entry in builtin_harness_catalog() {
-        let caps = &entry.capabilities;
-        let flags = ReviewEligibility::of(caps);
-        assert_eq!(
-            flags.is_plain_terminal, caps.is_plain_terminal,
-            "is_plain_terminal must mirror the catalogue for {}",
-            entry.id
-        );
-        assert_eq!(
-            flags.requires_attention_hook, caps.requires_attention_hook,
-            "requires_attention_hook must mirror the catalogue for {}",
-            entry.id
-        );
-        assert_eq!(
-            flags.supports_passive_turn_watcher, caps.supports_passive_turn_watcher,
-            "supports_passive_turn_watcher must mirror the catalogue for {}",
-            entry.id
-        );
-        assert_eq!(
-            flags.supports_result_file_handoff, caps.supports_result_file_handoff,
-            "supports_result_file_handoff must mirror the catalogue for {}",
-            entry.id
-        );
-    }
+    let narrow: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("HarnessReviewEligibility.json"))
+            .unwrap_or_else(|e| panic!("read the emitted eligibility JSON: {e}")),
+    )
+    .expect("the emitted eligibility JSON must parse");
+    let full: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("HarnessCapabilitiesTable.json"))
+            .unwrap_or_else(|e| panic!("read the emitted catalogue JSON: {e}")),
+    )
+    .expect("the emitted catalogue JSON must parse");
 
     // The id vocabulary must be the same set in both artifacts: the full
     // catalogue re-exports it from here, so a divergence would silently
     // change the Inspector's dropdown.
-    let eligibility_ids: Vec<String> = review_eligibility_file().ids;
+    let narrow_ids = narrow
+        .get("ids")
+        .and_then(|v| v.as_array())
+        .expect("the eligibility artifact must carry ids");
+    let full_ids = full
+        .get("ids")
+        .and_then(|v| v.as_array())
+        .expect("the catalogue artifact must carry ids");
     assert_eq!(
-        eligibility_ids,
-        catalog_ids(),
-        "the eligibility artifact must declare the same id set, in the same order"
+        narrow_ids, full_ids,
+        "the eligibility artifact and the catalogue must declare the same ids, in the same order"
     );
+
+    // Every flag of every row must match, read out of both emitted files.
+    let eligibility = narrow
+        .get("eligibility")
+        .and_then(|v| v.as_object())
+        .expect("the eligibility artifact must carry the eligibility flags");
+    let capabilities = full
+        .get("capabilities")
+        .and_then(|v| v.as_object())
+        .expect("the catalogue artifact must carry the capabilities");
+    assert_eq!(
+        eligibility.len(),
+        capabilities.len(),
+        "the two artifacts must describe the same number of harnesses"
+    );
+    for field in [
+        "is_plain_terminal",
+        "requires_attention_hook",
+        "supports_passive_turn_watcher",
+        "supports_result_file_handoff",
+    ] {
+        for (id, flags) in eligibility {
+            let caps = capabilities.get(id).unwrap_or_else(|| {
+                panic!("the eligibility artifact names a harness the catalogue does not: {id}")
+            });
+            assert_eq!(
+                flags.get(field),
+                caps.get(field),
+                "the eligibility artifact and the catalogue disagree about {field} for {id}"
+            );
+        }
+    }
 }

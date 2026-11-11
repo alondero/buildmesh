@@ -219,11 +219,15 @@ barrel.
   Inspector (`Circuits/InspectorPanel.tsx`).
 
 The full catalogue is therefore **not eagerly reachable**: the entry chunk
-carries only the narrow artifact. It is reachable from two *lazy* entry
-points — the Inspector, and `src/lib/archiveProvenance.ts`, which reads
-`HARNESS_LABEL` and `HARNESS_PROFILE_ALIASES` and is reached from the Probe
-tab `ArchivedNodesTab` → `AgentHistoryTab`. Sharing the catalogue with the
-Probe tab costs nothing extra, because the Inspector needs it anyway.
+carries only the narrow artifact. It is reachable from three *lazy* entry
+points — the Inspector (`Circuits/InspectorPanel.tsx`, which imports
+`harnessCapabilities.ts`); the circuit editor, because
+`Circuits/CircuitFlowEditor.tsx` imports `InspectorPanel`; and
+`src/lib/archiveProvenance.ts`, which reads `HARNESS_LABEL` and
+`HARNESS_PROFILE_ALIASES` and is reached from the Probe tab `ArchivedNodesTab` →
+`AgentHistoryTab`. All three are lazy, so the eager-reachability claim holds;
+sharing the catalogue costs nothing extra, because the Inspector needs it
+anyway.
 
 The mobile SPA carries both artifacts (it needs the labels for the archived
 nodes screen and the eligibility flags for the review screen), so it grows
@@ -469,20 +473,42 @@ There is no skip path to fall back to: the app loads the precompiled
 `dump-load` bundle (`default_newlines.packdump`), so syntect's YAML pre-test
 (`yaml_load.rs::try_compile_regex`) never runs at runtime.
 
-The whole default syntax set was swept under both feature sets and the output
-was compared byte for byte:
+**The engine cannot compile 104 of the shipped patterns, and never is asked
+to.** `fancy-regex` rejects backreferences; the default syntax set contains
+104 patterns that use them (103 in `LaTeX`, 1 in `C++`), such as
+`(\})|(\4)` and `\)\3"`. Compiled as written, those 104 are errors. They are
+never compiled as written: syntect substitutes the matched text for the
+backreference *before* compiling
+(`MatchPattern::regex_with_refs`, `syntax_definition.rs:271-277`), and it
+decides to substitute from the enclosing context's `uses_backrefs` flag, which
+the linker propagates to every context that includes a backreference-using one
+(`syntax_set.rs:660-690`; `parser.rs:717-730`). A pattern with capture groups
+therefore always reaches the engine substituted, and a pattern without them is
+compiled exactly as written.
+
+So the check that matters is not "does every pattern compile" — it does not —
+but "does every pattern the parser can hand the engine compile". That is now a
+test: `diff::highlight::tests::every_runtime_regex_compiles_with_the_active_engine`
+walks every context of every grammar in the shipped set and compiles each
+pattern the way the parser would, failing with the offending pattern and its
+context. It reads the same linked contexts the parser reads
+(`SyntaxSet::into_builder` reconstructs them), so the `uses_backrefs` flag it
+checks is the one the parser sees.
 
 | Measure | Before (onig) | After (fancy-regex) |
 |---|---:|---:|
 | grammars | 75 | 75 |
 | themes | 7 | 7 |
-| regexes compiled | 8 156 | 8 156 |
-| regexes that fail to compile | 0 | 0 |
-| grammars that panic when highlighted | 0 | 0 |
+| patterns in the shipped set | 8 156 | 8 156 |
+| patterns with capture groups | 116 | 116 |
+| patterns the engine rejects **as written** | 0 | **104** (all backreferences) |
+| patterns the parser can hand the engine that fail to compile | 0 | **0** |
 
-The sweep compiles every regex of every grammar with the active engine and
-then highlights a sample in every grammar under `catch_unwind`, so the panic
-path is exercised, not inferred. The two outputs are byte-identical.
+The 104 are a property of the *engine*, not of the grammar set: Oniguruma
+accepts backreferences, so the same set has 0 failures before the trim. They
+are safe under the substitution rule above, and the guard test fails loudly if
+that rule is ever broken — by a grammar that uses backreferences outside a
+backreference context, or by a syntect bump that changes when it substitutes.
 
 ### R3. Checked and dismissed — do not spend time on these
 
@@ -535,11 +561,18 @@ The realistic levers, in order of payoff:
 - `fancy-regex` implements a subset of Oniguruma. syntect compiles a grammar's
   regexes lazily and `.expect()`s on failure, so a rejected pattern is a
   **runtime panic**, not a silently skipped language — the risk is a crash in
-  the diff view, not a missing colour. The default syntax set was swept under
-  both feature sets (75 grammars, 7 themes, 8 156 regexes, 0 compile failures,
-  0 panics, byte-identical output), so the shipped grammar set is not affected.
-  A *future* grammar that used an unsupported construct would need its pattern
-  checked before it ships.
+  the diff view, not a missing colour. The engine rejects **104** of the
+  shipped set's 8 156 patterns as written (all backreferences, 103 in `LaTeX`
+  and 1 in `C++`); syntect substitutes the matched text for a backreference
+  before compiling, so those patterns never reach the engine in that form.
+  The guard test
+  `diff::highlight::tests::every_runtime_regex_compiles_with_the_active_engine`
+  holds that rule: every pattern the parser can hand the engine compiles, and
+  the test fails with the offending pattern and its context if it is ever
+  broken. What is **not** established here is the visual fidelity of the
+  highlighting under `fancy-regex` for every language: the guard test proves
+  the engine can compile what it is asked to compile, not that every grammar
+  colours exactly as it did under Oniguruma.
 
 ## Reproducing
 
@@ -563,5 +596,10 @@ cargo rustc --release --bin buildmesh -- `
 node .tmp\rust-crate-sizes.mjs .tmp\buildmesh.map
 ```
 
-The verified frontend patch is in `.tmp\lazy-boundaries.patch` and is also
-written out in full above.
+The frontend change is the diff in this repository, not a patch file: the
+`.tmp\lazy-boundaries.patch` left behind by the analysis is the **experiment**
+that first measured the three surfaces' cost — it defines `lazy()` locally
+inside `AgentNodeView.tsx` and `TitleBar.tsx` rather than routing through
+`src/components/lazySurfaces.ts`, so reproducing from it would produce a
+different change. The shipped implementation is the one described under
+"What was implemented" above.

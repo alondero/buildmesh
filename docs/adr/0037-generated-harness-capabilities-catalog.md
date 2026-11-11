@@ -51,7 +51,9 @@ themselves. Three harnesses drifted silently.
    on first paint. The split exists because the eager entry chunk has to
    answer "may this harness start a review circuit?" without carrying the
    whole catalogue (issue #2757). A Rust test asserts the two artifacts agree
-   flag for flag. The **TypeScript declaration** of the id vocabulary and the
+   flag for flag; it reads the **emitted** `HarnessReviewEligibility.json` and
+   `HarnessCapabilitiesTable.json`, because comparing the in-memory values
+   they were built from would only prove that a copy equals its source. The **TypeScript declaration** of the id vocabulary and the
    alias table is in the narrow artifact, and the full catalogue re-exports it;
    the full catalogue's *payload* still carries a copy of the id list, because
    the Rust and docs gates read it from the emitted JSON.

@@ -173,9 +173,9 @@ function parseArgs(argv) {
 function printHelp() {
   console.log(`Usage: node scripts/check-bundle-composition.mjs [options]
 
-Fails when a forbidden module (xterm + its addons, the Probe tabs) is no longer
-split into its own lazy chunk, which means its code rides along with every
-launch inside the desktop entry chunk.
+Fails when a forbidden module (xterm + its addons, the Probe tabs, the
+cold-only surfaces) is no longer split into its own lazy chunk, which means its
+code rides along with every launch inside the desktop entry chunk.
 
 Options:
   --dist <path>     Path to Vite output (default: dist/)
