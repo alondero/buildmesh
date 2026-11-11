@@ -35,24 +35,36 @@ pub(in crate::db::circuit) fn recovery_view(
     db: &Connection,
     run: &crate::models::AutopilotCircuitRun,
 ) -> Result<crate::circuit::stepper::RunView, DbError> {
+    let steps = crate::db::circuit::ledger::list_circuit_run_steps_inner(db, run.id)?;
+    let graph = run_graph(db, run.id)?;
+    recovery_view_from(db, run, &graph, &steps)
+}
+
+/// Assemble the recovery view from a graph and step list the caller already
+/// holds. An evidence read loads each once and passes them here.
+fn recovery_view_from(
+    db: &Connection,
+    run: &crate::models::AutopilotCircuitRun,
+    graph: &crate::circuit::model::CircuitGraph,
+    steps: &[crate::models::AutopilotCircuitRunStep],
+) -> Result<crate::circuit::stepper::RunView, DbError> {
     use crate::circuit::{
         model::StepOutcome,
         stepper::{RunState, RunView, StepStatus, StepView},
     };
-    let steps = crate::db::circuit::ledger::list_circuit_run_steps_inner(db, run.id)?;
     let mut view = RunView {
         run_id: run.id,
-        graph: run_graph(db, run.id)?,
+        graph: graph.clone(),
         state: RunState::from_db_str(&run.state),
         context: super::super::context_store::load_logical(db, run.id)?.runtime(),
         steps: steps
-            .into_iter()
+            .iter()
             .map(|step| StepView {
-                node_id: step.node_id,
+                node_id: step.node_id.clone(),
                 attempt: step.attempt,
                 status: StepStatus::from_db_str(&step.status),
                 outcome: step.outcome.as_deref().and_then(StepOutcome::from_db_str),
-                error: step.error_message,
+                error: step.error_message.clone(),
                 agent_node_id: step.agent_node_id,
             })
             .collect(),
@@ -185,14 +197,14 @@ pub(super) fn evidence_view_unresolved(
     {
         let graph = run_graph(db, run_id)?;
         let steps = crate::db::circuit::ledger::list_circuit_run_steps_inner(db, run_id)?;
-        let view = recovery_view(db, &run)?;
-        // The recovery view already loaded the stored context. Coverage reads
-        // that same runtime map, so a history read does not parse it again.
+        // One graph, one step list, and one stored context. Coverage reads
+        // the runtime map this view already built from those rows.
+        let view = recovery_view_from(db, &run, &graph, &steps)?;
         let agents =
             crate::db::agent_node::agent_coverage_identities_inner(db, &step_agent_ids(&view))?;
         let continuation =
-            crate::db::circuit::recovery::review_continuation_supported(&run, &graph);
-        for step in steps {
+            crate::db::circuit::recovery::review_continuation_supported(&run, &view.graph);
+        for step in &steps {
             if let Some(agent_id) = step
                 .agent_node_id
                 .or_else(|| view.resolve_target_agent(&step.node_id))
@@ -251,7 +263,7 @@ pub(super) fn evidence_view_unresolved(
             if run.state != "running" || step.status != "unverified" {
                 continue;
             }
-            let actions = checkpoint_actions(db, run_id, &graph, &view, &step)?;
+            let actions = checkpoint_actions(db, run_id, &view.graph, &view, step)?;
             let ends_review = view.completion_ends_review(&step.node_id);
             checkpoints.push(CircuitCheckpoint {
                 node_id: step.node_id.clone(),
@@ -293,14 +305,14 @@ pub(crate) fn attention_inner(
     let mut pushes = Vec::new();
     let continuation = crate::db::circuit::recovery::review_continuation_supported(&run, &graph);
     if run.state == "running" {
-        let view = recovery_view(db, &run)?;
+        let view = recovery_view_from(db, &run, &graph, &steps)?;
         pushes = crate::db::circuit::operator_push::pushes(&view, continuation);
         for step in steps.iter().filter(|step| step.status == "unverified") {
             let ends_review = view.completion_ends_review(&step.node_id);
             checkpoints.push(CircuitCheckpoint {
                 node_id: step.node_id.clone(),
                 attempt: step.attempt,
-                actions: checkpoint_actions(db, run_id, &graph, &view, step)?,
+                actions: checkpoint_actions(db, run_id, &view.graph, &view, step)?,
                 starts_next_review: view.completion_starts_next_review(&step.node_id),
                 ends_review,
                 review_again: ends_review && continuation,

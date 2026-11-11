@@ -5622,6 +5622,10 @@ struct EvidenceReadCost {
     /// Reads of the bulky context side table. One logical context load is
     /// one of these, however large the stored value is.
     context_reads: usize,
+    /// `run_graph` lookups. One evidence read holds one graph.
+    graph_reads: usize,
+    /// Full step-list queries. One evidence read holds one list.
+    step_lists: usize,
 }
 
 fn evidence_read_cost(steps: usize) -> (EvidenceReadCost, EvidenceReadCost) {
@@ -5633,12 +5637,18 @@ fn evidence_read_cost(steps: usize) -> (EvidenceReadCost, EvidenceReadCost) {
 
     let statements = Arc::new(AtomicUsize::new(0));
     let context_reads = Arc::new(AtomicUsize::new(0));
+    let graph_reads = Arc::new(AtomicUsize::new(0));
+    let step_lists = Arc::new(AtomicUsize::new(0));
     let traced = crate::db::test_support::trace_readers({
         let statements = Arc::clone(&statements);
         let context_reads = Arc::clone(&context_reads);
+        let graph_reads = Arc::clone(&graph_reads);
+        let step_lists = Arc::clone(&step_lists);
         move |conn| {
             let statements = Arc::clone(&statements);
             let context_reads = Arc::clone(&context_reads);
+            let graph_reads = Arc::clone(&graph_reads);
+            let step_lists = Arc::clone(&step_lists);
             conn.trace_v2(
                 rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
                 Some(move |event: rusqlite::trace::TraceEvent<'_>| {
@@ -5648,6 +5658,14 @@ fn evidence_read_cost(steps: usize) -> (EvidenceReadCost, EvidenceReadCost) {
                     let sql = statement.sql();
                     if sql.contains("circuit_run_artifacts") {
                         context_reads.fetch_add(1, Ordering::SeqCst);
+                    }
+                    if sql.contains("circuit_run_snapshots") {
+                        graph_reads.fetch_add(1, Ordering::SeqCst);
+                    }
+                    if sql
+                        .contains("FROM autopilot_circuit_run_steps WHERE run_id = ?1 ORDER BY id")
+                    {
+                        step_lists.fetch_add(1, Ordering::SeqCst);
                     }
                     statements.fetch_add(1, Ordering::SeqCst);
                 }),
@@ -5674,10 +5692,14 @@ fn evidence_read_cost(steps: usize) -> (EvidenceReadCost, EvidenceReadCost) {
     let history_cost = EvidenceReadCost {
         statements: statements.load(Ordering::SeqCst),
         context_reads: context_reads.load(Ordering::SeqCst),
+        graph_reads: graph_reads.load(Ordering::SeqCst),
+        step_lists: step_lists.load(Ordering::SeqCst),
     };
 
     let before_attention = history_cost.statements;
     let before_context = history_cost.context_reads;
+    let before_graphs = history_cost.graph_reads;
+    let before_steps = history_cost.step_lists;
     let attention = super::attention(1).unwrap();
     assert_eq!(attention.checkpoints.len(), steps);
     assert!(
@@ -5692,6 +5714,8 @@ fn evidence_read_cost(steps: usize) -> (EvidenceReadCost, EvidenceReadCost) {
     let attention_cost = EvidenceReadCost {
         statements: statements.load(Ordering::SeqCst) - before_attention,
         context_reads: context_reads.load(Ordering::SeqCst) - before_context,
+        graph_reads: graph_reads.load(Ordering::SeqCst) - before_graphs,
+        step_lists: step_lists.load(Ordering::SeqCst) - before_steps,
     };
     (history_cost, attention_cost)
 }
@@ -5793,6 +5817,26 @@ fn history_and_attention_reads_stay_linear_in_unverified_steps() {
             large.context_reads, 1,
             "{label} read the stored context {} times for 16 steps ({} statements)",
             large.context_reads, large.statements
+        );
+        assert_eq!(
+            small.graph_reads, 1,
+            "{label} loaded the graph {} times",
+            small.graph_reads
+        );
+        assert_eq!(
+            large.graph_reads, 1,
+            "{label} loaded the graph {} times for 16 steps",
+            large.graph_reads
+        );
+        assert_eq!(
+            small.step_lists, 1,
+            "{label} listed steps {} times",
+            small.step_lists
+        );
+        assert_eq!(
+            large.step_lists, 1,
+            "{label} listed steps {} times for 16 steps",
+            large.step_lists
         );
         // Four times as many steps. A quadratic recovery rebuild grows by
         // about sixteen times; a linear read stays well under four times.
