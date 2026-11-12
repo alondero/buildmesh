@@ -1,5 +1,5 @@
 /**
- * NodePalette — the editor's floating authoring palette (issue #1209).
+ * NodePalette — the editor's collapsible authoring palette (issue #1209).
  *
  * Grouped by category (Triggers cyan, Actions green, Gates amber,
  * Joins violet). Items drag onto the canvas (HTML5 dnd — React Flow's
@@ -25,7 +25,8 @@ export function NodePalette({ onAdd }: NodePaletteProps) {
   return (
     <div
       data-testid="circuit-palette"
-      className="absolute z-20 top-3 left-3 w-44 max-h-[calc(100%-24px)] overflow-y-auto rounded-md border border-border-subtle bg-bg-overlay/95 backdrop-blur p-1.5 shadow-lg"
+      id="circuit-node-palette"
+      className="w-44 shrink-0 overflow-y-auto border-r border-border-subtle bg-bg-overlay p-1.5 @max-[600px]/circuit:max-h-[45%] @max-[600px]/circuit:w-full"
     >
       {CATEGORY_ORDER.map(({ id, title }) => {
         const accent = categoryAccent(id);

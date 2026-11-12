@@ -24,6 +24,7 @@ import { MeshItem } from './MeshItem';
 import { dropdownId } from '../../lib/dropdownId';
 import { useSidebarResize } from './useSidebarResize';
 import { useClickOutside } from '../../hooks/useClickOutside';
+import { preferredDockWidth } from '../../lib/dockSizing';
 
 // Shared empty cluster list so meshes without visible nodes keep a stable
 // `nodeClusters` reference instead of allocating a fresh `[]` per mesh on every
@@ -47,7 +48,9 @@ const EMPTY_SORTABLE_IDS: number[] = [];
 const POINTER_SENSOR_OPTIONS = { activationConstraint: { distance: 5 } };
 
 export function Sidebar() {
-  const { width, isResizing, handleMouseDown } = useSidebarResize();
+  const panelRef = useRef<HTMLDivElement>(null);
+  const resolveWidth = useCallback((next: number) => preferredDockWidth(panelRef.current, next), []);
+  const { width, isResizing, handleMouseDown } = useSidebarResize(undefined, resolveWidth);
   // Single shared Spawn Option snapshot (issue #1502 — one fetch + one
   // `provider-list-changed` subscription for the whole app, no matter
   // how many headers mount). Platform filtering (e.g. macOS-only
@@ -317,9 +320,9 @@ export function Sidebar() {
   if (meshes.length === 0) return null;
 
   return (
-    <div className="relative flex h-full" style={{ width }}>
+    <div ref={panelRef} data-workspace-dock className="relative flex h-full min-w-[192px] shrink" style={{ width }}>
       <div
-        onMouseDown={handleMouseDown}
+        onMouseDown={event => handleMouseDown(event, panelRef.current?.getBoundingClientRect().width || width)}
         role="separator"
         aria-orientation="vertical"
         aria-label="Resize sidebar"

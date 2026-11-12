@@ -395,7 +395,7 @@ function App() {
       <TitleBar />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
-        <div className="flex-1 flex flex-col overflow-hidden">
+        <div data-testid="terminal-workspace" className="min-w-[300px] flex-[1_0_300px] flex flex-col overflow-hidden">
           <AgentNodeView />
         </div>
         <ProbePanel />

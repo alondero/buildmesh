@@ -17,10 +17,12 @@ import { activityMemberIds, activityRootId } from '../../lib/nodeActivities';
 import { focusNode } from '../../lib/navigation';
 import { useNodeActivityStore, type UtilityMode } from '../../stores/nodeActivityStore';
 import { DropIntentContext, NodeDragPreview, computeDropIntent, type DropIntent } from './nodeDrag';
-import { equalSizes } from '../../hooks/useGridLayout';
+import { equalSizes, minimumGridSize } from '../../hooks/useGridLayout';
 import { useResizable, SPLITTER_HANDLE_WIDTH } from '../../hooks/useResizable';
 import { CanvasEmptyStateContainer } from './CanvasEmptyStateContainer';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
+import { useActiveCardScroll } from './useActiveCardScroll';
+import { useGridResizeFloor } from './useGridResizeFloor';
 
 function activateActivity(nodeId: number, utility?: boolean, utilityMode?: UtilityMode): void {
   focusNode(nodeId, { utility, utilityMode });
@@ -44,6 +46,9 @@ function ResizablePanes({ nodes, activityMembersByRoot, draggable = true }: Resi
   // measure width on demand inside the compute, no `getElementById` lookup.
   const idxRef = useRef<number>(0);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const { floor, capture } = useGridResizeFloor(viewportRef, String(nodes.length));
+  const dragWidthRef = useRef(0);
 
   useEffect(() => {
     setWidths(equalSizes(nodes.length));
@@ -61,15 +66,16 @@ function ResizablePanes({ nodes, activityMembersByRoot, draggable = true }: Resi
     throttle: 'sync',
     lockBody: true,
     compute: (baseline, deltaPx) => {
-      const containerWidth = containerRef.current?.getBoundingClientRect().width;
+      const containerWidth = dragWidthRef.current;
       if (!containerWidth) return baseline;
       const deltaPercent = (deltaPx / containerWidth) * 100;
       const i = idxRef.current;
       const leftOrig = baseline[i];
       const rightOrig = baseline[i + 1];
+      const minPercent = Math.max(MIN_PANE_PERCENT, (300 + (baseline.length - 1) * SPLITTER_HANDLE_WIDTH / baseline.length) / containerWidth * 100);
       const clamped = Math.max(
-        MIN_PANE_PERCENT - leftOrig,
-        Math.min(deltaPercent, rightOrig - MIN_PANE_PERCENT),
+        minPercent - leftOrig,
+        Math.min(deltaPercent, rightOrig - minPercent),
       );
       const newLeft = leftOrig + clamped;
       const newRight = rightOrig - clamped;
@@ -88,6 +94,8 @@ function ResizablePanes({ nodes, activityMembersByRoot, draggable = true }: Resi
 
   const onHandleMouseDown = (e: React.MouseEvent, index: number) => {
     idxRef.current = index;
+    capture('width', containerRef.current);
+    dragWidthRef.current = (containerRef.current?.clientWidth ?? 8) - 8;
     handleMouseDown(e);
   };
 
@@ -95,18 +103,22 @@ function ResizablePanes({ nodes, activityMembersByRoot, draggable = true }: Resi
   const activateNode = activateActivity;
   const isMultiPane = nodes.length > 1;
 
+  useActiveCardScroll(containerRef, activeNodeId);
+
   return (
+    <div ref={viewportRef} className="flex-1 min-h-0 min-w-0 overflow-auto" data-testid="grid-scroll-viewport">
     <div
       ref={containerRef}
       id="grid-panes-container"
-      className={`flex-1 flex overflow-hidden ${isMultiPane ? 'p-1 bg-bg-surface' : 'flex-col'}`}
+      className={`flex h-full ${isMultiPane ? 'p-1 bg-bg-surface' : 'flex-col'}`}
+      style={{ minWidth: isMultiPane ? Math.max(floor.width, minimumGridSize(widths, SPLITTER_HANDLE_WIDTH) + 8) : undefined }}
     >
       {nodes.map((node, idx) => {
         return (
           <Fragment key={node.id}>
             <div
               className="flex flex-col overflow-hidden"
-              style={isMultiPane ? { width: `${widths[idx]}%`, flex: '0 0 auto' } : { flex: '1 1 0%' }}
+              style={isMultiPane ? { width: `calc(${widths[idx]}% - ${(nodes.length - 1) * SPLITTER_HANDLE_WIDTH / nodes.length}px)`, flex: '0 0 auto' } : { flex: '1 1 0%' }}
             >
               <NodeCard
                 nodeId={node.id}
@@ -126,6 +138,7 @@ function ResizablePanes({ nodes, activityMembersByRoot, draggable = true }: Resi
           </Fragment>
         );
       })}
+    </div>
     </div>
   );
 }

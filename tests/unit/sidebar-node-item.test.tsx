@@ -54,6 +54,21 @@ describe('NodeItem', () => {
     expect(onSelectNode).toHaveBeenCalledWith(10, 3);
   });
 
+  it('selects a node with Enter or Space and keeps F2 available for renaming', async () => {
+    const user = userEvent.setup();
+    const onSelectNode = vi.fn();
+    render(<NodeItem node={makeNode()} meshColor={meshColor} onSelectNode={onSelectNode} onDeleteNode={() => {}} />);
+    const select = screen.getByRole('button', { name: 'Select node-a' });
+    select.focus();
+    await user.keyboard('{Enter} ');
+    expect(onSelectNode).toHaveBeenCalledTimes(2);
+    expect(onSelectNode).toHaveBeenLastCalledWith(10, 3);
+    expect(screen.queryByRole('textbox')).toBeNull();
+    await user.keyboard('{F2}');
+    expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'Rename node-a' }));
+    expect(onSelectNode).toHaveBeenCalledTimes(2);
+  });
+
   it('calls onDeleteNode when the delete button is clicked', () => {
     const onDeleteNode = vi.fn();
     render(<NodeItem node={makeNode()} meshColor={meshColor} onSelectNode={() => {}} onDeleteNode={onDeleteNode} />);

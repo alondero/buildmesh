@@ -39,7 +39,7 @@ function loadStoredWidth(fallback: number): number {
  * `valueRef` updated synchronously in the render body and snapshots from
  * that ref. See `src/hooks/useResizable.ts` for the full analysis.
  */
-export function useSidebarResize(initialWidth = DEFAULT_WIDTH) {
+export function useSidebarResize(initialWidth = DEFAULT_WIDTH, resolveWidth?: (visibleWidth: number) => number) {
   const [width, setWidth] = useState(() => loadStoredWidth(initialWidth));
 
   // Persist on settle rather than every mousemove frame — localStorage
@@ -49,7 +49,7 @@ export function useSidebarResize(initialWidth = DEFAULT_WIDTH) {
     min: MIN_WIDTH,
     max: MAX_WIDTH,
     side: 'right', // Sidebar sits on the left; dragging the right edge right grows it.
-    onChange: setWidth,
+    onChange: (next: number) => setWidth(Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, resolveWidth?.(next) ?? next))),
   });
 
   useEffect(() => {

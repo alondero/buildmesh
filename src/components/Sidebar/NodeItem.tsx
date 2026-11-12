@@ -472,6 +472,8 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
         // `mesh-item-name-${id}` (issue #735).
         id={`node-item-name-${node.id}`}
         value={node.name}
+        ariaLabel={`Rename ${node.name}`}
+        onActivate={() => { closeGlance(); handleSelect(); }}
         onCommit={(next) => renameAgentNode(node.id, next)}
         className="min-w-0 flex-1 truncate text-text-primary font-sans text-left text-label"
       />

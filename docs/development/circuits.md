@@ -4,6 +4,12 @@ Status: current
 
 ## Autopilot Circuits (spec #1205, walking skeleton #1206)
 
+The editor's Add node palette occupies a collapsible dock beside the canvas.
+Below 1100px of editor width it starts closed, and palette, inspector and Run
+History share the available panel space one at a time. Below 600px, the open
+panel stacks vertically with the canvas and is bounded to 45% of the body.
+These thresholds use editor width, including when the Probe is open.
+
 The shared built-in review preset is named **Agent review**, independent of the
 first source agent. Startup normalizes existing preset names without renaming
 user-authored Circuits or rewriting run history. The run subject, queue and
