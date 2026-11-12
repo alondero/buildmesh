@@ -701,6 +701,11 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
           {quickConnect && (
             <QuickConnectMenu
               position={quickConnect.screen}
+              // Issue #2773 — the menu is positioned in the canvas
+              // wrapper's coordinate space and has to stay inside the
+              // visible editor, so it is bounded by that wrapper rather
+              // than by the window.
+              boundsRef={wrapperRef}
               onSelect={(spec) => {
                 addWiredNode(
                   spec.discriminator,
