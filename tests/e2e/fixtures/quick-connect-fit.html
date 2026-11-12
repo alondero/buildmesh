@@ -1,0 +1,38 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Quick Connect fit</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module">
+      // A stand-alone canvas with the real Quick Connect menu in it, so a
+      // browser can measure the menu's placement against the visible
+      // editor at any size and any drop point (issue #2773). The menu is
+      // the real component with the real stylesheet — only the canvas
+      // around it is synthetic.
+      const params = new URLSearchParams(location.search);
+      const width = Number(params.get('width') ?? 800);
+      const height = Number(params.get('height') ?? 600);
+      const x = Number(params.get('x') ?? 100);
+      const y = Number(params.get('y') ?? 100);
+      await import('/src/App.css');
+      const [{ default: React }, { createRoot }, { QuickConnectMenu }] = await Promise.all([
+        import('react'),
+        import('react-dom/client'),
+        import('/src/components/Circuits/QuickConnectMenu.tsx'),
+      ]);
+      const canvas = document.createElement('div');
+      canvas.id = 'canvas';
+      canvas.style.cssText = `position:relative;width:${width}px;height:${height}px;overflow:hidden;`;
+      document.getElementById('root').appendChild(canvas);
+      createRoot(canvas).render(React.createElement(QuickConnectMenu, {
+        position: { x, y },
+        onSelect: () => {},
+        onDismiss: () => {},
+      }));
+      window.__ready = true;
+    </script>
+  </body>
+</html>
