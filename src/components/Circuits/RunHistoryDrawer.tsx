@@ -46,7 +46,7 @@ export function RunHistoryDrawer({ runs, selectedRunId, onSelectRun, graph }: Ru
   return (
     <aside
       data-testid="run-history-drawer"
-      className="w-72 shrink-0 border-l border-border-subtle bg-bg-surface flex flex-col overflow-hidden"
+      className="w-72 shrink-0 border-l border-border-subtle bg-bg-surface flex flex-col overflow-hidden @max-[600px]/circuit:max-h-[45%] @max-[600px]/circuit:w-full"
     >
       <div className="px-3 py-2 border-b border-border-subtle text-xs font-semibold text-text-primary">
         Run History

@@ -25,6 +25,8 @@ import type { CircuitRunDetail } from '../../src/types/generated/CircuitRunDetai
 // no-op stub leaves every node unmeasured, so edge layers stay empty —
 // this stub reports a fixed card size on observe instead.
 
+let editorWidth = 1200;
+
 class ResizeObserverMock {
   callback: ResizeObserverCallback;
   constructor(callback: ResizeObserverCallback) {
@@ -42,7 +44,7 @@ class ResizeObserverMock {
     }
     const entry = {
       target,
-      contentRect: { width: 220, height: 64, top: 0, left: 0, right: 220, bottom: 64, x: 0, y: 0 },
+      contentRect: { width: target.getAttribute('data-testid') === 'circuit-flow-editor' ? editorWidth : 220, height: 64, top: 0, left: 0, right: 220, bottom: 64, x: 0, y: 0 },
       borderBoxSize: [{ inlineSize: 220, blockSize: 64 }],
       contentBoxSize: [{ inlineSize: 220, blockSize: 64 }],
       devicePixelContentBoxSize: [],
@@ -147,10 +149,25 @@ function renderEditor(runs: CircuitRunDetail[] = [RUN_COMPLETED]) {
 }
 
 beforeEach(() => {
+  editorWidth = 1200;
   vi.mocked(invoke).mockResolvedValue(undefined);
 });
 
 describe('CircuitFlowEditor', () => {
+  it('keeps the palette, history, and inspector from competing for narrow canvas space', async () => {
+    editorWidth = 644;
+    renderEditor();
+    await waitFor(() => expect(screen.queryByTestId('circuit-palette')).toBeNull());
+    expect(screen.queryByTestId('circuit-inspector')).toBeNull();
+    fireEvent.click(screen.getByTestId('toggle-node-palette'));
+    expect(screen.getByTestId('circuit-palette')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('toggle-run-history'));
+    expect(screen.queryByTestId('circuit-palette')).toBeNull();
+    expect(screen.getByTestId('run-history-drawer')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('circuit-node-spawn'));
+    expect(screen.queryByTestId('run-history-drawer')).toBeNull();
+    expect(screen.getByTestId('circuit-inspector')).toBeTruthy();
+  });
   it('keeps the Review Blueprint inspectable and copies it into an independent editor', async () => {
     useUIStore.setState({activeCircuitEditorId:CIRCUIT.id});
     vi.mocked(invoke).mockResolvedValue({...CIRCUIT,id:99,is_preset:false,enabled:false});

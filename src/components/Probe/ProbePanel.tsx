@@ -46,7 +46,7 @@
  * `prefers-reduced-motion` via the global media query.
  */
 
-import { Suspense, useEffect, useLayoutEffect, useRef } from 'react';
+import { Suspense, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import { useUIStore, type ProbeTab } from '../../stores/uiStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import {
@@ -56,6 +56,8 @@ import {
   type ProbeTabDefinition,
 } from '../../lib/probeContext';
 import { useProbeResize, PROBE_PANEL_BOUNDS } from './useProbeResize';
+import { useResizeWidth } from '../../hooks/useResizeWidth';
+import { preferredDockWidth } from '../../lib/dockSizing';
 import { ProbeToolRail, LABEL_COLLAPSE_WIDTH } from './ProbeToolRail';
 import { RelatedTools } from './RelatedTools';
 import { probeGroupId } from '../../lib/probeGroups';
@@ -120,7 +122,11 @@ function ProbePanelContent() {
   // relaunch. The handle lives on a `relative` outer wrapper (not inside
   // the overflow-hidden section) so the `-left-1` extension actually
   // reaches the gap with the center workspace instead of being clipped.
-  const { width: bodyWidth, isResizing, handleMouseDown, setWidth: setBodyWidth } = useProbeResize();
+  const panelRef = useRef<HTMLDivElement>(null);
+  const resolveWidth = useCallback((next: number) => preferredDockWidth(panelRef.current, next), []);
+  const { width: bodyWidth, isResizing, handleMouseDown, setWidth: setBodyWidth } = useProbeResize(undefined, resolveWidth);
+  const measuredWidth = useResizeWidth(panelRef);
+  const renderedWidth = Number.isFinite(measuredWidth) ? measuredWidth : bodyWidth;
   // Mirror bodyWidth into a ref so the keyboard handler reads the latest
   // value on every keydown — the same stale-closure anti-pattern
   // useResizable's valueRef guards against for the drag path. Without
@@ -128,7 +134,7 @@ function ProbePanelContent() {
   // stale bodyWidth N times before React commits, collapsing the rapid
   // expansion into a single +8 step per render.
   const bodyWidthRef = useRef(bodyWidth);
-  bodyWidthRef.current = bodyWidth;
+  bodyWidthRef.current = renderedWidth;
   // Scope comes from the shared resolver so Host probes never inherit a Mesh name.
   const context = useProbeContext();
 
@@ -170,7 +176,9 @@ function ProbePanelContent() {
     // open; since the whole inspector unmounts on close, nothing else
     // lingers in the layout.
     <div
-      className="relative h-full shrink-0 animate-slide-in-right"
+      ref={panelRef}
+      data-workspace-dock
+      className="relative h-full min-w-[240px] shrink animate-slide-in-right"
       style={{ width: bodyWidth }}
     >
       {/* Resize handle — issue #724. Sits on the LEFT edge of the body
@@ -185,11 +193,11 @@ function ProbePanelContent() {
           auto-repeat keydowns see the post-commit value on the next
           event — mirrors useResizable's valueRef pattern. */}
       <div
-        onMouseDown={handleMouseDown}
+        onMouseDown={event => handleMouseDown(event, panelRef.current?.getBoundingClientRect().width || bodyWidth)}
         role="separator"
         aria-orientation="vertical"
         aria-label="Resize probe panel"
-        aria-valuenow={bodyWidth}
+        aria-valuenow={Math.round(renderedWidth)}
         aria-valuemin={PROBE_PANEL_BOUNDS.MIN_WIDTH}
         aria-valuemax={PROBE_PANEL_BOUNDS.MAX_WIDTH}
         tabIndex={0}
@@ -199,7 +207,7 @@ function ProbePanelContent() {
           // geometry). Read the latest width through the ref so
           // auto-repeat doesn't collapse rapid presses into one commit.
           // setWidth clamps internally to PROBE_PANEL_BOUNDS.
-          const current = bodyWidthRef.current;
+          const current = panelRef.current?.getBoundingClientRect().width || bodyWidthRef.current;
           const min = PROBE_PANEL_BOUNDS.MIN_WIDTH;
           const max = PROBE_PANEL_BOUNDS.MAX_WIDTH;
           const small = e.shiftKey ? 32 : 8;

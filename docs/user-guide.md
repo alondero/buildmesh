@@ -336,6 +336,11 @@ choices survive a restart, including a filter with no matches.
 
 ## Configure Autopilot Circuits
 
+In the Circuit editor, **Add node** opens or closes the node palette. It starts
+closed in a narrow editor. The palette occupies its own panel, and narrow
+editors show the palette, node inspector or Run History one at a time. At the
+smallest widths the panel sits below the canvas.
+
 In **GitHub Issues**, use the tag button beside an issue to change its GitHub
 labels. Search the repository's labels, then check or uncheck one to add or
 remove it. Changes save individually; permission and network errors
@@ -577,6 +582,13 @@ indent. Every agent in a group stays individually clickable, renameable, and
 deletable; grouping is a view, not a merged node.
 
 ## Find open work in the sidebar
+
+Tab to an agent name and press Enter or Space to select it. Press F2 to rename
+the focused agent; double-clicking its name also starts a rename.
+
+On narrow windows, terminal cards keep a readable width and the grid scrolls
+within the workspace. Selecting an offscreen card brings it into view. The
+sidebar and inspector yield space to keep the workspace available.
 
 Each mesh is a card. The card's left edge is a full-height colour bar that does
 two jobs: click it to change the mesh colour, drag it to reorder the mesh. From

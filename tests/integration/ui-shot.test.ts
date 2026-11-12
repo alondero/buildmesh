@@ -161,6 +161,21 @@ describe('ui-shot mock mode', () => {
     }
   }, TEST_DEADLINE_MS);
 
+  it('keeps narrow workspaces, circuit panels, pairing and colour-save recovery usable', async () => {
+    const folder = await mkdtemp(join(tmpdir(), 'buildmesh-ui-shot-critical-ux-'));
+    try {
+      const port = await freePort();
+      const result = await runUiShot([
+        '--out', join(folder, 'critical-ux.png'), '--mock', '--serve',
+        '--mock-url', `http://127.0.0.1:${port}`,
+        '--steps', resolve(repoRoot, 'tests/integration/ui-shot-critical-ux.steps.mjs'),
+      ]);
+      expect(result.code, result.stderr).toBe(0);
+    } finally {
+      await rm(folder, { recursive: true, force: true });
+    }
+  }, TEST_DEADLINE_MS);
+
   it('serves the fixture UI, drives a circuit, and writes a screenshot', async () => {
     const folder = await mkdtemp(join(tmpdir(), 'buildmesh-ui-shot-'));
     try {
