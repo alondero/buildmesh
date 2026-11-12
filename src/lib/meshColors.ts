@@ -21,6 +21,44 @@ export type MeshColor = {
   hex: string;
 };
 
+/** Relative luminance of a 6-digit hex, per WCAG 2.x. */
+function relativeLuminance(hex: string): number {
+  const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex.trim());
+  if (!m) throw new Error(`Not a 6-digit hex colour: ${hex}`);
+  const channel = (raw: string) => {
+    const c = parseInt(raw, 16) / 255;
+    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  };
+  return (
+    0.2126 * channel(m[1]) + 0.7152 * channel(m[2]) + 0.0722 * channel(m[3])
+  );
+}
+
+/**
+ * The ink that stays readable ON a swatch of `hex` — the near-black step or
+ * the white step, whichever has the higher contrast ratio.
+ *
+ * The palette's eight swatches are all light, so they all take the dark ink,
+ * but a custom Mesh colour is whatever the user picked: #ffffff and #000000
+ * are both legal. The checkmark that marks the selected swatch is painted
+ * with this, so the marker keeps a readable contrast against the colour it
+ * marks (issue #2775) — the better of the two inks is never worse than
+ * 4.4:1, the floor where the two choices cross.
+ *
+ * The two inks are the extremes of the RGB cube and are deliberately NOT
+ * theme tokens: a theme-relative ink (the light theme's `text-inverse` is
+ * white) would flip with the theme and lose contrast against a swatch of
+ * the same lightness. This file is one of the documented mirror files, so
+ * the two literals belong here rather than in a component.
+ */
+export function swatchInk(hex: string): string {
+  const luminance = relativeLuminance(hex);
+  const inkLuminance = relativeLuminance('#0a0a0e');
+  const onDark = (luminance + 0.05) / (inkLuminance + 0.05);
+  const onLight = 1.05 / (luminance + 0.05);
+  return onDark >= onLight ? '#0a0a0e' : '#ffffff';
+}
+
 /**
  * Resolve a mesh's display colour. An explicit user-picked `color` (a
  * `#rrggbb` hex, from the New-mesh modal or the sidebar swatch) wins; when

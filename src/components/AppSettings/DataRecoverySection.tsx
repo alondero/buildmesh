@@ -364,7 +364,7 @@ export function DataRecoverySection() {
               type="button"
               onClick={handleStage}
               disabled={disabled}
-              className="px-4 py-2 bg-status-error text-white font-medium text-base rounded-md hover:opacity-90 disabled:opacity-50"
+              className="px-4 py-2 text-on-destructive bg-destructive/80 hover:bg-destructive active:bg-destructive-strong disabled:bg-bg-card-hover disabled:text-text-muted font-medium text-base rounded-md"
               data-testid="settings-data-recovery-stage"
             >
               {busy === 'stage' ? 'Staging…' : 'Restore this state'}

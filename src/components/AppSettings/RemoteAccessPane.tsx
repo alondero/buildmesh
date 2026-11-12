@@ -461,7 +461,7 @@ export function RemoteAccessPane() {
                     <button
                       onClick={() => handleRevokeDevice(device.id)}
                       disabled={revokingId === device.id}
-                      className="px-4 py-2 bg-status-error text-white text-base rounded-md hover:bg-status-error/90 disabled:opacity-50"
+                      className="px-4 py-2 text-on-destructive bg-destructive/80 hover:bg-destructive active:bg-destructive-strong disabled:bg-bg-card-hover disabled:text-text-muted text-base rounded-md"
                     >
                       {revokingId === device.id ? 'Revoking…' : 'Confirm revoke'}
                     </button>

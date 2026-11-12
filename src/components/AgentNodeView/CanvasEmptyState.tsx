@@ -108,7 +108,7 @@ export function CanvasEmptyState({ input, callbacks }: {
           type="button"
           data-testid={action.testId}
           onClick={action.onClick}
-          className="min-h-[32px] rounded-md border border-transparent bg-accent-cyan px-4 py-2 text-sm font-medium text-text-inverse transition-colors hover:bg-accent-blue"
+          className="min-h-[32px] rounded-md border border-transparent text-on-accent-cyan bg-accent-cyan/80 px-4 py-2 text-sm font-medium transition-colors hover:bg-accent-cyan active:bg-accent-blue"
         >
           {action.label}
         </button>

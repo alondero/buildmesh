@@ -126,7 +126,7 @@ export function BootErrorPanel({ error, onRetry, busy = false }: Props) {
           type="button"
           onClick={onRetry}
           disabled={busy}
-          className="px-4 py-2 bg-accent-cyan text-text-inverse rounded-md hover:bg-accent-cyan/85 font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+          className="px-4 py-2 text-on-accent-cyan bg-accent-cyan/80 hover:bg-accent-cyan active:bg-accent-blue disabled:bg-bg-card-hover disabled:text-text-muted rounded-md font-medium disabled:cursor-not-allowed"
         >
           Retry
         </button>

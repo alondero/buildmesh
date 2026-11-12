@@ -233,7 +233,7 @@ function SignedInView({
         data-testid="opencode-sign-out"
         className={
           confirmingSignOut
-            ? 'px-4 py-2 bg-status-error text-white text-base rounded-md hover:bg-status-error/90'
+            ? 'px-4 py-2 text-on-destructive bg-destructive/80 hover:bg-destructive active:bg-destructive-strong disabled:bg-bg-card-hover disabled:text-text-muted text-base rounded-md'
             : 'px-4 py-2 bg-status-error/15 text-status-error text-base rounded-md hover:bg-status-error/25'
         }
       >
@@ -393,7 +393,7 @@ function SignedInExpiredView({
           data-testid="opencode-sign-out"
           className={
             confirmingSignOut
-              ? 'px-4 py-2 bg-status-error text-white text-base rounded-md hover:bg-status-error/90'
+              ? 'px-4 py-2 text-on-destructive bg-destructive/80 hover:bg-destructive active:bg-destructive-strong disabled:bg-bg-card-hover disabled:text-text-muted text-base rounded-md'
               : 'px-4 py-2 bg-status-error/15 text-status-error text-base rounded-md hover:bg-status-error/25'
           }
         >
