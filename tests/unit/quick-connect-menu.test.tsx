@@ -166,3 +166,39 @@ describe('QuickConnectMenu placement', () => {
     expect(onSelect.mock.calls[0][0].discriminator).toBe('notify');
   });
 });
+
+/**
+ * Issue #2776 — the search input removed the native outline with
+ * `focus:outline-none` and supplied no replacement, so a keyboard user
+ * searching for a node type had no visible focus (the global button-like
+ * focus rule in App.css does not cover inputs). The repair is an explicit
+ * focused border, the same treatment the other inputs in the app carry.
+ */
+describe('QuickConnectMenu focus visibility (issue #2776)', () => {
+  it('takes focus on the search field and shows an explicit focused border', () => {
+    renderMenu({ x: 400, y: 300 }, { width: 800, height: 600 });
+    const input = screen.getByLabelText('Search nodes') as HTMLInputElement;
+
+    // The menu opens with the search field focused, so the keyboard is
+    // already on the control that was previously invisible.
+    expect(document.activeElement).toBe(input);
+
+    const classes = input.className.split(/\s+/);
+    // The native outline is suppressed and replaced, so the focus is not
+    // decorated twice.
+    expect(classes).toContain('focus:outline-none');
+    expect(classes).toContain('focus:border-accent-cyan');
+    // The focused border needs a border box to colour.
+    expect(classes).toContain('border');
+    expect(classes).toContain('border-border-subtle');
+  });
+
+  it('keeps the focused border while the user types', () => {
+    renderMenu({ x: 400, y: 300 }, { width: 800, height: 600 });
+    const input = screen.getByLabelText('Search nodes') as HTMLInputElement;
+    input.focus();
+    fireEvent.change(input, { target: { value: 'gat' } });
+    expect(document.activeElement).toBe(input);
+    expect(input.className.split(/\s+/)).toContain('focus:border-accent-cyan');
+  });
+});

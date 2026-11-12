@@ -17,7 +17,16 @@ export function MeshActionsSheet({
   onOpenPulls?: () => void;
 }) {
   return (
-    <Sheet onClose={onClose} testId="mesh-actions-sheet">
+    // The sheet's `label` becomes the dialog's accessible name. Without it
+    // the dialog announced no name, so a screen-reader user could not tell
+    // which mesh the actions belonged to (issue #2776). Naming it with the
+    // mesh identity is the supported Sheet API — `aria-labelledby` on the
+    // visible heading would announce the bare mesh name instead.
+    <Sheet
+      onClose={onClose}
+      testId="mesh-actions-sheet"
+      label={`Actions for ${mesh.name}`}
+    >
       <h3
         style={{
           fontSize: 13,

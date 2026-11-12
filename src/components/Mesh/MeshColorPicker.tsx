@@ -40,10 +40,19 @@ export function MeshColorPicker({ value, onChange, labelId }: MeshColorPickerPro
       })}
       {/* Custom colour — the native picker. The wrapper swatch shows the
           current custom hex (or a neutral "+" affordance) and clicking it
-          opens the OS colour picker via the overlaid transparent input. */}
+          opens the OS colour picker via the overlaid transparent input.
+
+          The focus indicator lives on this wrapper, not on the input: the
+          input is `opacity-0`, so its own native focus ring is painted
+          transparent, and the wrapper's `overflow-hidden` would clip a ring
+          drawn on the input anyway (issue #2776). `has-[:focus-visible]`
+          keeps the indicator keyboard-only — a mouse click on the swatch
+          focuses the input without claiming a keyboard focus — and the
+          accent-cyan outline stays distinguishable from the white
+          selection ring used for the chosen colour. */}
       <label
         title="Custom colour"
-        className={`relative h-6 w-6 cursor-pointer rounded-full border border-dashed border-border-default flex items-center justify-center overflow-hidden ${
+        className={`relative h-6 w-6 cursor-pointer rounded-full border border-dashed border-border-default flex items-center justify-center overflow-hidden has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-accent-cyan has-[:focus-visible]:outline-offset-2 ${
           isCustom ? 'ring-2 ring-offset-2 ring-offset-bg-overlay ring-white' : ''
         }`}
         style={isCustom ? { backgroundColor: value } : undefined}
