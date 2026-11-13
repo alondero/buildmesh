@@ -642,6 +642,18 @@ specificity and import order; custom properties don't.
   justified exceptions use an `allow-bare-rounded` marker.
 - Keyboard focus is always visible: 1.5px accent-cyan outline on button-like
   elements, focus border on inputs.
+- Pane dividers are keyboard controls, not decoration. The shared
+  `Separator` primitive (`src/components/shared/Separator.tsx`) owns that
+  contract — role, orientation, accessible name, the current/min/max
+  values, the tab stop, the accent focus ring and the arrow-key map — and
+  the call site owns the size, its bounds and its persistence. One Tailwind
+  v4 trap to keep in mind when you write the ring yourself: `outline-none`
+  sets `--tw-outline-style: none` on the element, so `focus-visible:outline-2`
+  alone resolves to `outline-style: none` and the ring does not paint. Pair
+  it with `focus-visible:outline-solid`. The app's own
+  `[role='separator']:focus-visible` rule in `App.css` does not reach it
+  either — that rule sits in the `base` layer, and Tailwind's `utilities`
+  layer (where `outline-none` lives) is applied after it.
 - Colour is never the only signal — statuses always carry a text label on the
   card title bar, and the circle's shape (solid, hollow, dashed, slashed,
   half-filled, ringed dot, thin, cross) carries its own meaning so a reader

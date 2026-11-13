@@ -10,6 +10,7 @@ programs for you.
 - [Install and authenticate a harness](#install-and-authenticate-a-harness)
   - [Add a custom API provider](#add-a-custom-api-provider)
 - [Your first session](#your-first-session)
+- [Resize panes with the keyboard](#resize-panes-with-the-keyboard)
 - [Open tools from the title bar](#open-tools-from-the-title-bar)
 - [Coordinate agents with Companion](#coordinate-agents-with-companion)
 - [See which scope you are looking at](#see-which-scope-you-are-looking-at)
@@ -179,6 +180,40 @@ nodes retain their separate confirmation for uncommitted or unpushed work.
 The first successful loop is: **install → configure → spawn → inspect → verify
 → integrate**. If a step does not behave as described, start with
 [Troubleshooting](troubleshooting.md).
+
+## Resize panes with the keyboard
+
+The dividers between panes — the sidebar's right edge, the Probe panel's
+left edge, and the agent grid's column and row dividers — are controls you
+can reach with `Tab`. A screen reader announces what each one resizes,
+which way it moves, the size it is at now, and the smallest and largest
+size it may take. The divider shows a cyan ring while it holds focus, so
+you can see where you are.
+
+| Key | What it does |
+|---|---|
+| `←` `→` | Resize by 8 pixels |
+| `Shift` + `←` `→` | Resize by 32 pixels |
+| `Page Up` / `Page Down` | Resize by 80 pixels |
+| `Home` | Make the pane as wide as it may be |
+| `End` | Make the pane as narrow as it may be |
+
+The arrow that widens a pane is the one that moves the divider towards
+the far edge of that pane. The sidebar's divider is on its right edge, so
+`→` widens the sidebar. The Probe panel's divider is on its left edge, so
+`←` widens the Probe panel. In the agent grid, `→` widens the terminal to
+the left of a column divider, and `↓` widens the row above a row divider.
+
+A grid pane does not shrink below 300px — the size a terminal needs — and
+the sidebar and the Probe panel keep their own minimum widths, so no pane
+is pushed out of sight by the keyboard. The sidebar keeps its width
+between launches, and the agent grid remembers the layout you set for the
+rest of the session. Terminals re-fit when the resize finishes, so their
+content stays where it was.
+
+You can still drag a divider with the mouse, and the two ways work
+together: resize with the keyboard first and the drag picks up from
+there.
 
 ## Open tools from the title bar
 
