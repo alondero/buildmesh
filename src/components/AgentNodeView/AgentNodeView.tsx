@@ -19,6 +19,8 @@ import { useNodeActivityStore, type UtilityMode } from '../../stores/nodeActivit
 import { DropIntentContext, NodeDragPreview, computeDropIntent, type DropIntent } from './nodeDrag';
 import { equalSizes, minimumGridSize } from '../../hooks/useGridLayout';
 import { useResizable, SPLITTER_HANDLE_WIDTH } from '../../hooks/useResizable';
+import { clampResizeAdjacentPair, minPanePercent } from './paneResize';
+import { Separator } from '../shared/Separator';
 import { CanvasEmptyStateContainer } from './CanvasEmptyStateContainer';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
 import { useActiveCardScroll } from './useActiveCardScroll';
@@ -27,8 +29,6 @@ import { useGridResizeFloor } from './useGridResizeFloor';
 function activateActivity(nodeId: number, utility?: boolean, utilityMode?: UtilityMode): void {
   focusNode(nodeId, { utility, utilityMode });
 }
-
-const MIN_PANE_PERCENT = 15;
 
 interface ResizablePanesProps {
   nodes: readonly AgentNode[];
@@ -50,6 +50,26 @@ function ResizablePanes({ nodes, activityMembersByRoot, draggable = true }: Resi
   const { floor, capture } = useGridResizeFloor(viewportRef, String(nodes.length));
   const dragWidthRef = useRef(0);
 
+  // The container's width, measured continuously (issue #2424). The
+  // keyboard path needs it to turn a pixel step into the percentage the
+  // layout stores and to announce the separator's range in the same
+  // pixels the floor is expressed in. `1000` stands in until the first
+  // measurement lands — and in environments without a ResizeObserver.
+  const [containerWidth, setContainerWidth] = useState(1000);
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const Observer = (globalThis as unknown as { ResizeObserver?: typeof ResizeObserver }).ResizeObserver;
+    if (!Observer) return;
+    const observer = new Observer(([entry]) => {
+      const w = entry.contentRect.width;
+      if (w <= 0) return;
+      setContainerWidth(prev => (prev === w ? prev : w));
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
   useEffect(() => {
     setWidths(equalSizes(nodes.length));
   }, [nodes.length]);
@@ -69,20 +89,12 @@ function ResizablePanes({ nodes, activityMembersByRoot, draggable = true }: Resi
       const containerWidth = dragWidthRef.current;
       if (!containerWidth) return baseline;
       const deltaPercent = (deltaPx / containerWidth) * 100;
-      const i = idxRef.current;
-      const leftOrig = baseline[i];
-      const rightOrig = baseline[i + 1];
-      const minPercent = Math.max(MIN_PANE_PERCENT, (300 + (baseline.length - 1) * SPLITTER_HANDLE_WIDTH / baseline.length) / containerWidth * 100);
-      const clamped = Math.max(
-        minPercent - leftOrig,
-        Math.min(deltaPercent, rightOrig - minPercent),
+      return clampResizeAdjacentPair(
+        baseline,
+        idxRef.current,
+        deltaPercent,
+        minPanePercent(baseline.length, containerWidth),
       );
-      const newLeft = leftOrig + clamped;
-      const newRight = rightOrig - clamped;
-      const next = [...baseline];
-      next[i] = newLeft;
-      next[i + 1] = newRight;
-      return next;
     },
     onChange: (next: number[]) => setWidths((prev) => {
       const i = idxRef.current;
@@ -99,9 +111,38 @@ function ResizablePanes({ nodes, activityMembersByRoot, draggable = true }: Resi
     handleMouseDown(e);
   };
 
+  /**
+   * Keyboard resize (issue #2424). The separator controls the width of the
+   * pane in FRONT of it (the left pane of the pair), so ArrowRight grows
+   * it — the direction the handle travels when it is dragged. The pixel
+   * floor is the same one the drag enforces, and the terminals are refit
+   * when the resize commits so their content survives the new size.
+   */
+  const resizeByKeyboard = (index: number, nextPx: number) => {
+    const baseline = widths;
+    if (!baseline[index] || !containerWidth) return;
+    const currentPx = (baseline[index] / 100) * containerWidth;
+    const deltaPercent = ((nextPx - currentPx) / containerWidth) * 100;
+    const next = clampResizeAdjacentPair(
+      baseline,
+      index,
+      deltaPercent,
+      minPanePercent(baseline.length, containerWidth),
+    );
+    setWidths(next);
+    terminalManager.fitAll();
+  };
+
   const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
   const activateNode = activateActivity;
   const isMultiPane = nodes.length > 1;
+
+  // The announced range of the pane separator (issue #2424): the same
+  // minimum pane size the drag enforces, expressed in the container's
+  // pixels, and the largest the pane may take while its neighbour keeps
+  // that minimum.
+  const paneMinPx = (minPanePercent(nodes.length, containerWidth) / 100) * containerWidth;
+  const paneMaxPx = Math.max(paneMinPx, containerWidth - paneMinPx);
 
   useActiveCardScroll(containerRef, activeNodeId);
 
@@ -129,7 +170,19 @@ function ResizablePanes({ nodes, activityMembersByRoot, draggable = true }: Resi
               />
             </div>
             {isMultiPane && idx < nodes.length - 1 && (
-              <div
+              /* Pane separator — issue #2424 made it operable by keyboard.
+                 The shared `Separator` primitive carries the role,
+                 orientation, name, range and the arrow-key key map;
+                 `resizeByKeyboard` applies the same minimum pane size
+                 the drag enforces and refits the terminals when the
+                 resize commits. */
+              <Separator
+                label={`Resize pane ${idx + 1} of ${nodes.length}`}
+                orientation="vertical"
+                value={(widths[idx] / 100) * containerWidth}
+                min={paneMinPx}
+                max={paneMaxPx}
+                onResize={next => resizeByKeyboard(idx, next)}
                 onMouseDown={(e) => onHandleMouseDown(e, idx)}
                 className="cursor-col-resize hover:bg-accent-cyan/30 active:bg-accent-cyan/50 transition-colors shrink-0 self-stretch rounded-sm"
                 style={{ width: SPLITTER_HANDLE_WIDTH }}
