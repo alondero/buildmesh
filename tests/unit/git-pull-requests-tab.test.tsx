@@ -50,6 +50,7 @@ const feed = <T,>(items: T[]) => ({
     incomplete_reason: null,
     reported_total: null,
   },
+  next_cursor: null,
 });
 
 // `@tauri-apps/plugin-opener`'s `openUrl` shells out to the OS to open an
@@ -293,6 +294,141 @@ describe('GitPullRequestsTab', () => {
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('get_repo_pulls', { meshId: 42, state: 'closed' });
     });
+  });
+
+  it('renders the first page immediately, then appends the next page on Load more', async () => {
+    // The closed history is read one page at a time: the feed answers with
+    // `next_cursor`, the tab renders that page without waiting for the rest,
+    // and "Load more" sends the cursor back for the older rows.
+    const older: GitHubPullRequest = {
+      ...CLOSED_PRS[0],
+      number: 100,
+      title: 'Ancient change',
+      url: 'https://github.com/acme/demo/pull/100',
+    };
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
+      switch (cmd) {
+        case 'get_repo_pulls': {
+          const { state, cursor } = args as { state?: string; cursor?: string };
+          if (state !== 'closed') return Promise.resolve(feed(OPEN_PRS));
+          if (cursor === 'cursor-2') return Promise.resolve({ ...feed([older]), next_cursor: null });
+          return Promise.resolve({ ...feed(CLOSED_PRS), next_cursor: 'cursor-2' });
+        }
+        case 'list_providers':
+          return Promise.resolve(PROVIDERS);
+        default:
+          return Promise.resolve({});
+      }
+    });
+    render(<GitPullRequestsTab />);
+
+    await screen.findByText('Add widget');
+    await userEvent.click(screen.getByRole('button', { name: 'closed' }));
+
+    expect(await screen.findByText('Old change')).toBeTruthy();
+    // First page carries no cursor, so the initial read is unchanged.
+    expect(invoke).toHaveBeenCalledWith('get_repo_pulls', { meshId: 42, state: 'closed' });
+    // The rest of the history is a separate, user-driven read.
+    expect(screen.queryByText('Ancient change')).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: 'Load older pull requests' }));
+
+    expect(await screen.findByText('Ancient change')).toBeTruthy();
+    expect(invoke).toHaveBeenCalledWith(
+      'get_repo_pulls',
+      { meshId: 42, state: 'closed', cursor: 'cursor-2' },
+    );
+    // The cursor chain ended, so the affordance is gone.
+    expect(screen.queryByRole('button', { name: 'Load older pull requests' })).toBeNull();
+  });
+
+  it('drops an in-flight older page when the list is refreshed first', async () => {
+    // A slow "Load more" must not append rows (and its cursor) onto a page 1
+    // that has since been reloaded — the refresh resets the list.
+    const older: GitHubPullRequest = {
+      ...CLOSED_PRS[0],
+      number: 100,
+      title: 'Ancient change',
+      url: 'https://github.com/acme/demo/pull/100',
+    };
+    let resolveOlder: ((value: unknown) => void) | undefined;
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
+      switch (cmd) {
+        case 'get_repo_pulls': {
+          const { state, cursor } = args as { state?: string; cursor?: string };
+          if (state !== 'closed') return Promise.resolve(feed(OPEN_PRS));
+          if (cursor === 'cursor-2') {
+            return new Promise((resolve) => {
+              resolveOlder = resolve;
+            });
+          }
+          return Promise.resolve({ ...feed(CLOSED_PRS), next_cursor: 'cursor-2' });
+        }
+        case 'list_providers':
+          return Promise.resolve(PROVIDERS);
+        default:
+          return Promise.resolve({});
+      }
+    });
+    render(<GitPullRequestsTab />);
+
+    await screen.findByText('Add widget');
+    await userEvent.click(screen.getByRole('button', { name: 'closed' }));
+    expect(await screen.findByText('Old change')).toBeTruthy();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Load older pull requests' }));
+    // Refresh while the older page is still in flight.
+    await userEvent.click(screen.getByRole('button', { name: 'Refresh pull requests' }));
+    await act(async () => {
+      resolveOlder?.({ ...feed([older]), next_cursor: null });
+    });
+
+    expect(screen.queryByText('Ancient change')).toBeNull();
+    // The reloaded page 1 is still the lazy list's first page.
+    expect(screen.getByRole('button', { name: 'Load older pull requests' })).toBeTruthy();
+  });
+
+  it('reports the last page as truncated even when it carries no cursor', async () => {
+    // GitHub can say "more pages" and still hand back no `endCursor`. That
+    // page is incomplete with no way to continue; presenting it as the end of
+    // the history would hide rows.
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
+      switch (cmd) {
+        case 'get_repo_pulls': {
+          const { state, cursor } = args as { state?: string; cursor?: string };
+          if (state !== 'closed') return Promise.resolve(feed(OPEN_PRS));
+          if (cursor === 'cursor-2') {
+            return Promise.resolve({
+              ...feed<GitHubPullRequest>([]),
+              completeness: {
+                returned: 0,
+                pages_fetched: 1,
+                complete: false,
+                incomplete_reason: 'safety_cap',
+                reported_total: null,
+              },
+              next_cursor: null,
+            });
+          }
+          return Promise.resolve({ ...feed(CLOSED_PRS), next_cursor: 'cursor-2' });
+        }
+        case 'list_providers':
+          return Promise.resolve(PROVIDERS);
+        default:
+          return Promise.resolve({});
+      }
+    });
+    render(<GitPullRequestsTab />);
+
+    await screen.findByText('Add widget');
+    await userEvent.click(screen.getByRole('button', { name: 'closed' }));
+    expect(await screen.findByText('Old change')).toBeTruthy();
+    // While a cursor remains, "Load more" is the whole story.
+    expect(screen.queryByTestId('feed-completeness-note')).toBeNull();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Load older pull requests' }));
+
+    expect(await screen.findByTestId('feed-completeness-note')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Load older pull requests' })).toBeNull();
   });
 
   it('shows a friendly empty state per filter when there are no PRs', async () => {

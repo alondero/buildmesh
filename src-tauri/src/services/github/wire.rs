@@ -243,11 +243,20 @@ pub struct GitHubIssueFeed {
 }
 
 /// A pull-request list plus its completeness — see [`GitHubIssueFeed`].
+///
+/// One feed is one page of 100 PRs. `next_cursor` is the opaque cursor for the
+/// page after it (`None` when this was the last page); the client passes it
+/// back as `get_repo_pulls`'s `cursor` to append older PRs. The field is the
+/// lazy-list contract: without it, callers could only get the whole history
+/// at once, which is why a long closed list used to block the first render.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "GitHubPullRequestFeed.ts")]
 pub struct GitHubPullRequestFeed {
     pub items: Vec<GitHubPullRequest>,
     pub completeness: GitHubPageCompleteness,
+    /// Cursor for the next page, or `None` when the list is exhausted.
+    #[serde(default)]
+    pub next_cursor: Option<String>,
 }
 
 /// A PR file list plus its completeness — see [`GitHubIssueFeed`]. A PR with

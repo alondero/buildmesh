@@ -8,12 +8,27 @@ import { useProbeResource, type ProbeLoadContext } from '../../lib/probeResource
  * the active mesh's pull requests (open by default, with a toggle to closed)
  * and lets the user squash-merge a mergeable open PR straight from the panel.
  *
+ * Lazy, page-at-a-time history
+ * ----------------------------
+ * `getRepoPulls` returns ONE page of 100 PRs plus a `next_cursor`. The tab
+ * renders that page as soon as it arrives and offers "Load more", which reads
+ * the next page with the cursor and appends it. The backend used to walk every
+ * page (up to 10 sequential GraphQL round trips) before answering, so opening
+ * the closed list on a repo with a long history waited on the whole walk
+ * before showing a single row. Pages are kept on top of the first one across
+ * mergeability re-polls; they are dropped when the mesh, filter, manual
+ * refresh or a merge changes what the list means. `MAX_PR_PAGES` mirrors the backend's
+ * page budget so a user-driven walk stays bounded like the old full read.
+ *
  * Mergeability is a single cohesive query (issue #1529)
  * -----------------------------------------------------
  * `getRepoPulls` returns list fields plus `mergeable`/`mergeable_state`
  * inline via the backend's GraphQL PR-summaries connection — one HTTP
  * request per page, not one per PR. The panel never orchestrates per-row
  * enrichment calls. A draft PR is flagged without consulting mergeability.
+ * Closed pages skip those per-PR fields entirely on the backend: the closed
+ * view is read-only, and mergeability/checks are the expensive parts of the
+ * query.
  *
  * Re-poll on `mergeable: null` (issue #419, preserved through #1529)
  * ------------------------------------------------------------------
@@ -92,6 +107,7 @@ import { ProbeRow } from './ProbeRow';
 import { ContributorPill } from './ContributorPill';
 import { ProbeTabBody } from './ProbeTabBody';
 import { FeedCompletenessNote } from './FeedCompletenessNote';
+import type { GitHubPageCompleteness } from '../../types/generated/GitHubPageCompleteness';
 import { ProbeToolbar } from './ProbeToolbar';
 import { SafeLink } from '../shared/SafeLink';
 import {
@@ -159,6 +175,11 @@ const BLOCKED_WORDING: Record<string, string> = {
 // O(pages). Module-level so the load effect and the tests share them.
 const MAX_POLL_ATTEMPTS = 3;
 const BASE_POLL_DELAY_MS = 1500;
+
+// Client-side page budget for "Load more". Mirrors the backend's
+// `pagination::DEFAULT_MAX_PAGES`: 10 pages × 100 PRs = the same 1,000-row
+// ceiling a single full read used to enforce, so lazy paging is bounded too.
+const MAX_PR_PAGES = 10;
 
 // --- Icon components ------------------------------------------------------
 // Tiny inline SVG icons used by the row's action buttons. The previous
@@ -297,8 +318,57 @@ export function GitPullRequestsTab() {
   const [stateFilter, setStateFilter] = useState<StateFilter>('open');
   const resource = useProbeResource(PROBE_TAB_DEFINITIONS.pulls.load, { meshId: activeMeshId, filter: stateFilter }, `${activeMeshId}:${stateFilter}`);
   const { loading, error } = resource.state;
-  const prs = useMemo(() => resource.state.data?.items ?? [], [resource.state.data]);
-  const completeness = resource.state.data?.completeness ?? null;
+  // The first page is the resource's own read; every further page is appended
+  // here by "Load more". `morePages` keeps its own cursor because once a page
+  // has been appended, the next cursor comes from that page, not the first.
+  const basePrs = useMemo(() => resource.state.data?.items ?? [], [resource.state.data]);
+  const [morePages, setMorePages] = useState<{
+    items: GitHubPullRequest[];
+    cursor: string | null;
+    pages: number;
+    /** The page's own completeness — the combined read reports this one. */
+    completeness: GitHubPageCompleteness | null;
+  } | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [moreError, setMoreError] = useState<string | null>(null);
+  // Identifies the list a "Load more" request belongs to. Any reset of the
+  // list (mesh/filter change, manual refresh, merge) bumps it, so an in-flight
+  // page that lands afterwards is dropped instead of appending rows and a
+  // cursor onto a page 1 it was never read against. A ref, not the
+  // `mesh:filter` string: `closed -> open -> closed` returns to the same
+  // string while the list underneath has been reloaded.
+  const pageGeneration = useRef(0);
+  // Deduplicate by PR number: a PR created between two page reads can shift
+  // the window, and the same number must not render twice.
+  const prs = useMemo(() => {
+    if (morePages === null) return basePrs;
+    const seen = new Set(basePrs.map((pr) => pr.number));
+    const appended = morePages.items.filter((pr) => {
+      if (seen.has(pr.number)) return false;
+      seen.add(pr.number);
+      return true;
+    });
+    return [...basePrs, ...appended];
+  }, [basePrs, morePages]);
+  const firstPageCompleteness = resource.state.data?.completeness ?? null;
+  const nextCursor = morePages === null
+    ? (resource.state.data?.next_cursor ?? null)
+    : morePages.cursor;
+  const pagesLoaded = morePages === null ? 1 : morePages.pages + 1;
+  const canLoadMore = nextCursor !== null && pagesLoaded < MAX_PR_PAGES;
+  // While more pages are available, the "Load more" button is the affordance
+  // and the truncation note would only repeat it. Once paging stops (end of
+  // list, or the page budget) the note describes what the list actually holds.
+  //
+  // The last page read owns the completeness: it may report `complete: false`
+  // with no cursor at all when GitHub says "more pages" but hands back no
+  // `endCursor`, and inferring completeness from `nextCursor === null` would
+  // present that truncated list as the whole history.
+  const lastPageCompleteness = morePages === null ? firstPageCompleteness : morePages.completeness;
+  const completeness = useMemo(() => {
+    if (!lastPageCompleteness) return null;
+    return { ...lastPageCompleteness, returned: prs.length, pages_fetched: pagesLoaded };
+  }, [lastPageCompleteness, prs.length, pagesLoaded]);
   // Which PR is awaiting an inline merge confirm, which is mid-merge,
   // and — for the confirming row — which strategy the user armed
   // (defaults to squash, the historical behaviour; the ▾ picker arms a
@@ -357,8 +427,13 @@ export function GitPullRequestsTab() {
   const clearExpanded = expanded.clear;
   const data = resource.state.data;
   const clearRows = useCallback(() => {
+    // A new list: any page still in flight belongs to the old one.
+    pageGeneration.current += 1;
     setConfirming(null);
     setMergeError({});
+    setMorePages(null);
+    setMoreError(null);
+    setLoadingMore(false);
     clearExpanded();
   }, [clearExpanded]);
   const retryListLoad = useCallback(() => {
@@ -372,6 +447,34 @@ export function GitPullRequestsTab() {
     setPollExhausted(false);
     void reload();
   }, [reload]);
+
+  // Read the next (older) page and append it. Guarded by the list generation
+  // so a page that lands after a refresh, merge or filter round-trip is
+  // dropped, and by `loadingMore` so two clicks cannot issue the same cursor
+  // twice. `loadingMore` is only cleared by a response from the same
+  // generation; a reset (which clears it) must not be undone by a stale one.
+  const loadMore = useCallback(async () => {
+    if (activeMeshId === null || nextCursor === null || loadingMore) return;
+    const cursor = nextCursor;
+    const generation = pageGeneration.current;
+    setLoadingMore(true);
+    setMoreError(null);
+    try {
+      const feed = await getRepoPulls(activeMeshId, stateFilter, cursor);
+      if (pageGeneration.current !== generation) return;
+      setMorePages((prev) => ({
+        items: [...(prev?.items ?? []), ...feed.items],
+        cursor: feed.next_cursor ?? null,
+        pages: (prev?.pages ?? 0) + 1,
+        completeness: feed.completeness ?? null,
+      }));
+    } catch (e) {
+      if (pageGeneration.current !== generation) return;
+      setMoreError(formatError(e));
+    } finally {
+      if (pageGeneration.current === generation) setLoadingMore(false);
+    }
+  }, [activeMeshId, stateFilter, nextCursor, loadingMore]);
   useEffect(() => {
     pollAttempts.current = 0;
     setPollExhausted(false);
@@ -666,7 +769,9 @@ export function GitPullRequestsTab() {
           />
         ) : (
           <div className="space-y-1">
-            <FeedCompletenessNote completeness={completeness} label="pull requests" />
+            {(nextCursor === null || !canLoadMore) && (
+              <FeedCompletenessNote completeness={completeness} label="pull requests" />
+            )}
             {filteredPrs.map((pr) => {
               const status = deriveMergeStatus(pr, pollExhausted);
               const isMerging = merging === pr.number;
@@ -1005,6 +1110,22 @@ export function GitPullRequestsTab() {
                 />
               );
             })}
+            {canLoadMore && (
+              <div className="pt-1">
+                <button
+                  type="button"
+                  onClick={() => void loadMore()}
+                  disabled={loadingMore}
+                  aria-label="Load older pull requests"
+                  className="w-full px-2 py-1.5 text-2xs font-medium rounded-md border border-border-subtle bg-bg-card text-text-secondary hover:text-accent-cyan hover:border-accent-cyan/40 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  {loadingMore ? 'Loading more…' : `Load more (${prs.length} loaded)`}
+                </button>
+                {moreError && (
+                  <p role="alert" className="text-2xs text-status-error mt-1 break-words">{moreError}</p>
+                )}
+              </div>
+            )}
           </div>
         )}
       </ProbeTabBody>

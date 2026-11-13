@@ -6,5 +6,6 @@
     "reported_total": null,
     "returned": 0
   },
-  "items": []
+  "items": [],
+  "next_cursor": null
 }

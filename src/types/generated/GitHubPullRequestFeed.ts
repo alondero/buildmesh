@@ -4,5 +4,15 @@ import type { GitHubPullRequest } from "./GitHubPullRequest";
 
 /**
  * A pull-request list plus its completeness — see [`GitHubIssueFeed`].
+ *
+ * One feed is one page of 100 PRs. `next_cursor` is the opaque cursor for the
+ * page after it (`None` when this was the last page); the client passes it
+ * back as `get_repo_pulls`'s `cursor` to append older PRs. The field is the
+ * lazy-list contract: without it, callers could only get the whole history
+ * at once, which is why a long closed list used to block the first render.
  */
-export type GitHubPullRequestFeed = { items: Array<GitHubPullRequest>, completeness: GitHubPageCompleteness, };
+export type GitHubPullRequestFeed = { items: Array<GitHubPullRequest>, completeness: GitHubPageCompleteness, 
+/**
+ * Cursor for the next page, or `None` when the list is exhausted.
+ */
+next_cursor: string | null, };

@@ -6,7 +6,7 @@
 use reqwest::header::{ACCEPT, AUTHORIZATION, USER_AGENT};
 use serde::{Deserialize, Serialize};
 
-use super::pagination::require_complete_read;
+use super::pagination::{require_complete_read, GitHubIncompleteReason, GitHubPageCompleteness};
 use super::sync::{
     graphql_repository_or_error, rest_failure, GitHubClient, GitHubError,
     HTTP_WRITE_REQUEST_TIMEOUT,
@@ -704,10 +704,14 @@ impl GitHubClient {
     ///
     /// A single page carries up to `first` PRs with their mergeability
     /// (`mergeable` + `mergeStateStatus`) inline — the REST list endpoint
-    /// omits both, which is what forced the old N+1 detail loop. The
-    /// caller ([`Self::list_pr_summaries`]) pages `after` until
-    /// `hasNextPage` is false or the list cap is reached, so the total
-    /// HTTP cost is O(pages), not O(PRs).
+    /// omits both, which is what forced the old N+1 detail loop.
+    ///
+    /// `include_enrichment` picks the query shape: `true` asks for
+    /// mergeability, review decision and the head commit's check rollup;
+    /// `false` asks only for the fields the row renders. Callers that can
+    /// never use mergeability (the closed-PR list, which is read-only in the
+    /// panel) must pass `false`: those fields are the expensive part of the
+    /// query, and closed history is where the list is longest.
     fn fetch_pr_summaries_page(
         &self,
         owner: &str,
@@ -715,7 +719,13 @@ impl GitHubClient {
         states: &[&str],
         first: i64,
         after: Option<&str>,
+        include_enrichment: bool,
     ) -> Result<(Vec<PullRequestSummary>, PageInfo), GitHubError> {
+        let query = if include_enrichment {
+            PR_SUMMARIES_QUERY
+        } else {
+            PR_SUMMARIES_LIST_QUERY
+        };
         #[derive(Serialize)]
         struct Variables<'a> {
             owner: &'a str,
@@ -730,7 +740,7 @@ impl GitHubClient {
             variables: Variables<'a>,
         }
         let body = GraphQLRequest {
-            query: PR_SUMMARIES_QUERY,
+            query,
             variables: Variables {
                 owner,
                 name: repo,
@@ -847,6 +857,7 @@ impl GitHubClient {
                 &states,
                 PR_SUMMARY_PAGE_SIZE,
                 after.as_deref(),
+                true,
             )?;
             all.append(&mut page);
             if !info.has_next_page {
@@ -878,6 +889,59 @@ impl GitHubClient {
         })
     }
 
+    /// Read exactly ONE cursor page of PR summaries — the lazy list read.
+    ///
+    /// The probe list used to walk every page (up to 1,000 PRs, 10 sequential
+    /// GraphQL round trips) before rendering anything, so a repo with a long
+    /// closed history waited on the whole walk. This returns the first page
+    /// as soon as GitHub answers, plus the cursor for the next one, so the
+    /// panel can render immediately and load further pages on demand.
+    ///
+    /// `after` is the opaque cursor from the previous page's
+    /// [`PrSummaryPage::next_cursor`]. `None` starts at the newest PR.
+    ///
+    /// Enrichment (mergeability / checks / review decision) is requested only
+    /// for the open filter: the panel's closed view is read-only, so those
+    /// per-PR fields would be fetched and thrown away — and they are the part
+    /// of the query GitHub takes longest to compute.
+    ///
+    /// The returned completeness describes THIS page: `complete` means the
+    /// cursor chain ended (this was the last page), and a `next_cursor` is
+    /// always paired with `complete: false` / `SafetyCap` so the UI never
+    /// presents one page as the whole history.
+    pub fn list_pr_summaries_page(
+        &self,
+        owner: &str,
+        repo: &str,
+        state: &str,
+        after: Option<&str>,
+    ) -> Result<PrSummaryPage, GitHubError> {
+        let states = graphql_states_for_filter(state);
+        let include_enrichment = state != "closed";
+        let (items, info) = self.fetch_pr_summaries_page(
+            owner,
+            repo,
+            &states,
+            PR_SUMMARY_PAGE_SIZE,
+            after,
+            include_enrichment,
+        )?;
+        // A page that advertises more but carries no cursor cannot be
+        // continued; keep the cursor `None` (so the UI does not offer a broken
+        // "load more") but still report the read as incomplete.
+        let next_cursor = info.end_cursor.filter(|_| info.has_next_page);
+        let mut completeness = GitHubPageCompleteness::rest(items.len(), 1);
+        if info.has_next_page {
+            completeness.complete = false;
+            completeness.incomplete_reason = Some(GitHubIncompleteReason::SafetyCap);
+        }
+        Ok(PrSummaryPage {
+            items,
+            next_cursor,
+            completeness,
+        })
+    }
+
     /// Bare-`Vec` view of [`Self::list_pr_summaries_paged`].
     pub fn list_pr_summaries(
         &self,
@@ -889,6 +953,16 @@ impl GitHubClient {
             .list_pr_summaries_paged(owner, repo, state)?
             .into_items())
     }
+}
+
+/// One cursor page of PR summaries plus how to continue — the lazy read
+/// behind [`GitHubClient::list_pr_summaries_page`].
+pub struct PrSummaryPage {
+    pub items: Vec<PullRequestSummary>,
+    /// Cursor for the next page, or `None` when this page ended the chain.
+    pub next_cursor: Option<String>,
+    /// Describes this page: `complete` is `true` only when no page follows.
+    pub completeness: GitHubPageCompleteness,
 }
 
 /// One page-cursor for the PR-summaries connection.
@@ -1031,6 +1105,43 @@ query PrSummaries($owner: String!, $name: String!, $states: [PullRequestState!],
         mergeStateStatus
         reviewDecision
         commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+}
+"#;
+
+/// The same connection without the per-PR enrichment fields. Used for lists
+/// the panel never merges from (closed PRs): skipping `mergeable`,
+/// `mergeStateStatus`, `reviewDecision` and the head commit's
+/// `statusCheckRollup` removes four expensive per-row resolutions from a
+/// query that is already the longest list the probe reads.
+///
+/// Kept as a separate document (not a variable-gated fragment) so the closed
+/// request cannot accidentally ask for the expensive fields again — the
+/// query the client sends is the query it meant.
+const PR_SUMMARIES_LIST_QUERY: &str = r#"
+query PrSummaries($owner: String!, $name: String!, $states: [PullRequestState!], $first: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(first: $first, after: $after, states: $states, orderBy: {field: CREATED_AT, direction: DESC}) {
+      nodes {
+        number
+        title
+        body
+        url
+        state
+        isDraft
+        headRefName
+        headRefOid
+        author { login }
+        headRepository {
+          owner { login }
+          url
+        }
       }
       pageInfo {
         hasNextPage
@@ -1824,6 +1935,33 @@ pub(crate) mod tests {
         );
     }
 
+    /// The list query is split so the closed history never asks GitHub for
+    /// per-PR mergeability / checks / review decision: those rows are
+    /// read-only in the panel, and those fields are what makes a long closed
+    /// page slow to compute.
+    #[test]
+    fn closed_history_query_omits_per_pr_enrichment() {
+        for field in [
+            "mergeable",
+            "mergeStateStatus",
+            "reviewDecision",
+            "statusCheckRollup",
+        ] {
+            assert!(
+                PR_SUMMARIES_QUERY.contains(field),
+                "the open list renders {field}, so its query must carry it"
+            );
+            assert!(
+                !PR_SUMMARIES_LIST_QUERY.contains(field),
+                "the closed list is read-only; paying for {field} is what made it slow"
+            );
+        }
+        // The cheap identity/list fields both shapes need.
+        for field in ["number", "title", "headRefName", "hasNextPage", "endCursor"] {
+            assert!(PR_SUMMARIES_LIST_QUERY.contains(field));
+        }
+    }
+
     #[test]
     fn map_graphql_merge_state_lowercases_rest_vocabulary() {
         assert_eq!(map_graphql_merge_state("CLEAN"), "clean");
@@ -2030,7 +2168,7 @@ pub(crate) mod tests {
     ///   never reaches `join`. The parked thread dies with the test process.
     /// - A request of an unexpected kind (POST where Detail was scripted or
     ///   vice versa) panics the guard with the request line, failing loudly.
-    fn fake_graphql_server(
+    pub(crate) fn fake_graphql_server(
         pages: Vec<(serde_json::Value, bool, Option<String>)>,
     ) -> (
         String,
@@ -2338,6 +2476,52 @@ pub(crate) mod tests {
             1,
             "100 PRs must cost 1 request, not 101"
         );
+    }
+
+    /// The lazy read must return after ONE request, carrying the cursor for
+    /// the rest of the history. Walking every page before answering is the
+    /// behaviour that made the closed list take 10 round trips to render.
+    #[test]
+    fn list_pr_summaries_page_reads_only_the_first_page() {
+        use std::sync::atomic::Ordering;
+        let p1 = serde_json::Value::Array((1..=100).map(fake_node).collect::<Vec<_>>());
+        let (base, count, handle) =
+            fake_graphql_server(vec![(p1, true, Some("cursor1".to_string()))]);
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+        let page = client
+            .list_pr_summaries_page("acme", "demo", "closed", None)
+            .expect("page");
+        assert_eq!(page.items.len(), 100);
+        assert_eq!(page.next_cursor.as_deref(), Some("cursor1"));
+        assert!(
+            !page.completeness.complete,
+            "one page with a cursor is not the whole history"
+        );
+        assert_eq!(
+            page.completeness.incomplete_reason,
+            Some(GitHubIncompleteReason::SafetyCap)
+        );
+        handle.join().expect("server");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "the first page must not wait on the rest of the history"
+        );
+    }
+
+    #[test]
+    fn list_pr_summaries_page_ends_with_a_complete_page() {
+        let nodes = serde_json::Value::Array((1..=5).map(fake_node).collect::<Vec<_>>());
+        let (base, _count, handle) = fake_graphql_server(vec![(nodes, false, None)]);
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+        let page = client
+            .list_pr_summaries_page("acme", "demo", "closed", Some("cursor0"))
+            .expect("page");
+        assert_eq!(page.items.len(), 5);
+        assert_eq!(page.next_cursor, None);
+        assert!(page.completeness.complete);
+        assert_eq!(page.completeness.incomplete_reason, None);
+        handle.join().expect("server");
     }
 
     /// Issue #1528: the summaries list used to stop at the REST list's 100-row

@@ -192,7 +192,7 @@ pub async fn execute(
         }
         Tool::ListGithubPrs { mesh_id, state, limit } => {
             let state = match state.unwrap_or(PullState::Open) { PullState::Open => "open", PullState::Closed => "closed" };
-            let mut feed = run_blocking("companion_pulls", move || crate::services::github::feeds::get_repo_pulls_blocking(mesh_id, state.to_string())).await?;
+            let mut feed = run_blocking("companion_pulls", move || crate::services::github::feeds::get_all_repo_pulls_blocking(mesh_id, state.to_string())).await?;
             let matched = feed.items.len();
             feed.items.truncate(limit.unwrap_or(100).clamp(1, 1000));
             Ok(json!({"feed":feed,"matched_before_limit":matched}))

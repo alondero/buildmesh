@@ -17,7 +17,8 @@ use super::{feeds::*, pr_workflow::*};
 use crate::env::test_helpers::init_repo_with_commit as init_repo_for_test;
 use crate::git::worktree::create_git_worktree;
 use crate::models::AgentNode;
-use crate::services::github::tests::{fake_server, Scripted};
+use crate::services::github::pagination::{GitHubIncompleteReason, DEFAULT_MAX_PAGES};
+use crate::services::github::tests::{fake_graphql_server, fake_node, fake_server, Scripted};
 use crate::services::github::{GitHubClient, GitHubError};
 use crate::{db, env};
 use git2::Repository;
@@ -98,7 +99,7 @@ fn github_feeds_report_unreadable_repository() {
     let tmp = TempGitRepo::new();
     let mesh = db::create_mesh("unreadable-github-feed", tmp.path().to_str().unwrap()).unwrap();
     let issues = get_repo_issues_blocking(mesh.id);
-    let pulls = get_repo_pulls_blocking(mesh.id, "open".to_string());
+    let pulls = get_repo_pulls_blocking(mesh.id, "open".to_string(), None);
     db::delete_mesh(mesh.id).unwrap();
     assert!(issues.unwrap_err().contains("git error:"));
     assert!(pulls.unwrap_err().contains("git error:"));
@@ -117,7 +118,7 @@ fn github_feeds_without_github_origin_remain_empty() {
         }
         let mesh = db::create_mesh("non-github-feed", &path).unwrap();
         let issues = get_repo_issues_blocking(mesh.id).unwrap();
-        let pulls = get_repo_pulls_blocking(mesh.id, "open".to_string()).unwrap();
+        let pulls = get_repo_pulls_blocking(mesh.id, "open".to_string(), None).unwrap();
         assert!(issues.items.is_empty());
         assert!(pulls.items.is_empty());
         // A read that never happened has nothing to be incomplete about,
@@ -1846,4 +1847,62 @@ fn pr_source_missing_node_is_a_404_not_a_server_fault() {
     let err = resolve_pr_source_for_node(1, 987_654_321).expect_err("unknown node must fail");
     assert_eq!(err.status(), "404 Not Found");
     assert!(matches!(err, PrSourceError::NotFound(987_654_321)));
+}
+
+/// The mobile/companion read reports what the walk actually did: every page
+/// it fetched, and the row count after deduplication. A PR created between
+/// two requests shifts the window and appears on both pages.
+#[test]
+fn walk_all_pr_pages_counts_pages_and_drops_duplicate_numbers() {
+    let p1 = serde_json::Value::Array((1..=3).map(fake_node).collect::<Vec<_>>());
+    let p2 = serde_json::Value::Array([3, 4].into_iter().map(fake_node).collect::<Vec<_>>());
+    let (base, count, handle) = fake_graphql_server(vec![
+        (p1, true, Some("cursor1".to_string())),
+        (p2, false, None),
+    ]);
+    let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+
+    let (items, completeness) = walk_all_pr_pages(&client, "acme", "demo", "closed").expect("walk");
+
+    assert_eq!(
+        items.iter().map(|pr| pr.number).collect::<Vec<_>>(),
+        vec![1, 2, 3, 4]
+    );
+    assert_eq!(completeness.returned, 4);
+    assert_eq!(completeness.pages_fetched, 2, "both pages must be counted");
+    assert!(completeness.complete);
+    assert_eq!(completeness.incomplete_reason, None);
+    handle.join().expect("server");
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+}
+
+/// Hitting the page budget is truncation, and the whole-list callers have
+/// nowhere to put a cursor — so the read must report SafetyCap rather than
+/// hand back a cursor the response cannot continue from.
+#[test]
+fn walk_all_pr_pages_reports_the_cap_without_a_cursor() {
+    let pages = (0..DEFAULT_MAX_PAGES)
+        .map(|i| {
+            let node = serde_json::Value::Array(vec![fake_node(i as i64 + 1)]);
+            (node, true, Some(format!("cursor{}", i + 1)))
+        })
+        .collect();
+    let (base, count, handle) = fake_graphql_server(pages);
+    let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+
+    let (items, completeness) = walk_all_pr_pages(&client, "acme", "demo", "closed").expect("walk");
+
+    assert_eq!(items.len(), DEFAULT_MAX_PAGES);
+    assert_eq!(completeness.pages_fetched, DEFAULT_MAX_PAGES as i64);
+    assert!(!completeness.complete);
+    assert_eq!(
+        completeness.incomplete_reason,
+        Some(GitHubIncompleteReason::SafetyCap)
+    );
+    handle.join().expect("server");
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        DEFAULT_MAX_PAGES,
+        "the budget bounds the requests the read issues"
+    );
 }

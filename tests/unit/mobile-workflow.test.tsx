@@ -11,7 +11,7 @@ import NodeOverview from "../../src/mobile/screens/NodeOverview";
 import NodeList from "../../src/mobile/screens/NodeList";
 import type { AgentNode, Mesh, Provider } from "../../src/mobile/api";
 import type { GitHubPullRequestFeed } from '../../src/types/generated/GitHubPullRequestFeed';
-const emptyPulls: GitHubPullRequestFeed = { items: [], completeness: { returned: 0, pages_fetched: 0, complete: true, incomplete_reason: null, reported_total: null } };
+const emptyPulls: GitHubPullRequestFeed = { items: [], completeness: { returned: 0, pages_fetched: 0, complete: true, incomplete_reason: null, reported_total: null }, next_cursor: null };
 
 const mesh = { id: 1, name: "Buildmesh" } as Mesh;
 const provider = {
