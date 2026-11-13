@@ -470,3 +470,16 @@ leave Retry visible. At the dock's 240px minimum, unbounded prose wraps and
 unspaced paths/errors use `break-all`. Stating only vertical overflow computes
 horizontal auto overflow. Keep Notes' mesh-aware save/restore ownership.
 
+### A field that fills the dock edge colours its own border to show focus
+
+The Scratch Pad's note field fills the Probe panel edge to edge, so its focus
+indicator is a **border**, not an outline and not a ring (issue #2776). The panel
+owns one scroll container, and a decoration drawn outside the field's border box
+— an outline, a ring — is cut off where it meets that container's edge. The
+border is transparent at rest, so the field keeps the look it had before, and
+the focused state has a real edge to colour with the accent token.
+
+The general rule: an input that suppresses the native outline (`focus:outline-none`)
+owes the user a replacement focus indicator in the same commit, and the
+replacement has to be something the surrounding scroll container does not clip.
+

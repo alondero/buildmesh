@@ -179,7 +179,7 @@ export function QuickConnectMenu({ position, onSelect, onDismiss, boundsRef }: Q
             onSelect(first);
           }
         }}
-        className="w-full mb-1 shrink-0 px-1.5 py-0.5 bg-bg-input border border-border-subtle rounded-sm text-xs text-text-primary focus:outline-none"
+        className="w-full mb-1 shrink-0 px-1.5 py-0.5 bg-bg-input border border-border-subtle rounded-sm text-xs text-text-primary focus:outline-none focus:border-accent-cyan"
       />
       {/* The list owns the menu's scrolling: `flex-[1_1_auto]` lets it
           shrink with the menu's height bound while keeping its content
