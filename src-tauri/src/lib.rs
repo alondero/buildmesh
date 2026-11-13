@@ -1085,6 +1085,16 @@ fn run_profile_startup(
     // bounded DELETE on `created_at`).
     services::coordinator_ledger_maintenance::start_worker();
 
+    // Device-session expiry sweep (issue #589). A paired device that re-pairs
+    // leaves its previous row behind as an orphan — a stale duplicate in the
+    // "Authorized Devices" panel that still authenticates as Admin. The sweep
+    // deletes rows that have not authenticated for
+    // `DEVICE_SESSION_IDLE_DAYS`, starting immediately (an install that was
+    // closed for months must not come back to a panel full of orphans) and
+    // then every six hours. A device that keeps authenticating keeps its row:
+    // the auth layer refreshes its activity.
+    services::device_session_expiry::start_worker();
+
     // Always-on resource diagnostics (issue: background-refresh grind).
     // A low-frequency sampler writes process vitals (memory, handles,
     // threads, live child processes) + per-subsystem counters to a
