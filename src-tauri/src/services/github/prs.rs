@@ -2168,7 +2168,7 @@ pub(crate) mod tests {
     ///   never reaches `join`. The parked thread dies with the test process.
     /// - A request of an unexpected kind (POST where Detail was scripted or
     ///   vice versa) panics the guard with the request line, failing loudly.
-    fn fake_graphql_server(
+    pub(crate) fn fake_graphql_server(
         pages: Vec<(serde_json::Value, bool, Option<String>)>,
     ) -> (
         String,

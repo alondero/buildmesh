@@ -107,6 +107,7 @@ import { ProbeRow } from './ProbeRow';
 import { ContributorPill } from './ContributorPill';
 import { ProbeTabBody } from './ProbeTabBody';
 import { FeedCompletenessNote } from './FeedCompletenessNote';
+import type { GitHubPageCompleteness } from '../../types/generated/GitHubPageCompleteness';
 import { ProbeToolbar } from './ProbeToolbar';
 import { SafeLink } from '../shared/SafeLink';
 import {
@@ -325,16 +326,18 @@ export function GitPullRequestsTab() {
     items: GitHubPullRequest[];
     cursor: string | null;
     pages: number;
+    /** The page's own completeness — the combined read reports this one. */
+    completeness: GitHubPageCompleteness | null;
   } | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreError, setMoreError] = useState<string | null>(null);
-  // The scope a "Load more" request belongs to. A filter/mesh change makes an
-  // in-flight page stale; comparing this after the await drops it instead of
-  // appending old-filter rows under the new heading.
-  const pageScope = useRef(`${activeMeshId}:${stateFilter}`);
-  useEffect(() => {
-    pageScope.current = `${activeMeshId}:${stateFilter}`;
-  }, [activeMeshId, stateFilter]);
+  // Identifies the list a "Load more" request belongs to. Any reset of the
+  // list (mesh/filter change, manual refresh, merge) bumps it, so an in-flight
+  // page that lands afterwards is dropped instead of appending rows and a
+  // cursor onto a page 1 it was never read against. A ref, not the
+  // `mesh:filter` string: `closed -> open -> closed` returns to the same
+  // string while the list underneath has been reloaded.
+  const pageGeneration = useRef(0);
   // Deduplicate by PR number: a PR created between two page reads can shift
   // the window, and the same number must not render twice.
   const prs = useMemo(() => {
@@ -356,13 +359,16 @@ export function GitPullRequestsTab() {
   // While more pages are available, the "Load more" button is the affordance
   // and the truncation note would only repeat it. Once paging stops (end of
   // list, or the page budget) the note describes what the list actually holds.
+  //
+  // The last page read owns the completeness: it may report `complete: false`
+  // with no cursor at all when GitHub says "more pages" but hands back no
+  // `endCursor`, and inferring completeness from `nextCursor === null` would
+  // present that truncated list as the whole history.
+  const lastPageCompleteness = morePages === null ? firstPageCompleteness : morePages.completeness;
   const completeness = useMemo(() => {
-    if (!firstPageCompleteness) return null;
-    if (nextCursor === null) {
-      return { ...firstPageCompleteness, returned: prs.length, complete: true, incomplete_reason: null };
-    }
-    return { ...firstPageCompleteness, returned: prs.length };
-  }, [firstPageCompleteness, nextCursor, prs.length]);
+    if (!lastPageCompleteness) return null;
+    return { ...lastPageCompleteness, returned: prs.length, pages_fetched: pagesLoaded };
+  }, [lastPageCompleteness, prs.length, pagesLoaded]);
   // Which PR is awaiting an inline merge confirm, which is mid-merge,
   // and — for the confirming row — which strategy the user armed
   // (defaults to squash, the historical behaviour; the ▾ picker arms a
@@ -421,10 +427,13 @@ export function GitPullRequestsTab() {
   const clearExpanded = expanded.clear;
   const data = resource.state.data;
   const clearRows = useCallback(() => {
+    // A new list: any page still in flight belongs to the old one.
+    pageGeneration.current += 1;
     setConfirming(null);
     setMergeError({});
     setMorePages(null);
     setMoreError(null);
+    setLoadingMore(false);
     clearExpanded();
   }, [clearExpanded]);
   const retryListLoad = useCallback(() => {
@@ -439,28 +448,31 @@ export function GitPullRequestsTab() {
     void reload();
   }, [reload]);
 
-  // Read the next (older) page and append it. Guarded by the page scope so a
-  // page that lands after the mesh/filter changed is dropped, and by
-  // `loadingMore` so two clicks cannot issue the same cursor twice.
+  // Read the next (older) page and append it. Guarded by the list generation
+  // so a page that lands after a refresh, merge or filter round-trip is
+  // dropped, and by `loadingMore` so two clicks cannot issue the same cursor
+  // twice. `loadingMore` is only cleared by a response from the same
+  // generation; a reset (which clears it) must not be undone by a stale one.
   const loadMore = useCallback(async () => {
     if (activeMeshId === null || nextCursor === null || loadingMore) return;
     const cursor = nextCursor;
-    const scope = pageScope.current;
+    const generation = pageGeneration.current;
     setLoadingMore(true);
     setMoreError(null);
     try {
       const feed = await getRepoPulls(activeMeshId, stateFilter, cursor);
-      if (pageScope.current !== scope) return;
+      if (pageGeneration.current !== generation) return;
       setMorePages((prev) => ({
         items: [...(prev?.items ?? []), ...feed.items],
         cursor: feed.next_cursor ?? null,
         pages: (prev?.pages ?? 0) + 1,
+        completeness: feed.completeness ?? null,
       }));
     } catch (e) {
-      if (pageScope.current !== scope) return;
+      if (pageGeneration.current !== generation) return;
       setMoreError(formatError(e));
     } finally {
-      setLoadingMore(false);
+      if (pageGeneration.current === generation) setLoadingMore(false);
     }
   }, [activeMeshId, stateFilter, nextCursor, loadingMore]);
   useEffect(() => {

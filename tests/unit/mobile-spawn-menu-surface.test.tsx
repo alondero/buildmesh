@@ -113,6 +113,7 @@ const pullFeed: GitHubPullRequestFeed = {
     incomplete_reason: null,
     reported_total: null,
   },
+  next_cursor: null,
 };
 
 const response = (body: unknown, status = 200) =>

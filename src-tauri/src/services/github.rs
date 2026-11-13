@@ -67,5 +67,5 @@ pub use sync::{parse_clone_input, parse_owner_repo, CloneTarget, GitHubClient, G
 /// `services::github::tests` stable.
 #[cfg(test)] // allow-test-in-production: preserve the shared fake-server export path used by the sibling service suites
 pub(crate) mod tests {
-    pub(crate) use super::prs::tests::{fake_node, fake_server, Scripted};
+    pub(crate) use super::prs::tests::{fake_graphql_server, fake_node, fake_server, Scripted};
 }

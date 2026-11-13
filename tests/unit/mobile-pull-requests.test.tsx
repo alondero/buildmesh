@@ -12,7 +12,7 @@ const pr: GitHubPullRequest = {
   head_sha: 'abc', author: 'o', mergeable: true, mergeable_state: 'clean', checks_state: 'success', review_decision: 'approved',
 };
 function feed(items = [pr]): GitHubPullRequestFeed {
-  return { items, completeness: { returned: items.length, pages_fetched: 1, complete: true, incomplete_reason: null, reported_total: null } };
+  return { items, completeness: { returned: items.length, pages_fetched: 1, complete: true, incomplete_reason: null, reported_total: null }, next_cursor: null };
 }
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 let current: GitHubPullRequestFeed;
