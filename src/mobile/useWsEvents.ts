@@ -3,19 +3,24 @@ import { eventsWsUrl, isAuthError, isRateLimited, type EventMsg } from "./api";
 import { useAsyncEffect } from "../hooks/useAsyncEffect";
 
 const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000];
+const TICKET_TIMEOUT_MS = 15000;
 
-/// Open a /ws/events WebSocket and call `onEvent` for every relevant message.
-/// The parsed `EventMsg` is passed through so the consumer can patch the
-/// affected node from the event body (issue #1364) before reconciling.
-///
-/// Auto-reconnects with simple backoff (1/2/4/8s, capped — losing the events
-/// stream falls back to the 5-second list poll in `NodeList`, so an outage
-/// is invisible beyond a brief lag). Resumes on foreground/network return
-/// the same way `TerminalScreen` does for the terminal WS (issue #806):
-/// when the page becomes visible or the browser signals `online` again, we
-/// reset the attempt counter and reconnect immediately instead of waiting
-/// out the next backoff slot — mobile backgrounding is the normal case and
-/// the OS will silently exhaust the ladder on a long absence.
+type EventsConnection =
+  | { kind: 'idle' }
+  | { kind: 'minting'; controller: AbortController; timer: number }
+  | { kind: 'socket'; socket: WebSocket }
+  | { kind: 'backoff'; timer: number }
+  | { kind: 'rate-limited' }
+  | { kind: 'unauthorized' }
+  | { kind: 'disposed' };
+
+/**
+ * One events connection per mounted screen, including the ticket mint before
+ * a socket exists. Failure takes one backoff slot (1/2/4/8s, capped); foreground
+ * or network return can bypass that wait. A 429 pauses until the next resume,
+ * a rejected session ends the connection, and disposal retires every callback.
+ * The screen's list poll remains the fallback while events are unavailable.
+ */
 export function useWsEvents(onEvent: (msg: EventMsg) => void, onAuthError: () => void): void {
   const onEventRef = useRef(onEvent);
   onEventRef.current = onEvent;
@@ -23,90 +28,89 @@ export function useWsEvents(onEvent: (msg: EventMsg) => void, onAuthError: () =>
   onAuthErrorRef.current = onAuthError;
 
   useAsyncEffect((signal) => {
-    let ws: WebSocket | null = null;
-    let reconnectTimer: number | null = null;
+    let connection: EventsConnection = { kind: 'idle' };
     let attempt = 0;
 
-    const clearReconnectTimer = () => {
-      if (reconnectTimer) {
-        window.clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-      }
+    const closeSocket = (socket: WebSocket) => {
+      socket.onopen = null;
+      socket.onmessage = null;
+      socket.onclose = null;
+      socket.onerror = null;
+      socket.close();
+    };
+
+    const scheduleReconnect = () => {
+      if (signal.aborted || connection.kind === 'backoff') return;
+      const previous = connection;
+      const delay = RECONNECT_DELAYS_MS[Math.min(attempt, RECONNECT_DELAYS_MS.length - 1)];
+      attempt++;
+      const waiting = {
+        kind: 'backoff',
+        timer: window.setTimeout(() => {
+          if (signal.aborted || connection !== waiting) return;
+          connection = { kind: 'idle' };
+          void connect();
+        }, delay),
+      } as const;
+      connection = waiting;
+      // Retire before closing: error and close can describe one failure, and
+      // queued frames from that socket must not reach the screen afterwards.
+      if (previous.kind === 'socket') closeSocket(previous.socket);
     };
 
     const connect = async () => {
-      if (signal.aborted) return;
-      // Mint a single-use WS ticket (issue #500) before opening the socket.
+      if (signal.aborted || connection.kind !== 'idle') return;
+      const controller = new AbortController();
+      let timer!: number;
+      let cancelled!: () => void;
+      const deadline = new Promise<never>((_, reject) => {
+        cancelled = () => reject(controller.signal.reason);
+        controller.signal.addEventListener('abort', cancelled, { once: true });
+        timer = window.setTimeout(() => {
+          controller.abort(new Error('Event connection ticket timed out'));
+        }, TICKET_TIMEOUT_MS);
+      });
+      const mint = { kind: 'minting', controller, timer } as const;
+      connection = mint;
       let url: string;
       try {
-        url = await eventsWsUrl();
-      } catch (e) {
-        // A 401/403 from the mint means the cookie is gone — re-minting would
-        // loop forever, so surface it for re-auth instead of backing off.
-        if (isAuthError(e)) {
+        // A suspended phone can leave fetch pending indefinitely. Bound the
+        // whole attempt (including shared cookie recovery), not just fetch.
+        url = await Promise.race([eventsWsUrl(controller.signal), deadline]);
+      } catch (error) {
+        if (signal.aborted || connection !== mint) return;
+        if (isAuthError(error)) {
+          connection = { kind: 'unauthorized' };
           onAuthErrorRef.current();
-          return;
+        } else if (isRateLimited(error)) {
+          // The mint helper already tried its bounded Retry-After wait.
+          connection = { kind: 'rate-limited' };
+        } else {
+          scheduleReconnect();
         }
-        // Issue #552: a 429 from the mint is a server pacing signal, NOT a
-        // connectivity failure. We deliberately do NOT fall through to the
-        // 1/2/4/8s reconnect ladder here — the helper's own bounded wait
-        // already gave the rate-limit window its best shot at draining, so
-        // a second 429 is genuine oversaturation. The 5s poll that backs
-        // this screen still surfaces new state, so a brief stall is
-        // invisible to the user; stop reconnecting silently.
-        if (isRateLimited(e)) return;
-        scheduleReconnect();
         return;
+      } finally {
+        window.clearTimeout(timer);
+        controller.signal.removeEventListener('abort', cancelled);
       }
-      if (signal.aborted) return;
+      if (signal.aborted || connection !== mint) return;
 
-      // Issue #1256: neuter the old socket's handlers BEFORE opening a new
-      // one. A socket whose browser-driven close is still in the CLOSING
-      // state keeps its handlers attached until the handshake finishes, so
-      // any late `onclose`/`onerror` would otherwise schedule a parallel
-      // reconnect (ladder) and a late `onmessage` would still fire `onEvent`
-      // for a socket the user no longer owns. Detaching the handlers turns
-      // the about-to-close socket into a passive no-op.
-      if (ws) {
-        ws.onopen = null;
-        ws.onmessage = null;
-        ws.onclose = null;
-        ws.onerror = null;
-      }
-
+      let socket: WebSocket;
       try {
-        ws = new WebSocket(url);
+        socket = new WebSocket(url);
       } catch {
         scheduleReconnect();
         return;
       }
-
-      // A single socket's failure must advance `attempt` exactly once:
-      // browsers fire BOTH `error` and `close` for one failure, in that
-      // order. Without this flag the backoff ticks twice as fast as the
-      // user expects and the `attempt` counter loses its meaning.
-      let reconnectScheduled = false;
-
-      // Issue #1256: capture the socket in a local so the handlers can
-      // detect "stale" events from a socket that has since been replaced
-      // by a newer `connect()` invocation. Belt-and-suspenders alongside
-      // the handler-neutering above — if any race window slips through
-      // and an event reaches a handler from a socket that is no longer
-      // the active connection, it must not schedule a reconnect.
-      const liveWs = ws;
-
-      ws.onopen = () => {
-        if (ws !== liveWs) return; // stale: a newer connect() has replaced us
-        attempt = 0;
+      connection = { kind: 'socket', socket };
+      const ownsSocket = () => !signal.aborted && connection.kind === 'socket' && connection.socket === socket;
+      socket.onopen = () => {
+        if (ownsSocket()) attempt = 0;
       };
-      ws.onmessage = (e) => {
-        if (ws !== liveWs) return; // stale: don't fire onEvent for a dead socket
+      socket.onmessage = (event) => {
+        if (!ownsSocket()) return;
         try {
-          const msg = JSON.parse(typeof e.data === "string" ? e.data : "") as EventMsg;
-          // Issue #1364: the typed `agent-lifecycle` event joined the legacy
-          // `attention-cleared` pair. Every event still just triggers a
-          // /api/nodes refetch (NodeList reconciles from the server, which
-          // is the source of truth after a reconnect/lag).
+          const msg = JSON.parse(typeof event.data === "string" ? event.data : "") as EventMsg;
           if (msg && (msg.type === "attention-cleared" || msg.type === "agent-lifecycle" || msg.type === "circuit-run-updated")) {
             onEventRef.current(msg);
           }
@@ -114,58 +118,37 @@ export function useWsEvents(onEvent: (msg: EventMsg) => void, onAuthError: () =>
           // Ignore non-JSON frames silently.
         }
       };
-      ws.onclose = () => {
-        if (signal.aborted || reconnectScheduled) return;
-        if (ws !== liveWs) return; // stale: a newer connect() owns reconnect now
-        reconnectScheduled = true;
-        scheduleReconnect();
+      const failed = () => {
+        if (ownsSocket()) scheduleReconnect();
       };
-      ws.onerror = () => {
-        if (signal.aborted || reconnectScheduled) return;
-        if (ws !== liveWs) return; // stale: a newer connect() owns reconnect now
-        reconnectScheduled = true;
-        scheduleReconnect();
-      };
+      socket.onclose = failed;
+      socket.onerror = failed;
     };
 
-    const scheduleReconnect = () => {
-      const delay = RECONNECT_DELAYS_MS[Math.min(attempt, RECONNECT_DELAYS_MS.length - 1)];
-      attempt++;
-      reconnectTimer = window.setTimeout(() => {
-        reconnectTimer = null;
-        connect();
-      }, delay);
-    };
-
-    // Mobile backgrounding is the normal case: the OS suspends timers and
-    // drops the WebSocket, so the connection can silently sit in a backoff
-    // slot while the tab is hidden. Resume the moment the document is
-    // foregrounded or the network returns, instead of waiting out the
-    // next 8-second backoff tick. Issue #806.
-    //
-    // Issue #1256: CLOSING counts as "still alive." The browser enters
-    // CLOSING when it begins the close handshake and only fires `onclose`
-    // on a later tick — if we proceed here we open a duplicate socket
-    // while the old one's handlers are still attached, leading to
-    // duplicated red-dot state changes and a parallel reconnect ladder.
     const resume = () => {
       if (signal.aborted) return;
-      if (
-        ws &&
-        (ws.readyState === WebSocket.OPEN ||
-          ws.readyState === WebSocket.CONNECTING ||
-          ws.readyState === WebSocket.CLOSING)
-      ) {
-        return;
+      switch (connection.kind) {
+        case 'minting':
+        case 'unauthorized':
+        case 'disposed':
+          return;
+        case 'socket':
+          // CLOSING still owns its handshake; onclose owns its retry.
+          if (connection.socket.readyState !== WebSocket.CLOSED) return;
+          closeSocket(connection.socket);
+          break;
+        case 'backoff':
+          window.clearTimeout(connection.timer);
+          break;
+        case 'idle':
+        case 'rate-limited':
+          break;
       }
-      clearReconnectTimer();
+      connection = { kind: 'idle' };
       attempt = 0;
       void connect();
     };
     const onForeground = () => {
-      // `online` fires resume unconditionally (network return can race
-      // ahead of foreground); visibilitychange only when we're actually
-      // back in front of the user.
       if (document.visibilityState === "visible") resume();
     };
     document.addEventListener("visibilitychange", onForeground);
@@ -173,14 +156,16 @@ export function useWsEvents(onEvent: (msg: EventMsg) => void, onAuthError: () =>
 
     void connect();
     return () => {
+      const previous = connection;
+      connection = { kind: 'disposed' };
       document.removeEventListener("visibilitychange", onForeground);
       window.removeEventListener("online", resume);
-      clearReconnectTimer();
-      if (ws) {
-        ws.onclose = null;
-        ws.onerror = null;
-        ws.close();
+      if (previous.kind === 'backoff') window.clearTimeout(previous.timer);
+      if (previous.kind === 'minting') {
+        window.clearTimeout(previous.timer);
+        previous.controller.abort();
       }
+      if (previous.kind === 'socket') closeSocket(previous.socket);
     };
   }, []);
 }

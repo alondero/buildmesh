@@ -127,7 +127,7 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
                 activate(tabs[target], false);
                 tabRefs.current[target]?.focus({ preventScroll: true });
               }}
-              className={`flex h-6 shrink-0 max-w-48 items-center gap-1.5 border-b-2 px-2.5 text-xs transition-colors ${selected ? 'border-accent-cyan bg-accent-cyan/5 text-text-primary' : 'border-transparent text-text-muted hover:bg-bg-card hover:text-text-primary'}`}>
+              className={`flex h-6 shrink-0 max-w-48 items-center gap-1.5 border-b-2 px-2.5 text-label transition-colors ${selected ? 'border-accent-cyan bg-accent-cyan/5 text-text-primary' : 'border-transparent text-text-muted hover:bg-bg-card hover:text-text-primary'}`}>
               {tab.overview
                 ? <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0"><circle cx="6" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" /><circle cx="18" cy="12" r="2.5" /><path d="M6 8.5v7M8.3 7.2l7.4 3.6M8.3 16.8l7.4-3.6" /></svg>
                 : !tab.utility && <ProviderIcon providerId={tab.member.provider} className="h-3 w-3 shrink-0" />}
@@ -135,8 +135,8 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
                 ? <span className={`truncate ${overview.status.className}`}>{overview.status.label}</span>
                 : <span className="truncate">{tab.label}</span>}
               {tab.overview
-                ? overview?.needsYou && <span aria-hidden="true" data-testid={`activity-overview-badge-${rootId}`} className="shrink-0 text-2xs font-semibold text-status-warning">!</span>
-                : !tab.utility && <span aria-hidden="true" className={`shrink-0 text-2xs ${getStatusConfig(tab.member.status).color}`}>{statusGlyph(tab.member.status)}</span>}
+                ? overview?.needsYou && <span aria-hidden="true" data-testid={`activity-overview-badge-${rootId}`} className="shrink-0 text-micro font-semibold text-status-warning">!</span>
+                : !tab.utility && <span aria-hidden="true" className={`shrink-0 text-micro ${getStatusConfig(tab.member.status).color}`}>{statusGlyph(tab.member.status)}</span>}
               {tab.utility && <button type="button" tabIndex={-1}
                 aria-label={`Close ${fullLabel(tab)}`} title={`Close ${fullLabel(tab)}`}
                 onClick={event => { event.stopPropagation(); onClose(tab.member.id); }}
@@ -187,7 +187,7 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
           // row under the cursor; the focus handler syncs the index.
           onMouseEnter={(e) => e.currentTarget.focus({ preventScroll: true })}
           onFocus={() => setActiveIndex(index)}
-          className={`flex w-full items-center gap-2 rounded-sm px-2 py-2 text-left text-xs focus:outline-none ${
+          className={`flex w-full items-center gap-2 rounded-sm px-2 py-2 text-left text-meta focus:outline-none ${
             index === activeIndex
               ? 'bg-bg-selection text-text-primary'
               : 'text-text-secondary'

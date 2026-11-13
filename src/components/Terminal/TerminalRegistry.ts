@@ -41,6 +41,7 @@ export interface TerminalInstance {
   attachedContainer: HTMLElement | null;
   onFindRequest: (() => void) | null;
   useNativeClipboardPaste: boolean;
+  outputSubscribe?: Promise<void>;
 }
 
 function terminalDataFromPayload(payload: AgentOutputPayload): TerminalWriteData | null {
@@ -420,7 +421,7 @@ export class TerminalRegistry {
       instance.resizeScheduler.dispose();
       instance.links.dispose(); // allow-dispose — the only path that tears a terminal down is the deleted node's
       instance.unlisten();
-      api.unsubscribeAgentOutput(nodeId).catch(() => {});
+      api.unsubscribeAgentOutput(nodeId, instance.outputSubscribe).catch(() => {});
       terminalWebglPool.release(`agent:${nodeId}`);
       instance.term.dispose(); // allow-dispose — keyed by deleted-node IPC, the registry's only legit dispose path
       this.instances.delete(nodeId);
@@ -602,17 +603,13 @@ export class TerminalRegistry {
       // `TerminalWriter` still rAF-batches the display write.
       const outputSubscribe = api.subscribeAgentOutput(nodeId, (bytes) => {
         this.writer.append(nodeId, bytes);
-      }).catch(console.error);
-      // The unsubscribe is chained AFTER the subscribe so a deletion that
-      // lands mid-registration still drops the Channel the backend is in
-      // the middle of creating (issue #2016) — unsubscribing first would
-      // race the registration and leave the Channel alive. The Rust
-      // `unsubscribe_agent_output` is idempotent, so the ordering is the
-      // only thing that matters here.
+      });
+      instance.outputSubscribe = outputSubscribe;
+      void outputSubscribe.catch(console.error);
+      // Cancel decoding immediately; the transport orders native teardown after
+      // this exact registration, even if a replacement subscribes in between.
       pending.own(() => {
-        void outputSubscribe
-          .then(() => api.unsubscribeAgentOutput(nodeId))
-          .catch(() => {});
+        void api.unsubscribeAgentOutput(nodeId, outputSubscribe).catch(() => {});
       });
 
       const unlistenSerialize = await listen<SerializeTerminalRequestPayload>('serialize-terminal-request', (event) => {

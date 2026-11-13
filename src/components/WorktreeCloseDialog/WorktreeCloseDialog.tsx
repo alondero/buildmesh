@@ -110,7 +110,7 @@ export function WorktreeCloseDialog() {
         <button
           type="button"
           onClick={() => choose('remove')}
-          className="px-3 py-1.5 text-xs text-white bg-status-error/80 hover:bg-status-error rounded-md transition-colors"
+          className="px-3 py-1.5 text-xs text-on-destructive bg-destructive/80 hover:bg-destructive active:bg-destructive-strong disabled:bg-bg-card-hover disabled:text-text-muted rounded-md transition-colors"
         >
           Remove anyway
         </button>

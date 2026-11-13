@@ -184,7 +184,7 @@ pub async fn execute(
         }
         Tool::ListGithubIssues { mesh_id, state, label, limit } => {
             let open = match state.unwrap_or(IssueState::Open) { IssueState::Open => Some(true), IssueState::Closed => Some(false), IssueState::All => None };
-            let mut feed = run_blocking("companion_issues", move || crate::commands::pr::get_repo_issues_filtered_blocking(mesh_id, open)).await?;
+            let mut feed = run_blocking("companion_issues", move || crate::services::github::feeds::get_repo_issues_filtered_blocking(mesh_id, open)).await?;
             if let Some(label) = label { feed.items.retain(|issue| issue.labels.contains(&label)); }
             let matched = feed.items.len();
             feed.items.truncate(limit.unwrap_or(100).clamp(1, 1000));
@@ -192,7 +192,7 @@ pub async fn execute(
         }
         Tool::ListGithubPrs { mesh_id, state, limit } => {
             let state = match state.unwrap_or(PullState::Open) { PullState::Open => "open", PullState::Closed => "closed" };
-            let mut feed = crate::commands::pr::get_repo_pulls(mesh_id, state.into()).await?;
+            let mut feed = run_blocking("companion_pulls", move || crate::services::github::feeds::get_repo_pulls_blocking(mesh_id, state.to_string())).await?;
             let matched = feed.items.len();
             feed.items.truncate(limit.unwrap_or(100).clamp(1, 1000));
             Ok(json!({"feed":feed,"matched_before_limit":matched}))
@@ -201,7 +201,7 @@ pub async fn execute(
             run_blocking("companion_circuits", move || {
                 let meshes = match mesh_id { Some(id) => vec![id], None => db::list_meshes().map_err(|e| e.to_string())?.into_iter().map(|m| m.id).collect() };
                 let mut summaries = Vec::new();
-                for id in meshes { summaries.push(json!({"mesh_id":id,"circuits":crate::commands::circuit::list_circuits_with_runs(id, Some(10))?})); }
+                for id in meshes { summaries.push(json!({"mesh_id":id,"circuits":crate::services::circuit_control::list_circuits_with_runs(id, Some(10))?})); }
                 Ok(json!(summaries))
             }).await
         }
@@ -324,7 +324,7 @@ pub async fn execute(
             let feed = if numbers.is_empty() {
                 None
             } else {
-                Some(crate::commands::pr::get_repo_issues(mesh_id).await?)
+                Some(run_blocking("companion_open_issues", move || crate::services::github::feeds::get_repo_issues_blocking(mesh_id)).await?)
             };
             let mut prepared = Vec::new();
             for request in requests {
@@ -381,7 +381,8 @@ async fn spawn_issue(
     let (node, intent) = run_blocking("companion_create_node", move || {
         let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
         let intent = if let Some(number) = request.issue_number {
-            let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)?;
+            let (owner, repo) =
+                crate::services::github::repository::resolve_github_owner_repo(&mesh)?;
             SpawnIntent::Issue(IssueContext {
                 owner,
                 repo,

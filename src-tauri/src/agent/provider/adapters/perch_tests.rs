@@ -1,6 +1,6 @@
 use super::*;
 use crate::agent::capabilities::ResolvedAgentConfig;
-use crate::agent::launch::{default_prepare, HarnessLaunchInput, SessionIdModeRef};
+use crate::agent::launch::{HarnessLaunchInput, SessionIdModeRef};
 use crate::agent::provider::WindowsShell;
 
 fn config(
@@ -13,6 +13,7 @@ fn config(
         effort: effort.map(str::to_string),
         extra_args: None,
         permission_mode: permission_mode.map(str::to_string),
+        agent: None,
     }
 }
 
@@ -65,17 +66,16 @@ fn fresh_spawn_is_unattended_and_assigns_a_thread() {
     // perchai-cli 2.4.116 accepts `--thread` on the interactive parser and
     // rejects a positional prompt. Unattended is `--permission take_the_wheel`.
     let config = config(None, None, None);
-    let prepared = default_prepare(
-        &PERCH,
-        HarnessLaunchInput {
-            platform: Platform::Windows,
-            runtime: EnvType::Windows,
-            session: SessionIdModeRef::Assign("fresh-uuid-99"),
-            config: &config,
-            prefill: Some("start work"),
-            sandbox: false,
-        },
-    );
+    let prepared = PERCH.prepare_launch(HarnessLaunchInput {
+        routing: None,
+        node_id: None,
+        platform: Platform::Windows,
+        runtime: EnvType::Windows,
+        session: SessionIdModeRef::Assign("fresh-uuid-99"),
+        config: &config,
+        prefill: Some("start work"),
+        sandbox: false,
+    });
     assert_eq!(
         prepared.recipe.base_args,
         vec![
@@ -98,20 +98,19 @@ fn fresh_spawn_is_unattended_and_assigns_a_thread() {
 #[test]
 fn resume_keeps_the_same_thread_flag() {
     let config = config(None, None, None);
-    let prepared = default_prepare(
-        &PERCH,
-        HarnessLaunchInput {
-            platform: Platform::Linux,
-            runtime: EnvType::Windows,
-            session: SessionIdModeRef::Resume {
-                id: "existing-uuid-100",
-                cause: crate::agent::spawn::ResumeCause::Explicit,
-            },
-            config: &config,
-            prefill: None,
-            sandbox: false,
+    let prepared = PERCH.prepare_launch(HarnessLaunchInput {
+        routing: None,
+        node_id: None,
+        platform: Platform::Linux,
+        runtime: EnvType::Windows,
+        session: SessionIdModeRef::Resume {
+            id: "existing-uuid-100",
+            cause: crate::agent::spawn::ResumeCause::Explicit,
         },
-    );
+        config: &config,
+        prefill: None,
+        sandbox: false,
+    });
     assert_eq!(
         prepared.recipe.base_args,
         vec![
@@ -126,17 +125,16 @@ fn resume_keeps_the_same_thread_flag() {
 #[test]
 fn prompt_mode_omits_the_permission_flag() {
     let config = config(Some("prompt"), Some("standard 1m"), Some("high"));
-    let prepared = default_prepare(
-        &PERCH,
-        HarnessLaunchInput {
-            platform: Platform::Windows,
-            runtime: EnvType::Windows,
-            session: SessionIdModeRef::Assign("thread-7"),
-            config: &config,
-            prefill: None,
-            sandbox: false,
-        },
-    );
+    let prepared = PERCH.prepare_launch(HarnessLaunchInput {
+        routing: None,
+        node_id: None,
+        platform: Platform::Windows,
+        runtime: EnvType::Windows,
+        session: SessionIdModeRef::Assign("thread-7"),
+        config: &config,
+        prefill: None,
+        sandbox: false,
+    });
     assert_eq!(
         prepared.recipe.base_args,
         vec![
@@ -161,7 +159,7 @@ fn model_override_rejects_flags_and_newlines() {
 
 #[test]
 fn capabilities_descriptor_shape() {
-    let caps = PERCH.capabilities();
+    let caps = crate::agent::capabilities::capabilities_for(&PERCH);
     assert_eq!(caps.harness_id, "perch");
     assert!(caps.supports_resume);
     assert!(caps.auto_resume_on_startup);

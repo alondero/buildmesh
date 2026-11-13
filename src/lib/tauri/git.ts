@@ -1,5 +1,6 @@
 import { _invoke } from './_invoke';
 import type { BranchInfo } from '../../types/generated/BranchInfo';
+import type { DiffCounts } from '../../types/generated/DiffCounts';
 import type { DiffHunk } from '../../types/generated/DiffHunk';
 import type { DiffLine } from '../../types/generated/DiffLine';
 import type { DiffResult } from '../../types/generated/DiffResult';
@@ -55,7 +56,7 @@ export const diffFileAgainstHead = (sessionPath: string, filePath: string) =>
 // request has superseded it. Tauri 2's `invoke` doesn't yet forward the
 // signal to the Rust command, so the *actual* backend cancellation
 // (pool-pressure ≤1 per node_id) happens on the Rust side via the
-// `DIFF_NODE_CANCEL` map — see `commands::diff::acquire_diff_cancel`.
+// `DIFF_NODE_CANCEL` map — see `diff::cancel::acquire_diff_cancel`.
 // The frontend signal exists to (a) drop stale local results so the UI
 // doesn't flicker, and (b) be the seam a future Tauri signal-aware
 // invoke can plug into without touching call sites.
@@ -87,6 +88,22 @@ export const diffNodeFileAgainstBase = (
   }
   return _invoke<DiffResult>('diff_node_file_against_base', { nodeId, filePath });
 };
+
+/** Counts-only read of a node's change set — the turn-finished banner's
+ *  totals (issue #2726). Same baseline and line-count semantics as
+ *  `diffNodeAgainstBase`, without building hunks or highlighted HTML.
+ *  `signal` drops a stale local result exactly like the full read. */
+export const diffNodeCountsAgainstBase = (
+  nodeId: number,
+  signal?: AbortSignal,
+): Promise<DiffCounts> => {
+  if (signal?.aborted) {
+    return Promise.reject(new DOMException('aborted', 'AbortError'));
+  }
+  return _invoke<DiffCounts>('diff_node_counts_against_base', { nodeId });
+};
+
+export type { DiffCounts };
 
 /** Lightweight base-relative file list for an Agent Node. The command
  * returns paths, statuses, and line counts without building or highlighting

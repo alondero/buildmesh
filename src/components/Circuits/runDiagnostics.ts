@@ -41,13 +41,9 @@ export interface ReviewCircuitMetadata {
   retryNodeIds: readonly string[];
   /** The step that asks the implementation agent to merge after approval. */
   mergeNodeId?: string;
-  supportsContinuation?: boolean;
+  mergeConfirmedNodeId?: string;
+  mergeUnconfirmedNodeIds?: readonly string[];
 }
-
-const MERGE_HAND_OFF_NODE_ID = 'merge';
-/** Steps the issue-review blueprint adds once the merge is checked on GitHub. */
-const MERGE_VERIFIED_NODE_ID = 'close_implementer';
-const MERGE_UNCONFIRMED_NODE_IDS = ['merge_unconfirmed', 'merge_blocked'];
 
 /** Review semantics come from the persisted graph, not `is_preset`. */
 export function reviewCircuitMetadata(
@@ -60,11 +56,17 @@ export function reviewCircuitMetadata(
 export function reviewCircuitForRun(
   detail: CircuitRunDetail,
   circuit: ReviewCircuitMetadata | null,
-  context = parseRunContext(detail.run.context_json),
 ): ReviewCircuitMetadata | null {
-  return context['review.extended'] === '1' || context['recovery.from_run_id']
-    ? { verdictNodeId: 'verdict', retryNodeIds: ['retry'], mergeNodeId: MERGE_HAND_OFF_NODE_ID, supportsContinuation: true }
-    : circuit;
+  const projection = detail.review_continuation;
+  if (!projection) return circuit;
+  const nodes = projection.review_nodes;
+  return nodes ? {
+    verdictNodeId: nodes.verdict_node_id,
+    retryNodeIds: nodes.retry_node_ids,
+    ...(nodes.merge_node_id === null ? {} : { mergeNodeId: nodes.merge_node_id }),
+    ...(nodes.merge_confirmed_node_id === null ? {} : { mergeConfirmedNodeId: nodes.merge_confirmed_node_id }),
+    mergeUnconfirmedNodeIds: nodes.merge_unconfirmed_node_ids,
+  } : null;
 }
 
 export interface CircuitGraphFacts {
@@ -82,14 +84,11 @@ export function circuitGraphFacts(
   try {
     const graph = parseGraph(circuit.graph_json);
     const verdict = graph.nodes.find((node) => node.type.type === 'review_verdict');
-    const merge = graph.nodes.find((node) => node.id === MERGE_HAND_OFF_NODE_ID && node.type.type === 'inject_pty');
     return {
       reviewCircuit: verdict === undefined
         ? null
         : {
             verdictNodeId: verdict.id,
-            ...(merge === undefined ? {} : { mergeNodeId: merge.id }),
-            ...(graph.blueprint === 'issue_driven_autopilot_review' ? { supportsContinuation: true } : {}),
             retryNodeIds: graph.nodes
               .filter((node) => node.type.type === 'retry_limit')
               .map((node) => node.id),
@@ -107,6 +106,7 @@ export function reviewResult(
   reviewCircuit: ReviewCircuitMetadata | null = null,
   context = parseRunContext(detail.run.context_json),
 ): { label: string; detail: string; needsAttention: boolean } | null {
+  reviewCircuit = reviewCircuitForRun(detail, reviewCircuit);
   if (reviewCircuit === null || !isTerminalRunState(detail.run.state)) return null;
   const review = detail.steps.find((s) => s.node_id === reviewCircuit.verdictNodeId);
   if (!review) return null;
@@ -124,14 +124,14 @@ export function reviewResult(
     && detail.steps.some((s) => s.node_id === reviewCircuit.mergeNodeId && s.status === 'completed');
   const stepDone = (nodeId: string) => detail.steps.some((s) => s.node_id === nodeId && s.status === 'completed');
   // Approved is not merged: say which of the two happened when the run knows.
-  if (approved && stepDone(MERGE_VERIFIED_NODE_ID)) {
+  if (approved && reviewCircuit.mergeConfirmedNodeId !== undefined && stepDone(reviewCircuit.mergeConfirmedNodeId)) {
     return {
       label: 'Review approved',
       detail: `${pass === null ? '' : `Approved on pass ${pass}. `}GitHub confirmed the squash-merge and the implementation agent was closed.`,
       needsAttention: false,
     };
   }
-  if (approved && MERGE_UNCONFIRMED_NODE_IDS.some(stepDone)) {
+  if (approved && reviewCircuit.mergeUnconfirmedNodeIds?.some(stepDone)) {
     return {
       label: 'Merge needs attention',
       detail: `${pass === null ? '' : `Approved on pass ${pass}. `}The squash-merge was not confirmed on GitHub, so the implementation agent was left open. Open it, finish the merge, then close it yourself.`,
@@ -148,20 +148,13 @@ export function reviewResult(
       }
     : {
         label: exhausted ? 'Review limit reached' : 'Review needs attention',
-        detail: `${exhausted && pass !== null ? `Ran out of review attempts after pass ${pass}. ` : ''}No final approval is recorded. ${canContinueReview(detail, reviewCircuit, context) ? 'Inspect the latest findings or open the retained reviewer. If the work is ready, choose additional review rounds for this run. If the approach needs changing, open the implementation agent first.' : 'Open the implementation agent, or resume its saved session from Archive. Address the failed step and latest findings before starting a fresh review. If the session is unavailable, recover from the PR branch.'}`,
+        detail: `${exhausted && pass !== null ? `Ran out of review attempts after pass ${pass}. ` : ''}No final approval is recorded. ${canContinueReview(detail) ? 'Inspect the latest findings or open the retained reviewer. If the work is ready, choose additional review rounds for this run. If the approach needs changing, open the implementation agent first.' : (detail.review_continuation?.refusal_message ?? 'Review continuation eligibility is unavailable. Open the implementation agent or start a fresh review.')}`,
         needsAttention: true,
       };
 }
 
-export function canContinueReview(
-  detail: CircuitRunDetail,
-  reviewCircuit: ReviewCircuitMetadata | null,
-  context = parseRunContext(detail.run.context_json),
-): boolean {
-  if (detail.run.state !== 'failed' || reviewCircuit === null) return false;
-  const supported = reviewCircuit.supportsContinuation || context['source.review_preset'] === '1' || Boolean(context['recovery.from_run_id']);
-  return Boolean(supported && detail.steps.some((s) => s.node_id === reviewCircuit.verdictNodeId)
-    && (detail.run.source_agent_node_id !== null || detail.steps.some((s) => s.node_id === 'implementer' && s.agent_node_id !== null)));
+export function canContinueReview(detail: CircuitRunDetail): boolean {
+  return detail.review_continuation?.available === true;
 }
 
 /**
@@ -300,7 +293,7 @@ export function buildCircuitProbeRows(
         : new Map(row.runs.map((run) => [run.run.id, runSearchContext(contextByRunId.get(run.run.id) ?? {})]));
       const reviewCircuit = facts.reviewCircuit;
       const contextFor = (run: CircuitRunDetail) => contextByRunId.get(run.run.id) ?? {};
-      const reviewFor = (run: CircuitRunDetail) => reviewCircuitForRun(run, reviewCircuit, contextFor(run));
+      const reviewFor = (run: CircuitRunDetail) => reviewCircuitForRun(run, reviewCircuit);
       let visibleRuns = view === 'history'
         ? row.runs.filter(runBelongsToHistory)
         : view === 'activity'
@@ -386,14 +379,14 @@ export function circuitActivityStats(
       const context = contextByRunId.get(detail.run.id) ?? {};
       if (runBelongsToActivity(detail)) {
         activeCount += 1;
-if (runNeedsOutstandingAttention(detail, reviewCircuitForRun(detail, reviewCircuit, context), context)) {
+if (runNeedsOutstandingAttention(detail, reviewCircuitForRun(detail, reviewCircuit), context)) {
           activeAttentionCount += 1;
           attentionCount += 1;
         }
       }
       if (runBelongsToHistory(detail)) {
         historyCount += 1;
-if (runNeedsOutstandingAttention(detail, reviewCircuitForRun(detail, reviewCircuit, context), context)) {
+if (runNeedsOutstandingAttention(detail, reviewCircuitForRun(detail, reviewCircuit), context)) {
           historyAttentionCount += 1;
           attentionCount += 1;
         }
@@ -401,6 +394,147 @@ if (runNeedsOutstandingAttention(detail, reviewCircuitForRun(detail, reviewCircu
     }
   }
   return { activityCount: activeCount, activeCount, attentionCount, historyAttentionCount, activeAttentionCount, historyCount, queuedCount };
+}
+
+/**
+ * The Activity view's one summary (issue #2740).
+ *
+ * Activity mixes three independent dimensions — what is holding a slot, what is
+ * waiting to start, and what is waiting for a person — and the old copy
+ * derived its empty state from the first dimension alone. Zero active runs
+ * therefore read as "Ready for work" while a finished run was still asking
+ * for attention, so the user had to reconcile the contradictions by hand.
+ *
+ * This derivation keeps the three apart and states the most urgent one
+ * first:
+ *
+ * - **attention** wins the headline whenever a finished run needs a
+ *   decision, and the summary foregrounds the route to those runs — that is
+ *   the work a person has to act on.
+ * - **active** is the headline while runs hold slots. The set is `running`
+ *   plus `paused`, so it is called active rather than running: a run parked
+ *   on the operator is not making progress, and the count says so when one
+ *   of the active runs is asking for a decision.
+ * - **queued** and **idle** both label the absence of execution
+ *   literally ("No active runs"). Zero active runs is a fact about
+ *   execution, not a claim that everything is fine — so the idle copy
+ *   appears only once the counts establish it.
+ *
+ * The outstanding attention count carries what the loaded window does not:
+ * when that count could not be read, "no run needs a decision" is not
+ * established, and the summary says so instead of going quiet.
+ *
+ * Each state is pinned by the cases in
+ * `tests/unit/circuit-run-diagnostics.test.ts`.
+ */
+export type CircuitActivityTone = 'attention' | 'active' | 'queued' | 'idle' | 'unverified';
+
+export type CircuitActivityAction = 'attention' | 'queue' | 'manage';
+
+export interface CircuitActivitySummary {
+  /** Which dimension leads. `unverified` means attention could not be established. */
+  tone: CircuitActivityTone;
+  /** The headline. It does not claim success from the absence of active runs. */
+  label: string;
+  /** The supporting detail: the active / queued / attention breakdown. */
+  detail: string;
+  /** The next action the summary foregrounds, or null when there is none. */
+  action: CircuitActivityAction | null;
+}
+
+export interface CircuitActivitySummaryInput {
+  /** Runs holding a slot (`running` + `paused`). */
+  activeCount: number;
+  /** Live runs asking for a decision — paused, blocked or awaiting a review. */
+  activeAttentionCount: number;
+  /** Runs waiting to start. */
+  queuedCount: number;
+  /** Finished runs asking for a decision, as the History filter lists them. */
+  attentionCount: number;
+  /**
+   * Outstanding attention on the mesh, or `null` when the count could not be
+   * read. `0` means the mesh has none; `null` means "not established", which
+   * is not the same claim.
+   */
+  outstandingAttention: number | null;
+}
+
+function pluralRuns(count: number): string {
+  return count === 1 ? 'run' : 'runs';
+}
+
+function attentionLabel(count: number): string {
+  return `${count} finished ${pluralRuns(count)} need${count === 1 ? 's' : ''} attention`;
+}
+
+/**
+ * The active set, with the runs that are waiting on a person called out.
+ *
+ * A paused or blocked run holds a slot without making progress, so counting
+ * it as plain activity would read as work in flight. The header's count
+ * already reports the two together; the summary says which of the active
+ * runs are waiting.
+ */
+function activeLabel(activeCount: number, activeAttentionCount: number): string {
+  if (activeCount === 0) return 'No active runs';
+  if (activeAttentionCount === 0) return `${activeCount} active`;
+  return `${activeCount} active, ${activeAttentionCount} need${activeAttentionCount === 1 ? 's' : ''} attention`;
+}
+
+export function circuitActivitySummary(input: CircuitActivitySummaryInput): CircuitActivitySummary {
+  const { activeCount, activeAttentionCount, queuedCount, attentionCount, outstandingAttention } = input;
+  const activeText = activeLabel(activeCount, activeAttentionCount);
+  const queuedLabel = queuedCount > 0 ? `${queuedCount} queued` : 'Nothing queued';
+
+  // Attention leads whenever a finished run is asking for a decision. The
+  // loaded window is counted first, because its number is the one the History
+  // filter will show; the mesh-wide count is the fallback for attention that
+  // the window does not carry.
+  const attention = attentionCount > 0 ? attentionCount : outstandingAttention;
+  if (attention !== null && attention > 0) {
+    return {
+      tone: 'attention',
+      label: attentionLabel(attention),
+      detail: `${activeText} · ${queuedLabel}`,
+      action: 'attention',
+    };
+  }
+
+  if (outstandingAttention === null) {
+    // The count failed, so no run needing attention is ruled out.
+    // State what is known and name the gap instead of implying an all-clear.
+    return {
+      tone: 'unverified',
+      label: activeText,
+      detail: 'The outstanding attention count could not be read.',
+      action: queuedCount > 0 ? 'queue' : null,
+    };
+  }
+
+  if (activeCount > 0) {
+    return {
+      tone: 'active',
+      label: activeText,
+      detail: queuedLabel,
+      action: queuedCount > 0 ? 'queue' : null,
+    };
+  }
+
+  if (queuedCount > 0) {
+    return {
+      tone: 'queued',
+      label: 'No active runs',
+      detail: `${queuedCount} waiting in queue`,
+      action: 'queue',
+    };
+  }
+
+  return {
+    tone: 'idle',
+    label: 'No active runs',
+    detail: 'Nothing running, queued, or waiting for a decision.',
+    action: 'manage',
+  };
 }
 
 /** Quiet threshold before a live run reads as stalled. Matches the

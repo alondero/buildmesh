@@ -247,6 +247,27 @@ test('editing the advisory self-review script does not select product verificati
   assert.ok(ids.includes('agent-tests'), 'the agent-infra tests still run');
 });
 
+test('ordinary tooling changes skip Rust gates while Rust verification scripts retain them', () => {
+  const rustIds = ['rust-format', 'rust-clippy', 'rust-tests', 'binding-drift'];
+  const ordinary = ['scripts/idle-animation-probe.mjs', 'scripts/ui-mock/hub-fixtures.mjs', 'scripts/generate-android-circuit-wire.mjs', '.github/workflows/verify.yml'];
+  for (const paths of [...ordinary.map(path => [path]), ordinary, [...ordinary, 'src/owner.ts']]) {
+    const ids = planGates(paths).map(gate => gate.id);
+    for (const id of rustIds) assert.ok(!ids.includes(id), `${paths}: ${id}`);
+    assert.ok(ids.includes('agent-tests'));
+    assert.ok(ids.includes('frontend-tests'));
+  }
+  // These paths used to be swallowed by the local infrastructure-only override.
+  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-check.mjs', 'scripts/harness-lanes.mjs', 'scripts/agent-tests.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) {
+    const ids = planGates([path]).map(gate => gate.id);
+    for (const id of rustIds) assert.ok(ids.includes(id), `${path}: ${id}`);
+  }
+  for (const paths of [[...ordinary, 'src-tauri/src/lib.rs'], [...ordinary, 'src/types/generated/Example.ts']]) {
+    const ids = planGates(paths).map(gate => gate.id);
+    for (const id of rustIds) assert.ok(ids.includes(id), `${paths}: ${id}`);
+  }
+  for (const id of rustIds) assert.ok(planGates(ordinary, { full: true }).some(gate => gate.id === id), `--full: ${id}`);
+});
+
 test('uncached ConPTY checks its network prerequisite before compilation; cached packages work offline', async t => {
   const fixture = repo(t);
   const unavailable = await conptyPrerequisite(fixture.cwd, async () => { throw new Error('offline'); });
@@ -1148,6 +1169,95 @@ test('checkpoint references belong to the goal and restore use is verified', t =
   assert.equal(readFileSync(join(fixture.cwd, 'src/owner.ts'), 'utf8'), 'export const owner = 1;\n');
   assert.match(readFileSync(join(fixture.cwd, '.harness/events.jsonl'), 'utf8'), /"type":"rollback"/);
 });
+test('repair-loop verification requires deliberate opt-in before changing state or starting gates', async t => {
+  for (const progress of [
+    { phase: 'implement' },
+    { phase: 'review', review: { reviewer: 'independent fixture', verdict: 'REQUEST_CHANGES', findings: ['Repair owner state'], summary: 'Needs repair' } },
+    { phase: 'implement', review: { reviewer: 'independent fixture', verdict: 'APPROVE', findings: [], summary: 'Earlier approval' } },
+  ]) {
+    const fixture = repo(t);
+    fixture.start();
+    fixture.put('.task.json', JSON.stringify(progress));
+    assert.equal(fixture.cli('update', '--spec', '.task.json').status, 0);
+    const taskPath = join(fixture.cwd, '.harness/active-task.json');
+    const before = readFileSync(taskPath, 'utf8');
+    const denied = fixture.cli('verify');
+    assert.equal(denied.status, 2, denied.stdout + denied.stderr);
+    assert.match(denied.stderr, /repair-loop/i);
+    assert.ok(denied.stderr.includes(`npm run harness -- check --base ${fixture.base}`));
+    assert.match(denied.stderr, /--repair/);
+    assert.equal(readFileSync(taskPath, 'utf8'), before);
+    assert.equal(existsSync(join(fixture.cwd, '.harness/receipt.json')), false);
+    assert.equal(existsSync(join(fixture.cwd, '.harness/gate-cache.json')), false);
+    assert.equal(existsSync(join(fixture.cwd, '.harness/lock')), false);
+  }
+});
+
+test('repair opt-in is recorded for each deliberate run and remains required until approval', async t => {
+  const fixture = repo(t);
+  fixture.start();
+  fixture.put('.task.json', JSON.stringify({ phase: 'implement', review: { reviewer: 'independent fixture', verdict: 'REQUEST_CHANGES', findings: ['Repair owner state'], summary: 'Needs repair' } }));
+  fixture.cli('update', '--spec', '.task.json');
+  const plan = () => [{ id: 'fixture', command: ['node', '-e', ''], minutes: FIXTURE_GATE_MINUTES }];
+  const receipt = await verify(fixture.cwd, { plan, repair: true });
+  assert.equal(receipt.outcome, 'PASS');
+  assert.deepEqual(receipt.repair, { optedIn: true, phase: 'implement', verdict: 'REQUEST_CHANGES' });
+  const events = readFileSync(join(fixture.cwd, '.harness/events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(events.find(row => row.type === 'verification').repair, receipt.repair);
+  const previous = readFileSync(join(fixture.cwd, '.harness/receipt.json'), 'utf8');
+  await assert.rejects(verify(fixture.cwd, { plan }), /repair-loop/i);
+  assert.equal(readFileSync(join(fixture.cwd, '.harness/receipt.json'), 'utf8'), previous);
+  const invalid = fixture.cli('check', '--repair');
+  assert.equal(invalid.status, 2);
+  assert.match(invalid.stderr, /--repair applies only to npm run verify/);
+  // Exercise the real CLI parser too; its fixture gate may fail, but it must
+  // reach verification and persist the deliberate run.
+  const deliberate = fixture.cli('verify', '--repair');
+  assert.doesNotMatch(deliberate.stderr, /harness start --spec|requires --repair/);
+  const stored = JSON.parse(readFileSync(join(fixture.cwd, '.harness/receipt.json')));
+  assert.deepEqual(stored.repair, { optedIn: true, phase: 'verify', verdict: 'REQUEST_CHANGES' });
+  assert.equal(JSON.parse(readFileSync(join(fixture.cwd, '.harness/active-task.json'))).verificationAttempts, 2);
+  fixture.cli('review', '--verdict', 'APPROVE', '--reviewer', 'independent fixture', '--summary', 'Repairs resolved');
+  assert.equal((await verify(fixture.cwd, { plan })).outcome, 'PASS');
+});
+
+test('gate timeout reports elapsed time and deadline before the other lane finishes', async t => {
+  const fixture = repo(t);
+  const printed = [];
+  const originalLog = console.log;
+  const release = join(fixture.cwd, '.harness/release');
+  // The other lane can finish only after the timeout has been reported and
+  // persisted. Its longer deadline is a failsafe, not the expected runtime.
+  const plan = () => [
+    { id: 'short-budget', lane: 'frontend', minutes: 0.01, command: ['node', '-e', 'setInterval(() => {}, 1000)'] },
+    { id: 'other-lane', lane: 'rust', minutes: 0.5, command: ['node', '-e', "const fs=require('node:fs');const timer=setInterval(()=>{if(fs.existsSync('.harness/release')){clearInterval(timer);}},10);"] },
+    { id: 'must-not-start', lane: 'frontend', minutes: 1, command: ['node', '-e', 'throw new Error("unexpected gate")'] },
+  ];
+  let receipt;
+  try {
+    console.log = (...args) => {
+      const line = args.join(' ');
+      printed.push(line);
+      if (line.startsWith('TIMEOUT short-budget')) {
+        const stored = JSON.parse(readFileSync(join(fixture.cwd, '.harness/receipt.json')));
+        assert.equal(stored.gates.find(row => row.id === 'short-budget').outcome, 'TIMEOUT');
+        assert.equal(stored.gates.some(row => row.id === 'other-lane'), false);
+        writeFileSync(release, 'reported');
+      }
+    };
+    receipt = await verify(fixture.cwd, { base: fixture.base, plan });
+  } finally { console.log = originalLog; }
+  const timedOut = receipt.gates.find(row => row.id === 'short-budget');
+  assert.equal(receipt.outcome, 'TIMEOUT');
+  assert.equal(timedOut.deadlineMs, 600);
+  assert.ok(timedOut.elapsedMs >= timedOut.deadlineMs);
+  assert.match(printed.join('\n'), /TIMEOUT short-budget: .*elapsed .*deadline .*600ms/);
+  assert.equal(receipt.gates.find(row => row.id === 'other-lane').outcome, 'PASS');
+  assert.equal(receipt.gates.some(row => row.id === 'must-not-start'), false);
+  const summary = await waitForVerify(fixture.cwd, { graceMs: 0 });
+  assert.match(summary.lines.join('\n'), /TIMEOUT short-budget: .*elapsed .*deadline/);
+});
+
 test('real gate execution separates assertion failure, unavailable tool and timeout', async t => {
   const fixture = repo(t);
   const gate = (id, command, minutes = 1) => runGate(fixture.cwd, { id, command, minutes }, fixture.base);
@@ -2396,6 +2506,7 @@ test('a Rust file attached with #[path] selects the module that owns it', () => 
   assert.equal(rustModule('src-tauri/src/git/mesh_health_tests.rs'), 'git::health::mesh_health_tests');
   assert.equal(rustModule('src-tauri/src/git/fetch_origin_tests.rs'), 'git::sync::fetch_origin_tests');
   assert.equal(rustModule('src-tauri/src/commands/prune_tests.rs'), 'commands::prune::prune_tests');
+  assert.equal(rustModule('src-tauri/src/commands/file_tree_tests.rs'), 'commands::file_tree::file_tree_tests');
   assert.equal(rustModule('src-tauri/src/services/legacy_retirement/retirement_crash_tests.rs'), 'services::legacy_retirement::retirement_crash_tests');
   assert.equal(rustModule('src-tauri/src/agent/terminal_input.rs'), 'agent::process::terminal_input');
   assert.equal(rustModule('src-tauri/src/agent/prompt_delivery_tests.rs'), 'agent::prompt_delivery::tests');
@@ -2430,6 +2541,10 @@ test('a Rust file attached with #[path] selects the module that owns it', () => 
   assert.equal(rustModule('src-tauri/src/db/create_operation.rs'), 'db::create_operation_tests');
   assert.equal(rustModule('src-tauri/src/db/mesh.rs'), 'db::mesh_tests');
   assert.equal(rustModule('src-tauri/src/services/github/pagination.rs'), 'services::github::pagination_tests');
+  // The Circuit control module's `#[path]` suites (issue #2673).
+  assert.equal(rustModule('src-tauri/src/commands/circuit_tests.rs'), 'commands::circuit::tests');
+  assert.equal(rustModule('src-tauri/src/services/circuit_control/control_tests.rs'), 'services::circuit_control::tests');
+  assert.equal(rustModule('src-tauri/src/services/circuit_control/cancellation_tests.rs'), 'services::circuit_control::cancellation::tests');
   // A production file that carries test items of its own keeps its own
   // module: redirecting it to the sibling module would skip those tests.
   assert.equal(rustModule('src-tauri/src/agent/spawn/launch.rs'), 'agent::spawn::launch');
@@ -2455,10 +2570,13 @@ test('extracted Rust implementations and included worker tests select their cont
     ['agent/process/registry.rs', 'agent::process'],
     ['agent/provider/adapters/codex/install_probe.rs', 'agent::provider::adapters::codex'],
     ['services/agent_node/cleanup.rs', 'services::agent_node'],
-    ['services/github/pr_workflow.rs', 'commands::pr'],
+    ['services/github/pr_workflow.rs', 'services::github::pr_tests'],
     ['git/worktree/maintenance.rs', 'git::worktree'],
     ['db/circuit/evidence/transition.rs', 'db::circuit::evidence'],
     ['services/circuit_worker/tests/result_delivery.rs', 'services::circuit_worker::tests'],
+    ['services/circuit_control/operator.rs', 'services::circuit_control'],
+    ['services/circuit_control/review.rs', 'services::circuit_control'],
+    ['services/circuit_control/catalog.rs', 'services::circuit_control'],
   ];
   for (const [file, owner] of owners) {
     const path = `src-tauri/src/${file}`;

@@ -387,6 +387,7 @@ interface UIState extends GridControls {
   // before opening; `null` here means "closed" and nothing else.
   canvasSpawnMenuMeshId: number | null;
   canvasSpawnMenuOptions: { providerId?: string; initialPrompt?: string } | null;
+  canvasSpawnMenuRequestId: number;
   openCanvasSpawnMenu: (meshId: number, options?: { providerId?: string; initialPrompt?: string }) => void;
   closeCanvasSpawnMenu: () => void;
 
@@ -622,7 +623,8 @@ export const useUIStore = create<UIState>((set, get) => {
 
     canvasSpawnMenuMeshId: null,
     canvasSpawnMenuOptions: null,
-    openCanvasSpawnMenu: (meshId, options) => set({ canvasSpawnMenuMeshId: meshId, canvasSpawnMenuOptions: options ?? null }),
+    canvasSpawnMenuRequestId: 0,
+    openCanvasSpawnMenu: (meshId, options) => set(state => ({ canvasSpawnMenuMeshId: meshId, canvasSpawnMenuOptions: options ?? null, canvasSpawnMenuRequestId: state.canvasSpawnMenuRequestId + 1 })),
     closeCanvasSpawnMenu: () => set({ canvasSpawnMenuMeshId: null, canvasSpawnMenuOptions: null }),
 
     createMeshOpen: false,

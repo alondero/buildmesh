@@ -273,19 +273,26 @@ describe('Settings > Data & Diagnostics (issue #1537)', () => {
     expect(within(pane).getByTestId('settings-data-recovery-stage')).toBeTruthy();
   });
 
-  it('paints the destructive restore button white-on-error (#2466)', async () => {
+  it('paints the destructive restore button with the shared destructive recipe (#2466, #2775)', async () => {
     mockBackend();
     const pane = await openPane();
     await userEvent.click(within(pane).getByTestId('settings-data-recovery-inspect'));
     const stage = await within(pane).findByTestId('settings-data-recovery-stage');
     // Design-system parity with the other destructive confirmations —
-    // Modal.tsx:349, RemoteAccessPane.tsx:464 and WorktreeCloseDialog.tsx:113
-    // are each white-on-error. A surface token here (text-bg-card) instead
-    // flips its meaning with the theme, and it sat on the one button whose
-    // label commits the user to replacing their whole state.
-    expect(stage.className).toMatch(/\bbg-status-error\b/);
-    expect(stage.className).toMatch(/\btext-white\b/);
+    // Modal.tsx, RemoteAccessPane.tsx and WorktreeCloseDialog.tsx are each
+    // painted with the same recipe. A surface token here (text-bg-card)
+    // instead flips its meaning with the theme, and it sat on the one button
+    // whose label commits the user to replacing their whole state (#2466).
+    //
+    // #2775 moved that parity from "white on the status red" to the shared
+    // `destructive` fill with the `on-destructive` label: white on the raw
+    // status-error red measured 3.76:1 on hover, under the 4.5:1 body floor.
+    // `on-destructive` is white in BOTH themes, so the #2466 guarantee — a
+    // fixed-contrast label that never flips with the theme — still holds.
+    expect(stage.className).toMatch(/\bbg-destructive\b/);
+    expect(stage.className).toMatch(/\btext-on-destructive\b/);
     expect(stage.className).not.toMatch(/\btext-bg-/);
+    expect(stage.className).not.toMatch(/\btext-white\b/);
   });
 
   it('warns that a credential-free export costs a re-auth on restore', async () => {

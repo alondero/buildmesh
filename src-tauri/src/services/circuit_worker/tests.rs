@@ -35,6 +35,7 @@ include!("tests/admission.rs");
 include!("tests/capacity.rs");
 include!("tests/lineage_recovery.rs");
 include!("tests/watchdog.rs");
+include!("tests/tick_reuse.rs");
 include!("tests/github.rs");
 include!("tests/spawn.rs");
 include!("tests/waits.rs");

@@ -5614,3 +5614,319 @@ fn recorded_operator_review_drives_the_next_tick_and_injected_prompt() {
         assert!(prompt.contains("Address the requested changes") || next_node == "merge");
     }
 }
+
+/// Statements issued by one evidence read, counted on the readers
+/// [`crate::db::read_conn`] hands out.
+struct EvidenceReadCost {
+    statements: usize,
+    /// Reads of the bulky context side table. One logical context load is
+    /// one of these, however large the stored value is.
+    context_reads: usize,
+    /// `run_graph` lookups. One evidence read holds one graph.
+    graph_reads: usize,
+    /// Full step-list queries. One evidence read holds one list.
+    step_lists: usize,
+}
+
+fn evidence_read_cost(steps: usize) -> (EvidenceReadCost, EvidenceReadCost) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let _db = crate::db::test_support::isolated();
+    seed_unverified_prompt_steps(steps);
+
+    let statements = Arc::new(AtomicUsize::new(0));
+    let context_reads = Arc::new(AtomicUsize::new(0));
+    let graph_reads = Arc::new(AtomicUsize::new(0));
+    let step_lists = Arc::new(AtomicUsize::new(0));
+    let traced = crate::db::test_support::trace_readers({
+        let statements = Arc::clone(&statements);
+        let context_reads = Arc::clone(&context_reads);
+        let graph_reads = Arc::clone(&graph_reads);
+        let step_lists = Arc::clone(&step_lists);
+        move |conn| {
+            let statements = Arc::clone(&statements);
+            let context_reads = Arc::clone(&context_reads);
+            let graph_reads = Arc::clone(&graph_reads);
+            let step_lists = Arc::clone(&step_lists);
+            conn.trace_v2(
+                rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(move |event: rusqlite::trace::TraceEvent<'_>| {
+                    let rusqlite::trace::TraceEvent::Stmt(statement, _) = event else {
+                        return;
+                    };
+                    let sql = statement.sql();
+                    if sql.contains("circuit_run_artifacts") {
+                        context_reads.fetch_add(1, Ordering::SeqCst);
+                    }
+                    if sql.contains("circuit_run_snapshots") {
+                        graph_reads.fetch_add(1, Ordering::SeqCst);
+                    }
+                    if sql
+                        .contains("FROM autopilot_circuit_run_steps WHERE run_id = ?1 ORDER BY id")
+                    {
+                        step_lists.fetch_add(1, Ordering::SeqCst);
+                    }
+                    statements.fetch_add(1, Ordering::SeqCst);
+                }),
+            )
+            .unwrap();
+        }
+    });
+    assert!(
+        traced >= 1,
+        "the statement counter has to sit on the readers history() checks out"
+    );
+
+    let history = super::history(1).unwrap();
+    assert_eq!(history.checkpoints.len(), steps);
+    assert!(
+        history.checkpoints.iter().all(|checkpoint| {
+            checkpoint
+                .actions
+                .first()
+                .is_some_and(|action| matches!(action, CheckpointAction::ManualDelivered))
+        }),
+        "every unverified prompt step offers manual delivery"
+    );
+    let history_cost = EvidenceReadCost {
+        statements: statements.load(Ordering::SeqCst),
+        context_reads: context_reads.load(Ordering::SeqCst),
+        graph_reads: graph_reads.load(Ordering::SeqCst),
+        step_lists: step_lists.load(Ordering::SeqCst),
+    };
+
+    let before_attention = history_cost.statements;
+    let before_context = history_cost.context_reads;
+    let before_graphs = history_cost.graph_reads;
+    let before_steps = history_cost.step_lists;
+    let attention = super::attention(1).unwrap();
+    assert_eq!(attention.checkpoints.len(), steps);
+    assert!(
+        attention.checkpoints.iter().all(|checkpoint| {
+            checkpoint
+                .actions
+                .first()
+                .is_some_and(|action| matches!(action, CheckpointAction::ManualDelivered))
+        }),
+        "every unverified prompt step offers manual delivery"
+    );
+    let attention_cost = EvidenceReadCost {
+        statements: statements.load(Ordering::SeqCst) - before_attention,
+        context_reads: context_reads.load(Ordering::SeqCst) - before_context,
+        graph_reads: graph_reads.load(Ordering::SeqCst) - before_graphs,
+        step_lists: step_lists.load(Ordering::SeqCst) - before_steps,
+    };
+    (history_cost, attention_cost)
+}
+
+/// A running run whose every step is an unverified prompt checkpoint.
+///
+/// Each step has its own agent and a retained prompt payload, which is the
+/// shape that used to rebuild the recovery view once per step.
+fn seed_unverified_prompt_steps(steps: usize) {
+    let conn = crate::db::write_conn();
+    conn.execute_batch(
+        "INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+         INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');",
+    )
+    .unwrap();
+    for index in 0..steps {
+        let agent_id = (index as i64) + 1;
+        conn.execute(
+            "INSERT INTO agent_nodes(id,mesh_id,name,path,status,env,provider)
+             VALUES(?1,1,?2,'/repo','awaiting_input','windows','claude')",
+            params![agent_id, format!("agent-{index}")],
+        )
+        .unwrap();
+    }
+    // The source agent has to exist before the run row names it.
+    conn.execute(
+        "INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state,source_agent_node_id,context_json)
+         VALUES(1,1,1,'running',1,?1)",
+        [r#"{"source.agent_id":"1"}"#],
+    )
+    .unwrap();
+    let bulky = "report".repeat(400);
+    conn.execute(
+        "INSERT INTO circuit_run_artifacts(run_id, key, node_id, attempt, value, bytes)
+         VALUES (1,'source.output','source',0,?1,?2)",
+        params![bulky, bulky.len() as i64],
+    )
+    .unwrap();
+
+    let mut nodes = Vec::with_capacity(steps);
+    for index in 0..steps {
+        let node_id = format!("send-{index}");
+        let agent_id = (index as i64) + 1;
+        conn.execute(
+            "INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,agent_node_id)
+             VALUES(1,?1,1,'unverified',?2)",
+            params![node_id, agent_id],
+        )
+        .unwrap();
+        let identity = super::prompt_delivery::PayloadIdentity {
+            agent_node_id: agent_id,
+            digest: "digest".into(),
+            kind: super::prompt_delivery::DeliveryKind::Inject,
+            turn: None,
+            submission_seq: 0,
+            prepared_at_ms: 500,
+        };
+        append_history(
+            &conn,
+            HistoryEvent {
+                run_id: 1,
+                node_id: Some(&node_id),
+                attempt: Some(1),
+                kind: "prompt_payload",
+                detail: &serde_json::to_string(&identity).unwrap(),
+                source: Some(SOURCE_PROMPT_SUBMISSION),
+                disposition: Some(DISPOSITION_RECORDED),
+            },
+        )
+        .unwrap();
+        nodes.push(serde_json::json!({
+            "id": node_id,
+            "type": {"type":"inject_pty","prompt":"work","target_node_id":"$source"}
+        }));
+    }
+    let graph = serde_json::json!({"version":3,"nodes":nodes,"edges":[]});
+    conn.execute(
+        "UPDATE autopilot_circuits SET graph_json=?1",
+        params![graph.to_string()],
+    )
+    .unwrap();
+}
+
+#[test]
+fn history_and_attention_reads_stay_linear_in_unverified_steps() {
+    let (history_small, attention_small) = evidence_read_cost(4);
+    let (history_large, attention_large) = evidence_read_cost(16);
+
+    for (label, small, large) in [
+        ("history", history_small, history_large),
+        ("attention", attention_small, attention_large),
+    ] {
+        assert_eq!(
+            small.context_reads, 1,
+            "{label} read the stored context {} times for 4 steps ({} statements)",
+            small.context_reads, small.statements
+        );
+        assert_eq!(
+            large.context_reads, 1,
+            "{label} read the stored context {} times for 16 steps ({} statements)",
+            large.context_reads, large.statements
+        );
+        assert_eq!(
+            small.graph_reads, 1,
+            "{label} loaded the graph {} times",
+            small.graph_reads
+        );
+        assert_eq!(
+            large.graph_reads, 1,
+            "{label} loaded the graph {} times for 16 steps",
+            large.graph_reads
+        );
+        assert_eq!(
+            small.step_lists, 1,
+            "{label} listed steps {} times",
+            small.step_lists
+        );
+        assert_eq!(
+            large.step_lists, 1,
+            "{label} listed steps {} times for 16 steps",
+            large.step_lists
+        );
+        // Four times as many steps. A quadratic recovery rebuild grows by
+        // about sixteen times; a linear read stays well under four times.
+        assert!(
+            large.statements < small.statements.saturating_mul(4),
+            "{label} statements grew from {} at 4 steps to {} at 16 steps",
+            small.statements,
+            large.statements
+        );
+    }
+}
+
+#[test]
+fn batched_agent_node_lookups_use_the_primary_key() {
+    let _db = crate::db::test_support::isolated();
+    let conn = crate::db::read_conn().unwrap();
+    for sql in [
+        crate::db::agent_node::lifecycle_snapshot_in_sql(3),
+        crate::db::agent_node::agent_launch_in_sql(3),
+    ] {
+        let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let plan = statement
+            .query_map(params![1_i64, 2_i64, 3_i64], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let lookups: Vec<_> = plan
+            .iter()
+            .filter(|line| line.contains("agent_nodes"))
+            .collect();
+        assert!(
+            !lookups.is_empty()
+                && lookups.iter().all(|line| {
+                    line.contains("SEARCH") && line.contains("USING INTEGER PRIMARY KEY")
+                }),
+            "{sql} must search the primary key per id, got {plan:?}"
+        );
+        assert!(
+            plan.iter().all(|line| !line.contains("SCAN")),
+            "{sql} scanned the table: {plan:?}"
+        );
+    }
+}
+
+#[test]
+fn batched_lifecycle_blockers_match_the_per_id_read() {
+    use crate::agent::session_lifecycle::{
+        HookSignalDetail, LifecycleChangedPayload, LifecycleKind,
+    };
+    use crate::models::SessionStatus;
+
+    let _db = crate::db::test_support::isolated();
+    let conn = crate::db::write_conn();
+    conn.execute(
+        "INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO agent_nodes(id,mesh_id,name,path,status) VALUES(1,1,'open','/repo','running')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO agent_nodes(id,mesh_id,name,path,status,lifecycle_snapshot)
+         VALUES(2,1,'broken','/repo','running','{unreadable')",
+        [],
+    )
+    .unwrap();
+    let request = LifecycleChangedPayload::new(
+        3,
+        LifecycleKind::QuestionRequested,
+        SessionStatus::AwaitingInput,
+        &HookSignalDetail::default(),
+        "approval is still pending",
+    );
+    conn.execute(
+        "INSERT INTO agent_nodes(id,mesh_id,name,path,status,lifecycle_snapshot)
+         VALUES(3,1,'asking','/repo','awaiting_input',?1)",
+        [serde_json::to_string(&request).unwrap()],
+    )
+    .unwrap();
+
+    let ids = [1_i64, 2, 3, 4];
+    let batched = crate::db::agent_node::circuit_lifecycle_blockers_inner(&conn, &ids).unwrap();
+    for id in ids {
+        assert_eq!(
+            batched.get(&id).cloned().flatten(),
+            crate::db::agent_node::circuit_lifecycle_blocker_inner(&conn, id).unwrap(),
+            "agent {id}"
+        );
+    }
+}

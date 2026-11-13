@@ -333,6 +333,12 @@ pub struct HarnessConfigValue {
     /// as `None` via `#[serde(default)]`.
     #[serde(default)]
     pub permission_mode: Option<String>,
+    /// Optional agent / persona name for this harness (issue #1552 /
+    /// #2716). `None` means "no agent override at this layer". The
+    /// resolver drops the value when `supports_agent == false`.
+    /// Additive on disk — older files without the key load as `None`.
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 impl HarnessConfigValue {
@@ -344,6 +350,7 @@ impl HarnessConfigValue {
         self.model.as_deref().is_none_or(str::is_empty)
             && self.effort.as_deref().is_none_or(str::is_empty)
             && self.permission_mode.as_deref().is_none_or(str::is_empty)
+            && self.agent.as_deref().is_none_or(str::is_empty)
     }
 }
 
@@ -529,6 +536,17 @@ pub struct AppPreferences {
     /// as `None`.
     #[serde(default)]
     pub pr_spawn_prompt: Option<String>,
+    /// User-authored initial prompts, shared across this profile's projects.
+    #[serde(default)]
+    pub saved_prompts: Vec<SavedPrompt>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "SavedPrompt.ts")]
+pub struct SavedPrompt {
+    pub id: String,
+    pub name: String,
+    pub body: String,
 }
 
 /// Default for [`AppPreferences::confirm_before_quit`] (issue #1501).

@@ -332,7 +332,9 @@ describe('ProbePanel', () => {
     const subjectName = screen.getByTestId('probe-context-subject-name');
 
     expect(subjectName.textContent).toBe('Mesh: demo');
-    expect(subjectName.className).toContain('text-sm');
+    // The `text-label` role (#2739) — a functional label is drawn at the
+    // 13px interface size, never treated as microcopy.
+    expect(subjectName.className).toContain('text-label');
     expect(subjectName.className).toContain('font-medium');
     expect(subjectName.className).toContain('text-text-primary');
     // The row must no longer carry the muted/secondary run the old treatment
@@ -342,7 +344,7 @@ describe('ProbePanel', () => {
   });
 
   it('keeps the destination name heavier than the promoted subject (issue #2075)', () => {
-    // The subject grew to a `text-sm font-medium` line. Without a heavier
+    // The subject grew to a `text-label font-medium` line. Without a heavier
     // title the two header lines would render identically and the header
     // would stop saying which one is the destination.
     useUIStore.setState({ probeOpen: true, probeTab: 'files' });
@@ -350,7 +352,7 @@ describe('ProbePanel', () => {
 
     const title = screen.getByTestId('probe-context-title');
     expect(title.textContent).toBe('Project Files');
-    expect(title.className).toContain('text-sm');
+    expect(title.className).toContain('text-label');
     expect(title.className).toContain('font-semibold');
 
     const subjectName = screen.getByTestId('probe-context-subject-name');
@@ -367,7 +369,9 @@ describe('ProbePanel', () => {
 
     const detail = screen.getByTestId('probe-context-subject-detail');
     expect(detail.textContent).toBe('· Working tree: agent-1');
-    expect(detail.className).toContain('text-xs');
+    // The `text-meta` role (#2739): supporting metadata, one step below the
+    // label it qualifies.
+    expect(detail.className).toContain('text-meta');
     expect(detail.className).toContain('text-text-secondary');
     expect(detail.className).not.toContain('text-text-muted');
   });

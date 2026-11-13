@@ -242,6 +242,11 @@ pub(crate) struct ExplicitSpawnOverrides {
     /// treated as "absent" by the resolver rather than "expire
     /// immediately", mirroring the whitespace-only collapse rule above.
     pub(crate) timeout_seconds: Option<u32>,
+    /// Optional agent / persona name for this one spawn (issue #1552 /
+    /// #2716). Same cascade position as `model`: wins over the mesh row
+    /// and the application default; masked when the harness doesn't
+    /// advertise `supports_agent`.
+    pub(crate) agent: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

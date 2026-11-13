@@ -250,6 +250,7 @@ fn normalize_harness_default_trims_blanks_and_whitespace() {
         model: Some("   ".to_string()),
         effort: Some("  high  ".to_string()),
         permission_mode: None,
+        agent: None,
     };
     let norm = normalize_harness_default(raw);
     assert_eq!(norm.model, None);
@@ -265,6 +266,7 @@ fn harness_default_for_reads_back_stored_value() {
             model: Some("opus-4-1".to_string()),
             effort: None,
             permission_mode: None,
+            agent: None,
         },
     );
     let read = harness_default_for(&prefs, &SpawnOptionId::from("claude")).unwrap();
@@ -283,6 +285,7 @@ fn harness_default_for_proxy_drops_native_model_and_effort() {
             model: Some("gpt-5.1-codex".to_string()),
             effort: Some("high".to_string()),
             permission_mode: None,
+            agent: None,
         },
     );
     let read = harness_default_for(&prefs, &SpawnOptionId::from("codex:minimax"));
@@ -304,6 +307,7 @@ fn harness_default_for_proxy_keeps_permission_mode() {
             model: Some("opus-4-1".to_string()),
             effort: None,
             permission_mode: Some("prompt".to_string()),
+            agent: None,
         },
     );
     let read = harness_default_for(&prefs, &SpawnOptionId::from("claude:minimax")).unwrap();
@@ -340,6 +344,7 @@ fn upsert_harness_default_persists_then_round_trips() {
                 model: Some("opus-4-1".to_string()),
                 effort: None,
                 permission_mode: None,
+                agent: None,
             },
         )
         .unwrap();
@@ -364,6 +369,7 @@ fn upsert_harness_default_removes_entry_when_all_fields_blank() {
             model: Some("opus-4-1".to_string()),
             effort: None,
             permission_mode: None,
+            agent: None,
         },
     );
     upsert_harness_default(
@@ -373,6 +379,7 @@ fn upsert_harness_default_removes_entry_when_all_fields_blank() {
             model: Some("   ".to_string()),
             effort: None,
             permission_mode: None,
+            agent: None,
         },
     )
     .unwrap();
@@ -389,6 +396,7 @@ fn upsert_harness_default_rejects_unknown_harness_id() {
             model: Some("m".to_string()),
             effort: None,
             permission_mode: None,
+            agent: None,
         },
     )
     .unwrap_err();
@@ -405,6 +413,7 @@ fn upsert_harness_default_rejects_effort_on_harness_without_effort_control() {
             model: None,
             effort: Some("high".to_string()),
             permission_mode: None,
+            agent: None,
         },
     )
     .unwrap_err();
@@ -424,6 +433,7 @@ fn upsert_harness_default_validates_permission_mode() {
             model: None,
             effort: None,
             permission_mode: Some("prompt".to_string()),
+            agent: None,
         },
     )
     .expect("prompt is a Claude Code mode");
@@ -442,6 +452,7 @@ fn upsert_harness_default_validates_permission_mode() {
             model: None,
             effort: None,
             permission_mode: Some("turbo".to_string()),
+            agent: None,
         },
     )
     .unwrap_err();
@@ -454,10 +465,99 @@ fn upsert_harness_default_validates_permission_mode() {
             model: None,
             effort: None,
             permission_mode: Some("prompt".to_string()),
+            agent: None,
         },
     )
     .unwrap_err();
     assert!(err.contains("permission mode"), "{err}");
+}
+
+/// Issue #1552 / #2716: the agent slot is capability-gated like model/
+/// effort — OpenCode and OpenCode 2 accept it, every other harness
+/// refuses it at the write boundary. Whitespace collapses to absent;
+/// a space-bearing name fails before spawn (adapter validation).
+#[test]
+fn upsert_harness_default_validates_agent() {
+    let mut prefs = AppPreferences::default();
+    for harness in ["opencode", "opencode2"] {
+        upsert_harness_default(
+            &mut prefs,
+            harness,
+            HarnessConfigValue {
+                model: None,
+                effort: None,
+                permission_mode: None,
+                agent: Some("build".to_string()),
+            },
+        )
+        .unwrap_or_else(|e| panic!("{harness} must accept an agent: {e}"));
+        assert_eq!(
+            prefs
+                .harness_defaults
+                .get(harness)
+                .and_then(|v| v.agent.clone()),
+            Some("build".to_string())
+        );
+    }
+    // Whitespace-only collapses to absent (removes the sparse entry).
+    let mut prefs = AppPreferences::default();
+    upsert_harness_default(
+        &mut prefs,
+        "opencode",
+        HarnessConfigValue {
+            model: None,
+            effort: None,
+            permission_mode: None,
+            agent: Some("   ".to_string()),
+        },
+    )
+    .unwrap();
+    assert!(!prefs.harness_defaults.contains_key("opencode"));
+    // Harnesses without the control reject any value.
+    for harness in ["claude", "codex", "terminal"] {
+        let err = upsert_harness_default(
+            &mut prefs,
+            harness,
+            HarnessConfigValue {
+                model: None,
+                effort: None,
+                permission_mode: None,
+                agent: Some("build".to_string()),
+            },
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("does not support an agent"),
+            "{harness}: {err}"
+        );
+    }
+    // Malformed names fail at the adapter grammar (before spawn).
+    let err = upsert_harness_default(
+        &mut prefs,
+        "opencode",
+        HarnessConfigValue {
+            model: None,
+            effort: None,
+            permission_mode: None,
+            agent: Some("has space".to_string()),
+        },
+    )
+    .unwrap_err();
+    assert!(err.contains("agent"), "{err}");
+    // A proxied row keeps the agent (harness-side persona, like
+    // permission_mode) while dropping the native model.
+    let mut prefs = AppPreferences::default();
+    prefs.harness_defaults.insert(
+        "opencode".to_string(),
+        HarnessConfigValue {
+            model: Some("anthropic/claude-sonnet-4-5".to_string()),
+            effort: None,
+            permission_mode: None,
+            agent: Some("build".to_string()),
+        },
+    );
+    let read = harness_default_for(&prefs, &SpawnOptionId::from("opencode:minimax")).unwrap();
+    assert_eq!(read.agent.as_deref(), Some("build"));
 }
 
 #[test]
@@ -470,6 +570,7 @@ fn upsert_harness_default_accepts_model_only_on_non_effort_harness() {
             model: Some("some-model".to_string()),
             effort: None,
             permission_mode: None,
+            agent: None,
         },
     )
     .unwrap();
@@ -485,6 +586,7 @@ fn upsert_harness_default_rejects_effort_outside_vocabulary() {
             model: None,
             effort: Some("extreme".to_string()),
             permission_mode: None,
+            agent: None,
         },
     )
     .unwrap_err();
@@ -501,6 +603,7 @@ fn upsert_harness_default_accepts_codex_xhigh() {
             model: None,
             effort: Some("xhigh".to_string()),
             permission_mode: None,
+            agent: None,
         },
     )
     .unwrap();
@@ -516,6 +619,7 @@ fn upsert_harness_default_accepts_canonical_lowercase_via_capitalisation() {
             model: None,
             effort: Some("medium".to_string()),
             permission_mode: None,
+            agent: None,
         },
     )
     .unwrap();
@@ -531,6 +635,7 @@ fn failed_upsert_harness_default_leaves_cache_unchanged() {
                 model: Some("opus-4-1".to_string()),
                 effort: None,
                 permission_mode: None,
+                agent: None,
             },
         );
         let err = upsert_harness_default(
@@ -540,6 +645,7 @@ fn failed_upsert_harness_default_leaves_cache_unchanged() {
                 model: Some("m".to_string()),
                 effort: None,
                 permission_mode: None,
+                agent: None,
             },
         )
         .unwrap_err();
@@ -575,6 +681,7 @@ fn validate_harness_default_returns_normalized_value() {
             model: Some(" opus-4-1  ".to_string()),
             effort: Some(" high ".to_string()),
             permission_mode: None,
+            agent: None,
         },
     )
     .unwrap();

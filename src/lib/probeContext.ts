@@ -1,6 +1,6 @@
 import { readProjectFiles, readAgentChanges } from './probePathReads';
 import { readGitPruneInfo } from './gitPruneInfo';
-import { FilesIcon, ReviewIcon, UsageIcon, BellIcon, WorktreesIcon, PropertiesIcon, CircuitsIcon, IssuesIcon, PullsIcon, ArchiveIcon, NotesIcon, type ProbeIcon } from '../components/Probe/probeIcons';
+import { FilesIcon, ReviewIcon, UsageIcon, BellIcon, WorktreesIcon, PropertiesIcon, CircuitsIcon, IssuesIcon, PullsIcon, ArchiveIcon, NotesIcon, PromptsIcon, type ProbeIcon } from '../components/Probe/probeIcons';
 import type { ComponentType } from 'react';
 import { probeTabAdapter } from './probeTabAdapter';
 import type { ProbeLoader } from './probeResource';
@@ -54,6 +54,8 @@ export interface ProbeTabDefinition {
   baseline: ProbeBaseline;
   /** True when the destination contains edits or other stateful actions. */
   stateful: boolean;
+  /** Mixed-ownership tools may still browse global content without a Mesh. */
+  allowsMissingContext?: boolean;
   /** Explicit decision for a destination that reads a secondary ownership. */
   mixedOwnership?: string;
 }
@@ -69,7 +71,10 @@ export const PROBE_TAB_DEFINITIONS = {
   files: {
     discovery: { group: 'code', order: 0 },
     command: {
-      label: 'Open Files',
+      // Issue #1548 — the row was "Open Files" while the header read "Project
+      // Files", which broke ADR-0030's one-name rule for the third destination
+      // the issue had not enumerated. The row now follows its header.
+      label: 'Open Project Files',
       subtitle: 'Browse the project explorer',
       keywords: ['project', 'explorer', 'file tree'],
     },
@@ -204,6 +209,23 @@ export const PROBE_TAB_DEFINITIONS = {
     baseline: 'mesh',
     stateful: true,
   },
+  prompts: {
+    discovery: { group: 'automate', order: 1 },
+    command: {
+      label: 'Open Prompts',
+      subtitle: 'Reuse prompts to start fresh agents',
+      keywords: ['prompt library', 'saved prompts', 'templates', 'spawn'],
+    },
+    icon: PromptsIcon,
+    ...probeTabAdapter(() => import('../components/Probe/PromptsProbeTab').then(m => ({ Component: m.PromptsProbeTab, load: m.loadPrompts }))),
+    label: 'Prompts',
+    lens: 'mesh',
+    followsSelection: true,
+    baseline: 'mesh',
+    stateful: true,
+    allowsMissingContext: true,
+    mixedOwnership: 'The library is shared across Meshes. Only fresh spawning needs the selected Mesh; a focused agent never supplies its checkout or conversation.',
+  },
   issues: {
     discovery: { group: 'github', order: 0 },
     command: {
@@ -230,7 +252,14 @@ export const PROBE_TAB_DEFINITIONS = {
     },
     icon: PullsIcon,
     ...probeTabAdapter(() => import('../components/Probe/GitPullRequestsTab').then(m => ({ Component: m.GitPullRequestsTab, load: m.loadPulls }))),
-    label: 'Pull Requests',
+    // Issue #1548 — the header was "Pull Requests" while the palette row read
+    // "Open GitHub Pull Requests", which broke ADR-0030's one-name rule
+    // ("Open <Header>"). The header now carries the same "GitHub" qualifier as
+    // its sibling destination ("GitHub Issues"), so the row, the inspector
+    // header and the palette tile all read "GitHub Pull Requests". The id
+    // stays `pulls` — ADR-0030 keeps `probe-<tab>` ids stable for callers and
+    // deep links.
+    label: 'GitHub Pull Requests',
     lens: 'mesh',
     followsSelection: true,
     baseline: 'mesh',

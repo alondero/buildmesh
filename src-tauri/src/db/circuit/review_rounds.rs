@@ -45,14 +45,15 @@ pub(crate) fn current_limit(
     {
         return Ok(Some(limit));
     }
-    let preset = (context.get("source.review_preset") == Some("1"))
-        .then(|| {
-            context
-                .get("retry.max_retries")
-                .and_then(|value| value.parse::<i32>().ok())
-                .filter(|limit| *limit > 0)
-        })
-        .flatten();
+    let preset = (crate::circuit::lineage::RunLineage::decode(|key| context.get(key))
+        .is_local_preset())
+    .then(|| {
+        context
+            .get("retry.max_retries")
+            .and_then(|value| value.parse::<i32>().ok())
+            .filter(|limit| *limit > 0)
+    })
+    .flatten();
     // An authored zero budget stops after the current pass; only an explicit
     // run override of zero means unlimited.
     Ok(Some(preset.unwrap_or(authored).max(1)))

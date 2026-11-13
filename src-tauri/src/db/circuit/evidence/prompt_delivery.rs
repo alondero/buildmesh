@@ -139,25 +139,22 @@ fn latest(
         .transpose()
 }
 
-fn current(
+/// Whether `identity` is still the prompt a person may mark delivered.
+///
+/// The run, graph, and step come from `view`. The submission ordinal and the
+/// initial-delivery uncertainty are read here, so a newer submission still
+/// retires the payload even when the caller is holding an older view.
+fn identity_still_current(
     db: &Connection,
-    run_id: i64,
+    view: &crate::circuit::stepper::RunView,
     node_id: &str,
     attempt: i32,
-) -> Result<Option<PayloadIdentity>, DbError> {
-    let Some(identity) = latest(db, run_id, node_id, attempt)? else {
-        return Ok(None);
-    };
-    let run = super::super::ledger::get_circuit_run_inner(db, run_id)?
-        .ok_or_else(|| DbError::not_found("Run no longer exists."))?;
-    if run.state != "running" {
-        return Ok(None);
-    }
-    let view = recovery_view(db, &run)?;
-    let Some(step) = view.step(node_id).filter(|s| {
-        s.attempt == attempt && s.status == crate::circuit::stepper::StepStatus::Unverified
+    identity: &PayloadIdentity,
+) -> Result<bool, DbError> {
+    let Some(step) = view.step(node_id).filter(|step| {
+        step.attempt == attempt && step.status == crate::circuit::stepper::StepStatus::Unverified
     }) else {
-        return Ok(None);
+        return Ok(false);
     };
     let initial_uncertain: bool = if identity.kind == DeliveryKind::Initial {
         db.query_row("SELECT (EXISTS(SELECT 1 FROM circuit_effects WHERE run_id=?1 AND node_id=?2 AND attempt=?3
@@ -167,11 +164,11 @@ fn current(
                     WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND kind='prompt_payload')))
             AND NOT EXISTS(SELECT 1 FROM circuit_effects WHERE run_id=?1 AND node_id=?2 AND attempt=?3
                 AND kind='prompt' AND state='acknowledged')",
-            params![run_id,node_id,attempt],|r|r.get(0))?
+            params![view.run_id, node_id, attempt], |row| row.get(0))?
     } else {
         false
     };
-    let graph_kind = view.graph.node(node_id).map(|n| &n.kind);
+    let graph_kind = view.graph.node(node_id).map(|node| &node.kind);
     let kind_matches = match identity.kind {
         DeliveryKind::Inject => matches!(graph_kind, Some(CircuitNodeKind::InjectPty { .. })),
         DeliveryKind::Initial => {
@@ -189,22 +186,46 @@ fn current(
     let target = step
         .agent_node_id
         .or_else(|| view.resolve_target_agent(node_id));
-    if !kind_matches
-        || target != Some(identity.agent_node_id)
-        || newest_submission_seq(db, identity.agent_node_id)? != identity.submission_seq
-    {
-        return Ok(None);
-    }
-    Ok(Some(identity))
+    Ok(kind_matches
+        && target == Some(identity.agent_node_id)
+        && newest_submission_seq(db, identity.agent_node_id)? == identity.submission_seq)
 }
 
-pub(super) fn available(
+fn current(
     db: &Connection,
     run_id: i64,
     node_id: &str,
     attempt: i32,
+) -> Result<Option<PayloadIdentity>, DbError> {
+    let Some(identity) = latest(db, run_id, node_id, attempt)? else {
+        return Ok(None);
+    };
+    // An operator action re-reads the run. The evidence read does not: it
+    // passes the view it already holds, and `validate` still refuses a moved
+    // revision before it calls here.
+    let run = super::super::ledger::get_circuit_run_inner(db, run_id)?
+        .ok_or_else(|| DbError::not_found("Run no longer exists."))?;
+    if run.state != "running" {
+        return Ok(None);
+    }
+    let view = recovery_view(db, &run)?;
+    identity_still_current(db, &view, node_id, attempt, &identity)
+        .map(|matches| matches.then_some(identity))
+}
+
+pub(super) fn available(
+    db: &Connection,
+    view: &crate::circuit::stepper::RunView,
+    node_id: &str,
+    attempt: i32,
 ) -> Result<bool, DbError> {
-    Ok(current(db, run_id, node_id, attempt)?.is_some())
+    if view.state != crate::circuit::stepper::RunState::Running {
+        return Ok(false);
+    }
+    let Some(identity) = latest(db, view.run_id, node_id, attempt)? else {
+        return Ok(false);
+    };
+    identity_still_current(db, view, node_id, attempt, &identity)
 }
 
 pub(crate) fn payload_identity(request: &CircuitPromptRequest) -> Result<PayloadIdentity, DbError> {

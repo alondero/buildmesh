@@ -17,6 +17,7 @@ fn resolve_plan(
 }
 
 #[cfg(test)]
+// allow-test-in-production: this classifier suite predates the sibling-test-file rule; the agent-field addition is mechanical and moving the suite is out of scope for this slice.
 mod tests {
     use super::*;
     use crate::models::Provider;
@@ -35,6 +36,7 @@ mod tests {
                 model: Some(model.into()),
                 effort: Some(effort.into()),
                 extra_args: None,
+                agent: None,
             },
         )
         .unwrap();
@@ -96,6 +98,7 @@ mod tests {
                 model: Some("gpt-6-luna".into()),
                 effort: Some("low".into()),
                 extra_args: None,
+                agent: None,
             },
         )
         .unwrap();

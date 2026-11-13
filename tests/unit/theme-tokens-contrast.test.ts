@@ -238,7 +238,7 @@ describe('load-bearing text-text-muted sites promoted to text-text-secondary (#7
       // Anchored on the whole className, which is unique to this span (the
       // mode line below it uses `text-2xs text-text-secondary truncate` in the
       // other order).
-      fragment: 'truncate min-w-0 text-sm font-medium text-text-primary',
+      fragment: 'truncate min-w-0 text-label font-medium text-text-primary',
       mustNotContain: 'text-text-muted',
     },
     {
@@ -247,18 +247,21 @@ describe('load-bearing text-text-muted sites promoted to text-text-secondary (#7
       // Working Directory vs the repository root, an Agent lens' parent Mesh.
       // The half of the disclosure a reader needs to tell WHICH subject is on
       // screen, so it cannot fall back to muted either.
-      fragment: 'truncate min-w-0 text-xs text-text-secondary',
+      fragment: 'truncate min-w-0 text-meta text-text-secondary',
       mustNotContain: 'text-text-muted',
     },
     {
       file: 'src/components/Probe/ArchivedNodesTab.tsx',
-      // timeAgo(timestamp) — load-bearing timestamp.
-      fragment: '{timeAgo(session.timestamp)}',
+      // timeAgo(timestamp) — load-bearing timestamp. #2461 moved the
+      // relative age out of this tab; the absolute stamp it renders now is
+      // the load-bearing one.
+      fragment: '{formatListTimestamp(session.timestamp)}',
       mustNotContain: 'text-text-muted',
     },
     {
-      file: 'src/components/Probe/ProjectFilesTab.tsx',
-      // Active file path in the project files tab header.
+      file: 'src/components/shared/PathHeader.tsx',
+      // Active file path in the project files tab header. The header itself
+      // was lifted out of ProjectFilesTab into the shared PathHeader.
       fragment: 'text-xs font-mono text-text-secondary truncate flex-1 min-w-0',
       mustNotContain: 'text-text-muted',
     },
@@ -278,9 +281,10 @@ describe('load-bearing text-text-muted sites promoted to text-text-secondary (#7
       mustNotContain: 'text-text-muted',
     },
     {
-      file: 'src/components/AppSettings/HarnessConfigList.tsx',
-      // Provider base_url — config the user is editing.
-      fragment: '{p.base_url}',
+      file: 'src/components/AppSettings/ProxiedChildRow.tsx',
+      // Provider base_url — config the user is editing. The card that
+      // renders it was split out of HarnessConfigList.
+      fragment: '{pairing.base_url}',
       mustNotContain: 'text-text-muted',
     },
     {
@@ -289,7 +293,7 @@ describe('load-bearing text-text-muted sites promoted to text-text-secondary (#7
       // className tail — `{activeMeshPath}` only appears on the `value=`
       // line, not the className line, so it would let a className
       // revert slip through.
-      fragment: 'bg-bg-surface border border-border-subtle rounded px-2 py-1.5 text-xs text-text-',
+      fragment: 'bg-bg-surface border border-border-subtle rounded-md px-2 py-1.5 text-xs text-text-',
       mustNotContain: 'text-text-muted',
     },
   ];
@@ -299,11 +303,23 @@ describe('load-bearing text-text-muted sites promoted to text-text-secondary (#7
     ({ file, fragment, mustNotContain }) => {
       const src = readFileSync(resolve(__dirname, '../../' + file), 'utf8');
       const offendingLines: string[] = [];
+      let matchedLines = 0;
       src.split(/\r?\n/).forEach((line, idx) => {
-        if (line.includes(fragment) && line.includes(mustNotContain)) {
+        if (!line.includes(fragment)) return;
+        matchedLines += 1;
+        if (line.includes(mustNotContain)) {
           offendingLines.push(`${file}:${idx + 1}: ${line.trim()}`);
         }
       });
+      // A fragment that matches nothing makes the whole pin vacuous: the
+      // site it guards could change its classes and the test would still
+      // pass. Issue #2739 moved two of these sites onto the type-role
+      // tokens, which is exactly how a pin goes stale without anybody
+      // noticing — so the match itself is asserted.
+      expect(
+        matchedLines,
+        `The pinned fragment "${fragment}" no longer matches anything in ${file} — update the pin.`,
+      ).toBeGreaterThan(0);
       expect(
         offendingLines,
         `Load-bearing sites must not use ${mustNotContain}:\n  ${offendingLines.join('\n  ')}`,

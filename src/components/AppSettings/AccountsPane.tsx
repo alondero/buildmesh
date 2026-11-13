@@ -21,11 +21,10 @@ import { formatError } from '../../lib/errorUtils';
 import { isSelfAuthId, KEYED_FIRST_CLASS_IDS } from '../../lib/providerClassification';
 import { AccountCard } from './AccountCard';
 import { AddProviderForm } from './AddProviderForm';
-import { OpenCodeAccountCard } from './OpenCodeAccountCard';
 import { SettingsSection } from './SettingsRow';
 import { ResourceLoadStatus } from './ResourceLoadStatus';
 import { useSettingsData } from './SettingsDataContext';
-import type { ProviderAccount } from '../../lib/tauri';
+import type { ApiSurface, ProviderAccount } from '../../lib/tauri';
 
 export function AccountsPane() {
   const {
@@ -38,12 +37,15 @@ export function AccountsPane() {
     loadRouting,
     loadAccounts,
     loadProviders,
+    loadPreferences,
+    loadPairings,
     retryResource,
     setError,
     siteDirtyChange,
   } = useSettingsData();
 
   const [addingProvider, setAddingProvider] = useState(false);
+  const [addedConfiguration, setAddedConfiguration] = useState<string | null>(null);
   const accountsLoaded = resources.accounts.status === 'loaded';
 
   /** Refresh everything the accounts list feeds: the list itself, the
@@ -149,14 +151,27 @@ export function AccountsPane() {
     }
   };
 
+  const handleConfigure = async (name: string, apiKey: string, surface: ApiSurface, baseUrl: string, model: string) => {
+    setError(null);
+    try {
+      const configuration = await api.createCustomProvider(name, apiKey, surface, baseUrl, model);
+      siteDirtyChange('add-custom-form', false);
+      setAddingProvider(false);
+      setAddedConfiguration(configuration.name);
+      await Promise.all([refreshAccountsAndCatalog(), loadPreferences(), loadPairings()]);
+    } catch (e) {
+      setError(formatError(e));
+    }
+  };
+
   return (
     <SettingsSection
       title="Accounts"
       description={
         <>
           Self-auth brands always appear (enable + billing). Add keyed first-class
-          or generic providers for API keys. Base URL and model names are
-          configured when you attach a provider under Launch Configurations. Usage Meters live
+          or custom APIs. Custom setup saves the endpoint, model and a launch configuration together.
+          Manage routes under Launch Configurations. Usage Meters live
           on the <span className="font-medium">Usage</span> tab in the side panel.
         </>
       }
@@ -190,15 +205,20 @@ export function AccountsPane() {
         </div>
       )}
 
-      <div className="pt-6 border-t border-border-subtle space-y-4">
-        <OpenCodeAccountCard />
-      </div>
+      <SettingsSection title="OpenCode Go">
+        <p className="text-sm text-text-secondary">
+          Connect OpenCode Console in OpenCode 2 and select your Go workspace,
+          or connect OpenCode Go in OpenCode 1 with your API key. Usage and reset
+          times appear in the Usage tab automatically.
+        </p>
+      </SettingsSection>
 
       {addingProvider ? (
         <AddProviderForm
           catalog={keyedCatalog.filter((t) => !accounts.some((a) => a.id === t.id))}
           onAddCatalog={handleAddCatalogProvider}
           onAddGeneric={handleAddGeneric}
+          onConfigure={handleConfigure}
           onCancel={() => {
             siteDirtyChange('add-custom-form', false);
             setAddingProvider(false);
@@ -208,13 +228,16 @@ export function AccountsPane() {
         />
       ) : (
         <button
-          onClick={() => setAddingProvider(true)}
-          disabled={!prefsLoaded}
+          onClick={() => { setAddedConfiguration(null); setAddingProvider(true); }}
+          disabled={!prefsLoaded || !accountsLoaded}
           className="mt-4 text-base text-text-secondary hover:text-text-primary disabled:opacity-50"
         >
           + Add provider
         </button>
       )}
+      {addedConfiguration && <p role="status" className="mt-3 text-base text-text-secondary">
+        Saved {addedConfiguration}. Choose it from the harness spawn menu. The harness must be installed to launch.
+      </p>}
     </SettingsSection>
   );
 }

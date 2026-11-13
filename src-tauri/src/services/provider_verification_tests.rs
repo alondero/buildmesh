@@ -82,6 +82,26 @@ fn descriptor(endpoint: String) -> EndpointModelDescriptor {
 }
 
 #[test]
+fn verification_url_policy_supports_loopback_without_a_test_only_bypass() {
+    for base in [
+        "http://localhost:1234/v1",
+        "http://127.0.0.1:11434/v1",
+        "http://[::1]:8080/v1",
+        "https://provider.example/v1",
+    ] {
+        assert_eq!(responses_url(base).unwrap(), format!("{base}/responses"));
+    }
+    for base in [
+        "http://provider.example/v1",
+        "http://localhost.example/v1",
+        "https://user:secret@provider.example/v1",
+        "https://provider.example/v1?key=secret",
+    ] {
+        assert!(responses_url(base).is_err(), "{base}");
+    }
+}
+
+#[test]
 fn fake_responses_server_proves_streaming_tool_round_trip() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -351,7 +371,7 @@ fn incompatible_pairing_fails_before_the_trap_endpoint_or_codex_discovery() {
         surface: preferences::ApiSurface::OpenAI,
         base_url: Some(format!("https://{}", listener.local_addr().unwrap())),
         model_tiers: preferences::ModelTiers {
-            default: Some("kimi-k3".into()),
+            default: None,
             ..Default::default()
         },
     };
@@ -366,8 +386,9 @@ fn incompatible_pairing_fails_before_the_trap_endpoint_or_codex_discovery() {
 
     let error = codex_proxy_route(&pairing, &account, EnvType::Windows)
         .err()
-        .expect("Chat Completions pairing must fail closed");
+        .expect("pairing without an explicit model must fail closed");
     assert!(error.contains("unsupported"), "{error}");
+    assert!(error.contains("explicit model"), "{error}");
     assert_eq!(
         incompatible_status(&pairing),
         PairingVerificationStatus::Unsupported
@@ -576,6 +597,28 @@ fn advisory_install(version: &str) -> codex::CodexInstall {
         codex_home: r"C:\Users\u\.codex".into(),
         wsl_distro: None,
     }
+}
+
+#[test]
+fn kimi_responses_route_is_launchable_with_advisory_verification() {
+    let mut pairing = advisory_pairing();
+    pairing.provider_id = "kimi".into();
+    pairing.base_url = Some("https://api.moonshot.ai/v1".into());
+    pairing.model_tiers.default = Some("moonshot-model".into());
+    let mut account = advisory_account();
+    account.id = "kimi".into();
+    account.name = "Kimi".into();
+    let install = advisory_install("0.166.0");
+    let route = codex_proxy_route_with_install(&pairing, &account, &install, &[]).unwrap();
+    assert_eq!(route.descriptor.wire_api, WireApi::Responses);
+    assert_eq!(route.advisory, Some(VerificationAdvisory::Missing));
+    assert!(launchable_on_runtime_with(
+        &pairing,
+        &account,
+        EnvType::Windows,
+        Some(&install),
+        &[]
+    ));
 }
 
 /// A route that was never checked on this runtime still launches. The

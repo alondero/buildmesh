@@ -23,6 +23,7 @@ import type { LaunchTarget } from '../../src/types/generated/LaunchTarget';
 import type { OpenCodeConsoleStatus } from '../../src/types/generated/OpenCodeConsoleStatus';
 import type { OpenPr } from '../../src/types/generated/OpenPr';
 import type { GitStatus } from '../../src/types/generated/GitStatus';
+import type { SavedPrompt } from '../../src/types/generated/SavedPrompt';
 
 /** Fresh wire responses for each browser, checked by the root tsc gate. */
 export function buildDefaultFixtures() {
@@ -142,7 +143,7 @@ export function buildDefaultFixtures() {
       attention_capability: { kind: 'hook', events: ['turn_completed'], launch_mode: 'skip_permissions', trust: null, min_version: null },
       supports_passive_turn_watcher: false, supports_result_file_handoff: true,
       produces_readable_transcript: true,
-      supports_model_override: true, supports_effort_override: true,
+      supports_model_override: true, supports_agent: false, supports_effort_override: true,
       supports_extra_args: true, supports_prefill: true, accepts_initial_prompt: true, is_plain_terminal: false,
       effort_control: { kind: 'closed', allowed: ['low', 'medium', 'high'] },
       permission_modes: [], default_permission_mode: null,
@@ -153,6 +154,7 @@ export function buildDefaultFixtures() {
   return {
     list_meshes: meshes,
     list_agent_nodes: agentNodes,
+    list_saved_prompts: [] satisfies SavedPrompt[],
     get_default_provider: 'anthropic',
     list_providers: providers,
     list_routing_options: providers,
@@ -181,7 +183,7 @@ export function buildDefaultFixtures() {
       circuit_agent_pool_size: null, circuit_classifier_provider: null,
       harness_defaults: {}, spawn_configurations: [], deleted_launch_configurations: [],
       detached_provider_routes: [], harness_logins: [], worktree_directory: null, confirm_before_quit: true,
-      issue_spawn_prompt: null, pr_spawn_prompt: null,
+      issue_spawn_prompt: null, pr_spawn_prompt: null, saved_prompts: [],
     } satisfies AppPreferences,
     get_probe_spawn_prompt_defaults: {
       issue_template: 'Implement issue #{{number}}{{title_suffix}}: {{url}}',

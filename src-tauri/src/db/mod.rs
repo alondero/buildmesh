@@ -84,6 +84,7 @@ pub mod create_operation;
 pub mod drive;
 pub mod error;
 pub mod mesh;
+pub mod mesh_properties;
 pub mod semantic_turns;
 pub mod warm_pool;
 
@@ -187,6 +188,9 @@ mod circuit_prune_tests;
 
 #[cfg(test)]
 mod seam_tests;
+
+#[cfg(test)]
+mod test_support_tests;
 
 use once_cell::sync::OnceCell;
 pub use rusqlite::Result as SqlResult;

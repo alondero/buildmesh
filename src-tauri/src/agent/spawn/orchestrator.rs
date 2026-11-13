@@ -115,7 +115,7 @@ pub(super) fn prepare_initial_prompt(
     let Some(prompt) = intent.initial_prompt() else {
         return Ok(None);
     };
-    if !provider.adapter().accepts_initial_prompt() {
+    if !provider.adapter().descriptor().accepts_initial_prompt() {
         tracing::warn!(
             "spawn_with_intent: provider '{}' does not accept an initial prompt; skipping {} bytes",
             node.provider,
@@ -274,7 +274,7 @@ pub(crate) async fn spawn_with_intent_from(
             let decision = decide_startup_resume(
                 node.cli_session_id.as_deref(),
                 *cause,
-                adapter.auto_resume_on_startup(),
+                adapter.descriptor().auto_resume_on_startup,
             );
             match decision {
                 // Startup resume with no cli_session_id: there is nothing
@@ -369,7 +369,8 @@ pub(crate) async fn spawn_with_intent_from(
     };
     // A harness without CLI prefill launches plain and has the prompt typed
     // into its PTY once the TUI has booted.
-    let (prefill, typed_prompt) = split_initial_prompt(adapter.supports_prefill(), prefill);
+    let (prefill, typed_prompt) =
+        split_initial_prompt(adapter.descriptor().supports_prefill, prefill);
 
     if let Some(plan) = node
         .launch_configuration
@@ -381,6 +382,7 @@ pub(crate) async fn spawn_with_intent_from(
             model: explicit.model.clone(),
             effort: explicit.effort.clone(),
             extra_args: explicit.extra_args.clone(),
+            agent: explicit.agent.clone(),
         };
         // Explicit user overrides become the next saved launch; absent overrides
         // preserve the snapshot without consulting today's defaults or routes.
@@ -434,6 +436,7 @@ pub(crate) async fn spawn_with_intent_from(
             // (issue #1148 AC #32 + #1155 AC #3).
             explicit_model: explicit.model,
             explicit_effort: explicit.effort,
+            explicit_agent: explicit.agent,
             // #1219: per-step wall-clock budget from the AST.
             // Threaded into SpawnOptions → LaunchParams so the launch
             // phase logs it (and a future process-level watchdog can

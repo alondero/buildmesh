@@ -450,7 +450,7 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
         '--mesh-bg-hover': `${meshColor.hex}99`,
       } as React.CSSProperties)}
       className={`
-        pl-3 pr-1 py-1.5 rounded-md text-sm mb-0.5 flex items-center gap-2 group/node
+        pl-3 pr-1 py-1.5 rounded-md text-meta mb-0.5 flex items-center gap-2 group/node
         ${isClosing ? 'opacity-50 pointer-events-none cursor-default' : 'cursor-pointer'}
         ${isActive ? 'border border-accent-cyan/50' : 'border border-transparent bg-[var(--mesh-bg)] hover:bg-[var(--mesh-bg-hover)]'}
       `}
@@ -472,8 +472,10 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
         // `mesh-item-name-${id}` (issue #735).
         id={`node-item-name-${node.id}`}
         value={node.name}
+        ariaLabel={`Rename ${node.name}`}
+        onActivate={() => { closeGlance(); handleSelect(); }}
         onCommit={(next) => renameAgentNode(node.id, next)}
-        className="min-w-0 flex-1 truncate text-text-primary font-sans text-left text-sm"
+        className="min-w-0 flex-1 truncate text-text-primary font-sans text-left text-label"
       />
       {lostConversation && <MissingSessionIdBadge />}
       {showRestart && (
@@ -516,7 +518,7 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
               addToast('Resume failed', formatError(err), 'error');
             });
           }}
-          className="h-[24px] w-[24px] shrink-0 flex items-center justify-center rounded-md text-text-secondary hover:text-accent-violet hover:bg-bg-card-hover text-xs transition-colors"
+          className="h-[24px] w-[24px] shrink-0 flex items-center justify-center rounded-md text-text-secondary hover:text-accent-violet-strong hover:bg-bg-card-hover text-xs transition-colors"
           title="Resume agent"
           aria-label={`Resume ${node.name}`}
           data-testid="resume-button"
@@ -634,7 +636,7 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
                       : 'Pick a Model Provider for this node (including current to kick-start)'
               }
               data-testid="regenerate-trigger"
-              className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card-hover flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+              className="w-full text-left px-3 py-1.5 text-label text-text-secondary hover:bg-bg-card-hover flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
@@ -716,7 +718,7 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
               }}
               title="Discard stale session and boot a fresh agent"
               data-testid="context-start-fresh"
-              className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card-hover flex items-center gap-2"
+              className="w-full text-left px-3 py-1.5 text-label text-text-secondary hover:bg-bg-card-hover flex items-center gap-2"
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
@@ -743,7 +745,7 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
             }}
             title={node.is_pinned ? 'Remove this node from the Pinned grid' : 'Keep this node in the Pinned grid'}
             data-testid="pin-toggle"
-            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card-hover flex items-center gap-2"
+            className="w-full text-left px-3 py-1.5 text-label text-text-secondary hover:bg-bg-card-hover flex items-center gap-2"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill={node.is_pinned ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
               <path d="M12 17v5" fill="none" />

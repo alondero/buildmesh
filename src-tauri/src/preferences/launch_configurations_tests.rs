@@ -102,6 +102,7 @@ fn mcode_configuration_round_trips_and_resolves_model_before_defaults() {
             model: Some("minimax/application-default".into()),
             effort: None,
             permission_mode: None,
+            agent: None,
         },
     );
     let plan = launch_configurations::resolve_for_edit(&prefs, "launch/mcode-review").unwrap();
@@ -240,6 +241,7 @@ fn proxy_defaults_do_not_inherit_native_harness_models() {
             model: Some("sonnet".into()),
             effort: Some("high".into()),
             permission_mode: None,
+            agent: None,
         },
     );
     prefs
@@ -272,6 +274,7 @@ fn minimax_codex_m3_1_flash_accepts_real_efforts_and_rejects_none() {
                 model: Some("MiniMax-M3.1-Flash".into()),
                 effort: Some(effort.into()),
                 extra_args: None,
+                agent: None,
             },
         )
     };
@@ -301,6 +304,7 @@ fn minimax_codex_configuration_accepts_documented_thinking_choices() {
                 model: Some("MiniMax-M3".into()),
                 effort: Some(effort.into()),
                 extra_args: None,
+                agent: None,
             },
         )
         .unwrap();
@@ -313,6 +317,7 @@ fn minimax_codex_configuration_accepts_documented_thinking_choices() {
             model: Some("MiniMax-M3".into()),
             effort: Some("xhigh".into()),
             extra_args: None,
+            agent: None,
         },
     )
     .unwrap_err()
@@ -352,6 +357,7 @@ fn explicit_overrides_win_and_terminal_masks_unsupported_fields() {
             model: Some("app".into()),
             effort: Some("low".into()),
             permission_mode: None,
+            agent: None,
         },
     );
     let plan = resolve(&prefs, "claude", &Default::default()).unwrap();
@@ -361,6 +367,7 @@ fn explicit_overrides_win_and_terminal_masks_unsupported_fields() {
         model: Some("explicit".into()),
         effort: Some("high".into()),
         extra_args: Some("--verbose".into()),
+        agent: None,
     };
     let plan = resolve(&prefs, "claude", &overrides).unwrap();
     assert_eq!(plan.model.as_deref(), Some("explicit"));

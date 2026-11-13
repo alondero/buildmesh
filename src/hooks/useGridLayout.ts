@@ -15,3 +15,11 @@ export function getGridRows(nodeCount: number): number[] {
 export function equalSizes(n: number): number[] {
   return Array.from({ length: n }, () => 100 / n);
 }
+
+/** Space required to keep each pane at least 300px with unequal saved shares. */
+export function minimumGridSize(shares: number[], handleWidth: number): number {
+  if (shares.length === 0) return 0;
+  const gutterPerPane = (shares.length - 1) * handleWidth / shares.length;
+  return Math.max(...shares.map(share =>
+    (300 + gutterPerPane) * 100 / (Number.isFinite(share) && share > 0 ? share : 100 / shares.length)));
+}

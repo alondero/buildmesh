@@ -6,6 +6,7 @@ import { railRows } from '../Circuits/runOverviewModel';
 import { nodeRoleLabel, parseRunContext } from '../Circuits/runStepPresentation';
 import { reviewCircuitMetadata, reviewResult } from '../Circuits/runDiagnostics';
 import { reviewRound, reviewRoundLabel } from '../Circuits/ReviewRoundLimit';
+import { agentReviewLabel } from '../Circuits/runIdentity';
 
 export interface OverviewTabStatus {
   /** Visible tab text: run state, plus the review round when the run has one. */
@@ -39,7 +40,7 @@ export function overviewTabStatus(ownership: CircuitAgentOwnership | undefined, 
     ? railRows(overview.graph, overview.steps, overview.run.state).filter(row => row.state === 'current')
     : [];
   const detail = [
-    overview?.circuit_name ?? ownership?.circuit_name,
+    agentReviewLabel(context) ?? overview?.circuit_name ?? ownership?.circuit_name,
     stateLabel,
     hasRound ? reviewRoundLabel(roundContext) : null,
     ...current.map(row => nodeRoleLabel(row.nodeId, row.kind)),

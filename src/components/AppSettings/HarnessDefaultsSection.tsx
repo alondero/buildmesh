@@ -44,7 +44,7 @@ interface HarnessDefaultsSectionProps {
   disabled?: boolean;
 }
 
-const EMPTY_DEFAULT: HarnessConfigValue = { model: null, effort: null, permission_mode: null };
+const EMPTY_DEFAULT: HarnessConfigValue = { model: null, effort: null, permission_mode: null, agent: null };
 
 function effortAllowed(kind: EffortControlKind): string[] | null {
   switch (kind.kind) {
@@ -63,11 +63,12 @@ function effortKey(kind: EffortControlKind): string | null {
 }
 
 /** Whether Buildmesh can set anything for this harness: a model override, an
- *  effort, or a permission mode (a single enforced mode is shown read-only). */
+ *  effort, an agent, or a permission mode (a single enforced mode is shown read-only). */
 function hasConfigurableDefaults(provider: ProviderInfo): boolean {
   const caps = provider.capabilities;
   return (
     caps.supports_model_override ||
+    caps.supports_agent ||
     effortAllowed(caps.effort_control) !== null ||
     (caps.permission_modes ?? []).length > 0
   );
@@ -149,6 +150,7 @@ export function HarnessDefaultsSection({
       const isDirty =
         (draft.model ?? null) !== (current.committed.model ?? null) ||
         (draft.effort ?? null) !== (current.committed.effort ?? null) ||
+        (draft.agent ?? null) !== (current.committed.agent ?? null) ||
         (draft.permission_mode ?? null) !== (current.committed.permission_mode ?? null);
       return { ...prev, [harnessId]: { ...current, draft, dirty: isDirty } };
     });
@@ -182,7 +184,7 @@ export function HarnessDefaultsSection({
       const current = drafts[harnessId];
       if (!current) return;
       const ok = await onReset(harnessId);
-      const cleared: HarnessConfigValue = { model: null, effort: null, permission_mode: null };
+      const cleared: HarnessConfigValue = { model: null, effort: null, permission_mode: null, agent: null };
       if (ok) {
         setDrafts((prev) => ({
           ...prev,
@@ -258,6 +260,7 @@ function HarnessDefaultCard({
   const stored =
     draft.committed.model !== null ||
     draft.committed.effort !== null ||
+    (draft.committed.agent ?? null) !== null ||
     draft.committed.permission_mode !== null;
   const defaultMode = modes.find((m) => m.id === caps.default_permission_mode) ?? modes[0] ?? null;
   const selectedMode = modes.find((m) => m.id === (draft.draft.permission_mode ?? '')) ?? defaultMode;
@@ -307,6 +310,20 @@ function HarnessDefaultCard({
                 </option>
               ))}
             </select>
+          )}
+          {caps.supports_agent && (
+            <input
+              id={`harness-default-agent-${provider.harness_id}`}
+              type="text"
+              value={draft.draft.agent ?? ''}
+              placeholder="agent (e.g. build)"
+              onChange={(e) => onUpdate({ agent: e.target.value || null })}
+              onBlur={commitOnBlur(onCommit)}
+              disabled={disabled}
+              className="w-40 bg-bg-input border border-border-default rounded-md px-3 py-1.5 text-base text-text-primary focus:outline-none focus:border-border-active disabled:opacity-50"
+              aria-label={`${provider.label} default agent`}
+              data-testid={`harness-default-agent-input-${provider.harness_id}`}
+            />
           )}
           {draft.dirty && (
             <span

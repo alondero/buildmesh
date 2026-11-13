@@ -78,7 +78,7 @@ function clampToBounds(n: number): number {
   return Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, n));
 }
 
-export function useProbeResize(initialWidth = DEFAULT_WIDTH) {
+export function useProbeResize(initialWidth = DEFAULT_WIDTH, resolveWidth?: (visibleWidth: number) => number) {
   const [width, setRawWidth] = useState(() => loadStoredWidth(initialWidth));
 
   // Persist on settle rather than every mousemove frame — localStorage
@@ -90,7 +90,7 @@ export function useProbeResize(initialWidth = DEFAULT_WIDTH) {
     side: 'left',
     // useResizable clamps to its own [min, max] before calling onChange,
     // so the raw setter is safe to wire here.
-    onChange: setRawWidth,
+    onChange: (next: number) => setRawWidth(clampToBounds(resolveWidth?.(next) ?? next)),
   });
 
   useEffect(() => {
@@ -110,8 +110,8 @@ export function useProbeResize(initialWidth = DEFAULT_WIDTH) {
   // via useCallback so consumers can safely add it to dependency arrays
   // without retriggering effects.
   const setWidth = useCallback((next: number) => {
-    setRawWidth(clampToBounds(next));
-  }, []);
+    setRawWidth(clampToBounds(resolveWidth?.(next) ?? next));
+  }, [resolveWidth]);
 
   return { width, isResizing, handleMouseDown, setWidth };
 }

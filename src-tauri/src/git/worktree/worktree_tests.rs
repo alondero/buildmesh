@@ -1809,3 +1809,71 @@ fn removal_failure_names_the_operation_that_failed() {
         "the failure must carry the underlying error text"
     );
 }
+
+// ── issue #2220 — the removal rides out a holder that is still leaving ────
+
+/// Issue #2220: the removal renames the working directory into a staging
+/// sibling and then deletes the staged copy. A live process that holds the
+/// tree as its **working directory** blocks that: Windows refuses the rename
+/// with `the process cannot access the file because it is being used by
+/// another process` (os error 32), because the directory cannot be renamed
+/// while a process is sitting in it.
+///
+/// The removal must ride that window out rather than failing the first
+/// refusal — the working directory has already been renamed away by then,
+/// so a failure leaves the node stuck and the staged copy behind.
+///
+/// Windows-only: on Unix a process's working directory never blocks a
+/// rename or a delete.
+#[cfg(windows)]
+#[test]
+fn the_removal_rides_out_a_working_directory_that_is_still_pinned() {
+    use std::process::Stdio;
+
+    /// The pinning process, contained so that a failed assertion does not
+    /// leave it — or the `ping` it spawns — holding the tree.
+    struct Contained {
+        child: std::process::Child,
+        job: Option<crate::process_util::JobHandle>,
+    }
+
+    impl Drop for Contained {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            // Closing the job terminates whatever is still inside it, so a
+            // survivor does not keep the tree pinned after the test.
+            self.job.take();
+        }
+    }
+
+    let td = TestDir::new("pinned_cwd");
+    init_repo_with_commit(td.path(), &[("file.txt", "initial\n")]);
+    let wt = make_branched_worktree(td.path(), "wt-pinned");
+
+    // A process whose working directory is the tree. It holds no file inside
+    // it, so nothing about the tree's contents shows that it is there — only
+    // the removal's own refusal does.
+    let child = crate::process_util::command_no_window("cmd")
+        .args(["/d", "/q", "/c", "ping -n 3 127.0.0.1 > nul"])
+        .current_dir(&wt)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn the process that pins the working directory");
+    let job = crate::process_util::JobHandle::contain(child.id());
+    let mut pinned = Contained { child, job };
+
+    // The removal must succeed: it retries through the close-node window
+    // while the pinning process is on its way out.
+    remove_one_worktree(&wt.to_string_lossy())
+        .expect("the removal must ride out a pinned working directory");
+    assert!(!wt.exists(), "the working directory must be gone");
+
+    // The guard kills the pinning process and its tree when the test ends,
+    // however it ends.
+    let _ = pinned.child.kill();
+    let _ = pinned.child.wait();
+    pinned.job.take();
+}

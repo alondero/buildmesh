@@ -41,4 +41,11 @@ effort: string | null,
  * with no modes). Additive on disk — older files without the key load
  * as `None` via `#[serde(default)]`.
  */
-permission_mode: string | null, };
+permission_mode: string | null, 
+/**
+ * Optional agent / persona name for this harness (issue #1552 /
+ * #2716). `None` means "no agent override at this layer". The
+ * resolver drops the value when `supports_agent == false`.
+ * Additive on disk — older files without the key load as `None`.
+ */
+agent: string | null, };

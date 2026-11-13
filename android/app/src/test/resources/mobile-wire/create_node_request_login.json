@@ -1,0 +1,9 @@
+{
+  "cols": 80,
+  "login_id": "work",
+  "mesh_id": 3,
+  "operation_key": "op-1",
+  "prompt": "Fix it",
+  "provider": "codex",
+  "rows": 24
+}

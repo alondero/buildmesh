@@ -27,6 +27,10 @@ pub(crate) fn migrate_prefs_json(value: &mut serde_json::Value) -> bool {
         return false;
     };
     let mut changed = false;
+    if !root.contains_key("saved_prompts") {
+        root.insert("saved_prompts".into(), serde_json::json!([]));
+        changed = true;
+    }
     if let Some(legacy_pool) = root.remove("autopilot_pool_size") {
         root.entry("circuit_agent_pool_size").or_insert(legacy_pool);
         changed = true;

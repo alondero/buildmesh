@@ -1,12 +1,14 @@
-import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import { Fragment, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { useAgentNodeStore, type AgentNode } from '../../stores/agentNodeStore';
 import { useNodeActivityStore } from '../../stores/nodeActivityStore';
 import { useScope } from '../../hooks/useScope';
 import { useGridLayoutStore, resolveLayout } from '../../stores/gridLayoutStore';
 import { terminalManager } from '../Terminal/Terminal';
 import { NodeCard } from './NodeCard';
-import { getGridRows, equalSizes } from '../../hooks/useGridLayout';
+import { getGridRows, equalSizes, minimumGridSize } from '../../hooks/useGridLayout';
 import { useResizable, SPLITTER_HANDLE_WIDTH } from '../../hooks/useResizable';
+import { useActiveCardScroll } from './useActiveCardScroll';
+import { useGridResizeFloor } from './useGridResizeFloor';
 
 const MIN_PANE_PX = 300;
 
@@ -52,6 +54,8 @@ export function GridSplitter({ nodes, activityMembersByRoot, draggable = true }:
   // same behaviour 'all' already had via a null selection.
   const scope = useScope();
   const layoutMeshId = scope.viewMode === 'mesh' ? scope.selectedMeshId : null;
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const { floor, capture } = useGridResizeFloor(viewportRef, `${layoutMeshId}:${rowKey}`);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerSize, setContainerSize] = useState({ width: 1000, height: 600 });
@@ -150,7 +154,8 @@ export function GridSplitter({ nodes, activityMembersByRoot, draggable = true }:
     compute: (baseline, deltaPx) => {
       const containerSize = dragContainerSizeRef.current?.width;
       if (!containerSize) return baseline;
-      const minPct = (MIN_PANE_PX / containerSize) * 100;
+      const columns = rowCounts[rowIdxRef.current];
+      const minPct = ((MIN_PANE_PX + (columns - 1) * SPLITTER_HANDLE_WIDTH / columns) / containerSize) * 100;
       const deltaPct = (deltaPx / containerSize) * 100;
       return clampResizeAdjacentPair(baseline, idxRef.current, deltaPct, minPct);
     },
@@ -169,7 +174,7 @@ export function GridSplitter({ nodes, activityMembersByRoot, draggable = true }:
     compute: (baseline, deltaPx) => {
       const containerSize = dragContainerSizeRef.current?.height;
       if (!containerSize) return baseline;
-      const minPct = (MIN_PANE_PX / containerSize) * 100;
+      const minPct = ((MIN_PANE_PX + (rows - 1) * SPLITTER_HANDLE_WIDTH / rows) / containerSize) * 100;
       const deltaPct = (deltaPx / containerSize) * 100;
       return clampResizeAdjacentPair(baseline, idxRef.current, deltaPct, minPct);
     },
@@ -188,9 +193,10 @@ export function GridSplitter({ nodes, activityMembersByRoot, draggable = true }:
     idxRef.current = index;
     rowIdxRef.current = row;
     const el = containerRef.current;
+    capture(axis === 'col' ? 'width' : 'height', el);
     if (el) {
       const rect = el.getBoundingClientRect();
-      dragContainerSizeRef.current = { width: rect.width, height: rect.height };
+      dragContainerSizeRef.current = { width: rect.width - 8, height: rect.height - 8 };
     }
     if (axis === 'col') {
       // `colWidthsRef.current[row]` is read SYNCHRONOUSLY here, after the
@@ -208,27 +214,27 @@ export function GridSplitter({ nodes, activityMembersByRoot, draggable = true }:
   const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
   const activateNode = useNodeActivityStore(state => state.activateNode);
 
+  useActiveCardScroll(containerRef, activeNodeId);
+
   const totalHandleHeightPct = ((rows - 1) * SPLITTER_HANDLE_WIDTH / containerSize.height) * 100;
 
-  const needsScroll = rows * MIN_PANE_PX + (rows - 1) * SPLITTER_HANDLE_WIDTH > containerSize.height;
-
   return (
+    <div ref={viewportRef} className="flex-1 min-h-0 min-w-0 overflow-auto" data-testid="grid-scroll-viewport">
     <div
       ref={containerRef}
-      className="flex-1 flex flex-col p-1 bg-bg-surface overflow-x-hidden"
-      style={{ overflowY: needsScroll ? 'auto' : 'hidden' }}
+      className="flex h-full flex-col p-1 bg-bg-surface"
+      style={{ minWidth: Math.max(floor.width, Math.max(...rowCounts.map((count, row) => minimumGridSize(colWidths[row] ?? equalSizes(count), SPLITTER_HANDLE_WIDTH))) + 8),
+        minHeight: Math.max(floor.height, minimumGridSize(rowHeights, SPLITTER_HANDLE_WIDTH) + 8) }}
     >
       {rowCounts.map((rowCount, rowIdx) => {
-        const rowHeight = needsScroll
-          ? `${MIN_PANE_PX}px`
-          : `calc(${rowHeights[rowIdx] ?? 100 / rows}% - ${totalHandleHeightPct / rows}%)`;
+        const rowHeight = `calc(${rowHeights[rowIdx] ?? 100 / rows}% - ${totalHandleHeightPct / rows}%)`;
 
         const widths = colWidths[rowIdx] ?? equalSizes(rowCount);
         const totalHandleWidthPct = ((rowCount - 1) * SPLITTER_HANDLE_WIDTH / containerSize.width) * 100;
         const startIdx = rowCounts.slice(0, rowIdx).reduce((a, b) => a + b, 0);
 
         return (
-          <div key={`row-${rowIdx}`} className="flex flex-col" style={{ height: rowHeight, flexShrink: needsScroll ? 0 : undefined }}>
+          <div key={`row-${rowIdx}`} className="flex flex-col shrink-0" style={{ height: rowHeight }}>
             <div className="flex flex-1 overflow-hidden">
               {Array.from({ length: rowCount }, (_, colIdx) => {
                 const node = nodes[startIdx + colIdx];
@@ -239,7 +245,8 @@ export function GridSplitter({ nodes, activityMembersByRoot, draggable = true }:
                 };
 
                 return (
-                  <div key={node.id} className="flex" style={colStyle}>
+                  <Fragment key={node.id}>
+                  <div className="flex" style={colStyle}>
                     <NodeCard
                       nodeId={node.id}
                       memberIds={activityMembersByRoot[node.id] ?? [node.id]}
@@ -247,6 +254,7 @@ export function GridSplitter({ nodes, activityMembersByRoot, draggable = true }:
                       onActivate={activateNode}
                       draggable={draggable}
                     />
+                  </div>
                     {colIdx < rowCount - 1 && (
                       <div
                         onMouseDown={startDrag('col', colIdx, rowIdx)}
@@ -254,7 +262,7 @@ export function GridSplitter({ nodes, activityMembersByRoot, draggable = true }:
                         style={{ width: SPLITTER_HANDLE_WIDTH }}
                       />
                     )}
-                  </div>
+                  </Fragment>
                 );
               })}
             </div>
@@ -268,6 +276,7 @@ export function GridSplitter({ nodes, activityMembersByRoot, draggable = true }:
           </div>
         );
       })}
+    </div>
     </div>
   );
 }

@@ -12,14 +12,37 @@ use crate::agent::provider::compatibility::{
 /// including the retired `MiniMax-M3[1m]` alias, stays capability-incomplete.
 const MINIMAX_RESPONSES_MODELS: &[&str] = &["MiniMax-M3.1-Flash", "MiniMax-M3"];
 
+/// Shared URL policy for route setup and verification, including local servers.
+/// This is identical in production and tests; tests bind loopback listeners.
+pub(crate) fn validate_endpoint_url(value: &str) -> Result<reqwest::Url, String> {
+    let url = reqwest::Url::parse(value).map_err(|_| "Enter a valid API base URL")?;
+    let loopback = url.host_str().is_some_and(|host| {
+        host == "localhost"
+            || host
+                .trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    });
+    if !(url.scheme() == "https" || (url.scheme() == "http" && loopback))
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("Use an HTTPS base URL (HTTP is allowed for localhost), without credentials, query, or fragment".into());
+    }
+    Ok(url)
+}
+
 fn is_minimax_responses_model(model_id: &str) -> bool {
     MINIMAX_RESPONSES_MODELS.contains(&model_id)
 }
 
 /// Reconstruct the exact endpoint/model descriptor from persisted pairing
-/// state. `ApiSurface::OpenAI` is deliberately not proof of Responses
-/// compatibility: known Kimi rows are classified as Chat Completions, and
-/// MiniMax's retired `[1m]` alias is left capability-incomplete.
+/// state. The OpenAI surface declares Responses; verification checks whether
+/// the endpoint implements it. MiniMax's retired `[1m]` alias is left
+/// capability-incomplete.
 pub fn endpoint_model_descriptor(pairing: &ProviderPairing) -> EndpointModelDescriptor {
     let endpoint = pairing.base_url.as_deref().unwrap_or("").trim().to_string();
     let model_id = pairing
@@ -32,10 +55,6 @@ pub fn endpoint_model_descriptor(pairing: &ProviderPairing) -> EndpointModelDesc
     let (wire_api, capabilities) = match pairing.surface {
         ApiSurface::Anthropic => (
             WireApi::AnthropicMessages,
-            compatibility::complete_agent_capabilities(),
-        ),
-        ApiSurface::OpenAI if pairing.provider_id == "kimi" => (
-            WireApi::ChatCompletions,
             compatibility::complete_agent_capabilities(),
         ),
         ApiSurface::OpenAI

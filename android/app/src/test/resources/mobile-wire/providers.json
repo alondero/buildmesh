@@ -19,6 +19,7 @@
       "permission_modes": [],
       "produces_readable_transcript": true,
       "requires_attention_hook": false,
+      "supports_agent": false,
       "supports_effort_override": false,
       "supports_extra_args": true,
       "supports_model_override": true,
@@ -57,6 +58,7 @@
       "permission_modes": [],
       "produces_readable_transcript": true,
       "requires_attention_hook": false,
+      "supports_agent": false,
       "supports_effort_override": false,
       "supports_extra_args": true,
       "supports_model_override": true,
@@ -104,6 +106,7 @@
       "permission_modes": [],
       "produces_readable_transcript": true,
       "requires_attention_hook": false,
+      "supports_agent": false,
       "supports_effort_override": false,
       "supports_extra_args": true,
       "supports_model_override": true,
@@ -142,6 +145,7 @@
       "permission_modes": [],
       "produces_readable_transcript": true,
       "requires_attention_hook": false,
+      "supports_agent": false,
       "supports_effort_override": false,
       "supports_extra_args": true,
       "supports_model_override": true,
@@ -157,6 +161,26 @@
     "id": "codex",
     "is_proxied": false,
     "label": "Unavailable agent",
+    "logins": [
+      {
+        "id": "default",
+        "is_default": true,
+        "label": "Default",
+        "signed_in": false
+      },
+      {
+        "id": "work",
+        "is_default": false,
+        "label": "Work",
+        "signed_in": true
+      },
+      {
+        "id": "guest",
+        "is_default": false,
+        "label": "Guest",
+        "signed_in": false
+      }
+    ],
     "provider_id": null,
     "resumable": true,
     "unavailable_reason": "Missing executable"

@@ -467,6 +467,45 @@ fn summarize(entries: &[FileStatus]) -> StatusSummary {
     summary
 }
 
+/// The counts over a list of change kinds.
+///
+/// This is the **one** implementation of the *change-set* counting policy
+/// (issue #2527): the Node Change Set's header and its file tree both fold
+/// with it, so the header and the tree cannot disagree.
+///
+/// The Changed Files Section counts a different list — the working-tree
+/// status — and keeps its own buckets in [`summarize`]: there an untracked
+/// or a renamed file counts towards the total and towards no bucket. The two
+/// views therefore do not agree on a renamed or an untracked file, and they
+/// are not meant to: one counts what the working tree holds, the other what
+/// the node changed since it branched. The change-set buckets are:
+///
+/// - `added` counts new *and* untracked files. An untracked file is a new
+///   file the agent wrote; leaving it out of the count is how a node's
+///   header said "no changes" while its tree listed them.
+/// - `deleted` counts removals.
+/// - everything else — modified, renamed — reads as a modification.
+pub(crate) fn summarize_statuses<'a>(statuses: impl IntoIterator<Item = &'a str>) -> StatusSummary {
+    let mut summary = StatusSummary::default();
+    for status in statuses {
+        summary.total += 1;
+        match status {
+            "added" | "untracked" => summary.added += 1,
+            "deleted" => summary.deleted += 1,
+            _ => summary.modified += 1,
+        }
+    }
+    summary
+}
+
+/// The counts over a changed-file list.
+///
+/// The Node Change Set's header is this fold over the very same list the
+/// file tree renders, so the header and the tree can never disagree.
+pub fn changed_files_summary(files: &[ChangedFile]) -> StatusSummary {
+    summarize_statuses(files.iter().map(|file| file.status.as_str()))
+}
+
 /// The files changed relative to a baseline, read from an open repository.
 fn changed_files_in(
     repo: &Repository,

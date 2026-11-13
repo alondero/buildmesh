@@ -17,8 +17,8 @@ const fixtures = {
 const destinations = [
   ['files', 'Project Files'], ['review', 'Agent Changes'],
   ['properties', 'Project Settings'], ['worktrees', 'Repository'],
-  ['issues', 'GitHub Issues'], ['pulls', 'Pull Requests'],
-  ['circuits', 'Circuits'], ['sessions', 'Agent History'],
+  ['issues', 'GitHub Issues'], ['pulls', 'GitHub Pull Requests'],
+  ['circuits', 'Circuits'], ['prompts', 'Prompts'], ['sessions', 'Agent History'],
   ['scratchpad', 'Notes'], ['usage', 'Usage'], ['notifications', 'Notifications'],
 ] as const;
 

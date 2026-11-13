@@ -87,14 +87,15 @@ export default function Connect({ onConnected, notice }: Props) {
       data-testid="connect-screen"
       style={{
         flex: 1,
+        minHeight: 0,
+        overflowY: "auto",
         display: "flex",
         flexDirection: "column",
         alignItems: "center",
-        justifyContent: "center",
         padding: 24,
-        gap: 12,
       }}
     >
+      <div style={{ marginBlock: "auto", flexShrink: 0, width: "100%", display: "flex", flexDirection: "column", alignItems: "center", gap: 12 }}>
       <div
         aria-hidden
         style={{
@@ -215,6 +216,7 @@ export default function Connect({ onConnected, notice }: Props) {
         >
           Reconnect paired phone
         </button>
+      </div>
     </main>
   );
 }

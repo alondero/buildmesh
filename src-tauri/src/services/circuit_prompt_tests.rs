@@ -40,7 +40,7 @@ fn payload_command_rejects_missing_run_and_malformed_request() {
         attempt: 1,
         expected_revision: 0,
     };
-    assert!(crate::commands::circuit::circuit_prompt_payload_blocking(request).is_err());
+    assert!(crate::services::circuit_prompt::payload(&request).is_err());
     assert!(
         serde_json::from_value::<CircuitPromptRequest>(serde_json::json!({"run_id":"bad"}))
             .is_err()

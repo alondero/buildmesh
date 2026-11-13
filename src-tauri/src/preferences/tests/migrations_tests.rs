@@ -91,6 +91,7 @@ fn migrate_prefs_json_pure_creates_pairing_and_strips_fields() {
 fn migrate_prefs_json_does_not_auto_pair_after_flag_set() {
     let mut value = serde_json::json!({
         "ad0025_account_pairings_migrated": true,
+        "saved_prompts": [],
         "provider_accounts": [
             {
                 "id": "minimax",

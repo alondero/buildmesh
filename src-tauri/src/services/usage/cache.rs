@@ -276,16 +276,6 @@ impl UsageCache {
             .unwrap()
             .retain(|key, _| key.provider != provider);
     }
-
-    fn provider_age(&self, provider: &str) -> Option<Duration> {
-        self.entries
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(key, _)| key.provider == provider)
-            .map(|(_, (instant, _))| instant.elapsed())
-            .min()
-    }
 }
 
 pub(crate) static USAGE_CACHE: once_cell::sync::Lazy<UsageCache> =
@@ -330,12 +320,4 @@ pub fn invalidate_cache() {
 /// re-fetching unrelated providers on the next usage-panel poll.
 pub fn invalidate_provider_cache(provider: &str) {
     USAGE_CACHE.remove_provider(provider);
-}
-
-/// Test-only: cache age for the OpenCode pre-emptive refresh check.
-/// Exposed so the OpenCode adapter (which lives outside this module) can
-/// decide whether its live credential is older than `REFRESH_TTL` without
-/// reaching into the cache internals.
-pub(crate) fn cached_age(provider: &str) -> Option<Duration> {
-    USAGE_CACHE.provider_age(provider)
 }

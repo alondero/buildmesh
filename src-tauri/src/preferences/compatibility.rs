@@ -33,6 +33,7 @@ pub fn normalize_harness_default(raw: HarnessConfigValue) -> HarnessConfigValue 
         model: trim_to_none(raw.model.as_deref()),
         effort: trim_to_none(raw.effort.as_deref()),
         permission_mode: trim_to_none(raw.permission_mode.as_deref()),
+        agent: trim_to_none(raw.agent.as_deref()),
     }
 }
 
@@ -113,6 +114,16 @@ pub fn validate_harness_default(
             ));
         }
     }
+    if let Some(agent) = normalized.agent.as_deref() {
+        if !caps.supports_agent {
+            return Err(format!(
+                "harness '{profile_id}' does not support an agent override"
+            ));
+        }
+        resolve_harness_provider(profile_id)
+            .adapter()
+            .validate_agent_override(agent)?;
+    }
     Ok(normalized)
 }
 
@@ -172,6 +183,9 @@ pub fn harness_default_for(
         model: None,
         effort: None,
         permission_mode: stored.permission_mode.clone(),
+        // Agent is a harness-side persona, not an endpoint fact — like
+        // permission_mode it keeps cascading to a proxied spawn.
+        agent: stored.agent.clone(),
     };
     (!scoped.is_empty()).then_some(scoped)
 }
@@ -248,8 +262,8 @@ fn fallback_surfaces(harness_id: &str) -> &'static [ApiSurface] {
 ///     Anthropic pairing + account key (legacy pre-composite node ids).
 ///
 /// Returns empty when no account matches or no stored pairing exists — the
-/// spawn path resets inherited backend vars first (see
-/// [`crate::agent::provider::AgentProvider::resets_backend_env`]), so empty
+/// Anthropic launch adapter resets inherited backend vars first (see
+/// [`crate::agent::provider::AgentProvider::prepare_launch`]), so empty
 /// means a clean slate, not a leaked override.
 ///
 /// The env is resolved from an **already-loaded** preferences snapshot, so the

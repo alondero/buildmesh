@@ -251,7 +251,8 @@ function CenterHeadBaseDiff({ diff, closeDiff, parentLabel }: DiffBranchProps) {
   // when the watcher reports a change in this worktree.
   // Issue #1165: same 2 s freshness window — a burst of `GIT_CHANGED` events
   // during a heavy edit session collapses to one trailing refetch instead of
-  // one per emit (each refetch hits the libgit2 walk + 3× syntect pass).
+  // one per emit (each refetch hits the libgit2 walk + a per-line syntect
+  // pass).
   useGitPathInvalidation(diff.rootPath, () => fetchDiff({ background: true }), {
     minRefetchIntervalMs: 2_000,
   });

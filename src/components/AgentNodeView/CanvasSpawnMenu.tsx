@@ -36,6 +36,7 @@
  * click-outside scope.
  */
 import { useEffect } from 'react';
+import { enterMesh } from '../../lib/navigation';
 import { Modal, ModalCloseButton } from '../shared/Modal';
 import { GroupedProviderMenu } from '../Providers/GroupedProviderMenu';
 import { SafeLink } from '../shared/SafeLink';
@@ -121,13 +122,15 @@ export function CanvasSpawnMenu({ meshId }: CanvasSpawnMenuProps) {
       onClose={close}
       labelledBy="canvas-spawn-menu-title"
       maxWidth="max-w-sm"
+      className="flex flex-col max-h-[90vh] p-4"
     >
-      <div className="flex items-start justify-between mb-3">
+      <div className="flex shrink-0 items-start justify-between gap-3 mb-3">
         <h2 id="canvas-spawn-menu-title" className="text-sm font-semibold text-text-primary">
           Spawn agent in {targetMesh.name}
         </h2>
         <ModalCloseButton onClose={close} />
       </div>
+      <div className="min-h-0 min-w-0 overflow-y-auto overflow-x-hidden">
       {noAgent && (
         <div
           data-testid="canvas-spawn-menu-empty-state"
@@ -147,6 +150,9 @@ export function CanvasSpawnMenu({ meshId }: CanvasSpawnMenuProps) {
           </SafeLink>
         </div>
       )}
+      <button type="button" onClick={() => { close(); enterMesh(targetMesh.id, { probeTab: 'prompts' }); }} className="mb-3 min-h-8 w-full rounded-md border border-border-default px-3 py-2 text-left text-sm text-text-primary hover:bg-bg-card-hover">
+        Choose a prompt…
+      </button>
       <GroupedProviderMenu
         providers={providerList}
         initialProviderId={options?.providerId}
@@ -161,6 +167,7 @@ export function CanvasSpawnMenu({ meshId }: CanvasSpawnMenuProps) {
         // comment claiming the opposite of what `onClose={close}`
         // actually did.
       />
+      </div>
     </Modal>
   );
 }

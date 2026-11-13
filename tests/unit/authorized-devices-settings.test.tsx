@@ -91,14 +91,34 @@ describe('Authorized Devices settings section', () => {
     vi.mocked(invoke).mockReset();
   });
 
-  it('lists each paired device with its label, IP and last-active time', async () => {
+  it('lists each paired device with its label, IP, pairing date and last-active age', async () => {
     mockBackend([device({ id: 1, label: 'Safari on iPhone', last_ip: '10.0.0.5' })]);
     render(<AppSettingsModal onClose={() => {}} />);
     await openSettingsPane(/remote access/i);
 
     await screen.findByText('Safari on iPhone');
     expect(screen.getByText(/10\.0\.0\.5/)).toBeTruthy();
-    expect(screen.getByText(/2026-06-22 09:30:00/)).toBeTruthy();
+    // Issue #589: the panel must make a stale duplicate recognisable — the
+    // last-active is a relative age and the pairing date is shown alongside
+    // it, so an old pairing plus a long idle age reads as an orphan.
+    expect(screen.getByText(/last active \d+d ago/i)).toBeTruthy();
+    expect(screen.getByText(/paired /i)).toBeTruthy();
+    // The raw timestamp stays reachable on hover for sub-day precision.
+    expect(screen.getByTitle('2026-06-22 09:30:00')).toBeTruthy();
+    expect(screen.getByTitle('2026-06-20 10:00:00')).toBeTruthy();
+  });
+
+  it('renders an unreadable timestamp verbatim instead of a broken age', async () => {
+    // A value the SQLite-UTC parser cannot read must not become "NaNd ago".
+    mockBackend([
+      device({ id: 21, last_active_at: 'not-a-timestamp', created_at: 'not-a-timestamp' }),
+    ]);
+    render(<AppSettingsModal onClose={() => {}} />);
+    await openSettingsPane(/remote access/i);
+
+    await screen.findByText('Safari on iPhone');
+    expect(screen.getByText(/last active not-a-timestamp/i)).toBeTruthy();
+    expect(screen.getByText(/paired not-a-timestamp/i)).toBeTruthy();
   });
 
   it('shows an empty state when no devices are paired', async () => {

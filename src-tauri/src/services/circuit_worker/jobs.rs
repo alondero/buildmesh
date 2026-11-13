@@ -226,7 +226,10 @@ pub(super) fn cancel_run(run_id: i64) {
     JOBS.retain(|key| key.run != run_id);
 }
 
-pub(super) fn watchdog(app: tauri::AppHandle) -> Vec<super::turn_classify::QuietClassifierFailure> {
+pub(super) fn watchdog(
+    app: tauri::AppHandle,
+    observed: Vec<super::ObservedRun>,
+) -> Vec<super::turn_classify::QuietClassifierFailure> {
     let key = Key {
         run: -1,
         step: "watchdog".into(),
@@ -234,8 +237,12 @@ pub(super) fn watchdog(app: tauri::AppHandle) -> Vec<super::turn_classify::Quiet
         verification: false,
         argument: String::new(),
     };
+    // The snapshot is moved into the job. If a watchdog is already in flight,
+    // `poll` drops this task and that job keeps the snapshot it was given.
     match JOBS.poll(key, None, move |_| {
-        ResultValue::Watchdog(super::turn_classify::lost_turn_watchdog_pass(&app))
+        ResultValue::Watchdog(super::turn_classify::lost_turn_watchdog_pass(
+            &app, observed,
+        ))
     }) {
         Some(ResultValue::Watchdog(failures)) => failures,
         _ => Vec::new(),

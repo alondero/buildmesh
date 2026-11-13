@@ -18,7 +18,7 @@ public API instead of re-deriving the fact.
 
 | Seam | Owner | The rule |
 |---|---|---|
-| **Commands are thin** | `commands/` | A `#[command]` is an adapter: validate, call one service or `db::` function, map the error to `String`. No policy, no SQL, no `git2` handles. Every new `#[command]` must be registered in `lib.rs` or it fails at runtime with "command not found". Files that still hold a `Repository` are [seam debt](#seam-debt), not the pattern to copy. |
+| **Commands are thin** | `commands/` | A `#[command]` is an adapter: validate, call one service, `db::` or `diff::` function, map the error to `String`. No policy, no SQL, no `git2` handles, and no connection checkout of its own — `db::write_conn()` / `db::read_conn()` belong to the `db::` layer, which owns the pool. Every new `#[command]` must be registered in `lib.rs` or it fails at runtime with "command not found". Files that still hold a `Repository` are [seam debt](#seam-debt), not the pattern to copy. |
 | **Git access lives in `git/`** | `git/` | New `git2` use goes through `git/state.rs` (the capability-shaped reads — a `RepoState` at a named `Baseline`), `git/diff.rs`, `git/index.rs`, `git/branches.rs`, `git/remote.rs`, `git/tree.rs`, `git/worktree` and `git/sync` (ADR 0007). If you need "what changed and by how many lines", "which branch, how far ahead", "which files does this branch hold", or "stage this file", ask `git/` for it. Do not open a `Repository` in a command or in `circuit/`. |
 | **`git/` never imports `services/`** | `git/` | The dependency between the service layer and the Git layer runs one way: `services/` → `git/`. A service that needs a Git capability calls `git/`'s public API; `git/` never reaches back into a service module. Where `git/` genuinely needs a service-side effect, the *consumer* declares the seam and the service implements it — today that is `git/worktree/warm::WarmClaim`, which the pre-spawn pool implements (issue #2533). A `services::` path under `src-tauri/src/git/` is a defect, not a shortcut. |
 | **The stepper is pure** | `circuit/stepper.rs` | `advance(run, event) -> Transition` performs no I/O. SQLite state, PTY liveness, capacity counts and clocks arrive as `CircuitEvent`s from outside; the return value is `step_writes` plus `effects`. It is unit-testable with no database, which is why its tests run as a pure module. A change that needs a connection or a process handle does not belong here. |
@@ -45,6 +45,13 @@ module, and callers ask for what they need through its capability-shaped
 reads. `tests/agent-infra/git2-ownership.test.mjs` fails if a file outside
 `git/` names `git2::`, and it fails if this list is not empty.
 
+The same test carries the **SQL rule** (issue #2527): a production file under
+`commands/` may not check a connection out of the pool
+(`db::write_conn()` / `db::read_conn()`) and may not carry a statement of its
+own. Both belong to `db::`, whose modules own the SQL and the connection
+discipline. A guard that only watches `git2` cannot tell you about the other
+two things this map forbids, so it watches them too.
+
 Test-only use (a `#[cfg(test)]` item, or a `*_tests.rs` / `tests.rs` file) is
 not debt.
 
@@ -54,12 +61,19 @@ The seam was closed by issue #2526, which replaced the raw handle with
 open a `Repository` in a command or in `circuit/`; do not copy a command that
 does.
 
+Issue #2527 closed the SQL half: the diff engine moved out of the command
+layer into the `diff/` module, the mesh-property statements moved into
+`db::mesh_properties`, and the two remaining connection checkouts in the
+circuit command moved behind `db::` and `services::`.
+
 ## Where things live
 
 | Directory | Responsibility |
 |---|---|
 | `commands/` | Tauri IPC boundary. Thin adapters over services and `db/`. Every command registered in `lib.rs`. The git-owning exceptions are [seam debt](#seam-debt). |
 | `services/` | Business logic between the command boundary and DB/IO. Long-running workers live here too (`circuit_worker`, `pool_worker`). |
+| `services/circuit_control/` | The transport-independent owner of Circuit control workflows (issue #2673): outcome, recovery, approval, step push, pause/resume, review allowance, review start and continuation, cancellation, batch cancellation and circuit deletion, plus the Circuit catalog reads a second boundary needs. The desktop commands and the mobile routes are two adapters over these operations. |
+| `diff/` | The diff engine: line diffing, hunk grouping, syntax highlighting and the escaping rules, the change-set baseline, and the per-node cancellation registry. The git side — the baseline tree, the delta walk, the line counts and the counts over a change set — stays in `git/`; the merge-base rule has one definition, `git::diff::resolve_base_tree` (issue #2527). |
 | `db/` | SQLite pool, schema and migrations (`migrations.rs` owns evolution), plus domain query modules (`mesh`, `agent_node`, `warm_pool`, `circuit`). `db/mod.rs` owns the connection and `init` only; queries belong in a domain module. |
 | `db/circuit/` | Circuit persistence: `ledger.rs` owns the `commit_circuit_advance` transaction, `evidence.rs` the outcome/evidence writes and reads, `context_store.rs` the logical context seam (a run's context as one thing, with the column/side-table split hidden inside it), plus `queue.rs`, `leases.rs`, and the recovery modules. |
 | `circuit/` | The circuit domain model and the pure decision core. `model.rs` is the graph AST; `stepper.rs` is `advance`; `vocabulary.rs` owns `RunState`/`StepStatus` strings; `capacity.rs` owns admission arithmetic. |
@@ -93,7 +107,10 @@ Read the child that owns the operation before changing the facade.
 | `agent/prompt_delivery.rs` | Readiness, guarded paste, settling and bounded Enter with explicit observation requirements; per-process bounded output lives in `agent/prompt_delivery/observation.rs`. Circuit callers retain payloads and own progression. |
 | `agent/process.rs` | Process handle and constructor; `process/input.rs`: incarnation stamps and bounded replay; `registry.rs`: registry claims and teardown; `commands.rs`: live input, interrupt, kill, and handover orchestration. Spawn arrangement remains in `agent/spawn/`. |
 | `agent/provider/adapters/codex.rs` | `AgentProvider` implementation; `codex/hooks.rs`: callbacks/config retirement; `install_cache.rs`: single-flight cache; `install_probe.rs`: bounded runtime probes; `profiles.rs`: proxy profiles; `runtime_files.rs`: native/WSL file access; `trust.rs`: project trust edits. |
-| `commands/pr.rs` | IPC DTOs and command/offload adapters; `services/github/feeds.rs`: feed queries and mergeability batching; `pr_workflow.rs`: source validation, create/open/merge workflows; `repository.rs`: GitHub origin identity. All reuse `github/prs.rs` and its `GitHubClient`; there is no second HTTP client. |
+| `commands/pr.rs` | Command and offload adapters only; `services/github/feeds.rs`: feed queries and mergeability batching; `pr_workflow.rs`: source validation, create/open/merge workflows; `repository.rs`: GitHub origin identity; `wire.rs`: the issue and pull-request wire shapes. All reuse `github/prs.rs` and its `GitHubClient`; there is no second HTTP client. No production module under `services/` or `circuit/` reaches this command layer (issue #2236). |
+| `commands/circuit.rs` | IPC DTOs and command/offload adapters; `services/circuit_control/`: the transport-independent owner of the Circuit control workflows and of the Circuit catalog reads a second boundary needs. The DTO declarations stay here (ADR 0047), so the control module imports them as data shapes and invokes no command. |
+| `diff/mod.rs` | The diff engine's public interface. `engine.rs`: line diffing, hunk grouping, the baseline walk and the counts-only walk; `highlight.rs`: the syntect themes and the HTML escaping rules; `baseline.rs`: the node's change-set baseline; `cancel.rs`: the per-node cancellation registry. The counts over a change set are a git fact and live in `git/state.rs`; line totals without hunks or highlighting are `engine::diff_counts_against_base` (issue #2726). |
+| `db/mesh_properties.rs` | The user-tunable `meshes` columns — one connection, `_inner(&Connection)` helpers, and the writable-column allowlist the command boundary checks. |
 | `git/worktree/mod.rs` | Shared Git deadlines and close-safety wire type; `create.rs`: worktree creation/husk recovery; `include.rs`: included files; `maintenance.rs`: move/reset/sanitise/cross-runtime links; `safety.rs`: retained work checks; `remove.rs`: staged deletion and admin cleanup. `provision.rs` still owns the spawn decision and `warm.rs` the consumer-owned pool seam. |
 | `db/circuit/evidence.rs` | Shared history vocabulary and DTOs; `evidence/read_view.rs`: view assembly and post-read capability resolution; `native_hooks.rs`: receipt/submission binding; `outcome.rs`: operator decisions; `waits.rs`: wait history; `transition.rs`: atomic stepper writes; `effects.rs`: durable claims and acknowledgements. Locked helpers keep the caller's connection. |
 | `services/circuit_worker/tests.rs` | Source index for responsibility groups in `tests/`: effect commits, cleanup, recovery, report/review gates, classifier retry, continuation, parked evidence, result delivery/repair, admission/capacity, lineage/watchdog, GitHub, spawn, waits, and naming. `include!` retains full test names and existing CI filters. |
@@ -114,26 +131,29 @@ makes a move behaviour-preserving.
 
 | File | Non-blank lines | Notes |
 |---|---|---|
-| `circuit/stepper/tests.rs` | 6,739 | The pure `advance` decision core's tests. |
-| `db/circuit/evidence_tests.rs` | 4,670 | The circuit evidence module's tests. |
-| `circuit/stepper.rs` | 4,454 | The pure `advance` decision core. |
-| `db/circuit_tests.rs` | 4,143 | The `db/circuit` module's tests. |
-| `http/routes/attention/tests.rs` | 3,453 | The attention route's tests. |
+| `circuit/stepper/tests.rs` | 7,397 | The pure `advance` decision core's tests. |
+| `db/circuit/evidence_tests.rs` | 5,464 | The circuit evidence module's tests. |
+| `circuit/stepper.rs` | 4,785 | The pure `advance` decision core. |
+| `db/circuit_tests.rs` | 4,253 | The `db/circuit` module's tests. |
+| `http/routes/attention/tests.rs` | 3,607 | The attention route's tests. |
+| `db/circuit/ledger.rs` | 3,016 | The `commit_circuit_advance` transaction. |
 | `db/migration_tests.rs` | 2,781 | The schema-migration suite. |
-| `db/circuit/ledger.rs` | 2,777 | The `commit_circuit_advance` transaction. |
+| `db/agent_node.rs` | 2,719 | Agent Node persistence and the pending worktree-removal queue. |
 | `services/github/prs.rs` | 2,535 | Pull-request listing, merge strategy, and contributor data. |
-| `db/agent_node.rs` | 2,508 | Agent Node persistence and the pending worktree-removal queue. |
-| `services/transcript_reader/report_snapshot_tests.rs` | 2,452 | The report snapshot module's tests. |
-| `db/migrations.rs` | 2,401 | The schema-evolution registry — `SCHEMA_VERSION` lives here. |
-| `commands/agent.rs` | 1,967 | Agent spawn command wrappers. |
+| `db/migrations.rs` | 2,505 | The schema-evolution registry — `SCHEMA_VERSION` lives here. |
+| `services/transcript_reader/report_snapshot_tests.rs` | 2,463 | The report snapshot module's tests. |
+| `commands/agent.rs` | 2,127 | Agent spawn command wrappers. |
 | `services/usage/adapters/cursor.rs` | 1,962 | The Cursor usage adapter. Per-provider usage logic lives in `services/usage/adapters/`. |
-| `services/circuit_worker/mod.rs` | 1,950 | The impure circuit loop. Effect dispatch lives in `dispatch.rs`. |
+| `services/circuit_worker/mod.rs` | 1,936 | The impure circuit loop. Effect dispatch lives in `dispatch.rs`. |
 | `circuit/model.rs` | 1,840 | The graph AST and its validation and serialisation. |
-| `commands/diff.rs` | 1,837 | The per-file diff view: hunk building and syntax highlighting. The git2 side lives in `git/diff.rs` and `git/state.rs`. |
 | `commands/build_run.rs` | 1,733 | Build and run command orchestration. |
 
 The counts are measured, not estimated. Re-measure before quoting one: the
-numbers move as files are split, and a stale figure is worse than none.
+numbers move as files are split, and a stale figure is worse than none. They
+are **non-blank** lines, and the table is ordered by that count. The diff
+engine's command wrapper left this table in issue #2527 — it is 129
+non-blank lines now, and its engine lives in `diff/` with a sibling test
+suite per module.
 
 When you split one of these, move code rather than rewriting it: an extraction
 that keeps the same tests green and changes no runtime behaviour is the safe

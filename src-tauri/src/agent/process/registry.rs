@@ -448,6 +448,8 @@ pub(super) fn teardown_incarnation(
     join: JoinPolicy,
     cleanup_sandbox: bool,
 ) -> TeardownOutcome {
+    // Release output credit waits after this incarnation's deliberate-kill flag is set.
+    crate::pty::sink::AGENT.wake_producers(session_id);
     // 1. Cancel input. Dropping the sender unblocks `recv()` so the
     //    writer join does not pay the two-second fallback.
     agent.close_input();
@@ -460,19 +462,25 @@ pub(super) fn teardown_incarnation(
         master_guard.take();
     }
 
-    // 3. Kill the process tree. Job Object first is authoritative
-    //    (reaches detached descendants `taskkill /T` can't); the
-    //    `kill_process_tree` is a fallback for the rare spawn case
-    //    where job assignment failed; `child.kill` + `try_wait` reap
-    //    the shell handle portable-pty owns.
-    if let Some(job) = &agent.job {
-        job.terminate();
-    }
+    // 3. Kill the process tree. The Job Object is terminated first and
+    //    unconditionally: it is the containment boundary, so it reaches the
+    //    detached descendants `taskkill /T` can't, and it must not depend on
+    //    the shell handle still having a pid - a shell that already exited
+    //    leaves `process_id()` empty while its descendants keep running. The
+    //    `taskkill /T` fallback covers the rare spawn case where job
+    //    assignment failed; `child.kill` + `try_wait` reap the shell handle
+    //    portable-pty owns.
+    // The pid is read through a poison-tolerant lock: the Job Object's
+    // termination must not be skipped because some other thread panicked
+    // while holding the child lock.
+    let pid = agent
+        .child
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .process_id();
+    crate::process_util::kill_process_tree_contained(agent.job.as_ref(), pid);
     {
         let mut child = agent.child.lock().unwrap();
-        if let Some(pid) = child.process_id() {
-            crate::process_util::kill_process_tree(pid);
-        }
         child.kill().ok();
         let _ = child.try_wait();
     }

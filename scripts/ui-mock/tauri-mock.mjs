@@ -52,6 +52,16 @@ export const defaultFixtures = buildDefaultFixtures();
  * state and may replace a response without mutating a fixture object.
  */
 const defaultHandlers = {
+  // The Probe panel's Scratch Pad lens reads the mesh notes when it mounts.
+  // The mock has no mesh notes to read, so the read resolves empty rather
+  // than rejecting: an unmocked command becomes a console error, and the
+  // ui-shot console gate then fails a render that actually succeeded.
+  // A fixture that models the notes still wins.
+  get_mesh_scratchpad: (args, responses) => (
+    Object.prototype.hasOwnProperty.call(responses, 'get_mesh_scratchpad')
+      ? responses.get_mesh_scratchpad
+      : ''
+  ),
   spawn_agent: (args, responses) => {
     const sessionId = args?.request?.sessionId;
     if (sessionId === undefined || sessionId === null || !Array.isArray(responses.list_agent_nodes)) return null;
@@ -128,6 +138,9 @@ export function buildInitScript(fixtures, handlers = defaultHandlers, { ignoredC
     'plugin:global-shortcut|register': null,
     'plugin:global-shortcut|unregister': null,
     'plugin:global-shortcut|unregister_all': null,
+    // Issue #2739 — the window-zoom control calls the native webview zoom.
+    // The mock has no webview to zoom, so the call is accepted and dropped.
+    'plugin:webview|set_webview_zoom': null,
   };
 
   const invoke = async (cmd, args) => {

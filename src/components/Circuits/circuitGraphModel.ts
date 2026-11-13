@@ -9,9 +9,12 @@
  * Positions are NOT part of the blueprint AST: the graph_json stays
  * canonical in Rust, and layout is derived (Dagre) with an optional
  * session-scoped position map layered on top when the user drags cards.
+ *
+ * The Dagre-backed layout itself lives in `circuitLayout.ts` (issue #2757,
+ * bundle size). This module is imported eagerly by the Agent Node overview
+ * tab, so it must not pull a library only the canvas editor needs.
  */
 
-import dagre from '@dagrejs/dagre';
 import type { CircuitGraph } from '../../types/generated/CircuitGraph';
 import type { CircuitNode } from '../../types/generated/CircuitNode';
 import type { CircuitNodeKind } from '../../types/generated/CircuitNodeKind';
@@ -85,21 +88,58 @@ export function categoryOf(kind: CircuitNodeKind): NodeCategory {
   return specFor(kind.type).category;
 }
 
-/** Tailwind accent tokens per palette category (App.css @theme). */
+/**
+ * Tailwind accent tokens per palette category (App.css @theme).
+ *
+ * The graphic and text roles are separate because the violet accent is two
+ * steps of one hue (issue #2737): `accent-violet` is the **graphic** step —
+ * the category glyph, the stripe, the border — and `accent-violet-strong` is
+ * the **text-safe** step for labels painted in violet. The other three
+ * categories have no separate text step, so `graphic` and `text` are the same
+ * class for them.
+ *
+ * Issue #2745 — the join category's label sat on the graphic step and measured
+ * 3.62:1 (dark) / 4.21:1 (light) on the card's own accent stripe, under the
+ * 4.5:1 body-text floor. The label now takes the text-safe step; the glyph
+ * keeps the graphic accent, so the category still reads as one hue.
+ */
 export function categoryAccent(category: NodeCategory): {
+  /** The graphic step — icons, washes and borders. */
+  graphic: string;
+  /** The text step — labels. */
   text: string;
   bg: string;
   border: string;
 } {
   switch (category) {
     case 'trigger':
-      return { text: 'text-accent-cyan', bg: 'bg-accent-cyan', border: 'border-accent-cyan' };
+      return {
+        graphic: 'text-accent-cyan',
+        text: 'text-accent-cyan',
+        bg: 'bg-accent-cyan',
+        border: 'border-accent-cyan',
+      };
     case 'action':
-      return { text: 'text-status-success', bg: 'bg-status-success', border: 'border-status-success' };
+      return {
+        graphic: 'text-status-success',
+        text: 'text-status-success',
+        bg: 'bg-status-success',
+        border: 'border-status-success',
+      };
     case 'gate':
-      return { text: 'text-status-warning', bg: 'bg-status-warning', border: 'border-status-warning' };
+      return {
+        graphic: 'text-status-warning',
+        text: 'text-status-warning',
+        bg: 'bg-status-warning',
+        border: 'border-status-warning',
+      };
     case 'join':
-      return { text: 'text-accent-violet', bg: 'bg-accent-violet', border: 'border-accent-violet' };
+      return {
+        graphic: 'text-accent-violet',
+        text: 'text-accent-violet-strong',
+        bg: 'bg-accent-violet',
+        border: 'border-accent-violet',
+      };
   }
 }
 
@@ -1046,39 +1086,5 @@ export function toGraph(
 }
 
 // ---------------------------------------------------------------------------
-// Dagre auto-layout.
+// Dagre auto-layout lives in `circuitLayout.ts`.
 // ---------------------------------------------------------------------------
-
-/** Card size used for spacing; the real card may vary a few px. */
-export const NODE_SIZE = { width: 220, height: 64 };
-
-/**
- * Lay out the whole graph with Dagre in `direction`, returning a
- * position per node id (disconnected nodes included).
- */
-export function layoutPositions(
-  graph: Pick<CircuitGraph, 'nodes' | 'edges'>,
-  direction: 'LR' | 'TB'
-): Map<string, { x: number; y: number }> {
-  const g = new dagre.graphlib.Graph();
-  g.setGraph({ rankdir: direction, nodesep: 40, ranksep: 80, marginx: 20, marginy: 20 });
-  g.setDefaultEdgeLabel(() => ({}));
-  for (const node of graph.nodes) {
-    g.setNode(node.id, { width: NODE_SIZE.width, height: NODE_SIZE.height });
-  }
-  for (const edge of graph.edges) {
-    g.setEdge(edge.from, edge.to);
-  }
-  dagre.layout(g);
-
-  const positions = new Map<string, { x: number; y: number }>();
-  for (const node of graph.nodes) {
-    const laid = g.node(node.id) as { x: number; y: number } | undefined;
-    // Dagre centres on the node; React Flow wants the top-left corner.
-    positions.set(node.id, {
-      x: (laid?.x ?? 0) - NODE_SIZE.width / 2,
-      y: (laid?.y ?? 0) - NODE_SIZE.height / 2,
-    });
-  }
-  return positions;
-}

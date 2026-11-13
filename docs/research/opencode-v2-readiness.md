@@ -1,7 +1,7 @@
 # OpenCode 2 integration evidence
 
 **Status:** Implementation evidence for #2655; platform acceptance is incomplete.
-**Checked:** 2026-10-30 and 2026-10-31, Windows, `opencode v2.2.3`; V1 executable reports `1.18.3`.
+**Checked:** 2026-10-30 and 2026-10-31, Windows, `opencode v2.2.3`; V1 executable reports `1.18.3`. Adapter contracts rechecked against `v2.2.6` source on 2026-11-08 (no live 2.2.6 app acceptance yet).
 
 The implementation retains V1 and adds `opencode2`. The staged retirement gate
 is in [ADR-0050](../adr/0050-opencode-major-version-isolation.md).
@@ -132,13 +132,68 @@ exact test with `--ignored --exact --nocapture`. The Windows check used
 executed this worktree's binary. The test opens the store read-only and prints
 the stored CLI version beside the report assertion.
 
+## 2.2.6 contract recheck (2026-11-08)
+
+The session, model, permission, and event schema files checked for the adapter
+showed no changes between `v2.2.3` and `v2.2.6`; the database migration diff
+adds only the `job` table. The adapter now targets the contracts below. These
+are source-validated and unit-tested, not yet accepted by a live 2.2.6 app run.
+
+- **Questions are forms.** V2 does not emit `question.asked`; the `question`
+  tool publishes `form.created` (and `form.replied` / `form.cancelled`) with
+  `form.sessionID`, `form.id`, and `form.fields`. The plugin forwards them as
+  `question.asked` / `question.replied` / `question.rejected` and the
+  descriptor advertises `QuestionRequested`. MCP forms owned by `"global"`,
+  and forms on child sessions, are not attributed to the node.
+- **Interrupts are `session.execution.interrupted`.** V2 has no
+  `session.execution.cancelled`. A `reason: "user"` interrupt is forwarded as
+  the route's `MessageAbortedError` (Ready); shutdown/superseded are ignored;
+  other reasons are failures.
+- **Native subagents are child sessions.** `session.created` carries
+  `parentID`; the plugin reports `subagent_start` / `subagent_stop` under the
+  configured root and keeps child lifecycle out of the node. Nested children
+  resolve to the same root. Live 2.2.6 child delivery remains to be accepted.
+- **Permission payloads are structured.** `permission.asked` carries
+  `action`, `resources`, `message`, `metadata`, and `source`; the plugin
+  forwards `action` as `tool_name` and builds a readable message.
+- **Model variants are supported.** `Model.Ref` accepts an optional `variant`
+  in `POST /api/session` and `POST /api/session/:id/model`; Buildmesh now
+  passes `provider/model#variant` through both the session API and the
+  background `run --model` path.
+- **Agent selection via the session API (issue #2716 P1).** The V2 full TUI
+  has no `--agent` flag; `POST /api/session` accepts `agent` at creation and
+  `POST /api/session/:id/agent` switches an existing session
+  (`{ "agent": "build" }`). Buildmesh carries the configured agent in
+  `prepare_identity` before the TUI starts — the create body, the resume
+  switch, and the regenerate-fork target all persist it — and passes
+  `run --agent` for background inference. The interactive argv stays
+  flag-free (`agent_override_via_session_api`). Malformed names fail in
+  `validate_agent_name` before any session-API request; unknown names fail
+  with the daemon's error before the PTY starts. Unit-tested against
+  `v2.2.3` fixtures; a manual `opencode2 api --standalone POST /api/session
+  --data '{"id":"ses_testagent1","agent":"build"}'` against `v2.2.3` returned
+  `data.agent: "build"`, confirming creation persists the agent through the
+  real daemon. A live 2.2.6 app run that persists a configured agent
+  through Buildmesh's `prepare_identity` is still an open acceptance gate.
+- **`run` changed in 2.2.6.** It waits for background shell/subagent/image jobs
+  started by the prompt (no time limit), and can emit `background_wait`. The
+  managed background config still denies tool use, so the existing JSON
+  decoder ignores the new event; a live 2.2.6 background run remains required.
+  New `run --archived` is useful for scripted sessions but is 2.2.6-only;
+  `run --worktree` is deliberately not used (Buildmesh owns worktrees).
+- **Job API.** `GET /api/experimental/job` (plus the `job` table) exposes
+  shell, subagent, and image jobs. It is not a direct fit for a node's private
+  `--standalone` server, whose address Buildmesh does not currently know or
+  configure; the in-process plugin remains the observation seam.
+
 ## Remaining acceptance gates
 
 The same native acceptance checks on macOS remain required.
 Actual external writes and OS containment are not established by the read
 and tool-availability probes above. V1 default changes and removal still require
 the acceptance gate and an explicit stored-row migration in ADR-0050.
-Question and native child/subagent event contracts are unverified. Circuit
+Question and native child/subagent contracts are now source-validated against
+2.2.6 and unit-tested, but no live 2.2.6 app run has delivered them. Circuit
 foreground wiring is outside this issue's adapter scope.
 
 A three-node coexistence probe stopped before starting its turns: V1's

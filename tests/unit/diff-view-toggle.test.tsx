@@ -11,7 +11,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { CenterDiffOverlay } from '../../src/components/AgentNodeView/CenterDiffOverlay';
-import { DIFF_VIEW_STORAGE_KEY, loadDiffViewMode } from '../../src/components/Diff/Diff';
+import { DIFF_VIEW_STORAGE_KEY, loadDiffViewMode, __resetDiffViewModeForTests } from '../../src/components/Diff/Diff';
 import { useUIStore, type DiffContext } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useToastStore } from '../../src/stores/toastStore';
@@ -155,6 +155,8 @@ describe('Diff view toggle (issue #1374)', () => {
       circuitOwnerships: {},
       semanticTurns: {},
     });
+    localStorage.clear();
+    __resetDiffViewModeForTests();
   });
 
   it('defaults to unified and persists split preference in localStorage', async () => {
@@ -169,8 +171,62 @@ describe('Diff view toggle (issue #1374)', () => {
     expect(loadDiffViewMode()).toBe('split');
   });
 
+  it('threads per-line HTML through both split panes, keeping escaping', async () => {
+    const escaped = {
+      files: [
+        {
+          path: 'src/app.ts',
+          status: 'modified',
+          old_path: null,
+          additions: 1,
+          deletions: 1,
+          binary: false,
+          hunks: [
+            {
+              old_start: 1,
+              old_lines: 1,
+              new_start: 1,
+              new_lines: 1,
+              old_highlighted: '',
+              new_highlighted: '',
+              lines: [
+                { line_type: 'remove', content: '<old>', old_num: 1, new_num: null },
+                { line_type: 'add', content: '<new>', old_num: null, new_num: 1 },
+              ],
+              lines_highlighted: [
+                '<span class="split-old">&lt;old&gt;</span>',
+                '<span class="split-new">&lt;new&gt;</span>',
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'diff_node_file_against_base') return Promise.resolve(escaped);
+      if (cmd === 'diff_file_against_head') return Promise.resolve(escaped);
+      if (cmd === 'node_changed_files') return Promise.resolve(CHANGED_FILES);
+      if (cmd === 'get_git_status') return Promise.resolve(CHANGED_FILES);
+      return Promise.resolve({});
+    });
+
+    localStorage.setItem(DIFF_VIEW_STORAGE_KEY, 'unified');
+    __resetDiffViewModeForTests();
+    const { container } = render(<CenterDiffOverlay diff={BASE_CTX} />);
+    await screen.findByText('src/app.ts');
+    fireEvent.click(screen.getByTestId('diff-view-toggle'));
+
+    await waitFor(() => {
+      expect(container.querySelector('.split-old')?.textContent).toBe('<old>');
+      expect(container.querySelector('.split-new')?.textContent).toBe('<new>');
+    });
+    // Escaped text stays text: an injection bug would create an <old> element.
+    expect(container.querySelector('old')).toBeNull();
+  });
+
   it('boots in split mode when the preference is persisted', async () => {
     localStorage.setItem(DIFF_VIEW_STORAGE_KEY, 'split');
+    __resetDiffViewModeForTests();
     render(<CenterDiffOverlay diff={BASE_CTX} />);
     const toggle = await screen.findByTestId('diff-view-toggle');
     expect(toggle.textContent).toContain('Split');

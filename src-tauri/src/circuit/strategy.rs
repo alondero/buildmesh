@@ -348,7 +348,7 @@ pub(crate) fn provider_for_id(id: &str) -> Option<crate::models::Provider> {
 /// The strategy for a stored provider string; unknown harnesses are unwired.
 pub fn for_stored(stored: &str) -> ObservationStrategy {
     provider_for_stored(stored).map_or(ObservationStrategy::UNWIRED, |provider| {
-        provider.adapter().circuit_observation()
+        provider.adapter().descriptor().circuit_observation
     })
 }
 
@@ -384,20 +384,26 @@ impl HarnessSelector {
 /// a profile remapped mid-read cannot pair one harness with another's data.
 pub fn strategy_of(provider: Option<crate::models::Provider>) -> ObservationStrategy {
     provider.map_or(ObservationStrategy::UNWIRED, |provider| {
-        provider.adapter().circuit_observation()
+        provider.adapter().descriptor().circuit_observation
     })
+}
+
+/// Pure over the stored provider and launch snapshot: safe to call while a
+/// database connection is held. A row is not required, so a narrow agent
+/// lookup can resolve the same selector the full row would.
+pub(crate) fn selector_for_launch(
+    provider: &str,
+    launch: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
+) -> HarnessSelector {
+    match launch.and_then(|configuration| configuration.resolved.as_ref()) {
+        Some(plan) => HarnessSelector::Frozen(plan.harness.harness.clone()),
+        None => HarnessSelector::Stored(provider.to_string()),
+    }
 }
 
 /// Pure over the agent row: safe to call while a database connection is held.
 pub fn selector_for_agent(agent: &crate::models::AgentNode) -> HarnessSelector {
-    match agent
-        .launch_configuration
-        .as_ref()
-        .and_then(|configuration| configuration.resolved.as_ref())
-    {
-        Some(plan) => HarnessSelector::Frozen(plan.harness.harness.clone()),
-        None => HarnessSelector::Stored(agent.provider.clone()),
-    }
+    selector_for_launch(&agent.provider, agent.launch_configuration.as_ref())
 }
 
 /// The harness that runs this agent; `None` when it is unknown.
@@ -416,7 +422,7 @@ pub fn for_recorded_adapter(adapter_id: Option<&str>) -> ObservationStrategy {
     adapter_id
         .and_then(provider_for_id)
         .map_or(ObservationStrategy::UNWIRED, |provider| {
-            provider.adapter().circuit_observation()
+            provider.adapter().descriptor().circuit_observation
         })
 }
 
@@ -427,7 +433,8 @@ pub fn native_pull_for_source(source: &str) -> Option<NativePull> {
     crate::models::Provider::all().iter().find_map(|provider| {
         provider
             .adapter()
-            .circuit_observation()
+            .descriptor()
+            .circuit_observation
             .native_pull()
             .filter(|pull| pull.source == source)
             .copied()
@@ -441,7 +448,8 @@ pub fn hook_ownership_gap_for_source(source: &str) -> Option<&'static str> {
     crate::models::Provider::all().iter().find_map(|provider| {
         provider
             .adapter()
-            .circuit_observation()
+            .descriptor()
+            .circuit_observation
             .hooks()
             .filter(|hooks| hooks.source == source)
             .and_then(|hooks| hooks.ownership_gap)
@@ -473,8 +481,8 @@ mod tests {
         // evidence it cannot produce.
         for provider in Provider::all() {
             let adapter = provider.adapter();
-            let strategy = adapter.circuit_observation();
-            let caps = adapter.capabilities();
+            let strategy = adapter.descriptor().circuit_observation;
+            let caps = crate::agent::capabilities::capabilities_for(adapter);
             let id = adapter.id();
             if strategy.hooks().is_some() {
                 assert!(
@@ -531,7 +539,7 @@ mod tests {
             .map(|p| {
                 (
                     p.adapter().id(),
-                    p.adapter().circuit_observation().coverage(),
+                    p.adapter().descriptor().circuit_observation.coverage(),
                 )
             })
             .filter(|(_, c)| c.push != PushKind::None || c.pull != PullKind::None)
@@ -548,7 +556,12 @@ mod tests {
         );
         let foreground: Vec<&str> = Provider::all()
             .iter()
-            .filter(|p| p.adapter().circuit_observation().has_foreground_source())
+            .filter(|p| {
+                p.adapter()
+                    .descriptor()
+                    .circuit_observation
+                    .has_foreground_source()
+            })
             .map(|p| p.adapter().id())
             .collect();
         assert_eq!(foreground, vec!["anthropic", "agy", "codex"]);
@@ -575,7 +588,7 @@ mod tests {
         // never produce a receipt, whatever the payload looks like.
         for provider in Provider::all() {
             let adapter = provider.adapter();
-            let strategy = adapter.circuit_observation();
+            let strategy = adapter.descriptor().circuit_observation;
             for payload in [claude_style_stop(), agy_stop()] {
                 let hook = strategy.parse_hook(&payload);
                 if strategy.hooks().is_none() {

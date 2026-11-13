@@ -34,11 +34,11 @@ export function SettingsRow({
     <div className="min-w-0">
       <div className="flex items-center gap-1.5">
         {htmlFor ? (
-          <label htmlFor={htmlFor} className="text-base font-medium text-text-secondary">
+          <label htmlFor={htmlFor} className="text-label font-medium text-text-secondary">
             {label}
           </label>
         ) : (
-          <span className="text-base font-medium text-text-secondary">{label}</span>
+          <span className="text-label font-medium text-text-secondary">{label}</span>
         )}
         {(details || summary) && <InfoTip label={label}>{details ?? summary}</InfoTip>}
       </div>

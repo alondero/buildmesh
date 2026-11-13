@@ -11,18 +11,7 @@ use chrono::Utc;
 use std::io::BufRead;
 
 fn responses_url(base_url: &str) -> Result<String, String> {
-    let parsed = reqwest::Url::parse(base_url)
-        .map_err(|_| "endpoint must be a valid HTTPS URL".to_string())?;
-    if parsed.scheme() != "https" && !(cfg!(test) && parsed.scheme() == "http") {
-        return Err("endpoint must use HTTPS".into());
-    }
-    if !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || parsed.query().is_some()
-        || parsed.fragment().is_some()
-    {
-        return Err("endpoint must not contain credentials, a query, or a fragment".into());
-    }
+    preferences::resolver::pairing_compat::validate_endpoint_url(base_url)?;
     Ok(format!("{}/responses", base_url.trim_end_matches('/')))
 }
 

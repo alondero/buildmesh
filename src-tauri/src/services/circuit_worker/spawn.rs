@@ -60,6 +60,11 @@ pub(super) fn resolve_circuit_spawn_inputs(
             .and_then(non_empty_trim)
             .map(str::to_string),
         timeout_seconds,
+        // SpawnAgentNode carries no agent slot in this slice (issue
+        // #2716 publishes agent via Launch Configurations + the
+        // application default); the resolver still sees the frozen
+        // review configuration's agent through `resolve_review_spawn_inputs`.
+        agent: None,
     };
     Ok(ResolvedCircuitSpawn {
         prompt,
@@ -112,6 +117,7 @@ pub(super) fn resolve_review_spawn_inputs(
         explicit.model = configuration.model;
         explicit.effort = configuration.effort;
         explicit.extra_args = configuration.extra_args;
+        explicit.agent = configuration.agent;
         return (Some(configuration.id), explicit);
     }
 
@@ -143,7 +149,9 @@ pub(super) fn resolve_review_spawn_inputs(
     // A configured reviewer provider is the independent adversarial default;
     // the source agent is the fallback. Authored Circuits keep their explicit
     // reviewer provider as the highest-precedence layer.
-    let provider = if view.context.get("source.review_preset") == Some("1") {
+    let provider = if crate::circuit::lineage::RunLineage::decode(|key| view.context.get(key))
+        .is_local_preset()
+    {
         configured_review_provider
             .or(source_provider)
             .or_else(|| inherited_review_provider(None, parent_provider))
@@ -154,12 +162,13 @@ pub(super) fn resolve_review_spawn_inputs(
             .or(source_provider)
             .or_else(|| inherited_review_provider(None, parent_provider))
     };
-    if view.context.get("source.review_preset") == Some("1") {
+    if crate::circuit::lineage::RunLineage::decode(|key| view.context.get(key)).is_local_preset() {
         // Saved built-in graphs and source.* snapshots copied the legacy
         // mesh columns. They are not reviewer-specific configuration. Let
         // launch resolve the selected harness's mesh/application defaults.
         explicit.model = None;
         explicit.effort = None;
+        explicit.agent = None;
     } else {
         explicit.model = explicit.model.or(source_model);
         explicit.effort = explicit.effort.or(source_effort);
@@ -203,7 +212,7 @@ pub(super) fn resolve_review_spawn_configuration(
 }
 
 pub(super) fn is_review_spawn_step(view: &RunView, node_id: &str) -> bool {
-    ((view.context.get("source.review_preset") == Some("1")
+    ((crate::circuit::lineage::RunLineage::decode(|key| view.context.get(key)).is_local_preset()
         || view.graph.is_issue_driven_autopilot_review())
         && node_id == "reviewer")
         || view.graph.nodes.iter().any(|node| {
@@ -234,7 +243,8 @@ pub(super) fn circuit_step_node_name(
     // The built-in review preset's graph row is shared and its reviewer name
     // is a role label ("Code reviewer"), not author intent for this run — the
     // same reason `resolve_review_spawn_inputs` ignores its stored provider.
-    let preset_reviewer = view.context.get("source.review_preset") == Some("1")
+    let preset_reviewer = crate::circuit::lineage::RunLineage::decode(|key| view.context.get(key))
+        .is_local_preset()
         && is_review_spawn_step(view, node_id);
     let authored = authored.filter(|_| !preset_reviewer);
     let base = if let Some(name) = authored.and_then(non_empty_trim) {
@@ -839,12 +849,14 @@ fn spawn_step_agent_with(
     };
     let prompt_delivery =
         crate::agent::launch::initial_prompt_delivery(launch_harness, &resolved_prompt);
-    let worktree_policy =
-        if source_issue.is_some() || view.context.get("source.review_preset") == Some("1") {
-            WorktreePolicy::ForceBranched
-        } else {
-            WorktreePolicy::RespectMesh
-        };
+    let worktree_policy = if source_issue.is_some()
+        || crate::circuit::lineage::RunLineage::decode(|key| view.context.get(key))
+            .is_local_preset()
+    {
+        WorktreePolicy::ForceBranched
+    } else {
+        WorktreePolicy::RespectMesh
+    };
     let use_worktree_override = match worktree_policy {
         WorktreePolicy::ForceBranched => Some(true),
         WorktreePolicy::RespectMesh => None,

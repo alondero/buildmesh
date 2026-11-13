@@ -96,6 +96,7 @@ fn starting_a_review_parses_strictly_and_refuses_unavailable_sources() {
         circuit_id: id,
         max_rounds: 3,
         reviewer_provider: None,
+        reviewer_login_id: None,
     };
     assert_eq!(
         start_review_core(node, request(Some(99999)))
@@ -130,6 +131,14 @@ fn starting_a_review_uses_the_desktop_run_and_deduplicates_retries() {
             ..Default::default()
         },
     );
+    preferences
+        .harness_logins
+        .push(crate::preferences::harness_logins::HarnessLogin {
+            id: "work".into(),
+            harness_id: "codex".into(),
+            label: "Work".into(),
+            home: "C:/codex-work".into(),
+        });
     store.save(preferences).unwrap();
     let unique = 89_000_000 + i64::from(std::process::id());
     db::write_conn()
@@ -154,6 +163,7 @@ fn starting_a_review_uses_the_desktop_run_and_deduplicates_retries() {
         circuit_id: None,
         max_rounds: 3,
         reviewer_provider: Some("launch/mobile-reviewer".into()),
+        reviewer_login_id: Some("work".into()),
     };
     let run = start_review_core_from(&store, node, request()).unwrap();
     assert_ne!(run, old_run);
@@ -173,6 +183,17 @@ fn starting_a_review_uses_the_desktop_run_and_deduplicates_retries() {
         serde_json::from_str(context.get("review.launch.reviewer").unwrap()).unwrap();
     assert_eq!(launch.id, "launch/mobile-reviewer");
     assert_eq!(launch.model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(
+        launch
+            .resolved
+            .as_ref()
+            .unwrap()
+            .harness_login
+            .as_ref()
+            .unwrap()
+            .id,
+        "work"
+    );
     assert_eq!(launch.effort.as_deref(), Some("high"));
     assert_eq!(reply(run, Ok(())).status, "200 OK");
     cancel_core(run).unwrap();
@@ -182,6 +203,7 @@ fn starting_a_review_uses_the_desktop_run_and_deduplicates_retries() {
             node,
             StartNodeReviewRequest {
                 reviewer_provider: Some(reviewer.into()),
+                reviewer_login_id: None,
                 ..request()
             },
         )
@@ -197,6 +219,7 @@ fn starting_a_review_uses_the_desktop_run_and_deduplicates_retries() {
         StartNodeReviewRequest {
             circuit_id: Some(saved.id),
             reviewer_provider: Some("launch/deleted".into()),
+            reviewer_login_id: None,
             ..request()
         },
     )
@@ -305,13 +328,11 @@ fn listing() -> Response {
 fn ownership_read_shares_the_desktop_ledger_and_reports_failed_reads() {
     let _db = db::test_support::isolated();
     assert_eq!(
-        text(&ownerships_reply(
-            circuit_commands::list_circuit_agent_ownerships_now()
-        )),
+        text(&ownerships_reply(circuit_control::list_agent_ownerships())),
         "[]"
     );
     let (node, run) = review_run();
-    let response = ownerships_reply(circuit_commands::list_circuit_agent_ownerships_now());
+    let response = ownerships_reply(circuit_control::list_agent_ownerships());
     assert_eq!(response.status, "200 OK");
     let body = json(&response);
     assert_eq!(body.as_array().unwrap().len(), 1);

@@ -7,7 +7,7 @@ export function CompanionPill() {
   const task = useCompanionStore(s => s.task);
   useEffect(() => { void initializeCompanion().catch(error => useCompanionStore.setState({ error: formatError(error) })); }, []);
   if (!task) return null;
-  return <div className="flex items-center gap-2 text-xs text-accent-violet">
+  return <div className="flex items-center gap-2 text-xs text-accent-violet-strong">
     <button type="button" onClick={() => {
       useCompanionStore.setState({ visible: true });
       useUIStore.getState().openOmnibar('files');

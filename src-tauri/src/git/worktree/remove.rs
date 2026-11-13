@@ -246,8 +246,7 @@ pub(super) fn remove_worktree_dir_with_retry(path: &str) -> Result<(), WorktreeR
                 path,
                 staging
             );
-            return std::fs::remove_dir_all(&staging)
-                .map_err(|e| WorktreeRemovalFailure::new(OP_DELETE_STAGING, e));
+            return remove_staging(&staging);
         }
         return Ok(());
     }
@@ -260,8 +259,7 @@ pub(super) fn remove_worktree_dir_with_retry(path: &str) -> Result<(), WorktreeR
     for attempt in 0..WORKTREE_REMOVE_ATTEMPTS {
         match std::fs::rename(path, &staging) {
             Ok(()) => {
-                return std::fs::remove_dir_all(&staging)
-                    .map_err(|e| WorktreeRemovalFailure::new(OP_DELETE_STAGING, e))
+                return remove_staging(&staging);
             }
             Err(e) => {
                 last_err = e.to_string();
@@ -274,6 +272,16 @@ pub(super) fn remove_worktree_dir_with_retry(path: &str) -> Result<(), WorktreeR
         }
     }
     Err(WorktreeRemovalFailure::new(OP_RENAME_TO_STAGING, last_err))
+}
+
+/// Delete the staged copy.
+///
+/// The rename already had to clear the holders that block a rename, and the
+/// rename's retry rides out the same close-node window this delete needs: a
+/// holder that is still leaving blocks the rename with os error 32 first, so
+/// by the time the staged delete runs the holder has gone.
+fn remove_staging(staging: &str) -> Result<(), WorktreeRemovalFailure> {
+    std::fs::remove_dir_all(staging).map_err(|e| WorktreeRemovalFailure::new(OP_DELETE_STAGING, e))
 }
 
 /// Finish the git half of a removal whose working directory is already gone:

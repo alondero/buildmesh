@@ -451,6 +451,18 @@ pub fn is_executable(kind: &CircuitNodeKind) -> bool {
     )
 }
 
+#[cfg(test)]
+// allow-test-in-production: interval tick tests count graph parses on the calling thread
+thread_local! {
+    static GRAPH_PARSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+// allow-test-in-production: interval tick tests read the graph parse count
+pub(crate) fn graph_parse_calls() -> u64 {
+    GRAPH_PARSES.with(|count| count.get())
+}
+
 impl CircuitGraph {
     pub fn requires_source_agent(&self) -> bool {
         self.nodes.iter().any(|node| match &node.kind {
@@ -468,6 +480,9 @@ impl CircuitGraph {
     /// are a hard error at the read boundary (the writer always writes
     /// what this build understands) rather than a silent skip.
     pub fn from_json(json: &str) -> Result<Self, String> {
+        #[cfg(test)]
+        // allow-test-in-production: interval tick tests count this parse on the calling thread
+        GRAPH_PARSES.with(|count| count.set(count.get() + 1));
         let graph: Self =
             serde_json::from_str(json).map_err(|e| format!("invalid circuit graph_json: {}", e))?;
 

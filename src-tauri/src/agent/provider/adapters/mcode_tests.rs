@@ -10,7 +10,7 @@
 
 use super::*;
 use crate::agent::capabilities::ResolvedAgentConfig;
-use crate::agent::launch::{default_prepare, HarnessLaunchInput, SessionIdModeRef};
+use crate::agent::launch::{HarnessLaunchInput, SessionIdModeRef};
 
 #[test]
 fn id_and_ui_metadata() {
@@ -50,7 +50,7 @@ fn spawn_recipe_cmd_on_windows() {
 
 #[test]
 fn available_on_all_three_platforms() {
-    let platforms = MCODE.available_on();
+    let platforms = MCODE.descriptor().available_on;
     assert_eq!(
         platforms.len(),
         3,
@@ -115,13 +115,13 @@ fn prefill_args_preserves_multiline_text() {
 
 #[test]
 fn supports_prefill_via_positional() {
-    assert!(MCODE.supports_prefill());
+    assert!(MCODE.descriptor().supports_prefill);
 }
 
 #[test]
 fn supports_resume_and_session_model_override() {
-    assert!(MCODE.supports_resume());
-    assert!(MCODE.supports_model_override());
+    assert!(MCODE.descriptor().supports_resume);
+    assert!(MCODE.descriptor().supports_model_override);
 }
 
 #[test]
@@ -152,7 +152,7 @@ fn model_override_accepts_native_and_byok_references() {
 /// compatibility gate will misroute mcode.
 #[test]
 fn capabilities_descriptor_supports_model_without_effort() {
-    let caps = MCODE.capabilities();
+    let caps = crate::agent::capabilities::capabilities_for(&MCODE);
     assert_eq!(caps.harness_id, "mcode");
     assert!(caps.supports_resume);
     assert!(caps.supports_prefill);
@@ -177,7 +177,7 @@ fn capabilities_descriptor_supports_model_without_effort() {
 /// fails a refactor that drops it.
 #[test]
 fn attention_capability_advertises_validated_stop_only() {
-    let caps = MCODE.capabilities();
+    let caps = crate::agent::capabilities::capabilities_for(&MCODE);
     assert!(caps.requires_attention_hook);
     let capability = caps.attention_capability;
     match &capability {
@@ -216,19 +216,19 @@ fn mcode_interactive_recipe_carries_model_before_positional_prompt() {
         effort: None,
         extra_args: None,
         permission_mode: None,
+        agent: None,
     };
     for platform in [Platform::Windows, Platform::Macos, Platform::Linux] {
-        let prepared = default_prepare(
-            &MCODE,
-            HarnessLaunchInput {
-                platform,
-                runtime: EnvType::Windows,
-                session: SessionIdModeRef::None,
-                config: &config,
-                prefill: Some("Review this workspace"),
-                sandbox: false,
-            },
-        );
+        let prepared = MCODE.prepare_launch(HarnessLaunchInput {
+            routing: None,
+            node_id: None,
+            platform,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::None,
+            config: &config,
+            prefill: Some("Review this workspace"),
+            sandbox: false,
+        });
         assert_eq!(
             prepared.recipe.base_args,
             vec![
@@ -248,22 +248,22 @@ fn mcode_resume_recipe_carries_session_and_model_before_prompt() {
         effort: None,
         extra_args: None,
         permission_mode: None,
+        agent: None,
     };
     for platform in [Platform::Windows, Platform::Macos, Platform::Linux] {
-        let prepared = default_prepare(
-            &MCODE,
-            HarnessLaunchInput {
-                platform,
-                runtime: EnvType::Windows,
-                session: SessionIdModeRef::Resume {
-                    id: "mvs_abc123",
-                    cause: crate::agent::spawn::ResumeCause::Explicit,
-                },
-                config: &config,
-                prefill: Some("Continue the review"),
-                sandbox: false,
+        let prepared = MCODE.prepare_launch(HarnessLaunchInput {
+            routing: None,
+            node_id: None,
+            platform,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::Resume {
+                id: "mvs_abc123",
+                cause: crate::agent::spawn::ResumeCause::Explicit,
             },
-        );
+            config: &config,
+            prefill: Some("Continue the review"),
+            sandbox: false,
+        });
         assert_eq!(
             prepared.recipe.base_args,
             vec![
@@ -284,6 +284,7 @@ fn mcode_recipe_without_model_preserves_native_default() {
         effort: None,
         extra_args: None,
         permission_mode: None,
+        agent: None,
     };
     for session in [
         SessionIdModeRef::None,
@@ -292,17 +293,16 @@ fn mcode_recipe_without_model_preserves_native_default() {
             cause: crate::agent::spawn::ResumeCause::Explicit,
         },
     ] {
-        let prepared = default_prepare(
-            &MCODE,
-            HarnessLaunchInput {
-                platform: Platform::Windows,
-                runtime: EnvType::Windows,
-                session,
-                config: &config,
-                prefill: None,
-                sandbox: false,
-            },
-        );
+        let prepared = MCODE.prepare_launch(HarnessLaunchInput {
+            routing: None,
+            node_id: None,
+            platform: Platform::Windows,
+            runtime: EnvType::Windows,
+            session,
+            config: &config,
+            prefill: None,
+            sandbox: false,
+        });
         let expected = match session {
             SessionIdModeRef::None => vec![],
             _ => vec!["--session", "mvs_abc123"],
@@ -316,7 +316,7 @@ fn produces_readable_transcript() {
     // mcode's canonical `messages.jsonl` history is parsed via
     // `TranscriptFormat::Mcode` (see
     // `services::transcript_reader::adapters::mcode`).
-    assert!(MCODE.produces_readable_transcript());
+    assert!(MCODE.descriptor().produces_readable_transcript);
 }
 
 // -----------------------------------------------------------------
@@ -1249,7 +1249,7 @@ fn mcode_hook_constants_are_pinned() {
 #[test]
 fn requires_attention_hook_is_enabled_after_tui_validation() {
     assert!(
-        MCODE.requires_attention_hook(),
+        MCODE.descriptor().requires_attention_hook(),
         "issue #1797 validated historical Stop delivery against a live 0.4.12 TUI; \
              reverting to false would close the Autopilot gate without cause"
     );

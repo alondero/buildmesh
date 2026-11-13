@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { NodeCreationForm } from '../../src/components/Sidebar/NodeCreationForm';
 import type { Mesh } from '../../src/stores/meshStore';
 import type { SpawnOption } from '../../src/lib/groups';
+import { useUIStore } from '../../src/stores/uiStore';
 
 const MESH: Mesh = {
   id: 7,
@@ -46,6 +47,16 @@ function setup(overrides: Partial<React.ComponentProps<typeof NodeCreationForm>>
 }
 
 describe('NodeCreationForm', () => {
+  it('opens the prompt library for this mesh through the keyboard-accessible menu action', async () => {
+    const { onSelectProvider, onToggleDropdown } = setup({ isDropdownOpen: true });
+    const action = screen.getByRole('menuitem', { name: 'Choose a prompt…' });
+    expect(action.tabIndex).toBe(0);
+    await userEvent.keyboard('{Enter}');
+    expect(useUIStore.getState().probeTab).toBe('prompts');
+    expect(useUIStore.getState().probeOpen).toBe(true);
+    expect(onToggleDropdown).toHaveBeenCalledWith(MESH);
+    expect(onSelectProvider).not.toHaveBeenCalled();
+  });
   it('adds a node with the default provider when + is clicked, deferring use_worktree to the mesh default', async () => {
     // Regression: a normal click must NOT force use_worktree=true, because
     // meshes with `use_worktree = false` would otherwise get a worktree node

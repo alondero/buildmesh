@@ -522,6 +522,7 @@ export const useMeshStore = create<MeshState>((set, get) => {
       });
     } catch (e) {
       set({ error: formatError(e) });
+      throw e;
     }
   },
 

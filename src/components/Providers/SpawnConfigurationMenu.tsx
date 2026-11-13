@@ -12,21 +12,8 @@ function belongsToHarness(configuration: SpawnConfiguration, harnessId: string):
   return (configuration.harness_id ?? configuration.spawn_option_id.split(':')[0]) === harnessId;
 }
 
-/**
- * Whether a configuration is offered under a login's submenu: unpinned
- * configurations launch with whichever login was picked, a pinned one only
- * appears under its own login. A Provider Route signs in with its own key, so
- * it is offered only under the Default login, where the pick changes nothing.
- */
-export function offeredUnderLogin(configuration: SpawnConfiguration, loginId: string | undefined): boolean {
-  if (loginId === undefined) return true;
-  const routed = Boolean(configuration.provider_route_id) || configuration.spawn_option_id.includes(':');
-  if (routed) return loginId === DEFAULT_LOGIN_ID;
-  return !configuration.login_id || configuration.login_id === loginId;
-}
-
-/** Id of the implicit login that uses Codex's ordinary home. */
-const DEFAULT_LOGIN_ID = 'default';
+import { offeredUnderLogin } from '../../lib/launchSelection';
+export { offeredUnderLogin } from '../../lib/launchSelection';
 
 export function SpawnConfigurationMenu({ option, anchor, keyboard, configurationRows, decorate, login, onSelect, onClose, onDismiss, onEditingChange }: {
   option: SpawnOption;

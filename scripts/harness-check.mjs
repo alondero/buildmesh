@@ -76,7 +76,39 @@ export function frontendInScope(paths) {
 // `pathIncludeDrift` below, so a new `#[path]` fails the gate that runs on the
 // Rust diff itself, not only the one CI happens to run (review of PR #2232).
 export const RUST_PATH_INCLUDES = {
+  // The HTTP auth layer's suite moved to a sibling file (issue #589): the
+  // module keeps the name `tests`, so every test path is unchanged.
+  'src-tauri/src/http/auth_tests.rs': 'http::auth::tests',
+  'src-tauri/src/http/routes/session_tests.rs': 'http::routes::session::tests',
+  'src-tauri/src/services/device_session_expiry_tests.rs': 'services::device_session_expiry::tests',
+  'src-tauri/src/commands/build_run_tests.rs': 'commands::build_run::tests',
+  'src-tauri/src/pty/output_window_tests.rs': 'pty::output_window::tests',
+  'src-tauri/src/pty/sink_tests.rs': 'pty::sink::tests',
+  'src-tauri/src/agent/launch_tests.rs': 'agent::launch::tests',
+  // The owner keeps its inline `mod tests` for the cases that already live
+  // there, so the new sibling takes its own module name.
+  'src-tauri/src/agent/managed_config_replace_tests.rs': 'agent::managed_config::replace_tests',
+  'src-tauri/src/agent/provider/adapters/anthropic_tests.rs': 'agent::provider::adapters::anthropic::tests',
+  'src-tauri/src/agent/provider/adapters/commandcode_tests.rs': 'agent::provider::adapters::commandcode::tests',
+  'src-tauri/src/agent/provider/adapters/cursor_tests.rs': 'agent::provider::adapters::cursor::tests',
+  'src-tauri/src/agent/provider/adapters/dsh_tests.rs': 'agent::provider::adapters::dsh::tests',
+  'src-tauri/src/agent/provider/adapters/kimi_tests.rs': 'agent::provider::adapters::kimi::tests',
+  'src-tauri/src/agent/provider/adapters/muse_tests.rs': 'agent::provider::adapters::muse::tests',
+  'src-tauri/src/agent/provider/adapters/opencode_contract_tests.rs': 'agent::provider::adapters::opencode::tests',
+  'src-tauri/src/agent/provider/adapters/terminal_tests.rs': 'agent::provider::adapters::terminal::tests',
+  'src-tauri/src/models/models_tests.rs': 'models::tests',
+
+  'src-tauri/src/db/mesh_properties_tests.rs': 'db::mesh_properties::tests',
+  'src-tauri/src/diff/engine_tests.rs': 'diff::engine::tests',
+  'src-tauri/src/diff/highlight_tests.rs': 'diff::highlight::tests',
+  'src-tauri/src/diff/cancel_tests.rs': 'diff::cancel::tests',
+  'src-tauri/src/services/interruption_recovery_tests.rs': 'services::interruption_recovery::tests',
+  'src-tauri/src/services/transcript_reader/interruption_tests.rs': 'services::transcript_reader::interruption::tests',
+  'src-tauri/src/services/transcript_reader/readers/codex_failure_tests.rs': 'services::transcript_reader::readers::codex::failure_tests',
+  'src-tauri/src/services/transcript_reader/readers/codex_location_tests.rs': 'services::transcript_reader::readers::codex::location_cache_tests',
   'src-tauri/src/commands/agent_spawn_menu_tests.rs': 'commands::agent::spawn_menu_tests',
+  'src-tauri/src/circuit/lineage_tests.rs': 'circuit::lineage::tests',
+  'src-tauri/src/db/circuit/overview_tests.rs': 'db::circuit::overview::tests',
   'src-tauri/src/circuit/evaluator_tests.rs': 'circuit::evaluator::tests',
   'src-tauri/src/db/circuit/recovery_tests.rs': 'db::circuit::recovery::tests',
   'src-tauri/src/db/circuit/review_rounds_tests.rs': 'db::circuit::review_rounds::tests',
@@ -110,11 +142,11 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/circuit/vocabulary_tests.rs': 'circuit::vocabulary::tests',
   'src-tauri/src/commands/git_status_bench.rs': 'commands::git_tests',
   'src-tauri/src/commands/git_status_counts_tests.rs': 'commands::git_tests::status_counts',
-  'src-tauri/src/commands/pr_tests.rs': 'commands::pr::tests',
   'src-tauri/src/db/circuit/evidence_tests.rs': 'db::circuit::evidence::tests',
   'src-tauri/src/db/circuit/history_compaction_tests.rs': 'db::circuit::history_compaction::tests',
   'src-tauri/src/db/circuit/evidence/prompt_delivery_tests.rs': 'db::circuit::evidence::prompt_delivery::tests',
   'src-tauri/src/services/circuit_prompt_tests.rs': 'services::circuit_prompt::tests',
+  'src-tauri/src/services/circuit_triggers_interval_tests.rs': 'services::circuit_triggers::interval_tests',
   'src-tauri/src/git/branches_tests.rs': 'git::branches::tests',
   'src-tauri/src/git/diff_tests.rs': 'git::diff::tests',
   'src-tauri/src/git/fetch_origin_tests.rs': 'git::sync::fetch_origin_tests',
@@ -129,6 +161,7 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/git/worktree/provision_tests.rs': 'git::worktree::provision::tests',
   'src-tauri/src/git/worktree/warm_tests.rs': 'git::worktree::warm::tests',
   'src-tauri/src/git/worktree/worktree_tests.rs': 'git::worktree::tests',
+  'src-tauri/src/commands/file_tree_tests.rs': 'commands::file_tree::file_tree_tests',
   'src-tauri/src/commands/prune_tests.rs': 'commands::prune::prune_tests',
   'src-tauri/src/http/ws_tests.rs': 'http::ws::tests',
   'src-tauri/src/http/events_tests.rs': 'http::events::tests',
@@ -136,9 +169,12 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/http/mobile_wire_tests.rs': 'http::mobile_wire::tests',
   'src-tauri/src/http/router_tests.rs': 'http::router::tests',
   'src-tauri/src/http/routes/providers_tests.rs': 'http::routes::providers::usage_tests',
+  'src-tauri/src/http/routes/issues_tests.rs': 'http::routes::issues::tests',
+  'src-tauri/src/http/routes/pr_tests.rs': 'http::routes::pr::tests',
   'src-tauri/src/http/routes/circuit_tests.rs': 'http::routes::circuit::tests',
   'src-tauri/src/http/routes/nodes_close_tests.rs': 'http::routes::nodes::close_tests',
   'src-tauri/src/http/routes/nodes_glance_tests.rs': 'http::routes::nodes::glance_tests',
+  'src-tauri/src/preferences/custom_providers_tests.rs': 'preferences::custom_providers::tests',
   'src-tauri/src/preferences/launch_catalog_tests.rs': 'preferences::launch_catalog::tests',
   'src-tauri/src/preferences/launch_configurations_tests.rs': 'preferences::launch_configurations::tests',
   'src-tauri/src/preferences/spawn_configurations_tests.rs': 'preferences::spawn_configurations::tests',
@@ -184,6 +220,20 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/services/harness_logins_tests.rs': 'services::harness_logins::tests',
   'src-tauri/src/services/usage/logins_tests.rs': 'services::usage::logins::tests',
   'src-tauri/src/commands/preferences_tests.rs': 'commands::preferences::preferences_tests',
+  // The webview user-data folder (issue #2469). The sibling is included by
+  // `startup/webview_data.rs`, so the tests run under
+  // `startup::webview_data::tests`, not under a module named after the file.
+  'src-tauri/src/startup/webview_data_tests.rs': 'startup::webview_data::tests',
+  // The Circuit control module (issue #2673). The command adapter's suite and
+  // the control module's suites are `#[path]`-included siblings, so their
+  // tests run under the module that declares them.
+  'src-tauri/src/commands/circuit_tests.rs': 'commands::circuit::tests',
+  'src-tauri/src/services/circuit_control/control_tests.rs': 'services::circuit_control::tests',
+  'src-tauri/src/services/circuit_control/cancellation_tests.rs': 'services::circuit_control::cancellation::tests',
+  // The kill seam's own regression (issue #2220) is a `#[path]`-included
+  // sibling of `process_util.rs`, so its tests run under the module that
+  // declares it rather than under a module named after the file.
+  'src-tauri/src/process_util_tests.rs': 'process_util::process_util_tests',
 };
 
 // A Rust production file whose tests live in a sibling `<stem>_tests` module
@@ -240,6 +290,14 @@ export const RUST_SIBLING_TESTS = {
   'src-tauri/src/preferences/secrets.rs': 'preferences::tests::secrets_tests',
   'src-tauri/src/preferences/storage.rs': 'preferences::tests::storage_tests',
   'src-tauri/src/preferences/store.rs': 'preferences::tests::store_tests',
+  // The Circuit control module (issue #2673) keeps its contract tests in the
+  // suite the module root declares, so an edit to a private child still runs
+  // that suite rather than a filter that selects nothing.
+  'src-tauri/src/services/circuit_control/mod.rs': 'services::circuit_control',
+  'src-tauri/src/services/circuit_control/catalog.rs': 'services::circuit_control',
+  'src-tauri/src/services/circuit_control/operator.rs': 'services::circuit_control',
+  'src-tauri/src/services/circuit_control/review.rs': 'services::circuit_control',
+  'src-tauri/src/services/circuit_control/cancellation.rs': 'services::circuit_control',
 };
 
 // Private implementations keep their contract tests at the owning facade.
@@ -272,9 +330,13 @@ export const RUST_IMPLEMENTATION_TESTS = {
   'src-tauri/src/db/circuit/evidence/waits.rs': 'db::circuit::evidence',
   'src-tauri/src/db/circuit/evidence/transition.rs': 'db::circuit::evidence',
   'src-tauri/src/db/circuit/evidence/effects.rs': 'db::circuit::evidence',
-  'src-tauri/src/services/github/feeds.rs': 'commands::pr',
-  'src-tauri/src/services/github/pr_workflow.rs': 'commands::pr',
-  'src-tauri/src/services/github/repository.rs': 'commands::pr',
+  // The GitHub service files carry no tests of their own: the suite the
+  // `services::github` module root declares (`pr_tests`) covers them, and
+  // it moved here from `commands::pr` with the functions it exercises
+  // (issue #2236).
+  'src-tauri/src/services/github/feeds.rs': 'services::github::pr_tests',
+  'src-tauri/src/services/github/pr_workflow.rs': 'services::github::pr_tests',
+  'src-tauri/src/services/github/repository.rs': 'services::github::pr_tests',
   // The committed schema snapshot. It is not Rust, so the path filter cannot
   // scope it, and without an entry the scoped check falls back to the whole
   // lib suite. The test that owns it is the seam test.

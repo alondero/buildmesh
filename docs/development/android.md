@@ -306,12 +306,23 @@ Mesh cards, issue cards and the mesh's open pull requests carry the same split
 button as the desktop spawn cluster (`SpawnSplitButton`). Issue and pull request
 buttons name the mesh's pinned default, or read **Mesh default** when the app-wide
 default applies, which the phone cannot see. The mesh list uses a compact **+** instead,
-with that default name in its accessibility description. The chevron lists the backend menu in its
-own order, saved configurations included, without unavailable rows. On a mesh
+with that default name in its accessibility description. The chevron opens a
+Material modal bottom sheet with scrollable harness/login groups and saved
+configurations, preserving backend order. Capture and built-in reviewer forms
+reuse that picker with a selected indicator and an explicit default choice.
+Rows have at least 48dp touch targets; Cancel, Android Back and sheet gestures
+respect pending-action ownership. Unavailable rows retain their reason, and an
+unsigned additional login directs the user to desktop Settings. On a mesh
 card both halves open Capture with that mesh and launch already selected, because
 Capture is where the first prompt is written; an empty prompt opens a plain
-session. Capture keeps an explicit choice that cannot take a prompt and explains
-why, instead of silently switching to another harness. On an issue or pull
+session. Capture keeps an explicit choice that cannot take a prompt, or one that became
+unavailable, and explains why; submission requires a compatible choice or an
+explicit Mesh default selection. The selected row identity includes its login,
+so recreation, Capture presets and retry keys retain that account. Create,
+issue and PR bodies send `login_id` alongside the provider/configuration pair.
+Built-in reviews send `reviewer_login_id`; saved Circuits own their reviewer.
+The API catalogue carries only login selection metadata, excluding login homes
+and OAuth state. On an issue or pull
 request the menu offers only prompt-capable rows, and a tap starts the agent at
 once, as on the desktop. `POST /api/meshes/{id}/issues/{n}/spawn` and
 `POST /api/meshes/{id}/pulls/{n}/spawn` run the desktop probes'
@@ -319,8 +330,8 @@ once, as on the desktop. `POST /api/meshes/{id}/issues/{n}/spawn` and
 away, and its status reports the background worktree and process start. The
 backend renders the issue or review prompt from the user's template, so the
 phone sends only a title hint and, for a pull request, the head fields from the
-feed. Archive resume accepts a Spawn Option only, so its picker offers no saved
-configurations and requires a resumable option.
+feed. Archive resume accepts a Spawn Option only, so its **Resume with** picker offers
+no saved configurations or replacement logins and requires a resumable option.
 Archive HTTP 207 dismisses the launch dialog and reports the imported node and
 launch failure, so a user can inspect the mesh page before attempting another import.
 Pull requests are created from an Agent Node, because the create route requires
@@ -359,11 +370,50 @@ Only the terminal is a WebView: it loads bundled xterm assets from
 resize and ready callbacks. No remote page, cookie or credential enters that
 WebView. Kotlin owns HTTP and WebSockets. The server's initial terminal snapshot
 replaces local terminal state on reconnect; binary output retains UTF-8 decoder
-state inside xterm. Native composer and control buttons own input; the xterm
-display disables stdin so replayed terminal queries cannot inject synthetic
-responses into the current desktop prompt. Input controls report disconnection instead of silently
+state inside xterm. Kotlin owns input; the xterm display disables stdin so
+replayed terminal queries cannot inject synthetic responses into the current
+desktop prompt. Input controls report disconnection instead of silently
 queueing keystrokes. HTTP replies enforce the server's 1024-byte encoded-body
 limit. Enumerated answers are shown as guidance rather than guessed PTY keys.
+
+### Typing goes into the agent's own input box
+
+The phone types straight into the agent's own input box (issue #2747),
+because that is where the agent's slash-command menu, `@` file completion and
+Tab completion run. A separate line-buffered box under the terminal sent
+nothing until **Send**, so none of them could react.
+
+`TerminalSurface` (`TerminalKeyInput.kt`) wraps the WebView and is the soft
+keyboard's target. Android 9 and later refuse focus to a zero-sized view, so a
+hidden helper view cannot hold the keyboard. The wrapper also blocks focus
+from reaching the WebView (`FOCUS_BLOCK_DESCENDANTS`), and xterm's textarea is
+read-only with `inputmode="none"`, so Chromium has no focused field to raise a
+keyboard of its own for. A plain tap on the
+terminal calls `BuildmeshTerminal.focusInput()`; so does the keyboard button
+at the head of the quick-key row. A plain tap is short, still and
+single-finger, and is not a link tap: `attachMobileTerminalLinks` claims a
+link tap by cancelling its `touchend`.
+
+The keyboard connection asks for visible-password input with no suggestions,
+which keyboards honour by committing one character at a time; each commit goes
+to the socket at once. A keyboard that still holds back a word replaces the
+whole word on each key, so `ImeTextStream` sends only the difference: DEL for
+each changed code point, then the new tail. That keeps the agent's box equal
+to what the keyboard shows. The editable is cleared after each commit, so
+Backspace arrives as a key event. `terminalKeyBytes` maps key events,
+including a hardware keyboard's Ctrl and Alt chords, to the bytes a desktop
+terminal sends. Arrows, Home and End follow the agent's application-cursor
+mode. The WebView reports that mode and bracketed paste over
+`BuildmeshTerminal.modes` whenever either flips, and the desktop snapshot
+replays both, so a reconnect starts from the agent's current state.
+
+Character input turns off autocorrect, swipe typing and the keyboard's
+microphone, so **Compose** opens a sheet with an ordinary text field for prose
+and dictation. **Insert** pastes the text into the agent's box, bracketed when
+the agent has bracketed paste on so that newlines stay in the draft. **Send**
+pastes, then sends Enter as its own frame after `COMPOSE_SUBMIT_GAP_MS`: 1s,
+the desktop's ordinary paste gap, because an Enter in the same burst as a
+paste can be read as part of it. The draft survives dismissing the sheet.
 
 The terminal screen draws the desktop's semantic-turn banner directly above the
 terminal surface, where the request is read (issue #2609). The band is read
@@ -532,6 +582,8 @@ reaches the same conclusion, and that each node owns its own notification id),
 and one that drives the feed against MockWebServer to prove two owners share a
 single socket, that the socket closes with its last owner, and that a revoked
 device stops the feed instead of minting tickets forever.
+`TerminalKeyInputTest` covers the key-to-bytes mapping, cursor-key mode,
+held-back words and the Compose paste.
 The terminal's quick-key row has its own suite: the approval keys are not
 duplicated there, and the approval sequences the band sends are the desktop's
 `y\r` / `n\r`.
@@ -545,7 +597,11 @@ controls, dashboard filtering/navigation and Android Keystore persistence and
 forgetting, Main-thread network discipline, cancelled mutation callbacks,
 snapshot ownership, diff retry and the real bundled WebView's snapshot/binary
 rendering, visible pixels in the native window, viewport geometry, resize and
-input, including replayed queries that must not become keystrokes.
+input, including replayed queries that must not become keystrokes. Input
+starts with a tap on the terminal and drives the keyboard connection the
+surface hands a soft keyboard (not a real keyboard app), then the Compose
+sheet and the quick keys, whose arrows follow the agent's cursor-key mode. A
+link tap does not raise the keyboard.
 The semantic-turn band above the terminal is covered on the device too: it
 shows a permission request's own words and the desktop's `Allow (Y)` /
 `Reject (N)` pair above the terminal surface, posts `y\r` to the desktop,

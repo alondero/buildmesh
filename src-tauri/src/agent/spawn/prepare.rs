@@ -103,6 +103,9 @@ pub(crate) struct SpawnOptions {
     /// the only one) silently drops the value at the resolver rather
     /// than splicing a synthetic flag into its argv.
     pub explicit_extra_args: Option<String>,
+    /// Cascade layer-1 agent / persona override (issue #1552 / #2716).
+    /// Same semantics as [`Self::explicit_model`].
+    pub explicit_agent: Option<String>,
     /// Optional per-step wall-clock budget in seconds (#1219). Threaded
     /// into the launch phase so it can log the budget (circuit-level
     /// enforcement reads the graph node in `observe_waits`). `Some(0)`
@@ -211,6 +214,7 @@ pub(super) async fn prepare_context(
         explicit_model,
         explicit_effort,
         explicit_extra_args,
+        explicit_agent,
         explicit_timeout_seconds,
         worktree_policy,
     } = opts;
@@ -249,7 +253,7 @@ pub(super) async fn prepare_context(
     // Session-id mode: Assign writes the UUID before launch; Resume
     // reuses the captured id; None leaves capture to the adapter.
     let can_infer_scope = resume.is_none() && resume_cause != ResumeCause::Startup;
-    let session_id_mode = if adapter.supports_resume() {
+    let session_id_mode = if adapter.descriptor().supports_resume {
         match resume {
             Some(ref id) if !id.is_empty() => SessionIdMode::Resume(id.clone()),
             _ => {
@@ -490,6 +494,9 @@ pub(super) async fn prepare_context(
     let explicit_extra_args = explicit_extra_args
         .filter(|s| !s.trim().is_empty())
         .or_else(|| configuration.as_ref().and_then(|c| c.extra_args.clone()));
+    let explicit_agent = explicit_agent
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| configuration.as_ref().and_then(|c| c.agent.clone()));
     Ok(PrepareOutcome::Ready(Box::new(PreparedPhases {
         workspace: WorkspaceToProvision {
             session_id,
@@ -510,6 +517,7 @@ pub(super) async fn prepare_context(
             explicit_model,
             explicit_effort,
             explicit_extra_args,
+            explicit_agent,
             explicit_timeout_seconds,
             spawn_option_id,
             registry_mesh_id: mesh_id,

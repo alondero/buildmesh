@@ -1,25 +1,7 @@
-/**
- * The Spawn Menu, flattened for the phone (issue #2385).
- *
- * The backend already derives one ordered Spawn Menu (`GET /api/providers`,
- * see `agent::provider_menu::available_providers`) and ADR-0016 forbids a
- * client re-sorting or re-deriving it: the desktop groups the rows by
- * harness, the phone renders them flat. The phone therefore does not build
- * its own list of harnesses; it flattens the backend rows into the two things
- * the spawn routes need:
- *
- *   * a bare **Spawn Option** row — `id` is the spawn option id, and the row
- *     launches itself;
- *   * a saved **Launch Configuration** row — the backend gives the row the
- *     configuration's own id and carries the configuration on the row, so it
- *     launches the row's *own* spawn option with that recipe beside it. The
- *     route pair is (`spawn_option_id`, `configuration_id`), which is the
- *     same pair the Android client sends.
- *
- * A launch that resolves the mesh's own default chain sends neither field.
- */
-
+/** Phone adapters for the backend Spawn Menu: ordered harness/login groups,
+ * configuration compatibility and the fields carried by launch requests. */
 import type { Mesh, Provider } from "./api";
+import { offeredUnderLogin } from "../lib/launchSelection";
 
 /**
  * The label for a launch that resolves the mesh's own default.
@@ -41,38 +23,64 @@ export type LaunchChoice = {
   provider: string;
   /** The saved Launch Configuration id, when the row is one. */
   configurationId?: string;
+  harnessId?: string;
+  harnessLabel?: string;
+  loginId?: string;
+  loginLabel?: string;
+  unavailableReason?: string;
+  warning?: string;
 };
 
-/**
- * The backend menu rows the phone offers for a launch.
- *
- * Only rows that can take a first prompt are offered. Every launch the phone
- * starts carries a prompt — the backend renders it from the issue or pull
- * request, and Capture writes it by hand — so a row that cannot prefill would
- * silently lose it. A row is also dropped when the backend reports it
- * unavailable, and a proxied row is kept only when it carries a saved
- * configuration, because a proxy without one has no provider to route to.
- *
- * The backend's order is preserved: the rows arrive grouped and ranked, and
- * the phone renders them in that order rather than sorting its own way.
- */
-export function launchChoices(providers: Provider[]): LaunchChoice[] {
+/** Preserve server order and filter by the launch context's prompt requirement.
+ * Unavailable rows can remain visible with an explanation in selection controls. */
+export function launchChoices(providers: Provider[], { needsPrompt = true, includeUnavailable = false }: {
+  needsPrompt?: boolean; includeUnavailable?: boolean;
+} = {}): LaunchChoice[] {
   return providers
-    .filter((row) => !row.unavailable_reason)
-    .filter(
-      (row) =>
-        row.capabilities?.accepts_initial_prompt &&
-        (!row.is_proxied || row.configuration),
-    )
-    .map((row) => {
+    .filter((row) => includeUnavailable || !row.unavailable_reason)
+    .filter((row) => (!needsPrompt || row.capabilities?.accepts_initial_prompt) && (!row.is_proxied || row.configuration))
+    .flatMap((row) => {
       const configuration = row.configuration;
-      return {
+      const native = providers.find((p) => p.harness_id === row.harness_id && !p.configuration && !p.is_proxied);
+      const base: LaunchChoice = {
         id: row.id,
+        harnessId: row.group_key ?? row.harness_id,
+        harnessLabel: native?.label ?? row.harness_id,
         label: configuration?.name ?? row.label,
         provider: configuration?.spawn_option_id ?? row.id,
         ...(configuration ? { configurationId: configuration.id } : {}),
+        ...(row.unavailable_reason ? { unavailableReason: row.unavailable_reason } : {}),
+        ...(row.verification_warning ? { warning: row.verification_warning } : {}),
       };
+      const logins = native?.logins ?? [];
+      if (logins.length < 2) return [base];
+      return logins.filter((login) => !configuration || offeredUnderLogin(configuration, login.id))
+        .map((login) => ({ ...base,
+          id: loginChoiceId(row.id, login.id),
+          label: `${base.label} · ${login.label}`,
+          loginId: login.id, loginLabel: login.label,
+          ...(!login.is_default && !login.signed_in ? { unavailableReason: 'Not signed in. Sign in from desktop Settings.' } : {}),
+        }));
     });
+}
+
+
+/** JSON tuple encoding keeps ids distinct even when names contain separators. */
+export function loginChoiceId(rowId: string, loginId: string): string {
+  return JSON.stringify([rowId, loginId]);
+}
+
+/** Group in server order; web select controls and sheets consume the same rows. */
+export function launchGroups(choices: LaunchChoice[]): { id: string; label: string; choices: LaunchChoice[] }[] {
+  const groups = new Map<string, { id: string; label: string; choices: LaunchChoice[] }>();
+  for (const choice of choices) {
+    const id = JSON.stringify([choice.harnessId ?? choice.provider, choice.loginId]);
+    const label = `${choice.harnessLabel ?? choice.provider}${choice.loginLabel ? ` · ${choice.loginLabel}` : ''}`;
+    const group = groups.get(id) ?? { id, label, choices: [] };
+    group.choices.push(choice);
+    groups.set(id, group);
+  }
+  return [...groups.values()];
 }
 
 /**
@@ -82,10 +90,12 @@ export function launchChoices(providers: Provider[]): LaunchChoice[] {
 export function launchFields(choice: LaunchChoice | null | undefined): {
   provider?: string;
   configuration_id?: string;
+  login_id?: string;
 } {
   if (!choice) return {};
   return {
     provider: choice.provider,
+    ...(choice.loginId ? { login_id: choice.loginId } : {}),
     ...(choice.configurationId
       ? { configuration_id: choice.configurationId }
       : {}),

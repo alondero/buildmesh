@@ -340,6 +340,29 @@ describe("mobile session-cookie recovery (issue #1577)", () => {
     expect(server.count("/api/ws-ticket")).toBe(2); // attempt + one replay
   });
 
+  it('retires a cancelled ticket replay while shared cookie recovery still serves another caller', async () => {
+    const response = deferred<Response>();
+    const server = cookieServer({
+      session: () => response.promise,
+      routes: {
+        '/api/ws-ticket': ({ cookie }) => cookie ? json(200, { ticket: 't-1' }) : unauthorized(),
+      },
+    });
+    vi.stubGlobal('fetch', server.fetchMock);
+    const controller = new AbortController();
+    const ticket = eventsWsUrl(controller.signal).catch(error => error);
+    const nodes = listNodes();
+    await waitFor(() => expect(server.count('/api/session')).toBe(1));
+    controller.abort();
+    response.resolve(noContent());
+    expect(await ticket).toMatchObject({ name: 'AbortError' });
+    expect(await nodes).toEqual([]);
+    expect(server.count('/api/session')).toBe(1);
+    expect(server.count('/api/ws-ticket')).toBe(1);
+    expect(server.count('/api/nodes')).toBe(2);
+    expect(readStoredToken()).toBe(DEVICE_TOKEN);
+  });
+
   it("surfaces an auth error without a refresh when there is no saved token", async () => {
     localStorage.clear();
     const server = cookieServer();

@@ -56,7 +56,7 @@ export function useSpawnMenu(enabled: boolean) {
   );
 
   const choices = useMemo<LaunchChoice[] | null>(
-    () => (enabled && providers ? launchChoices(providers) : null),
+    () => (enabled && providers ? launchChoices(providers, { includeUnavailable: true }) : null),
     [enabled, providers],
   );
 

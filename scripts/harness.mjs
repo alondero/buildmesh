@@ -16,7 +16,7 @@ import { recordReview, reviewContext, validateReview, REVIEW_USAGE } from './har
 import { event, git, readJson, saveJson, statePath, taskAt } from './harness-state.mjs';
 import { runWorktreeDeps, WORKTREE_DEPS_USAGE } from './worktree-deps.mjs';
 
-const USAGE = 'harness start --spec <json> | update --spec <json> | status | metrics | ' + REVIEW_USAGE + ' | check [--base <commit>] | verify [--base <commit>] [--full] | wait [--max-seconds <n>] | finish | evaluate [--case <id>] | checkpoint | record-rollback --ref <commit> | ' + WORKTREE_DEPS_USAGE;
+const USAGE = 'harness start --spec <json> | update --spec <json> | status | metrics | ' + REVIEW_USAGE + ' | check [--base <commit>] | verify [--base <commit>] [--full] [--repair] | wait [--max-seconds <n>] | finish | evaluate [--case <id>] | checkpoint | record-rollback --ref <commit> | ' + WORKTREE_DEPS_USAGE;
 const EXIT = { PASS: 0, FAIL: 1, FLAKY: 1, BLOCKED: 2, TIMEOUT: 124 };
 function alive(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; }
@@ -393,8 +393,16 @@ export async function runGate(root, gate, base, paths = [], extraEnv = {}, { def
     delete env.BUILDMESH_PREFILL;
     delete env.NODE_TEST_CONTEXT;
     if (gate.tests === 'rust') env.BUILDMESH_TEST_REPORT = reportPath;
+    const commandStarted = Date.now();
     const code = await runGuarded({ minutes: gate.minutes, killGraceSeconds: 2, log, label: gate.id, command, cwd: gate.cwd ? join(root, gate.cwd) : root, env, output: () => {} });
     result = { ...classify(gate, code, readFileSync(log, 'utf8'), paths), exitCode: code };
+    if (result.outcome === 'TIMEOUT') {
+      // Queueing and prerequisite probes precede the command's deadline.
+      // Keep its elapsed time separate from the whole gate's duration.
+      const elapsedMs = Date.now() - commandStarted;
+      const deadlineMs = gate.minutes * 60000;
+      Object.assign(result, { elapsedMs, deadlineMs, reason: `Deadline exceeded: elapsed ${elapsedMs}ms, deadline ${deadlineMs}ms (${gate.minutes} minutes). Investigate a hang or resource contention before retrying.` });
+    }
     if (result.outcome === 'FAIL' && ['vitest', 'rust'].includes(gate.tests)) {
       const report = readTestReport(root, gate.tests, reportPath, readFileSync(log, 'utf8'));
       result = { ...result, failures: report.failures, count: report.count, unattributed: report.unattributed };
@@ -473,11 +481,18 @@ function classify(gate, code, output, paths) {
 }
 // `plan` lets tests substitute fake gates for the real npm/cargo plan; a substituted plan also skips
 // the self-review prompts unless `selfReview` asks for them (true, or a function standing in for them).
-export async function verify(root, { base: requestedBase, full = false, plan = planGates, selfReview = plan === planGates } = {}) {
+export async function verify(root, { base: requestedBase, full = false, repair = false, plan = planGates, selfReview = plan === planGates } = {}) {
   const task = taskAt(root);
   if (!task && !requestedBase) throw new Error('BLOCKED: start a task or provide --base <commit>; HEAD alone can miss committed work.');
   const base = resolveBase(root, requestedBase ?? task.base);
   if (task && base !== task.base) throw new Error('BLOCKED: verification base must match the active task.');
+  const repairLoop = task?.phase === 'implement' || task?.review?.verdict === 'REQUEST_CHANGES';
+  const repairContext = { optedIn: repair, phase: task?.phase ?? null, verdict: task?.review?.verdict ?? null };
+  if (repairLoop) {
+    const advice = `Repair-loop run (phase ${task.phase}, last review ${task.review?.verdict ?? 'none'}): use npm run harness -- check --base ${base} for fast checks. Scope-complete verification requires --repair: npm run verify -- --repair.`;
+    if (!repair) throw new Error(`BLOCKED: ${advice}`);
+    console.log(`${advice} Deliberate scope-complete run accepted (--repair).`);
+  }
   // The run publishes the identity its own gates read. `runIdentity` hashes the
   // base string, so `c5f0dd42` and its full hash are two identities for one
   // commit: the ref is resolved once here, and the `binding-drift` gate
@@ -496,6 +511,7 @@ export async function verify(root, { base: requestedBase, full = false, plan = p
   // second one, because a reviewer and the implementer do not share a
   // machine.
   const receipt = { taskId: task?.id ?? null, root, base, head: git(root, 'rev-parse', 'HEAD').trim(), tree, contentTree: contentTree(root), full, paths, gatePlan: gates, gates: [], outcome: 'BLOCKED', startedAt: new Date().toISOString(), runIdentity: runIdentity(root, base) };
+  if (repair) receipt.repair = repairContext;
   // Advisory only, and printed first: a repair is cheapest before the slow gates have run against it.
   let selfReviewFlags = 0;
   if (selfReview) {
@@ -596,7 +612,7 @@ export async function verify(root, { base: requestedBase, full = false, plan = p
     saveJson(cachePath, { taskId: receipt.taskId, gates: reusable });
   }
   saveJson(statePath(root, 'receipt.json'), receipt);
-  event(root, { type: 'verification', taskId: receipt.taskId, outcome: receipt.outcome, durationMs: receipt.durationMs, attempt: task?.verificationAttempts ?? null });
+  event(root, { type: 'verification', taskId: receipt.taskId, outcome: receipt.outcome, durationMs: receipt.durationMs, attempt: task?.verificationAttempts ?? null, ...(receipt.repair ? { repair: receipt.repair } : {}) });
   console.log(`${receipt.outcome}: ${receipt.gates.length}/${gates.length} gates${receipt.reason ? `; ${receipt.reason}` : ''}. Receipt: .harness/receipt.json`);
   if (selfReviewFlags) console.log(`Self-review prompts above flagged ${selfReviewFlags} item${selfReviewFlags === 1 ? '' : 's'}; apply docs/agents/self-review.md before committing.`);
   return receipt;
@@ -905,6 +921,7 @@ function parse(argv) {
   for (let i = 1; i < argv.length; i += 1) {
     const flag = argv[i];
     if (flag === '--full') options.full = true;
+    else if (flag === '--repair') options.repair = true;
     else if (flag === '--show') options.show = true;
     else if (flag === '--max-seconds' && Number(argv[i + 1]) > 0) options.maxSeconds = Number(argv[++i]);
     else if (flag === '--finding' && argv[i + 1]) options.finding.push(argv[++i]);
@@ -930,6 +947,7 @@ async function main() {
     if (args[0] === 'gate') { await internalGate(root, args[1]); return; }
     if (args[0] === 'link-deps' || args[0] === 'unlink-deps') { console.log(runWorktreeDeps(root, args)); return; }
     const options = parse(args);
+    if (options.repair && options.action !== 'verify') throw new Error('BLOCKED: --repair applies only to npm run verify.');
     if (options.action === 'status') { console.log(JSON.stringify(status(root), null, 2)); return; }
     if (options.action === 'metrics') { console.log(JSON.stringify(metrics(root), null, 2)); return; }
     // Reading the review ledger is advisory: a follow-up reviewer loads the last

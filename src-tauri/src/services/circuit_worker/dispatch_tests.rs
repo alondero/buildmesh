@@ -163,6 +163,10 @@ struct World {
 impl Scratch {
     fn new() -> Self {
         let db = crate::db::test_support::isolated();
+        // The run id is reserved before the run exists. The worker's
+        // cancellation registry is process-wide and keyed by run id, so a run
+        // id another database could also hand out would let that database's
+        // cancellation invalidate this batch (issue #2663).
         crate::db::test_support::seed_unique_circuit_run_ids();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_str().unwrap().to_string();
@@ -227,6 +231,11 @@ impl Scratch {
             "{}",
         )
         .unwrap();
+        assert!(
+            run_id >= crate::db::test_support::reserved_run_id_floor(),
+            "the dispatch batch is keyed by run id in a process-wide registry, so the fixture must \
+             hold one no other database holds: {run_id}"
+        );
         db::set_circuit_run_state(run_id, "running").unwrap();
         context.with_run(run_id);
         db::circuit::evidence::commit_transition(

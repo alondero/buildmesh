@@ -83,6 +83,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 
+use rusqlite::Connection;
+
 use super::SqlResult;
 
 /// Reader connections opened for an isolated test database. Production opens
@@ -177,17 +179,44 @@ pub fn installed_node_id_range() -> Option<(i64, i64)> {
     INSTALLED.with(|slot| slot.borrow().as_ref().map(|i| i.node_id_range))
 }
 
+/// The lowest circuit-run id a reserved database hands out.
+///
+/// A database that does not reserve its run ids numbers its runs from 1, and
+/// the worker's cancellation registry is process-wide and keyed by run id, so
+/// two databases that hand out the same id share that registry entry: one
+/// database's cancellation then invalidates the other database's effect batch
+/// (issue #2663). A reserved id therefore starts above the ids an unreserved
+/// database hands out, which is what this floor expresses.
+pub const RESERVED_RUN_ID_FLOOR: i64 = NODE_ID_RANGE + 1;
+
+/// The lowest circuit-run id the installed database hands out once its run ids
+/// are reserved.
+///
+/// The reserved band sits above the database's own agent-node band, so this is
+/// the id its first reserved run takes. A fixture that reserves its ids can
+/// compare its run against this floor; the comparison holds for each database,
+/// because the band is derived from that database's own range.
+pub fn reserved_run_id_floor() -> i64 {
+    let (first, _) = installed_node_id_range().expect("an isolated database is installed");
+    first + NODE_ID_RANGE
+}
+
 /// Seed a fresh fixture before its first run when it exercises process-wide run
 /// state. Nested fixture builders retain the sequence. Separate databases would
 /// otherwise reuse run id 1 and share cancellation markers across effect batches.
+///
+/// The reserved band sits above the database's own agent-node band, so the
+/// first reserved run id is at least [`RESERVED_RUN_ID_FLOOR`] for each
+/// database, and above the ids a database that does not reserve its run ids
+/// hands out.
 pub fn seed_unique_circuit_run_ids() {
-    let (first, _) = installed_node_id_range().expect("an isolated database is installed");
+    let reserved = reserved_run_id_floor() - 1;
     crate::db::write_conn()
         .execute(
             "INSERT INTO sqlite_sequence (name, seq)
              SELECT 'autopilot_circuit_runs', ?1
              WHERE NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name='autopilot_circuit_runs')",
-            [first],
+            [reserved],
         )
         .unwrap();
 }
@@ -410,6 +439,21 @@ pub fn shared_global_db() -> SharedGlobalDb {
 #[must_use = "the guard keeps the test's database installed; bind it (`let _db = ...`) and drop it when the test ends"]
 pub fn isolated() -> IsolatedDbGuard {
     install(next_database_uri(), Vec::new())
+}
+
+/// Install a statement trace on every idle reader in the installed database.
+///
+/// The trace stays on the connection when [`super::read_conn`] returns it to
+/// the pool, so the next checkout — the one `history` and `attention` take
+/// for themselves — is counted. Returns how many readers were armed. Call
+/// this after the fixture is written and before the read under test.
+pub fn trace_readers(mut install: impl FnMut(&mut Connection)) -> usize {
+    let mut available = super::get().readers.available.lock();
+    let count = available.len();
+    for connection in available.iter_mut() {
+        install(connection);
+    }
+    count
 }
 
 /// Like [`isolated`], but the database is a real file, so every commit pays
@@ -641,8 +685,11 @@ impl Drop for IsolatedDbGuard {
                 // The preferences store belongs to this install, so dropping it
                 // here hands this test's preferences to nobody: the next test
                 // on this recycled worker thread installs its own. Dropping
-                // the `TempDir` removes the files as well.
+                // the `TempDir` removes the files as well. The interval
+                // schedule is thread-local too: leave it and the next test
+                // would skip its database read on the strength of this one.
                 installed.prefs = None;
+                crate::services::circuit_triggers::clear_interval_schedule();
                 *slot = None;
             }
         });

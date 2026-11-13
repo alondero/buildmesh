@@ -92,6 +92,16 @@ candidate is stable and before successful handoff. Final completion continues
 to require current verification, acceptance evidence and independent APPROVE
 for the same tree.
 
+`npm run verify` refuses a repair-loop run while the task is in `implement`
+or its last recorded review is `REQUEST_CHANGES`. It names the fast alternative,
+`npm run harness -- check --base <base>`, before starting any gates or counting
+an attempt. When scope-complete verification is deliberate, use
+`npm run verify -- --repair`. The receipt and verification event record the
+opt-in, starting phase and last verdict. Each repair-loop invocation needs its
+own opt-in; moving to `verify` does not clear a `REQUEST_CHANGES` verdict.
+When the candidate is stable, move out of `implement` and record independent
+approval, or use `--repair` for the final verification before renewed review.
+
 Use the [review skill](../../.claude/skills/review/SKILL.md) with the task's
 immutable base, complete change, acceptance criteria, existing findings and
 available evidence. The first pass checks the whole change against the spec
@@ -323,6 +333,17 @@ npm run harness -- update --spec .tmp/progress.json
 npm run harness -- finish
 ```
 
+The Claude `Bash|PowerShell` PreToolUse
+[waiting guard](../../.claude/hooks/guard-waiting.mjs) refuses `Start-Sleep` /
+`sleep` paired with common process/job probes, harness status checks, or reads
+of `.harness` artifacts and `.log` / `.out` files. This includes a single
+sleep followed by a check, as well as loops. For other background work, block
+until the task completes and read its output once (the task tool's blocking
+completion option, shell `wait`, or PowerShell `Wait-Process` / `Wait-Job`).
+Bounded delays without these polls remain allowed. The guard is a heuristic:
+quoted scripts and computed commands are outside its scope. The same blocking
+workflow applies to agents whose tool hooks do not run this guard.
+
 `wait` blocks until no harness operation holds `.harness/lock` (a verify holds it
 for its whole run), then prints the receipt summary: the outcome line, then each
 nonpassing gate with its reason and log path, in at most about 20 lines. It exits
@@ -374,6 +395,14 @@ to wait for. After any nonpassing gate no new gate starts in either lane, gates
 already running finish so their logs and receipt rows stay complete, and a gate
 whose dependency did not pass is not run. The receipt lists gates in plan order
 whatever order they finished in, and its `durationMs` is wall time.
+
+Each command has its own deadline. A timeout is persisted and printed against
+that gate as soon as its guard finishes, while another running lane may still
+be draining. Its receipt row includes `elapsedMs` and `deadlineMs`, and the
+reason shown by both `verify` and `wait` names those times. Command elapsed time
+includes termination and bounded output draining; it excludes prerequisite
+probes and time queued for a machine-wide slot. A timeout stops further gates
+from starting and remains `TIMEOUT` in the receipt.
 
 When both lanes hold a heavy gate, each of `frontend-tests` and `rust-tests` is
 limited to half the cores (`VITEST_MAX_WORKERS`, `RUST_TEST_THREADS`, and two
@@ -487,6 +516,13 @@ installed as missing.
 Committed, staged, unstaged, deleted and untracked paths determine scope.
 Unknown paths select both product layers; generated wire types always select
 both. Executable hooks and harness tests still run infrastructure gates.
+Ordinary `scripts/` and `.github/` edits select frontend coverage without the
+Rust graph. The exact Rust tooling exceptions and their per-file rationale live
+in `scripts/ci/changed-scope.mjs`: gate selection/execution, Rust shard coverage
+and failure handling, and ConPTY build inputs retain both graphs, including in
+the local harness. The Android Circuit wire generator writes Kotlin under
+`android/` and does not select Rust. Add a script to the exceptions when it
+controls Rust verification or supplies an input to the Rust build.
 Adding only harness package scripts, or the exact `.harness` ESLint ignore,
 keeps infrastructure scope; dependency/build/rule changes retain product gates.
 

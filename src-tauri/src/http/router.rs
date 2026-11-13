@@ -881,7 +881,9 @@ pub(crate) async fn dispatch_matched(
     }
 
     if let Some(required) = matched.scope.required() {
-        if let Some(denied) = auth::deny_response(auth::authorize(&req.headers, required)) {
+        if let Some(denied) =
+            auth::deny_response(auth::authorize(&req.headers, required, Some(req.peer.ip())))
+        {
             return DispatchResult::Http(denied);
         }
     }
@@ -956,7 +958,7 @@ async fn run_handler(handler: Handler, req: &ParsedRequest) -> DispatchResult {
 }
 
 fn admin_catchall(req: &ParsedRequest) -> Response {
-    match auth::authorize(&req.headers, RequiredScope::Admin) {
+    match auth::authorize(&req.headers, RequiredScope::Admin, Some(req.peer.ip())) {
         auth::AuthOutcome::Ok(_) => Response::empty("404 Not Found"),
         auth::AuthOutcome::Unauthorized => Response::empty("401 Unauthorized"),
         auth::AuthOutcome::Forbidden => Response::empty("403 Forbidden"),

@@ -117,6 +117,7 @@ fn harness_capabilities(
         supports_result_file_handoff: !plain_terminal,
         produces_readable_transcript: true,
         supports_model_override: true,
+        supports_agent: false,
         supports_effort_override: false,
         supports_extra_args: true,
         supports_prefill,
@@ -192,8 +193,8 @@ fn provider_row(row: MenuRow) -> crate::agent::provider::ProviderInfo {
 /// The Spawn Menu the phone renders, in the backend's own order: a plain
 /// terminal, a saved Launch Configuration, a proxied provider, and a row
 /// whose executable is missing.
-fn provider_menu() -> Vec<crate::agent::provider::ProviderInfo> {
-    vec![
+fn provider_menu() -> Vec<crate::http::routes::providers::MobileSpawnOption> {
+    let providers = vec![
         provider_row(MenuRow {
             id: "terminal",
             label: "Terminal",
@@ -234,7 +235,32 @@ fn provider_menu() -> Vec<crate::agent::provider::ProviderInfo> {
             configuration: None,
             unavailable_reason: Some("Missing executable"),
         }),
+    ];
+    crate::http::routes::providers::phone_menu(providers, sample_logins())
+}
+
+pub(crate) fn sample_logins() -> Vec<crate::services::harness_logins::HarnessLoginStatus> {
+    [
+        ("default", "Default", true, false),
+        ("work", "Work", false, true),
+        ("guest", "Guest", false, false),
     ]
+    .into_iter()
+    .map(
+        |(id, label, is_default, signed_in)| crate::services::harness_logins::HarnessLoginStatus {
+            id: id.into(),
+            harness_id: "codex".into(),
+            label: label.into(),
+            home: "C:/private-home".into(),
+            is_default,
+            signed_in,
+            email: Some("private@example.test".into()),
+            plan: None,
+            same_account_as: None,
+            sign_in: None,
+        },
+    )
+    .collect()
 }
 
 /// The completeness block every multi-page GitHub read carries.
@@ -250,9 +276,9 @@ fn completeness() -> crate::services::github::pagination::GitHubPageCompleteness
 
 /// The issues feed: the `{items, completeness}` wrapper the desktop moved to
 /// in issue #2024.
-fn issues_feed() -> crate::commands::pr::GitHubIssueFeed {
-    crate::commands::pr::GitHubIssueFeed {
-        items: vec![crate::commands::pr::GitHubIssue {
+fn issues_feed() -> crate::services::github::wire::GitHubIssueFeed {
+    crate::services::github::wire::GitHubIssueFeed {
+        items: vec![crate::services::github::wire::GitHubIssue {
             number: 42,
             title: "Fix deadline".to_string(),
             body: "Issue details".to_string(),
@@ -267,9 +293,9 @@ fn issues_feed() -> crate::commands::pr::GitHubIssueFeed {
 }
 
 /// The pull request feed: the same `{items, completeness}` wrapper.
-fn pulls_feed() -> crate::commands::pr::GitHubPullRequestFeed {
-    crate::commands::pr::GitHubPullRequestFeed {
-        items: vec![crate::commands::pr::GitHubPullRequest {
+fn pulls_feed() -> crate::services::github::wire::GitHubPullRequestFeed {
+    crate::services::github::wire::GitHubPullRequestFeed {
+        items: vec![crate::services::github::wire::GitHubPullRequest {
             number: 42,
             title: "Fix deadline".to_string(),
             body: String::new(),
@@ -292,8 +318,8 @@ fn pulls_feed() -> crate::commands::pr::GitHubPullRequestFeed {
 
 /// The pull request feed with nothing in it: the mesh has no open pull
 /// requests.
-fn pulls_feed_empty() -> crate::commands::pr::GitHubPullRequestFeed {
-    crate::commands::pr::GitHubPullRequestFeed {
+fn pulls_feed_empty() -> crate::services::github::wire::GitHubPullRequestFeed {
+    crate::services::github::wire::GitHubPullRequestFeed {
         items: Vec::new(),
         completeness: crate::services::github::pagination::GitHubPageCompleteness {
             returned: 0,
@@ -464,21 +490,21 @@ fn fixtures() -> Vec<Fixture> {
         fixture("issue_labels", &issue_labels()),
         fixture(
             "pr_source",
-            &crate::commands::pr::PrSource {
+            &crate::services::github::wire::PrSource {
                 head_branch: "topic".to_string(),
                 base_branch: "main".to_string(),
             },
         ),
         fixture(
             "pr_mergeability",
-            &crate::commands::pr::PrMergeability {
+            &crate::services::github::wire::PrMergeability {
                 mergeable: Some(true),
                 mergeable_state: "clean".to_string(),
             },
         ),
         fixture(
             "create_pr_result",
-            &crate::commands::pr::CreatePrResult {
+            &crate::services::github::wire::CreatePrResult {
                 url: "https://example.invalid/pull/17".to_string(),
                 head_branch: "topic".to_string(),
                 base_branch: "main".to_string(),
@@ -518,6 +544,20 @@ fn fixtures() -> Vec<Fixture> {
             },
         ),
         // ----- requests the phone sends -----------------------------------
+        request_fixture(
+            "create_node_request_login",
+            &crate::http::routes::nodes::CreateNodeRequest {
+                mesh_id: 3,
+                prompt: Some("Fix it".into()),
+                provider: Some("codex".into()),
+                configuration_id: None,
+                login_id: Some("work".into()),
+                rows: Some(24),
+                cols: Some(80),
+                operation_key: Some("op-1".into()),
+            },
+            &[],
+        ),
         // A saved Launch Configuration travels as `configuration_id` beside
         // its own Spawn Option.
         request_fixture(
@@ -527,6 +567,7 @@ fn fixtures() -> Vec<Fixture> {
                 prompt: Some("Fix it".to_string()),
                 provider: Some("claude".to_string()),
                 configuration_id: Some("launch/405f11ec".to_string()),
+                login_id: None,
                 rows: Some(24),
                 cols: Some(80),
                 operation_key: Some("op-1".to_string()),
@@ -541,6 +582,7 @@ fn fixtures() -> Vec<Fixture> {
                 prompt: None,
                 provider: Some("claude:minimax".to_string()),
                 configuration_id: None,
+                login_id: None,
                 rows: Some(24),
                 cols: Some(80),
                 operation_key: Some("op-1".to_string()),
@@ -556,6 +598,7 @@ fn fixtures() -> Vec<Fixture> {
                 prompt: Some("Fix it".to_string()),
                 provider: None,
                 configuration_id: None,
+                login_id: None,
                 rows: Some(24),
                 cols: Some(80),
                 operation_key: Some("op-1".to_string()),
@@ -568,6 +611,7 @@ fn fixtures() -> Vec<Fixture> {
                 title: "Fix deadline".to_string(),
                 provider: Some("claude".to_string()),
                 configuration_id: Some("launch/405f11ec".to_string()),
+                login_id: None,
             },
             &[],
         ),
@@ -577,6 +621,7 @@ fn fixtures() -> Vec<Fixture> {
                 title: "Fix deadline".to_string(),
                 provider: Some("claude:minimax".to_string()),
                 configuration_id: None,
+                login_id: None,
             },
             &[],
         ),
@@ -586,6 +631,7 @@ fn fixtures() -> Vec<Fixture> {
                 title: "Fix deadline".to_string(),
                 provider: None,
                 configuration_id: None,
+                login_id: None,
             },
             &[],
         ),
@@ -599,6 +645,7 @@ fn fixtures() -> Vec<Fixture> {
                 head_repo_clone_url: Some("https://github.com/octo/r.git".to_string()),
                 provider: Some("claude".to_string()),
                 configuration_id: Some("launch/405f11ec".to_string()),
+                login_id: None,
             },
             &[],
         ),
@@ -612,6 +659,7 @@ fn fixtures() -> Vec<Fixture> {
                 head_repo_clone_url: Some("https://github.com/octo/r.git".to_string()),
                 provider: None,
                 configuration_id: None,
+                login_id: None,
             },
             &[],
         ),
@@ -627,6 +675,7 @@ fn fixtures() -> Vec<Fixture> {
                 head_repo_clone_url: Some("https://github.com/octo/r.git".to_string()),
                 provider: Some("claude:minimax".to_string()),
                 configuration_id: None,
+                login_id: None,
             },
             &[],
         ),

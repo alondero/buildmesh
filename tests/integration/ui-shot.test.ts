@@ -39,6 +39,7 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const uiShot = resolve(repoRoot, 'scripts', 'ui-shot.mjs');
 const circuitSteps = resolve(repoRoot, 'tests', 'integration', 'ui-shot-circuit.steps.mjs');
 const circuitFixtures = resolve(repoRoot, 'tests', 'integration', 'ui-shot-circuit.fixtures.mjs');
+const circuitActivitySteps = resolve(repoRoot, 'tests', 'integration', 'ui-shot-circuit-activity.steps.mjs');
 const nodeHeaderSteps = resolve(repoRoot, 'tests', 'integration', 'ui-shot-node-header.steps.mjs');
 const nodeHeaderFixtures = resolve(repoRoot, 'tests', 'integration', 'ui-shot-node-header.fixtures.mjs');
 const hangingSteps = resolve(repoRoot, 'tests', 'integration', 'ui-shot-hanging.steps.mjs');
@@ -138,7 +139,7 @@ describe('ui-shot mock mode', () => {
         '--steps', resolve(repoRoot, 'tests/integration/ui-shot-probe-header.steps.mjs'),
       ]);
       expect(result.code, result.stderr).toBe(0);
-      expect(result.stdout).toContain('11 two-row Probe headers at 240px');
+      expect(result.stdout).toContain('12 two-row Probe headers at 240px');
     } finally {
       await rm(folder, { recursive: true, force: true });
     }
@@ -153,6 +154,21 @@ describe('ui-shot mock mode', () => {
         '--mock-url', `http://127.0.0.1:${port}`,
         '--fixtures', resolve(repoRoot, 'tests/integration/ui-shot-node-groups.fixtures.mjs'),
         '--steps', resolve(repoRoot, 'tests/integration/ui-shot-node-groups.steps.mjs'),
+      ]);
+      expect(result.code, result.stderr).toBe(0);
+    } finally {
+      await rm(folder, { recursive: true, force: true });
+    }
+  }, TEST_DEADLINE_MS);
+
+  it('keeps narrow workspaces, circuit panels, pairing and colour-save recovery usable', async () => {
+    const folder = await mkdtemp(join(tmpdir(), 'buildmesh-ui-shot-critical-ux-'));
+    try {
+      const port = await freePort();
+      const result = await runUiShot([
+        '--out', join(folder, 'critical-ux.png'), '--mock', '--serve',
+        '--mock-url', `http://127.0.0.1:${port}`,
+        '--steps', resolve(repoRoot, 'tests/integration/ui-shot-critical-ux.steps.mjs'),
       ]);
       expect(result.code, result.stderr).toBe(0);
     } finally {
@@ -177,6 +193,32 @@ describe('ui-shot mock mode', () => {
       expect(result.code, result.stderr).toBe(0);
       expect(result.stdout).toContain('Saved');
       expect((await stat(output)).size).toBeGreaterThan(0);
+    } finally {
+      await rm(folder, { recursive: true, force: true });
+    }
+  }, TEST_DEADLINE_MS);
+
+  it('states the Activity summary apart from queued and attention work, at the dock widths and both themes', async () => {
+    // Issue #2740 — the Activity view used to say "Ready for work" beside a
+    // queued backlog and a finished run that needed a person. This checks the
+    // replacement in the real browser: both routes work from the keyboard, and
+    // the summary holds at the 240px minimum and the default width, in both
+    // themes, at the largest interface text size.
+    const folder = await mkdtemp(join(tmpdir(), 'buildmesh-ui-shot-circuit-activity-'));
+    try {
+      const port = await freePort();
+      const result = await runUiShot([
+        '--out', join(folder, 'circuit-activity.png'),
+        '--mock',
+        '--serve',
+        '--mock-url', `http://127.0.0.1:${port}`,
+        '--fixtures', circuitFixtures,
+        '--steps', circuitActivitySteps,
+      ]);
+
+      expect(result.code, result.stderr).toBe(0);
+      expect(result.stdout).toContain('PASS: the Activity summary states running, queued and attention work apart');
+      expect((await stat(join(folder, 'circuit-activity.png'))).size).toBeGreaterThan(0);
     } finally {
       await rm(folder, { recursive: true, force: true });
     }

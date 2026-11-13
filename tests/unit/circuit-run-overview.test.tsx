@@ -147,7 +147,7 @@ describe('Overview tab on a circuit card', () => {
     const onChanged = vi.fn();
     const props = { error: null, onRefresh, onChanged, onOpenAgent: vi.fn(), agentName: () => null };
     const view = render(<CircuitRunOverview {...props} overview={review} />);
-    const select = screen.getByRole('combobox', { name: 'Review rounds' }) as HTMLSelectElement;
+    const select = screen.getByRole('combobox', { name: 'Round limit' }) as HTMLSelectElement;
     expect(select.value).toBe('5');
     expect(within(select).getAllByRole('option').map((option) => option.textContent)).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9', 'Unlimited']);
     fireEvent.change(select, { target: { value: '1' } });
@@ -167,11 +167,12 @@ describe('Overview tab on a circuit card', () => {
     expect(select.disabled).toBe(false);
     review.run.context_json = '{"retry.attempt":"12","retry.max_retries":"unlimited","review.round_limit":"0"}';
     review.review_round_limit = 0;
+    review.steps = [step('verdict', 'running', { attempt: 12 })];
     view.rerender(<CircuitRunOverview {...props} overview={{ ...review }} />);
     expect(select.value).toBe('0');
-    expect(screen.getByText('Round 12 of unlimited')).toBeTruthy();
+    expect(screen.getByTestId('run-review-rounds-caption').textContent).toBe('Round 12 of unlimited · Reviewing now');
     view.rerender(<CircuitRunOverview {...props} overview={{ ...review, run: { ...review.run, state: 'completed' } }} />);
-    expect(screen.queryByRole('combobox', { name: 'Review rounds' })).toBeNull();
+    expect(screen.queryByRole('combobox', { name: 'Round limit' })).toBeNull();
   });
   it('leads the tab strip, never steals the terminal, and switches back without disposing anything', async () => {
     vi.mocked(circuitRunOverview).mockResolvedValue(overview());
@@ -279,6 +280,100 @@ describe('Overview panel', () => {
     agentName: (id: number) => `Agent ${id}`,
   };
 
+  const reviewGraph: CircuitGraph = {
+    version: 3,
+    nodes: [
+      { id: 'trigger', type: { type: 'manual' } },
+      { id: 'source', type: { type: 'await_agent_turn', target_node_id: '$source' } },
+      { id: 'reviewer', type: { type: 'spawn_agent_node', prompt: 'review', name: 'Code reviewer', provider: null, model: null, effort: null, extra_args: null, timeout_seconds: null } },
+      { id: 'verdict', type: { type: 'review_verdict', target_node_id: 'reviewer' } },
+      { id: 'feedback', type: { type: 'inject_pty', prompt: 'fix', target_node_id: '$source' } },
+      { id: 'fixes', type: { type: 'await_agent_turn', target_node_id: '$source' } },
+      { id: 'retry', type: { type: 'retry_limit', max_retries: 3 } },
+      { id: 'again', type: { type: 'inject_pty', prompt: 'again', target_node_id: 'reviewer' } },
+      { id: 'merge', type: { type: 'inject_pty', prompt: 'merge', target_node_id: '$source' } },
+    ],
+    edges: [
+      { from: 'trigger', to: 'source', condition: 'always' },
+      { from: 'source', to: 'reviewer', condition: { on_outcome: 'completed' } },
+      { from: 'reviewer', to: 'verdict', condition: 'always' },
+      { from: 'verdict', to: 'feedback', condition: { on_outcome: 'working' } },
+      { from: 'feedback', to: 'fixes', condition: 'always' },
+      { from: 'fixes', to: 'retry', condition: { on_outcome: 'completed' } },
+      { from: 'retry', to: 'again', condition: { on_outcome: 'completed' } },
+      { from: 'again', to: 'verdict', condition: 'always' },
+      { from: 'verdict', to: 'merge', condition: { on_outcome: 'completed' } },
+    ],
+  };
+
+  const reviewingRoundTwo = (): Overview => overview({
+    circuit_name: 'Review',
+    review_round_limit: 3,
+    run: {
+      ...overview().run, source_agent_node_id: 1,
+      context_json: JSON.stringify({
+        'retry.attempt': '2', 'node.verdict.review_verdict': 'changes_requested', 'node.verdict.review_verdict_attempt': '1',
+        'node.verdict.evaluated_output': '## Round 1\n\n1. Retain the terminal on unmount.\n2. Test switching away and back.',
+      }),
+    },
+    graph: reviewGraph,
+    steps: [
+      step('trigger', 'completed'), step('source', 'completed', { agent_node_id: 1 }), step('reviewer', 'completed', { agent_node_id: 2 }),
+      step('verdict', 'running', { attempt: 2 }), step('feedback', 'completed', { agent_node_id: 1 }),
+      step('fixes', 'completed', { agent_node_id: 1 }), step('retry', 'completed'), step('again', 'completed', { agent_node_id: 2 }),
+    ],
+    attention: { revision: 5, checkpoints: [], pushes: [] },
+  });
+
+  it('leads with what is happening, which stage the run is in and where the review rounds stand', () => {
+    render(<CircuitRunOverview {...props} overview={reviewingRoundTwo()} />);
+    expect(screen.getByTestId('run-overview-state').textContent).toBe('Running');
+    expect(screen.getByTestId('run-overview-headline').textContent).toBe('Code reviewer is reviewing round 2');
+
+    const stages = within(screen.getByRole('list', { name: 'Run stages' })).getAllByRole('listitem');
+    expect(stages.map((stage) => [...stage.querySelectorAll('p')].map((line) => line.textContent)))
+      .toEqual([['Prepare: done'], ['Review: in progress', 'Round 2 of 3'], ['Finish: not started']]);
+    expect(stages.map((stage) => stage.getAttribute('aria-current'))).toEqual([null, 'step', null]);
+
+    const rounds = within(screen.getByRole('list', { name: 'Review round results' })).getAllByRole('listitem');
+    expect(rounds.map((round) => round.getAttribute('title'))).toEqual(['Round 1: Changes requested', 'Round 2: Reviewing now', 'Round 3: Not started']);
+    expect(screen.getByTestId('run-review-rounds-caption').textContent).toBe('Round 2 of 3 · Reviewing now');
+  });
+
+  it('keeps the previous round’s findings in view while the next round runs, with the full report on request', () => {
+    render(<CircuitRunOverview {...props} overview={reviewingRoundTwo()} />);
+    const latest = screen.getByTestId('run-latest-review');
+    expect(latest.textContent).toContain('Latest review · Round 1');
+    expect(latest.textContent).toContain('Changes requested');
+    expect(latest.textContent).toContain('1. Retain the terminal on unmount.');
+    expect(latest.textContent).not.toContain('## Round 1');
+    const toggle = within(latest).getByRole('button', { name: 'Read the full review' });
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(latest.querySelector('pre')?.textContent).toContain('## Round 1');
+  });
+
+  it('lists the agents the run uses, who is working now, and opens one', () => {
+    const onOpenAgent = vi.fn();
+    render(<CircuitRunOverview {...props} onOpenAgent={onOpenAgent} overview={reviewingRoundTwo()} />);
+    expect(screen.getByTestId('run-overview-agent-1').textContent).toContain('Implementation agent');
+    expect(screen.getByTestId('run-overview-agent-1').textContent).not.toContain('working now');
+    expect(screen.getByTestId('run-overview-agent-2').textContent).toContain('Code reviewer · working now');
+    fireEvent.click(screen.getByRole('button', { name: 'Open Agent 2' }));
+    expect(onOpenAgent).toHaveBeenCalledWith(2);
+  });
+
+  it('offers to move a step on by hand behind a toggle when nothing is holding it', () => {
+    const quiet = overview();
+    quiet.attention.pushes[0].overrides = null;
+    render(<CircuitRunOverview {...props} overview={quiet} />);
+    expect(screen.queryByTestId('run-overview-push-await')).toBeNull();
+    const toggle = screen.getByRole('button', { name: /Move this step on by hand/ });
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByTestId('run-overview-push-await').textContent).not.toContain('Autopilot is waiting');
+  });
+
   it('offers Retry for a failed first read and for a failed refresh', () => {
     const onRefresh = vi.fn();
     const view = render(<CircuitRunOverview {...props} onRefresh={onRefresh} overview={null} error="Connection lost" />);
@@ -291,8 +386,14 @@ describe('Overview panel', () => {
     expect(onRefresh).toHaveBeenCalledTimes(2);
   });
 
-  it('lays the graph out as a rail: done, current, then what is still ahead', () => {
+  it('keeps every step behind a disclosure and lays them out as a rail: done, current, then what is still ahead', () => {
     render(<CircuitRunOverview {...props} overview={overview()} />);
+    const toggle = screen.getByRole('button', { name: /All steps/ });
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(toggle.textContent).toContain('1 of 4 done');
+    expect(screen.queryByRole('list', { name: 'Circuit steps' })).toBeNull();
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
     const rail = screen.getByRole('list', { name: 'Circuit steps' });
     const rows = within(rail).getAllByRole('listitem');
     expect(rows.map((row) => [row.getAttribute('data-testid'), row.getAttribute('data-rail-state')])).toEqual([
@@ -387,9 +488,11 @@ describe('Overview panel', () => {
   });
 
   it('asks for approval on a blocked step and approves that step', async () => {
-    const steps = [...overview().steps, step('gate', 'blocked')];
+    const steps = [...overview().steps, step('gate', 'blocked', { error_message: 'The agent asked whether to keep the legacy path.' })];
     render(<CircuitRunOverview {...props} overview={overview({ steps })} />);
+    expect(screen.getByTestId('run-overview-headline').textContent).toBe('Waiting for your approval');
     const approval = screen.getByTestId('run-overview-approval-gate');
+    expect(approval.textContent).toContain('The agent asked whether to keep the legacy path.');
     fireEvent.click(within(approval).getByRole('button', { name: 'Approve' }));
     await waitFor(() => expect(approveCircuitStep).toHaveBeenCalledWith(10, 'gate'));
   });

@@ -8,6 +8,7 @@ programs for you.
 
 - [The mental model](#the-mental-model)
 - [Install and authenticate a harness](#install-and-authenticate-a-harness)
+  - [Add a custom API provider](#add-a-custom-api-provider)
 - [Your first session](#your-first-session)
 - [Open tools from the title bar](#open-tools-from-the-title-bar)
 - [Coordinate agents with Companion](#coordinate-agents-with-companion)
@@ -29,6 +30,7 @@ programs for you.
   - [Removing a hook](#removing-a-hook)
 - [Worktrees, branches, and review](#worktrees-branches-and-review)
 - [Project Settings and Repository](#project-settings-and-repository)
+- [Reuse prompts when spawning agents](#reuse-prompts-when-spawning-agents)
 - [Launch Configurations](#launch-configurations)
 - [Use more than one Codex login](#use-more-than-one-codex-login)
 - [Settings that matter](#settings-that-matter)
@@ -68,7 +70,7 @@ Buildmesh so the detection cache is refreshed.
 |---|---|---|
 | Harness-owned login or API key | Claude Code, Codex, Antigravity, OpenCode, Cursor, Grok Code, Kimi Code, MiniMax Code, DeepSeek Harness, Command Code, Freebuff, Meta Muse, and Perch | The selected CLI's own login/configuration flow |
 | Buildmesh provider account | Anthropic, MiniMax, and Kimi usage/quota integrations | **Settings → Providers** |
-| Custom compatible endpoint | Claude-compatible model endpoints | **Settings → Providers**, then select the proxied profile for a harness |
+| Custom compatible endpoint | OpenAI Responses or Anthropic Messages APIs | **Settings → Providers → Add provider → Other / custom** |
 
 The two columns are independent: a detected harness can run with its own
 login, while a compatible provider profile can supply routing or usage data.
@@ -90,6 +92,40 @@ current figures directly. Where no direct dashboard is available, it opens the
 provider's account console, quota documentation, or subscription settings instead.
 Custom providers and externally managed billing omit the link. The browser uses
 its own login; choose the same account or workspace as the meter.
+
+OpenCode Go usage follows your OpenCode login automatically. In OpenCode 2,
+connect **OpenCode Console** and select the workspace with your Go subscription.
+OpenCode 1 uses the **OpenCode Go** API key saved by its own connection flow.
+The Usage tab shows the 5-hour, weekly, and monthly quotas with local reset
+dates and times. A separate Buildmesh Console sign-in is not required. If a
+native session expires, open OpenCode to renew it, then refresh usage. An expired
+API key must be replaced in OpenCode; signing in again does not renew that key.
+
+### Add a custom API provider
+
+1. Open **Settings → Providers → Add provider → Other / custom**.
+2. Enter a name and API key, then choose **OpenAI Responses — Codex** or
+   **Anthropic Messages — Claude Code**.
+3. Enter the provider's API **base URL** and exact **Model ID**. For example,
+   an OpenAI base might end in `/v1`; leave off `/responses`, `/messages`, and
+   `/chat/completions`. Hosted endpoints require HTTPS. Local servers can use
+   HTTP on `localhost` or a loopback IP address.
+4. Click **Add provider**. Buildmesh saves the credential, provider route and
+   named Launch Configuration together. Select the configuration from the
+   corresponding harness's spawn submenu. Install the harness first if it is
+   not available.
+
+Codex requires Responses with streaming and tool calls; an API advertised as
+“OpenAI-compatible” may offer only Chat Completions. Claude Code requires
+Anthropic Messages with streaming and tool calls. Buildmesh does not translate
+between these APIs. Codex routes receive a background verification check;
+failure is a warning you can inspect in **Launch Configurations → Advanced
+Provider Routes**, where endpoint and model mappings can also be edited.
+Claude routes initially use your chosen model for every tier, including
+background tasks; edit the tier mappings there to use different models.
+
+Choose **Credentials only — configure later** to save just the account and key.
+You can attach the account to another harness later and reuse the credential.
 
 ## Your first session
 
@@ -148,7 +184,8 @@ The first successful loop is: **install → configure → spawn → inspect → 
 
 Use **More** at the right of the title bar to open **Project Files**,
 **Agent Changes**, **Project Settings**, **Repository**, **GitHub Issues**,
-**Pull Requests**, **Circuits**, **Agent History**, or **Notes** in the inspector.
+**GitHub Pull Requests**, **Circuits**, **Agent History**, or **Notes** in the
+inspector.
 More and the command palette's empty search show compact rows with a name and
 icon. The highlighted row marks the current choice; hover a tool for optional
 help. In the palette, Up/Down move through the rows and wrap at either end;
@@ -172,13 +209,13 @@ or Escape to close the menu and return focus to **More**. Clicking outside also
 closes the menu. On short windows, scroll the menu to reach every tool.
 
 The inspector groups **Project Files** and **Agent Changes** under **Files &
-changes**, and **GitHub Issues** and **Pull Requests** under **GitHub**. Switch
-subviews inside the panel. The header shows the tool name, then its current
-scope. Host-wide tools apply across projects; Mesh and Agent tools follow your
-selection. Click or tap the scope line, or focus it and press Enter or Space,
-to read full names and scope behavior. Escape closes the details while focus is
-inside the disclosure. Clicking or tapping outside, or moving focus away,
-also closes them. Files
+changes**, and **GitHub Issues** and **GitHub Pull Requests** under **GitHub**.
+Switch subviews inside the panel. The header shows the tool name, then its
+current scope. Host-wide tools apply across projects; Mesh and Agent tools
+follow your selection. Click or tap the scope line, or focus it and press Enter
+or Space, to read full names and scope behavior. Escape closes the details while
+focus is inside the disclosure. Clicking or tapping outside, or moving focus
+away, also closes them. Files
 shows the working tree, while Agent Changes
 compares against HEAD or the selected repository's base merge point. Commands
 still open the exact requested view. The last Files subview is restored when
@@ -253,8 +290,8 @@ clears the Mesh selection.
 
 Open the same control to choose a Mesh. The list shows every Mesh with a tick
 beside the current one. Choosing a Mesh moves the canvas to that Mesh's nodes
-and retargets the Mesh-scoped tools in the inspector — Files, Properties,
-Worktree Manager, GitHub Issues and Archived Nodes all follow. Choosing the
+and retargets the Mesh-scoped tools in the inspector — Project Files, Project
+Settings, Repository, GitHub Issues and Archived Nodes all follow. Choosing the
 Mesh you are already in returns the canvas to its grid. Escape or a click
 outside closes the list and returns focus to the control, leaving the scope
 unchanged.
@@ -270,6 +307,12 @@ you the canvas moved to **All Nodes**. It is a reminder only — the view still
 changes.
 
 ## Find agents that need attention
+
+Live Codex and MiniMax Code nodes can automatically continue after supported
+temporary provider failures. Their status explains the retry delay; typing
+cancels a pending attempt. Policy rejections and unknown failures need manual
+inspection. See [provider-error recovery](troubleshooting.md#an-agent-stops-on-capacity-or-connection-errors)
+for retry limits and exceptions.
 
 An agent that needs you is marked where it lives. In the sidebar, a mesh whose
 agent is waiting on input, has failed, was lost, or is paused opens itself, so
@@ -293,6 +336,11 @@ choices survive a restart, including a filter with no matches.
 
 ## Configure Autopilot Circuits
 
+In the Circuit editor, **Add node** opens or closes the node palette. It starts
+closed in a narrow editor. The palette occupies its own panel, and narrow
+editors show the palette, node inspector or Run History one at a time. At the
+smallest widths the panel sits below the canvas.
+
 In **GitHub Issues**, use the tag button beside an issue to change its GitHub
 labels. Search the repository's labels, then check or uncheck one to add or
 remove it. Changes save individually; permission and network errors
@@ -312,6 +360,16 @@ Open **Circuits** to configure automated flows and their triggers. **Max concurr
 circuit runs** controls how many runs the selected mesh can admit at once.
 Settings > Autopilot > **Circuit agent pool size** adds an optional cap on agents
 across all meshes; leave it empty for no global cap, or use 0 to pause new launches.
+
+The **Activity** view opens on a summary of what the circuits on this mesh are
+doing: runs holding a slot, runs waiting to start, and finished runs that are
+still asking for a decision. The summary names whichever of those needs you
+first, so a mesh with a backlog or a failed run does not read as an all-clear —
+**No active runs** says only that no run is executing at that moment. Choose
+**Review in History** to open the finished runs that need a decision, or
+**View queue** to reorder or cancel the waiting ones. When the count of runs
+asking for attention is unavailable, the summary says so instead of reporting
+an empty mesh.
 
 Agent steps use their explicit launch configuration, then the mesh default, then
 the application default. Review agents use their configured reviewer selection.
@@ -524,6 +582,13 @@ indent. Every agent in a group stays individually clickable, renameable, and
 deletable; grouping is a view, not a merged node.
 
 ## Find open work in the sidebar
+
+Tab to an agent name and press Enter or Space to select it. Press F2 to rename
+the focused agent; double-clicking its name also starts a rename.
+
+On narrow windows, terminal cards keep a readable width and the grid scrolls
+within the workspace. Selecting an offscreen card brings it into view. The
+sidebar and inspector yield space to keep the workspace available.
 
 Each mesh is a card. The card's left edge is a full-height colour bar that does
 two jobs: click it to change the mesh colour, drag it to reorder the mesh. From
@@ -920,6 +985,43 @@ typing to its original project. Saves for the same project run in order;
 returning to it waits for the latest save to finish. A save failure keeps the
 current text visible so you can retry editing before leaving the tool.
 
+## Reuse prompts when spawning agents
+
+Open **Prompts** from the tool picker or search for **Open Prompts**. The
+**Choose a prompt…** shortcut in a project's spawn menu opens the same Probe
+with that Mesh selected. The canvas spawn dialog offers the same shortcut.
+
+Search by title or prompt text. Expand a row to read and copy the complete
+prompt, or use its spawn button immediately. The button shows the selected
+Mesh's default agent icon and starts that agent; hover or focus it to reveal
+the agent's name. The adjacent arrow offers the usual agent,
+Launch Configuration and login choices. Every launch creates a fresh agent using the
+Mesh's spawn settings: Worktree Nodes start from its configured base ref; Root
+Nodes use its folder. The Mesh heading and launch summary identify the target.
+The focused agent's checkout, changes and conversation are never inherited.
+Plain Terminal cannot receive an initial prompt. If it is your default, choose
+an agent from the arrow menu.
+
+Choose **New prompt**, enter a title and prompt, then **Save prompt**. The row's
+**Actions** menu offers **Duplicate** and, for your saved prompts, **Edit saved
+prompt** and **Delete prompt** with confirmation. Built-ins remain unchanged.
+Saved prompts are shared across Meshes in this Buildmesh profile and survive
+restarts. You can browse and create prompts without a selected Mesh; select
+one in the Probe to enable spawning.
+
+For a single-use variation, expand the row and choose **Customise for this
+launch**. Its dialog names the launch target and never saves your changes to
+the library. Closing either editor asks before discarding edits. Save and
+launch failures retain the draft for retry.
+
+Prompt text is sent as written, without placeholder substitution. The
+issue and pull request templates under **Settings → Prompts** remain separate.
+The Probe stays open after spawning and offers **View agent**. If creating the
+node fails, correct the error in the launch dialog and try again. If the node
+was created but launch failed, **Retry launch** sends your current prompt to
+that same node with its original configuration. Keep the dialog open to retain
+any unsaved prompt edits for this retry.
+
 ## Launch Configurations
 
 Use **Settings → Launch Configurations** to name the recipes you launch (the
@@ -1132,7 +1234,7 @@ answer there too.
 
 | Settings area | Use it for |
 |---|---|
-| General | Appearance (including interface text size), quit confirmation, and the default worktree directory |
+| General | Appearance (theme, interface text size, text density and window zoom), quit confirmation, and the default worktree directory |
 | Providers | Routing defaults, plus a compact expandable row per provider account for its API key and billing mode |
 | Launch Configurations | Spawn menu order, per-harness model, effort and permission defaults, advanced provider routes, and (behind a **Show launch configurations** toggle) named recipes |
 | Autopilot | The global Circuit agent pool size |
@@ -1148,6 +1250,52 @@ app ships with; drag the slider right in 5% steps to read the app at up to
 already applied on the next launch, without a flash of the smaller size.
 Terminals keep their own size: use the title bar's **Zoom** control or
 `Ctrl + +` / `Ctrl + -`.
+
+**Text density** (Settings → General → Appearance) picks how large Buildmesh
+draws its *functional labels* — the names of your tasks and agents, action
+labels, form labels and tab labels. **Comfortable** (the default) draws them
+at 13px, the size the interface reads at. **Compact** draws them at 11.375px
+if you want the denser presentation. Supporting metadata (timestamps, helper
+text) follows one step down either way, and terminals are unaffected. Compact is
+a ladder, not a copy of the presentation Buildmesh had before this setting
+existed: before the roles existed every surface chose its own size, so some
+labels grow in Compact (the ones that used to be micro-sized) and some shrink
+(the Settings chrome, which used to be drawn at the interface size). What is
+guaranteed is the ladder itself — 11.375px labels, 9.75px metadata and a 10px
+floor for microcopy. The choice is saved per machine and is already applied on
+the next launch. To go back, pick **Comfortable**: it applies immediately and
+leaves nothing behind.
+
+**Window zoom** (Settings → General → Appearance) is how to read the app at
+200%. The interface text size stops at 150% because past that the dense chrome
+starts clipping instead of reflowing, and several terminals share one window;
+the window zoom is the platform's own zoom, so the chrome, the labels and the
+content all grow together and nothing is cut off. It scales the whole window,
+so it is not a text setting — the interface text size and the terminal's own
+font size are both left alone (the terminal's glyphs do get bigger on
+screen, because everything does, which means fewer columns and rows fit).
+Pick 100%–200% in 25% steps; the choice is saved per machine and is re-applied
+on the next launch. To go back, pick **100%**. At every launch Buildmesh puts
+the window at your saved zoom (or at 100%), so a zoom set outside the app does
+not survive a restart.
+
+Two things to know about the window zoom:
+
+- `Ctrl + +` / `Ctrl + -` / `Ctrl + 0` change the **terminal** font size, not
+  the window. That shortcut is the terminal's own, and it is why the
+  platform's built-in zoom hotkeys are not switched on — set the window zoom
+  from Settings instead.
+- The window zoom needs the native desktop app. It is not available in the
+  mobile app or on Android, and Settings says so if the platform cannot apply
+  it. A zoom the platform refuses leaves the window at its previous size —
+  the control shows the size the window really is, not the one you asked for.
+
+The window zoom scales everything, including the layout, so it needs room. At
+200% a window that is 1280px wide shows a 640px-wide layout — narrower than
+Buildmesh's own minimum, so the title bar's search box is squeezed out of reach
+(press `Ctrl + K` instead, or use the **More** menu, which still reaches every
+tool). Widen the window before choosing 200%: 1800px is enough to keep the
+full layout, which a maximised window on a 1920px display gives you.
 
 **Probe spawn prompts** (Settings → Prompts) customise the initial prompt
 for agents spawned from the Probe's GitHub Issues and Pull Requests tabs.
@@ -1269,6 +1417,14 @@ doing, so the screen stays where it was. A phone without one — which includes
 any phone paired by scanning a QR code, because pairing hands the browser a
 cookie and nothing else — is shown the pairing screen instead. Pairing again is
 always required after you revoke a device or clear the browser's site data.
+
+A paired phone also stops being authorized on its own after **90 days without
+use**. Buildmesh then removes it from **Authorized Devices** and closes any
+connection it still holds, so a phone you have not used in months cannot stay
+a live administrator credential. A phone you are still using keeps its place:
+any request from it counts as use, so the entry only disappears once the phone
+has genuinely been gone. If a phone that you still own is removed this way,
+pair it again with a fresh QR code from **Settings → Remote Access**.
 
 The loopback listener stays plain HTTP for local agent hooks. LAN/VPN interfaces
 use HTTPS/WSS. The status panel lists the interfaces that are actually exposed;

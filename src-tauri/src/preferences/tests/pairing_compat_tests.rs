@@ -5,6 +5,18 @@ use crate::preferences::{
 };
 
 #[test]
+fn kimi_openai_pairing_declares_responses_regardless_of_provider_id() {
+    let mut pairing = minimax_codex_pairing("moonshot-model");
+    pairing.provider_id = "kimi".into();
+    pairing.base_url = Some("https://api.moonshot.ai/v1".into());
+    assert!(pairing_compatibility(&pairing).compatible);
+    assert_eq!(
+        endpoint_model_descriptor(&pairing).wire_api,
+        crate::agent::provider::compatibility::WireApi::Responses
+    );
+}
+
+#[test]
 fn pairing_compatibility_rejects_unverified_minimax_alias() {
     let pairing = ProviderPairing {
         harness_id: "codex".to_string(),

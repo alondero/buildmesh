@@ -490,35 +490,113 @@ pub(crate) fn persist_with_backup(path: &Path, bytes: &[u8]) -> Result<(), Strin
 /// matters because on a build with no credential store both still hold
 /// plaintext API keys (issue #830).
 pub(crate) fn persist_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    use std::io::Write;
     let parent = path
         .parent()
         .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
     std::fs::create_dir_all(parent)
         .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|e| {
-        format!(
-            "failed to create temporary file in {}: {e}",
-            parent.display()
-        )
-    })?;
+
+    let mut last = format!("failed to atomically replace {}", path.display());
+    for attempt in 0..ATOMIC_REPLACE_ATTEMPTS {
+        match replace_once(path, parent, bytes) {
+            Ok(()) => {
+                sync_parent_dir(parent);
+                return Ok(());
+            }
+            Err(failure) => {
+                last = failure.message;
+                if !failure.transient || attempt + 1 == ATOMIC_REPLACE_ATTEMPTS {
+                    return Err(last);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(ATOMIC_REPLACE_BACKOFF_MS));
+            }
+        }
+    }
+    Err(last)
+}
+
+/// How many times the atomic replacement is attempted before the failure is
+/// reported.
+///
+/// The replacement is a `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`, and
+/// Windows refuses it while the destination is held by a handle that does not
+/// share delete access — an antivirus scanner walking the profile directory
+/// is one such holder, and any other reader that has the file open is
+/// another. The refusal is transient in the case that was observed: the
+/// holder let go within milliseconds and the replacement landed on a later
+/// attempt. Each attempt writes a fresh temporary file and moves it over the
+/// target in one step, so every attempt is a whole-file replacement of the
+/// same bytes, and retrying turns a failed settings write into a slightly
+/// later one rather than a lost one (issue #2220).
+const ATOMIC_REPLACE_ATTEMPTS: u32 = 40;
+
+/// The wait between two attempts of the atomic replacement.
+const ATOMIC_REPLACE_BACKOFF_MS: u64 = 25;
+
+/// One attempt at the atomic replacement, and whether its failure was the
+/// transient kind a retry can ride out.
+struct ReplaceFailure {
+    message: String,
+    transient: bool,
+}
+
+/// Whether an OS error is the transient "somebody else holds this file" kind.
+///
+/// `ERROR_ACCESS_DENIED` (5) is what `MoveFileExW` reports for a destination
+/// that is open without delete sharing;
+/// `ERROR_SHARING_VIOLATION` (32) and `ERROR_LOCK_VIOLATION` (33) are the
+/// same condition seen through its other entry points. Anything else — a full
+/// disk, a read-only directory — is not transient, and is reported at once.
+///
+/// The check is Windows-only because `raw_os_error()` is a POSIX `errno`
+/// everywhere else, where 5 is `EIO` — a real I/O error, not a handle on its
+/// way out — and retrying it would hide a failure behind a settings write that
+/// never lands.
+#[cfg(windows)]
+fn is_transient_replace_error(error: &std::io::Error) -> bool {
+    const ERROR_ACCESS_DENIED: i32 = 5;
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    const ERROR_LOCK_VIOLATION: i32 = 33;
+    matches!(
+        error.raw_os_error(),
+        Some(ERROR_ACCESS_DENIED) | Some(ERROR_SHARING_VIOLATION) | Some(ERROR_LOCK_VIOLATION)
+    )
+}
+
+#[cfg(not(windows))]
+fn is_transient_replace_error(_error: &std::io::Error) -> bool {
+    false
+}
+
+/// One attempt: write the temp file, flush it, and move it over the target.
+fn replace_once(path: &Path, parent: &Path, bytes: &[u8]) -> Result<(), ReplaceFailure> {
+    use std::io::Write;
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(parent).map_err(|error| ReplaceFailure {
+            message: format!(
+                "failed to create temporary file in {}: {error}",
+                parent.display()
+            ),
+            transient: is_transient_replace_error(&error),
+        })?;
     temporary
         .write_all(bytes)
         .and_then(|_| temporary.as_file().sync_all())
-        .map_err(|e| {
-            format!(
-                "failed to write temporary file in {}: {e}",
+        .map_err(|error| ReplaceFailure {
+            message: format!(
+                "failed to write temporary file in {}: {error}",
                 parent.display()
-            )
+            ),
+            transient: is_transient_replace_error(&error),
         })?;
-    temporary.persist(path).map_err(|e| {
-        format!(
+    temporary.persist(path).map_err(|error| ReplaceFailure {
+        message: format!(
             "failed to atomically replace {}: {}",
             path.display(),
-            e.error
-        )
+            error.error
+        ),
+        transient: is_transient_replace_error(&error.error),
     })?;
-    sync_parent_dir(parent);
     Ok(())
 }
 

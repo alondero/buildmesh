@@ -316,7 +316,7 @@ export function AccountCard({
               <button
                 onClick={confirmRemove}
                 disabled={busy}
-                className="px-3 py-1 bg-status-error text-white text-sm rounded-md hover:bg-status-error/90 disabled:opacity-50"
+                className="px-3 py-1 text-on-destructive bg-destructive/80 hover:bg-destructive active:bg-destructive-strong disabled:bg-bg-card-hover disabled:text-text-muted text-sm rounded-md"
                 aria-label={`Confirm remove ${account.name}`}
               >
                 Yes

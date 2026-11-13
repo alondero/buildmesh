@@ -4,7 +4,9 @@
 
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 /// Upper bound for a node's buffered PTY tail. Enough for a full turn of
 /// terminal output; the classifier prompt only sends [`CLASSIFY_TAIL_CHARS`].
@@ -12,7 +14,12 @@ const MAX_TAIL_CHARS: usize = 16_000;
 
 /// How much *cleaned* tail is handed to the classifier.
 const CLASSIFY_TAIL_CHARS: usize = 6_000;
-const CIRCUIT_PROBE_RETRY: std::time::Duration = std::time::Duration::from_secs(10);
+const CIRCUIT_PROBE_RETRY: Duration = Duration::from_secs(10);
+
+/// Minimum gap between worker wakes caused by one node's PTY output.
+/// A yield inside the gap is delivered when the window ends, so a classifier
+/// does not sit out the 2 s tick (issue #2764).
+const OUTPUT_WAKE_FLOOR: Duration = Duration::from_millis(250);
 
 /// One word out of the classifier, or `None` = "could not tell" (degrade to
 /// no action).
@@ -37,6 +44,10 @@ struct NodeEvaluatorState {
     output_bytes: u64,
     last_output: Option<std::time::Instant>,
     last_evaluation: Option<std::time::Instant>,
+    /// When PTY output last notified the circuit worker.
+    last_output_wake: Option<Instant>,
+    /// Wake owed for output that arrived before [`OUTPUT_WAKE_FLOOR`] elapsed.
+    output_wake_due: Option<Instant>,
     turn_start: Option<usize>,
     circuit_probes: HashMap<String, CircuitProbeState>,
 }
@@ -86,6 +97,8 @@ pub fn is_circuit_piloted(node_id: i64) -> bool {
 /// state).
 pub fn unregister(node_id: i64) {
     NODES.lock().unwrap().remove(&node_id);
+    // Drop the node map before the hub.
+    disarm_output_wake(node_id);
 }
 
 /// Record the start of a fresh turn for this node (at the current tail position).
@@ -192,34 +205,248 @@ pub(crate) fn begin_circuit_wait_probe(node_id: i64, probe_key: &str) -> Option<
 }
 
 /// PTY reader hook — called for every output chunk (see `agent::spawn`'s
-/// reader thread). Non-piloted nodes
-/// return after one set lookup.
+/// reader thread). Non-piloted nodes return after one map lookup.
+///
+/// Each chunk is buffered. The circuit worker is notified at most once per
+/// node per [`OUTPUT_WAKE_FLOOR`]: the first chunk in a quiet window wakes
+/// it immediately (#1207), and a later chunk in that window arms one deferred
+/// wake so a trailing yield is not left until the 2 s tick (issue #2764).
 pub fn on_output(node_id: i64, data: &str) {
-    let mut nodes = NODES.lock().unwrap();
-    let Some(state) = nodes.get_mut(&node_id) else {
-        return;
-    };
-    state.output_generation = state.output_generation.saturating_add(1);
-    state.output_bytes = state.output_bytes.saturating_add(data.len() as u64);
-    state.last_output = Some(std::time::Instant::now());
-    let tail = &mut state.tail;
-    tail.push_str(data);
-    if tail.len() > MAX_TAIL_CHARS {
-        let mut drain_to = tail.len() - MAX_TAIL_CHARS;
-        while !tail.is_char_boundary(drain_to) {
-            drain_to += 1;
+    on_output_at(node_id, data, Instant::now());
+}
+
+fn on_output_at(node_id: i64, data: &str, now: Instant) {
+    let action = {
+        let mut nodes = NODES.lock().unwrap();
+        let Some(state) = nodes.get_mut(&node_id) else {
+            return;
+        };
+        state.output_generation = state.output_generation.saturating_add(1);
+        state.output_bytes = state.output_bytes.saturating_add(data.len() as u64);
+        state.last_output = Some(now);
+        let tail = &mut state.tail;
+        tail.push_str(data);
+        if tail.len() > MAX_TAIL_CHARS {
+            let mut drain_to = tail.len() - MAX_TAIL_CHARS;
+            while !tail.is_char_boundary(drain_to) {
+                drain_to += 1;
+            }
+            tail.drain(..drain_to);
+            if let Some(start) = state.turn_start.as_mut() {
+                *start = start.saturating_sub(drain_to);
+            }
         }
-        tail.drain(..drain_to);
-        if let Some(start) = state.turn_start.as_mut() {
-            *start = start.saturating_sub(drain_to);
+        observe_output_wake(state, now)
+    };
+    match action {
+        OutputWakeAction::Notify => {
+            disarm_output_wake(node_id);
+            notify_output_wake(node_id);
+        }
+        OutputWakeAction::Schedule(at) => arm_output_wake(node_id, at),
+        OutputWakeAction::Suppress => {}
+    }
+}
+
+enum OutputWakeAction {
+    Notify,
+    Schedule(Instant),
+    Suppress,
+}
+
+/// Decide whether this chunk may notify the worker. `now` is the chunk's
+/// clock, so a test can move the window without sleeping.
+fn observe_output_wake(state: &mut NodeEvaluatorState, now: Instant) -> OutputWakeAction {
+    let Some(last) = state.last_output_wake else {
+        state.last_output_wake = Some(now);
+        state.output_wake_due = None;
+        return OutputWakeAction::Notify;
+    };
+    if now.saturating_duration_since(last) >= OUTPUT_WAKE_FLOOR {
+        state.last_output_wake = Some(now);
+        state.output_wake_due = None;
+        return OutputWakeAction::Notify;
+    }
+    if state.output_wake_due.is_some() {
+        return OutputWakeAction::Suppress;
+    }
+    let at = last.checked_add(OUTPUT_WAKE_FLOOR).unwrap_or(now);
+    state.output_wake_due = Some(at);
+    OutputWakeAction::Schedule(at)
+}
+
+fn notify_output_wake(node_id: i64) {
+    #[cfg(test)]
+    // allow-test-in-production: the sibling suite counts a wake only when the worker was notified.
+    let before = worker_wake_mark();
+    crate::services::circuit_worker::wake_circuit_worker();
+    #[cfg(test)]
+    // allow-test-in-production: the sibling suite counts a wake only when the worker was notified.
+    if worker_wake_mark() != before {
+        *OUTPUT_WAKE_COUNTS
+            .lock()
+            .unwrap()
+            .entry(node_id)
+            .or_default() += 1;
+    }
+    #[cfg(not(test))]
+    let _ = node_id;
+}
+
+/// Deliver one node's deferred output wake if its deadline has arrived.
+/// Returns whether the worker was notified. Shared with the coalescer.
+fn deliver_due_output_wake(node_id: i64, now: Instant) -> bool {
+    let Some(claimed) = claim_output_wake(node_id, now) else {
+        return false;
+    };
+    // Only the deadline this claim took. A chunk that armed the next
+    // window after the claim must keep its own deadline.
+    disarm_output_wake_if(node_id, claimed);
+    notify_output_wake(node_id);
+    true
+}
+
+fn claim_output_wake(node_id: i64, now: Instant) -> Option<Instant> {
+    let mut nodes = NODES.lock().unwrap();
+    let state = nodes.get_mut(&node_id)?;
+    match state.output_wake_due {
+        Some(at) if at <= now => {
+            state.output_wake_due = None;
+            state.last_output_wake = Some(now);
+            Some(at)
+        }
+        _ => None,
+    }
+}
+
+struct OutputWakeHub {
+    deadlines: HashMap<i64, Instant>,
+}
+
+/// Deadlines for deferred output wakes. Drop [`NODES`] before taking this
+/// lock. A delivery removes only the instant it claimed.
+static OUTPUT_WAKE_HUB: Lazy<(Mutex<OutputWakeHub>, Condvar)> = Lazy::new(|| {
+    (
+        Mutex::new(OutputWakeHub {
+            deadlines: HashMap::new(),
+        }),
+        Condvar::new(),
+    )
+});
+
+static OUTPUT_WAKE_COALESCER_STARTED: AtomicBool = AtomicBool::new(false);
+
+fn lock_output_wake_hub() -> std::sync::MutexGuard<'static, OutputWakeHub> {
+    let (lock, _) = &*OUTPUT_WAKE_HUB;
+    match lock.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!("circuit output-wake mutex was poisoned by a prior panic — recovering");
+            poisoned.into_inner()
         }
     }
-    drop(nodes);
-    // Reactive gate evaluation (#1207): a circuit LlmTurnClassifier
-    // waiting on this agent's turn yield must not sit out the 2s tick.
-    // Cheap notify; redundant classifications are prevented by the
-    // fresh-output guards in the circuit worker's observation pass.
-    crate::services::circuit_worker::wake_circuit_worker();
+}
+
+fn arm_output_wake(node_id: i64, at: Instant) {
+    let (_, cvar) = &*OUTPUT_WAKE_HUB;
+    lock_output_wake_hub().deadlines.insert(node_id, at);
+    cvar.notify_one();
+}
+
+fn disarm_output_wake(node_id: i64) {
+    lock_output_wake_hub().deadlines.remove(&node_id);
+}
+
+fn disarm_output_wake_if(node_id: i64, at: Instant) {
+    let mut hub = lock_output_wake_hub();
+    if hub.deadlines.get(&node_id) == Some(&at) {
+        hub.deadlines.remove(&node_id);
+    }
+}
+
+/// One turn of the deferred-wake thread. The deadline check and the wait
+/// share the hub lock, so a wake armed before the wait is still visible
+/// when the waiter runs.
+fn poll_output_wake_hub() {
+    let (_, cvar) = &*OUTPUT_WAKE_HUB;
+    let mut hub = lock_output_wake_hub();
+    let now = Instant::now();
+    let due: Vec<(i64, Instant)> = hub
+        .deadlines
+        .iter()
+        .filter(|(_, at)| **at <= now)
+        .map(|(id, at)| (*id, *at))
+        .collect();
+    if !due.is_empty() {
+        for (id, at) in &due {
+            if hub.deadlines.get(id) == Some(at) {
+                hub.deadlines.remove(id);
+            }
+        }
+        drop(hub);
+        crate::process_util::run_worker_pass("circuits:output-wake", || {
+            for (id, _) in due {
+                let _ = deliver_due_output_wake(id, now);
+            }
+        });
+        return;
+    }
+    let wait = match hub.deadlines.values().copied().min() {
+        Some(at) => at.saturating_duration_since(now),
+        None => Duration::from_secs(60),
+    };
+    if let Err(poisoned) = cvar.wait_timeout(hub, wait) {
+        let _ = poisoned.into_inner();
+    }
+}
+
+/// Wake the circuit worker when a deferred PTY wake comes due. Started once
+/// with the circuit worker. Unit tests deliver a deadline with an injected
+/// clock instead of sleeping on this thread.
+pub(crate) fn start_output_wake_coalescer() {
+    if OUTPUT_WAKE_COALESCER_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::Builder::new()
+        .name("circuit-output-wake".to_string())
+        .spawn(|| loop {
+            poll_output_wake_hub();
+        })
+        .expect("circuit-output-wake thread spawn failed");
+}
+
+#[cfg(test)]
+// allow-test-in-production: the sibling suite counts worker wakes caused by one node's PTY output.
+static OUTPUT_WAKE_COUNTS: Lazy<Mutex<HashMap<i64, u32>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+// allow-test-in-production: output-wake tests read a per-thread mark set by wake_circuit_worker.
+thread_local! {
+    static WORKER_WAKE_MARK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+// allow-test-in-production: output-wake tests read a per-thread mark set by wake_circuit_worker.
+pub(crate) fn note_worker_wake() {
+    WORKER_WAKE_MARK.with(|mark| mark.set(mark.get().wrapping_add(1)));
+}
+
+#[cfg(test)]
+// allow-test-in-production: output-wake tests read a per-thread mark set by wake_circuit_worker.
+fn worker_wake_mark() -> u64 {
+    WORKER_WAKE_MARK.with(|mark| mark.get())
+}
+
+#[cfg(test)]
+// allow-test-in-production: the sibling suite counts worker wakes caused by one node's PTY output.
+fn output_wake_count(node_id: i64) -> u32 {
+    OUTPUT_WAKE_COUNTS
+        .lock()
+        .unwrap()
+        .get(&node_id)
+        .copied()
+        .unwrap_or(0)
 }
 
 /// The current cleaned (ANSI-stripped, tail-capped) buffer for a node.

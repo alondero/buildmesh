@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import type { SemanticTurnPayload } from '../../types/generated/SemanticTurnPayload';
-import { diffNodeAgainstBase } from '../../lib/tauri';
+import { diffNodeCountsAgainstBase } from '../../lib/tauri';
 
 interface SemanticTurnBannerProps {
   turn: SemanticTurnPayload;
@@ -20,16 +20,10 @@ export function SemanticTurnBanner({ turn, isActive, onResolve, onFinish }: Sema
       return;
     }
     const controller = new AbortController();
-    void diffNodeAgainstBase(turn.node_id, controller.signal)
-      .then((result) => {
+    void diffNodeCountsAgainstBase(turn.node_id, controller.signal)
+      .then((counts) => {
         if (controller.signal.aborted) return;
-        setDiffCounts(result.files.reduce(
-          (totals, file) => ({
-            additions: totals.additions + file.additions,
-            deletions: totals.deletions + file.deletions,
-          }),
-          { additions: 0, deletions: 0 },
-        ));
+        setDiffCounts({ additions: counts.additions, deletions: counts.deletions });
       })
       .catch(() => {
         // Diff stats are enrichment; the action remains usable when the repo

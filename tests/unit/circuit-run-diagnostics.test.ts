@@ -9,6 +9,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { reviewContinuation } from './helpers/reviewContinuation';
 import { formatDurationMs, runDurationMs } from '../../src/components/Circuits/circuitGraphModel';
 import {
   activityStatusToken,
@@ -17,6 +18,7 @@ import {
   circuitGraphFacts,
   countActiveRuns,
   circuitActivityStats,
+  circuitActivitySummary,
   isActiveRunState,
   isRunStale,
   pendingAdmissionDetail,
@@ -27,6 +29,7 @@ import {
   runNeedsAttention,
   runNeedsOutstandingAttention,
   reviewResult,
+  canContinueReview,
   reviewCircuitMetadata,
   reviewCircuitForRun,
   runStateLabel,
@@ -81,13 +84,39 @@ describe('run diagnostics', () => {
   });
 
   describe('Probe view model', () => {
+    it('uses backend eligibility with arbitrary node identities and no lineage flags', () => {
+      const response = { ...detail(47, 'failed'), review_continuation: reviewContinuation({
+        review_nodes: { verdict_node_id: 'inspect_work', retry_node_ids: ['another_pass'],
+          merge_node_id: null, merge_confirmed_node_id: null, merge_unconfirmed_node_ids: [] },
+      }) };
+      expect(canContinueReview(response)).toBe(true);
+      expect(reviewCircuitForRun(response, null)?.verdictNodeId).toBe('inspect_work');
+      const unavailable = { ...response, review_continuation: reviewContinuation({
+        available: false, refusal_reason: 'source_wrong_mesh', refusal_message: 'The implementation agent no longer belongs to this Mesh.',
+      }) };
+      expect(canContinueReview(unavailable)).toBe(false);
+      expect(canContinueReview({ ...detail(46, 'failed'), run: { ...detail(46, 'failed').run,
+        source_agent_node_id: 9, context_json: '{"source.review_preset":"1","recovery.from_run_id":"5"}' } })).toBe(false);
+    });
+
+    it('presents backend refusal wording without manufacturing a review approval', () => {
+      const response = { ...detail(47, 'failed'), review_continuation: reviewContinuation({
+        available: false, refusal_reason: 'source_wrong_mesh', refusal_message: 'The implementation agent no longer belongs to this Mesh.',
+      }), steps: [{ id: 1, run_id: 47, node_id: 'verdict', agent_node_id: null,
+        parent_agent_node_id: null, status: 'completed', attempt: 3, outcome: 'working',
+        error_message: null, started_at: null, completed_at: null }] };
+      expect(reviewResult(response)?.detail).toContain(response.review_continuation.refusal_message);
+      expect(reviewResult(response)?.label).toBe('Review needs attention');
+      expect(reviewResult({ ...response, steps: [] })).toBeNull();
+    });
+
     it('reads an extended issue review through its review-only run snapshot', () => {
       const extended = {
         ...detail(49, 'failed'),
-        run: { ...detail(49, 'failed').run, context_json: '{"review.extended":"1"}' },
+        review_continuation: reviewContinuation({ lineage: { review_origin: 'issue_driven', extended: true, recovery: { kind: 'none' } } }),
       };
       expect(reviewCircuitForRun(extended, { verdictNodeId: 'review_classifier', retryNodeIds: ['review_retry'] }))
-        .toEqual({ verdictNodeId: 'verdict', retryNodeIds: ['retry'], mergeNodeId: 'merge', supportsContinuation: true });
+        .toEqual({ verdictNodeId: 'verdict', retryNodeIds: ['retry'], mergeNodeId: 'merge', mergeUnconfirmedNodeIds: [] });
     });
     it('says the agent was asked to merge only when the run delivered that request', () => {
       const graph = { version: 3, nodes: [
@@ -96,11 +125,11 @@ describe('run diagnostics', () => {
         { id: 'merge', type: { type: 'inject_pty', prompt: 'Squash and merge', target_node_id: 'implementer' } },
       ], edges: [] };
       const reviewCircuit = reviewCircuitMetadata({ graph_json: JSON.stringify(graph) });
-      expect(reviewCircuit?.mergeNodeId).toBe('merge');
+      expect(reviewCircuit?.verdictNodeId).toBe('review_classifier');
       const step = (node_id: string) => ({ id: 1, run_id: 50, node_id, agent_node_id: null,
         parent_agent_node_id: null, status: 'completed', attempt: 1, outcome: 'completed',
         error_message: null, started_at: null, completed_at: null });
-      const handedOff = { ...detail(50, 'completed'), steps: [step('review_classifier'), step('merge')] };
+      const handedOff = { ...detail(50, 'completed'), review_continuation: reviewContinuation({ available: false, review_nodes: { verdict_node_id: 'review_classifier', retry_node_ids: ['review_retry'], merge_node_id: 'merge', merge_confirmed_node_id: null, merge_unconfirmed_node_ids: [] } }), steps: [step('review_classifier'), step('merge')] };
       expect(reviewResult(handedOff, reviewCircuit)?.label).toBe('Review approved');
       expect(reviewResult(handedOff, reviewCircuit)?.detail).toBe(
         'The implementation agent was asked to squash-merge the pull request and was handed back. Check its report to confirm the merge.');
@@ -120,13 +149,13 @@ describe('run diagnostics', () => {
         error_message: null, started_at: null, completed_at: null });
       const base = [step('review_classifier'), step('merge')];
 
-      const verified = { ...detail(60, 'completed'), steps: [...base, step('merge_verify'), step('close_implementer')] };
+      const verified = { ...detail(60, 'completed'), review_continuation: reviewContinuation({ available: false, review_nodes: { verdict_node_id: 'review_classifier', retry_node_ids: ['review_retry'], merge_node_id: 'merge', merge_confirmed_node_id: 'close_implementer', merge_unconfirmed_node_ids: ['merge_unconfirmed', 'merge_blocked'] } }), steps: [...base, step('merge_verify'), step('close_implementer')] };
       expect(reviewResult(verified, reviewCircuit)).toMatchObject({ label: 'Review approved', needsAttention: false });
       expect(reviewResult(verified, reviewCircuit)?.detail).toContain('GitHub confirmed the squash-merge');
       expect(reviewResult(verified, reviewCircuit)?.detail).toContain('closed');
 
       for (const ending of ['merge_unconfirmed', 'merge_blocked']) {
-        const unconfirmed = { ...detail(61, 'completed'), steps: [...base, step(ending)] };
+        const unconfirmed = { ...detail(61, 'completed'), review_continuation: verified.review_continuation, steps: [...base, step(ending)] };
         const result = reviewResult(unconfirmed, reviewCircuit);
         expect(result?.label, ending).toBe('Merge needs attention');
         expect(result?.needsAttention, ending).toBe(true);
@@ -746,5 +775,102 @@ describe('run diagnostics', () => {
       expect(queuedCopy).toContain('agent slot');
       expect(queuedCopy).not.toContain('circuit-run');
     });
+  });
+});
+
+/**
+ * The Activity view's one summary (issue #2740).
+ *
+ * The rule under test: zero active runs is a fact about execution, not a
+ * claim that no run needs a person. A state that still holds queued or
+ * human-action work has to say so, and only a state whose counts establish
+ * idleness may say so quietly.
+ */
+describe('circuit activity summary (#2740)', () => {
+  const idle = { activeCount: 0, activeAttentionCount: 0, queuedCount: 0, attentionCount: 0, outstandingAttention: 0 };
+
+  it('states the absence of execution literally when no run is running', () => {
+    const summary = circuitActivitySummary(idle);
+    expect(summary.tone).toBe('idle');
+    expect(summary.label).toBe('No active runs');
+    expect(summary.detail).toBe('Nothing running, queued, or waiting for a decision.');
+    // The idle state still owes the reader a next action.
+    expect(summary.action).toBe('manage');
+  });
+
+  it('does not present zero active runs as an all-clear while runs wait in the queue', () => {
+    const summary = circuitActivitySummary({ ...idle, queuedCount: 2 });
+    expect(summary.tone).toBe('queued');
+    expect(summary.label).toBe('No active runs');
+    expect(summary.detail).toBe('2 waiting in queue');
+    expect(summary.action).toBe('queue');
+    // The idle wording must not leak into the queued state.
+    expect(summary.detail).not.toContain('Nothing running');
+  });
+
+  it('leads with the finished runs that need a person, not with the empty slot count', () => {
+    const summary = circuitActivitySummary({ ...idle, attentionCount: 1 });
+    expect(summary.tone).toBe('attention');
+    expect(summary.label).toBe('1 finished run needs attention');
+    expect(summary.detail).toBe('No active runs · Nothing queued');
+    expect(summary.action).toBe('attention');
+  });
+
+  it('keeps the queued context visible when attention is the headline', () => {
+    const summary = circuitActivitySummary({ ...idle, attentionCount: 1, queuedCount: 2 });
+    expect(summary.tone).toBe('attention');
+    expect(summary.label).toBe('1 finished run needs attention');
+    expect(summary.detail).toBe('No active runs · 2 queued');
+    expect(summary.action).toBe('attention');
+  });
+
+  it('pluralises the attention headline', () => {
+    expect(circuitActivitySummary({ ...idle, attentionCount: 3 }).label)
+      .toBe('3 finished runs need attention');
+  });
+
+  it('reports the active set as active, because it holds slots while paused too', () => {
+    const summary = circuitActivitySummary({ ...idle, activeCount: 2, queuedCount: 1 });
+    expect(summary.tone).toBe('active');
+    // The set is `running` + `paused`, so calling it "running" would describe
+    // a parked run as work in flight.
+    expect(summary.label).toBe('2 active');
+    expect(summary.detail).toBe('1 queued');
+    expect(summary.action).toBe('queue');
+  });
+
+  it('calls out the active runs that are waiting on a person', () => {
+    const summary = circuitActivitySummary({ ...idle, activeCount: 3, activeAttentionCount: 1 });
+    expect(summary.label).toBe('3 active, 1 needs attention');
+  });
+
+  it('claims idleness only once the outstanding attention count is known to be zero', () => {
+    // The count could not be read: no run needing attention is ruled out, so
+    // the summary must not fall back to the idle wording.
+    const summary = circuitActivitySummary({ ...idle, outstandingAttention: null });
+    expect(summary.tone).toBe('unverified');
+    expect(summary.label).toBe('No active runs');
+    expect(summary.detail).toBe('The outstanding attention count could not be read.');
+    expect(summary.action).toBeNull();
+  });
+
+  it('still routes to the queue when the attention count is unreadable', () => {
+    const summary = circuitActivitySummary({ ...idle, queuedCount: 1, outstandingAttention: null });
+    expect(summary.tone).toBe('unverified');
+    expect(summary.action).toBe('queue');
+  });
+
+  it('counts mesh-wide attention the loaded window does not carry', () => {
+    // The Probe's ledger window is bounded; the mesh-wide count is not. A run
+    // asking for a decision outside the window still has to reach the summary.
+    const summary = circuitActivitySummary({ ...idle, outstandingAttention: 4 });
+    expect(summary.tone).toBe('attention');
+    expect(summary.label).toBe('4 finished runs need attention');
+    expect(summary.action).toBe('attention');
+  });
+
+  it('prefers the window count, which is the one the History filter lists', () => {
+    const summary = circuitActivitySummary({ ...idle, attentionCount: 1, outstandingAttention: 7 });
+    expect(summary.label).toBe('1 finished run needs attention');
   });
 });

@@ -21,7 +21,7 @@ pub async fn list(_req: &ParsedRequest) -> Response {
 }
 
 /// Mobile close preserves the checkout. Like desktop, stop the process before
-/// deleting its node; `delete(_, false)` alone does not stop a live process.
+/// deleting its node and cancelling attached circuits.
 pub async fn close(req: &ParsedRequest) -> Response {
     let node_id = req.id0();
     if node_id <= 0 {
@@ -29,7 +29,7 @@ pub async fn close(req: &ParsedRequest) -> Response {
     }
     match crate::commands::run_blocking("http_close_node", move || {
         crate::agent::process::kill_agent_blocking(node_id)?;
-        crate::services::agent_node::delete(node_id, false).map_err(|error| error.to_string())
+        crate::services::agent_node::close(node_id, false).map_err(|error| error.to_string())
     })
     .await
     {
@@ -78,6 +78,9 @@ pub struct CreateNodeRequest {
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub configuration_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub login_id: Option<String>,
     #[serde(default)]
     #[ts(optional)]
     pub rows: Option<u16>,
@@ -217,16 +220,30 @@ async fn run_create(
     // so it runs on the blocking pool with the rest of the create work.
     let configuration_provider = provider.clone();
     let configuration_id = request.configuration_id.clone();
+    let login_id = request.login_id.clone();
     let configuration = match crate::commands::run_blocking_typed::<_, CreateTransportError, _>(
         "http_create_node",
         move || {
-            crate::preferences::spawn_configurations::resolve_saved(
+            use crate::preferences::spawn_configurations::{
+                resolve_menu_selection, resolve_saved, SpawnConfigurationError,
+            };
+            if login_id.is_none() {
+                return resolve_saved(&configuration_provider, configuration_id.as_deref())
+                    .map_err(CreateTransportError::Configuration);
+            }
+            let store = crate::preferences::ambient_store().map_err(|e| {
+                CreateTransportError::Configuration(SpawnConfigurationError::Storage(e))
+            })?;
+            let prefs = store.load().map_err(|e| {
+                CreateTransportError::Configuration(SpawnConfigurationError::Storage(e))
+            })?;
+            resolve_menu_selection(
+                &prefs,
                 &configuration_provider,
-                configuration_id
-                    .as_deref()
-                    .filter(|id| !id.trim().is_empty()),
+                configuration_id.as_deref(),
+                login_id.as_deref(),
             )
-            .map_err(CreateTransportError::Configuration)
+            .map_err(|e| CreateTransportError::Configuration(SpawnConfigurationError::Invalid(e)))
         },
     )
     .await
@@ -256,6 +273,7 @@ async fn run_create(
             mesh_id,
             provider,
             configuration_id: request.configuration_id.clone(),
+            login_id: request.login_id.clone(),
             configuration,
             prompt,
             rows: request.rows.unwrap_or(24),

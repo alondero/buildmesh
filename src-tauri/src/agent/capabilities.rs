@@ -220,6 +220,70 @@ pub struct BackgroundInferenceCapability {
     pub max_prompt_bytes: Option<u32>,
 }
 
+/// Adapter-owned capability facts. Redundant flags live only in the wire
+/// projection, so attention installation, effort support and prompt admission
+/// cannot be declared independently of the facts they describe.
+pub struct HarnessDescriptor {
+    pub supports_resume: bool,
+    pub auto_resume_on_startup: bool,
+    pub attention_capability: crate::agent::capabilities::AttentionCapability,
+    pub circuit_observation: crate::circuit::strategy::ObservationStrategy,
+    pub produces_readable_transcript: bool,
+    pub supports_model_override: bool,
+    /// Whether the harness exposes an agent / persona selector
+    /// (`--agent <name>` on OpenCode 1, session-API `agent` on
+    /// OpenCode 2, `run --agent` for background inference). Issue #1552 /
+    /// #2716: default `false`; adapters opt in only when they can apply
+    /// the value on every launch path.
+    pub supports_agent: bool,
+    pub supports_extra_args: bool,
+    pub supports_prefill: bool,
+    pub available_on: &'static [Platform],
+    pub is_plain_terminal: bool,
+    pub effort_control: EffortControlKind,
+    pub permission_modes: Vec<PermissionModeOption>,
+    pub prefill_auto_submits: bool,
+}
+
+impl Default for HarnessDescriptor {
+    fn default() -> Self {
+        Self {
+            supports_resume: false,
+            auto_resume_on_startup: false,
+            attention_capability: crate::agent::capabilities::AttentionCapability::None,
+            circuit_observation: crate::circuit::strategy::ObservationStrategy::UNWIRED,
+            produces_readable_transcript: false,
+            supports_model_override: false,
+            supports_agent: false,
+            supports_extra_args: false,
+            supports_prefill: false,
+            available_on: &[],
+            is_plain_terminal: false,
+            effort_control: EffortControlKind::None,
+            permission_modes: Vec::new(),
+            prefill_auto_submits: false,
+        }
+    }
+}
+
+impl HarnessDescriptor {
+    pub fn requires_attention_hook(&self) -> bool {
+        !matches!(self.attention_capability, AttentionCapability::None)
+    }
+    pub fn supports_passive_turn_watcher(&self) -> bool {
+        self.circuit_observation.passive_watcher.is_some()
+    }
+    pub fn accepts_initial_prompt(&self) -> bool {
+        self.supports_prefill || !self.is_plain_terminal
+    }
+    pub fn default_permission_mode(&self) -> Option<String> {
+        self.permission_modes.first().map(|m| m.id.clone())
+    }
+    pub fn supports_result_file_handoff(&self) -> bool {
+        !self.is_plain_terminal
+    }
+}
+
 /// Backend-owned **Harness Capability Contract** (issue #1149, prefactor for
 /// #1148). One descriptor per Agent Harness — the same descriptor drives:
 ///
@@ -276,6 +340,12 @@ pub struct HarnessCapabilities {
     pub produces_readable_transcript: bool,
     /// Whether `--model <name>` (or equivalent) from configuration applies.
     pub supports_model_override: bool,
+    /// Whether an agent / persona selector (`--agent <name>` or the
+    /// session-API equivalent) from configuration applies. The mask drops
+    /// the value for every harness that does not opt in, so a stale
+    /// `harness_defaults` entry can never splice a synthetic flag into an
+    /// unrelated CLI (issue #1552 / #2716).
+    pub supports_agent: bool,
     /// Whether `--effort <level>` (or equivalent) from configuration applies.
     /// Mirrors `effort_control != EffortControlKind::None`; pinned by a unit
     /// test so the two can't drift.
@@ -308,7 +378,7 @@ pub struct HarnessCapabilities {
     /// the "this harness has no such flag" line instead of a control and
     /// the launch path contributes no approval argv. Otherwise the first
     /// entry is the unattended default (see
-    /// [`crate::agent::provider::AgentProvider::default_permission_mode`]).
+    /// [`HarnessDescriptor::default_permission_mode`]).
     pub permission_modes: Vec<PermissionModeOption>,
     /// The mode used when no layer supplies one. `None` when the harness
     /// has no modes. `Some` preserves today's unattended launch for
@@ -348,6 +418,12 @@ pub struct ResolvedAgentConfig {
     /// with the harness's unattended default (today's flags) — see
     /// `default_prepare`.
     pub permission_mode: Option<String>,
+    /// Capability-masked agent / persona name (issue #1552 / #2716), or
+    /// `None` if no layer supplied one or the harness doesn't accept an
+    /// agent selector. Downstream callers forward it via
+    /// [`crate::agent::provider::AgentProvider::agent_args`] (V1 argv) or
+    /// the V2 session API, without re-consulting the capability flag.
+    pub agent: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -390,9 +466,9 @@ pub struct FieldInputs<'a> {
     pub application: Option<&'a str>,
 }
 
-/// Per-field inputs to the configuration resolver. `model`, `effort`, and
-/// `permission_mode` are resolved independently so each layer's cascade
-/// runs per field.
+/// Per-field inputs to the configuration resolver. `model`, `effort`,
+/// `permission_mode`, and `agent` are resolved independently so each
+/// layer's cascade runs per field.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AgentConfigInputs<'a> {
     pub model: FieldInputs<'a>,
@@ -401,6 +477,12 @@ pub struct AgentConfigInputs<'a> {
     /// value (the per-harness Settings default, issue #2151) — there is no
     /// per-launch or per-mesh permission slot yet.
     pub permission_mode: FieldInputs<'a>,
+    /// Agent / persona cascade (issue #1552 / #2716). Same shape as
+    /// `model`: explicit > mesh (future) > application > native. V1 has
+    /// no mesh column yet, so the mesh slot stays `None` on the live spawn
+    /// path; the capability mask still drops the value for harnesses
+    /// without an agent control.
+    pub agent: FieldInputs<'a>,
 }
 
 // ---------------------------------------------------------------------------
@@ -429,11 +511,13 @@ pub fn resolve_agent_config(
     let extra_args = resolve_extra_args(capabilities, explicit_extra_args);
     let permission_mode =
         resolve_permission_mode(inputs.permission_mode, &capabilities.permission_modes);
+    let agent = resolve_field(inputs.agent).filter(|_| capabilities.supports_agent);
     ResolvedAgentConfig {
         model,
         effort,
         extra_args,
         permission_mode,
+        agent,
     }
 }
 
@@ -537,25 +621,44 @@ fn normalize_non_empty(raw: &str) -> Option<String> {
 // Trait integration
 // ---------------------------------------------------------------------------
 
-/// Default implementation that packages every `AgentProvider` capability flag
-/// into a [`HarnessCapabilities`] descriptor. The default impl makes the
-/// trait additive: no existing adapter needs to override `capabilities()`
-/// to compile, and adding a new flag at the trait level automatically
-/// appears in every adapter's descriptor.
-///
-/// Adapters that need a non-default `effort_control` override
-/// [`capabilities_for`] (the lower-level helper) rather than this method —
-/// the override pattern keeps each adapter's CLI surface in one place.
-/// Derive a [`HarnessCapabilities`] descriptor for one adapter.
-///
-/// Thin pass-through to [`AgentProvider::capabilities`] (issue #1179).
-/// Retained as a free function so the ~9 external call sites
-/// (`provider_menu.rs`, `autopilot/compatibility.rs`, `preferences.rs`,
-/// `commands/agent_tests.rs`, `spawn.rs`, the inventory tests) keep
-/// their existing import surface; the body is one line so any future
-/// harness that overrides `capabilities()` automatically flows through.
-pub fn capabilities_for(adapter: &dyn AgentProvider) -> HarnessCapabilities {
-    adapter.capabilities()
+/// Project the selected adapter's authoritative facts into the generated wire
+/// contract. This projection is shared by the menu, resolver and catalogue.
+pub fn capabilities_for<A: AgentProvider + ?Sized>(adapter: &A) -> HarnessCapabilities {
+    let descriptor = adapter.descriptor();
+    let default_permission_mode = descriptor.default_permission_mode();
+    let requires_attention_hook = descriptor.requires_attention_hook();
+    let supports_passive_turn_watcher = descriptor.supports_passive_turn_watcher();
+    let supports_result_file_handoff = descriptor.supports_result_file_handoff();
+    let accepts_initial_prompt = descriptor.accepts_initial_prompt();
+
+    HarnessCapabilities {
+        harness_id: adapter.id().to_string(),
+        background_inference: adapter
+            .background_recipe(Platform::current())
+            .map(|r| r.capability),
+        supports_resume: descriptor.supports_resume,
+        auto_resume_on_startup: descriptor.auto_resume_on_startup,
+        requires_attention_hook,
+        attention_capability: descriptor.attention_capability.clone(),
+        supports_passive_turn_watcher,
+        supports_result_file_handoff,
+        produces_readable_transcript: descriptor.produces_readable_transcript,
+        supports_model_override: descriptor.supports_model_override,
+        supports_agent: descriptor.supports_agent,
+        supports_extra_args: descriptor.supports_extra_args,
+        supports_prefill: descriptor.supports_prefill,
+        accepts_initial_prompt,
+        is_plain_terminal: descriptor.is_plain_terminal,
+        effort_control: descriptor.effort_control.clone(),
+        permission_modes: descriptor.permission_modes.clone(),
+        default_permission_mode,
+        supports_effort_override: !matches!(descriptor.effort_control, EffortControlKind::None),
+        available_on: descriptor
+            .available_on
+            .iter()
+            .map(|p| platform_name(*p).to_string())
+            .collect(),
+    }
 }
 
 /// Claude Code's effort levels. Availability varies by model, but the CLI
@@ -639,6 +742,10 @@ mod tests {
         capabilities_for(&crate::agent::provider::adapters::OPENCODE)
     }
 
+    fn opencode2_caps() -> HarnessCapabilities {
+        capabilities_for(&crate::agent::provider::adapters::OPENCODE2)
+    }
+
     fn terminal_caps() -> HarnessCapabilities {
         capabilities_for(&crate::agent::provider::adapters::TERMINAL)
     }
@@ -683,6 +790,45 @@ mod tests {
 
     fn perch_caps() -> HarnessCapabilities {
         capabilities_for(&crate::agent::provider::adapters::PERCH)
+    }
+
+    #[test]
+    fn opencode2_capabilities_pin_the_v2_contract() {
+        use crate::agent::session_lifecycle::LifecycleKind;
+
+        let caps = opencode2_caps();
+        assert_eq!(caps.harness_id, "opencode2");
+        assert!(caps.supports_resume);
+        assert!(caps.auto_resume_on_startup);
+        assert!(caps.requires_attention_hook);
+        assert!(caps.produces_readable_transcript);
+        assert!(caps.supports_model_override);
+        assert!(caps.supports_agent);
+        assert!(!caps.supports_effort_override);
+        assert!(!caps.supports_extra_args);
+        assert!(caps.supports_prefill);
+        assert!(!caps.is_plain_terminal);
+        assert!(caps.background_inference.is_some());
+        assert!(matches!(
+            &caps.attention_capability,
+            AttentionCapability::Hook {
+                events,
+                launch_mode: AttentionLaunchMode::PermissionAsk,
+                trust: None,
+                min_version: Some(version),
+            } if version.as_str() == "2.2.3"
+                && events.contains(&LifecycleKind::TurnCompleted)
+                && events.contains(&LifecycleKind::QuestionRequested)
+                && events.contains(&LifecycleKind::PermissionRequested)
+        ));
+        assert_eq!(
+            caps.available_on,
+            vec![
+                "windows".to_string(),
+                "macos".to_string(),
+                "linux".to_string()
+            ]
+        );
     }
 
     /// Inventory pin (issue #1149 step 1) — every adapter's capability
@@ -864,6 +1010,7 @@ mod tests {
         // so the Coordinator Node Digest hydrates for OpenCode rows.
         assert!(opencode.produces_readable_transcript);
         assert!(opencode.supports_model_override);
+        assert!(opencode.supports_agent);
         assert!(!opencode.supports_effort_override);
         assert!(opencode.supports_extra_args);
         assert!(opencode.supports_prefill);
@@ -1281,7 +1428,7 @@ mod tests {
             &crate::agent::provider::adapters::CLINE,
             &crate::agent::provider::adapters::PERCH,
         ] {
-            let from_trait = adapter.effort_control();
+            let from_trait = adapter.descriptor().effort_control.clone();
             let from_descriptor = capabilities_for(adapter).effort_control;
             assert_eq!(
                 from_trait,
@@ -1313,6 +1460,7 @@ mod tests {
                 application: Some("low"),
             },
             permission_mode: FieldInputs::default(),
+            agent: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("explicit-model"));
@@ -1336,6 +1484,7 @@ mod tests {
                 application: Some("medium"),
             },
             permission_mode: FieldInputs::default(),
+            agent: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus-4"));
@@ -1357,6 +1506,7 @@ mod tests {
             },
             effort: FieldInputs::default(),
             permission_mode: FieldInputs::default(),
+            agent: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&terminal_caps(), inputs, None);
         assert!(
@@ -1384,6 +1534,7 @@ mod tests {
                     application: Some("low"),
                 },
                 permission_mode: FieldInputs::default(),
+                agent: FieldInputs::default(),
             };
             let resolved = resolve_agent_config(&caps, inputs.clone(), None);
             assert!(
@@ -1409,6 +1560,7 @@ mod tests {
                 application: None,
             },
             permission_mode: FieldInputs::default(),
+            agent: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert!(
@@ -1438,6 +1590,7 @@ mod tests {
                         application: None,
                     },
                     permission_mode: FieldInputs::default(),
+                    agent: FieldInputs::default(),
                 },
                 None,
             )
@@ -1470,6 +1623,7 @@ mod tests {
                 application: None,
             },
             permission_mode: FieldInputs::default(),
+            agent: FieldInputs::default(),
         };
         let codex = resolve_agent_config(&codex_caps(), inputs.clone(), None);
         assert_eq!(
@@ -1512,6 +1666,7 @@ mod tests {
                 application: None,
             },
             permission_mode: FieldInputs::default(),
+            agent: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
@@ -1535,6 +1690,7 @@ mod tests {
                 application: None,
             },
             permission_mode: FieldInputs::default(),
+            agent: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&terminal_caps(), inputs, None);
         assert!(resolved.model.is_none());
@@ -1558,6 +1714,7 @@ mod tests {
                 application: Some("\t"),
             },
             permission_mode: FieldInputs::default(),
+            agent: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model, None);
@@ -1580,6 +1737,7 @@ mod tests {
                 application: None,
             },
             permission_mode: FieldInputs::default(),
+            agent: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus"));
@@ -1606,10 +1764,68 @@ mod tests {
                 application: None,
             },
             permission_mode: FieldInputs::default(),
+            agent: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&terminal_caps(), inputs, None);
         assert_eq!(resolved.model, None);
         assert_eq!(resolved.effort, None);
+    }
+
+    /// Agent / persona mask (issue #1552 / #2716): the resolver forwards
+    /// the value only when `supports_agent` is true. OpenCode and
+    /// OpenCode 2 keep it; every other harness drops it so a stale
+    /// `harness_defaults` entry can never splice `--agent` into an
+    /// unrelated CLI. The cascade itself is explicit > application.
+    #[test]
+    fn resolver_masks_agent_to_agent_capable_harnesses_only() {
+        for (caps, keeps) in [
+            (opencode_caps(), true),
+            (opencode2_caps(), true),
+            (anthropic_caps(), false),
+            (codex_caps(), false),
+            (terminal_caps(), false),
+        ] {
+            let inputs = AgentConfigInputs {
+                agent: FieldInputs {
+                    explicit: Some("build"),
+                    mesh: None,
+                    application: Some("plan"),
+                },
+                ..Default::default()
+            };
+            let resolved = resolve_agent_config(&caps, inputs, None);
+            assert_eq!(
+                resolved.agent.as_deref(),
+                keeps.then_some("build"),
+                "{} keeps={keeps}: agent={:?}",
+                caps.harness_id,
+                resolved.agent
+            );
+        }
+        // Application-only falls through when explicit is blank.
+        let inputs = AgentConfigInputs {
+            agent: FieldInputs {
+                explicit: Some("   "),
+                mesh: None,
+                application: Some("plan"),
+            },
+            ..Default::default()
+        };
+        let resolved = resolve_agent_config(&opencode_caps(), inputs, None);
+        assert_eq!(resolved.agent.as_deref(), Some("plan"));
+    }
+
+    #[test]
+    fn agent_capability_matrix_only_opencode_family_opts_in() {
+        for provider in crate::models::Provider::all() {
+            let caps = capabilities_for(provider.adapter());
+            let expect = matches!(caps.harness_id.as_str(), "opencode" | "opencode2");
+            assert_eq!(
+                caps.supports_agent, expect,
+                "{} supports_agent={} expected {expect}",
+                caps.harness_id, caps.supports_agent
+            );
+        }
     }
 
     /// Capability contract pinning for CodexProxy rows. The harness
@@ -1663,6 +1879,7 @@ mod tests {
                 application: Some("high"),
             },
             permission_mode: FieldInputs::default(),
+            agent: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
@@ -1690,6 +1907,7 @@ mod tests {
                 application: Some("high"),
             },
             permission_mode: FieldInputs::default(),
+            agent: FieldInputs::default(),
         };
         // Issue #1286: agy now accepts `--effort <low|medium|high>`, so
         // the application's `high` value passes the mask. Switch the
@@ -1721,6 +1939,7 @@ mod tests {
             },
             effort: FieldInputs::default(),
             permission_mode: FieldInputs::default(),
+            agent: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert!(
@@ -1748,6 +1967,7 @@ mod tests {
                 application: Some("  high  "),
             },
             permission_mode: FieldInputs::default(),
+            agent: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model, None, "whitespace-only model collapses");
@@ -1771,6 +1991,7 @@ mod tests {
             },
             effort: FieldInputs::default(),
             permission_mode: FieldInputs::default(),
+            agent: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("sonnet-4"));
@@ -1804,6 +2025,7 @@ mod tests {
                 application: Some("high"),
             },
             permission_mode: FieldInputs::default(),
+            agent: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
@@ -1834,6 +2056,7 @@ mod tests {
                 application: None,
             },
             permission_mode: FieldInputs::default(),
+            agent: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
@@ -1925,6 +2148,7 @@ mod tests {
                     mesh: None,
                     application,
                 },
+                agent: FieldInputs::default(),
             }
         }
 

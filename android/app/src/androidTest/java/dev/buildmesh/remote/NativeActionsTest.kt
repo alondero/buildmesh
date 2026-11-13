@@ -74,6 +74,7 @@ class NativeActionsTest {
             server.dispatcher = object : Dispatcher() {
                 override fun dispatch(request: RecordedRequest): MockResponse {
                     if (request.path == "/api/session") return MockResponse().setResponseCode(204)
+                    if (request.path == "/api/nodes/9/glance") return MockResponse().setBody(MobileWireFixtures.raw("node_glance_unsupported"))
                     if (request.path == "/api/agents/9/git/branch") return MockResponse().setBody(MobileWireFixtures.raw("git_branch"))
                     if (request.path == "/api/meshes/0/pulls?state=open") return MockResponse().setBody(MobileWireFixtures.raw("pulls_feed_empty"))
                     requests.add(request)
@@ -132,10 +133,10 @@ class NativeActionsTest {
                 TaskScreen(state.copy(meshes = listOf(mesh), providers = providers), vm, 3, {}, launch, { launch = it }, { opened = it })
             } }
             compose.onNodeWithText("What should the agent do?").performTextInput("Fix the deadline")
-            compose.onNodeWithText("Launch configuration: Mesh default").performClick()
-            compose.onNodeWithText("Unavailable agent").assertDoesNotExist()
+            compose.onNodeWithContentDescription("Launch configuration: Mesh default").performClick()
+            compose.onNode(hasText("Unavailable agent · Work") and hasClickAction()).assertIsNotEnabled()
             compose.onNodeWithText("Saved agent").performClick()
-            compose.onNodeWithText("Launch configuration: Saved agent").assertExists()
+            compose.onNodeWithContentDescription("Launch configuration: Saved agent").assertExists()
             compose.onNodeWithText("Start agent").performScrollTo().performClick()
             compose.waitUntil(10000) { vm.state.value.error == "Retry this task" && !vm.state.value.busy }
             compose.onNodeWithText("Fix the deadline").assertExists()
@@ -174,13 +175,13 @@ class NativeActionsTest {
                 val state by vm.state.collectAsState()
                 TaskScreen(state.copy(meshes = listOf(mesh), providers = providers), vm, 3, {}, launch.value, { launch.value = it }, { opened = it })
             } }
-            compose.onNodeWithText("Launch configuration: Terminal").assertExists()
+            compose.onNodeWithContentDescription("Launch configuration: Terminal").assertExists()
             compose.onNodeWithText("Start agent").performScrollTo().assertIsEnabled()
             compose.onNodeWithText("What should the agent do?").performTextInput("Fix the deadline")
             compose.onNodeWithText("Terminal can't take an initial prompt", substring = true).assertExists()
-            compose.onNodeWithText("Launch configuration: Terminal").assertExists()
+            compose.onNodeWithContentDescription("Launch configuration: Terminal").assertExists()
             compose.onNodeWithText("Start agent").performScrollTo().assertIsNotEnabled()
-            compose.onNodeWithText("Launch configuration: Terminal").performScrollTo().performClick()
+            compose.onNodeWithContentDescription("Launch configuration: Terminal").performScrollTo().performClick()
             compose.onNodeWithText("Mesh default").performClick()
             compose.onNodeWithText("Start agent").performScrollTo().performClick()
             compose.waitUntil(10000) { opened == 17L && !vm.state.value.busy }
@@ -269,8 +270,8 @@ class NativeActionsTest {
             opened = 0L
             compose.onNodeWithContentDescription("Choose how to start issue #42").performClick()
             compose.onNodeWithText("Terminal").assertDoesNotExist()
-            compose.onNodeWithText("Unavailable agent").assertDoesNotExist()
-            compose.onNodeWithText("MiniMax via Claude Code").assertExists()
+            compose.onNode(hasText("Unavailable agent · Work") and hasClickAction()).assertIsNotEnabled()
+            compose.onNodeWithText("MiniMax via Claude Code").assertDoesNotExist()
             compose.onNodeWithText("Saved configuration").assertExists()
             compose.onNodeWithText("Saved agent").performClick()
             compose.waitUntil(10000) { opened == 17L && !vm.state.value.busy }
@@ -309,13 +310,13 @@ class NativeActionsTest {
             compose.onNodeWithText("Squash and merge").assertDoesNotExist()
             compose.onNodeWithContentDescription("Choose how to start PR #42").performClick()
             compose.onNodeWithText("Terminal").assertDoesNotExist()
-            compose.onNodeWithText("MiniMax via Claude Code").performClick()
+            compose.onNodeWithText("Saved agent").performClick()
             compose.waitUntil(10000) { opened == 17L && !vm.state.value.busy }
             // `resume()` also mints an event-socket ticket, which is a POST too.
             val post = requests.single { it.path?.endsWith("/spawn") == true }
             assertEquals("/api/meshes/3/pulls/42/spawn", post.path)
             assertEquals(
-                MobileWireFixtures.obj("pull_spawn_request_proxied"),
+                MobileWireFixtures.obj("pull_spawn_request_saved_configuration"),
                 Json.parseToJsonElement(post.body.readUtf8()).jsonObject,
             )
         }
@@ -413,7 +414,7 @@ class NativeActionsTest {
             compose.onNodeWithText("#42 Fix the mobile", substring = true, useUnmergedTree = true).performClick()
             compose.onNodeWithText("Expanded issue details").assertExists()
             compose.onNodeWithContentDescription("Choose how to start issue #42").performScrollTo().performClick()
-            compose.onNodeWithText("MiniMax via Claude Code").assertExists()
+            compose.onNodeWithText("MiniMax via Claude Code").assertDoesNotExist()
             issueScreenshot("issues-android-launch")
             androidx.test.espresso.Espresso.pressBack()
             compose.onNodeWithText("MiniMax via Claude Code").assertDoesNotExist()
@@ -454,10 +455,10 @@ class NativeActionsTest {
             } }
             compose.waitUntil(10000) { compose.onAllNodesWithText("Import and resume").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithText("Import and resume").performClick()
-            compose.onNodeWithText("Launch configuration: MiniMax via Claude Code").assertExists()
+            compose.onNodeWithText("Resume with: MiniMax via Claude Code").assertExists()
             compose.onNodeWithText("Start").performClick()
             compose.waitUntil(10000) { vm.state.value.error.contains("Node 17 was imported") && !vm.state.value.busy }
-            compose.onNodeWithText("Choose a launch configuration").assertDoesNotExist()
+            compose.onNodeWithText("Resume with").assertDoesNotExist()
             assertEquals(0L, opened)
             assertTrue(vm.state.value.error.contains("Executable missing"))
             val request = requests.single { it.method == "POST" }

@@ -429,6 +429,39 @@ pub fn upsert_provider_account(app: AppHandle, account: ProviderAccount) -> Resu
     Ok(())
 }
 
+/// Explicitly create a credential, route and saved launch configuration together.
+#[command]
+pub async fn create_custom_provider(
+    app: AppHandle,
+    name: String,
+    api_key: String,
+    surface: preferences::ApiSurface,
+    base_url: String,
+    model: String,
+) -> Result<preferences::spawn_configurations::SpawnConfiguration, String> {
+    let configuration = crate::commands::run_blocking("create_custom_provider", move || {
+        preferences::custom_providers::create_from(
+            &preferences::ambient_store()?,
+            name,
+            api_key,
+            surface,
+            base_url,
+            model,
+        )
+    })
+    .await?;
+    crate::services::usage::invalidate_cache();
+    let _ = app.emit("provider-list-changed", ());
+    if surface == preferences::ApiSurface::OpenAI {
+        let option =
+            crate::agent::provider::SpawnOptionId::from(configuration.spawn_option_id.as_str());
+        if let Some(provider_id) = option.provider_id() {
+            schedule_pairing_verification(app, option.harness_id().into(), provider_id.into());
+        }
+    }
+    Ok(configuration)
+}
+
 /// Remove a stored provider account. Removing a self-auth built-in just
 /// reverts it to the code-defined default; keyed-first-class and generic
 /// rows are deleted outright (re-adding them starts from the catalog /
@@ -1036,8 +1069,9 @@ fn read_mesh_legacy(mesh_id: i64) -> Result<Option<HarnessConfigValue>, String> 
         model: row.model.clone(),
         effort: row.effort.clone(),
         // The legacy mesh row has no permission column (issue #2151 adds
-        // only the application-layer slot).
+        // only the application-layer slot) and no agent column.
         permission_mode: None,
+        agent: None,
     };
     Ok(if legacy.model.is_some() || legacy.effort.is_some() {
         Some(legacy)

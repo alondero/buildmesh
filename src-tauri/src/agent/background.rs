@@ -133,6 +133,10 @@ pub(crate) fn resolve_plan(
         adapter.validate_model_override(model)?;
         args.extend(adapter.background_model_args(model));
     }
+    if let Some(agent) = &plan.agent {
+        adapter.validate_agent_override(agent)?;
+        args.extend(adapter.background_agent_args(agent));
+    }
     if let Some(effort) = &plan.effort {
         args.extend(adapter.effort_args(effort));
     }
@@ -479,7 +483,7 @@ mod tests {
             for platform in [Platform::Windows, Platform::Macos, Platform::Linux] {
                 let recipe = adapter.background_recipe(platform);
                 assert_eq!(
-                    adapter.capabilities().background_inference,
+                    crate::agent::capabilities::capabilities_for(adapter).background_inference,
                     recipe.as_ref().map(|r| r.capability.clone()),
                     "{provider:?} {platform:?}"
                 );

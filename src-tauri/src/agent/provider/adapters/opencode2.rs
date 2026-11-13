@@ -19,6 +19,55 @@ pub struct OpenCode2Adapter;
 pub static OPENCODE2: OpenCode2Adapter = OpenCode2Adapter;
 
 impl AgentProvider for OpenCode2Adapter {
+    fn descriptor(&self) -> &'static crate::agent::capabilities::HarnessDescriptor {
+        static DESCRIPTOR: std::sync::LazyLock<crate::agent::capabilities::HarnessDescriptor> =
+            std::sync::LazyLock::new(|| crate::agent::capabilities::HarnessDescriptor {
+                supports_resume: true,
+                auto_resume_on_startup: true,
+                attention_capability: {
+                    use crate::agent::session_lifecycle::LifecycleKind;
+                    AttentionCapability::Hook {
+                        events: vec![
+                            LifecycleKind::TurnCompleted,
+                            LifecycleKind::QuestionRequested,
+                            LifecycleKind::PermissionRequested,
+                        ],
+                        launch_mode: AttentionLaunchMode::PermissionAsk,
+                        trust: None,
+                        min_version: Some("2.2.3".into()),
+                    }
+                },
+                circuit_observation: {
+                    // Native foreground fences and V2 child identity are a separate port.
+                    crate::circuit::strategy::ObservationStrategy::UNWIRED
+                },
+                produces_readable_transcript: true,
+                supports_model_override: true,
+                // Issue #2716: the V2 full TUI has no `--agent` flag
+                // (`opencode2 --help`), so the value is applied through
+                // the session API in `prepare_session` instead — the same
+                // transport `supports_model_override` uses.
+                supports_agent: true,
+                supports_extra_args: false,
+                supports_prefill: true,
+                available_on: { &[Platform::Windows, Platform::Macos, Platform::Linux] },
+                permission_modes: {
+                    vec![
+                    PermissionModeOption::unattended(
+                        "--auto",
+                        "Use OpenCode's auto-approve mode with managed project permission rules.",
+                    ),
+                    PermissionModeOption::prompt(
+                        "Prompts on (no flag)",
+                        "OpenCode asks before permission-gated tools.",
+                    ),
+                ]
+                },
+                ..Default::default()
+            });
+        &DESCRIPTOR
+    }
+
     fn id(&self) -> &'static str {
         "opencode2"
     }
@@ -37,61 +86,11 @@ impl AgentProvider for OpenCode2Adapter {
             windows_shell: shell_for(platform),
         }
     }
-    fn supports_resume(&self) -> bool {
-        true
-    }
-    fn auto_resume_on_startup(&self) -> bool {
-        true
-    }
-    fn requires_attention_hook(&self) -> bool {
-        true
-    }
-    fn produces_readable_transcript(&self) -> bool {
-        true
-    }
-    fn supports_model_override(&self) -> bool {
-        true
-    }
-    fn supports_extra_args(&self) -> bool {
-        false
-    }
-    fn supports_prefill(&self) -> bool {
-        true
-    }
+
     fn confirms_prompt_submission(&self) -> bool {
         true
     }
-    fn available_on(&self) -> &'static [Platform] {
-        &[Platform::Windows, Platform::Macos, Platform::Linux]
-    }
-    fn circuit_observation(&self) -> crate::circuit::strategy::ObservationStrategy {
-        // Native foreground fences and V2 child identity are a separate port.
-        crate::circuit::strategy::ObservationStrategy::UNWIRED
-    }
-    fn attention_capability(&self) -> AttentionCapability {
-        use crate::agent::session_lifecycle::LifecycleKind;
-        AttentionCapability::Hook {
-            events: vec![
-                LifecycleKind::TurnCompleted,
-                LifecycleKind::PermissionRequested,
-            ],
-            launch_mode: AttentionLaunchMode::PermissionAsk,
-            trust: None,
-            min_version: Some("2.2.3".into()),
-        }
-    }
-    fn permission_modes(&self) -> Vec<PermissionModeOption> {
-        vec![
-            PermissionModeOption::unattended(
-                "--auto",
-                "Use OpenCode's auto-approve mode with managed project permission rules.",
-            ),
-            PermissionModeOption::prompt(
-                "Prompts on (no flag)",
-                "OpenCode asks before permission-gated tools.",
-            ),
-        ]
-    }
+
     fn permission_args(&self, mode_id: &str) -> Vec<String> {
         if mode_id == crate::agent::capabilities::PERMISSION_MODE_UNATTENDED {
             vec!["--auto".into()]
@@ -119,6 +118,29 @@ impl AgentProvider for OpenCode2Adapter {
     }
     fn validate_model_override(&self, model: &str) -> Result<(), String> {
         model_ref(model).map(|_| ())
+    }
+    fn validate_agent_override(&self, agent: &str) -> Result<(), String> {
+        super::opencode::validate_agent_name(agent)
+    }
+    fn agent_args(&self, _agent: &str) -> Vec<String> {
+        // The full V2 TUI has no `--agent` flag; the selector is applied
+        // through the session API in `prepare_session` (mirroring the
+        // model path). Returning empty keeps the interactive argv
+        // flag-free so a future V2 release that adds the flag cannot
+        // silently double-apply it.
+        Vec::new()
+    }
+    fn agent_override_via_session_api(&self) -> bool {
+        true
+    }
+    fn background_agent_args(&self, agent: &str) -> Vec<String> {
+        // Issue #2716: `opencode2 run --agent <name>` is the one-shot
+        // spelling; the background recipe never touches the session API.
+        if agent.is_empty() {
+            Vec::new()
+        } else {
+            vec!["--agent".into(), agent.into()]
+        }
     }
     fn prefill_args(&self, text: &str) -> Vec<String> {
         vec![
@@ -160,9 +182,13 @@ impl AgentProvider for OpenCode2Adapter {
         let directory = Path::new(&input.resolved.host_path);
         config::provision(directory, input.node_id, None)?;
         let config_path = config::config_path(directory, input.node_id);
+        if let Some(agent) = input.config.agent.as_deref() {
+            self.validate_agent_override(agent)?;
+        }
         let target = prepare_identity(
             input.session,
             input.config.model.as_deref(),
+            input.config.agent.as_deref(),
             &mut |method, path, body| api(executable, directory, &config_path, method, path, body),
         )?;
         let id = match input.session {
@@ -224,6 +250,7 @@ impl From<SessionApiError> for String {
 fn prepare_identity(
     session: SessionIdModeRef<'_>,
     model: Option<&str>,
+    agent: Option<&str>,
     request: &mut dyn FnMut(
         &str,
         &str,
@@ -243,6 +270,9 @@ fn prepare_identity(
     };
     if crate::http::request::parse_opencode_session_id(id).as_deref() != Some(id) {
         return Err("Invalid OpenCode 2 session identity".into());
+    }
+    if let Some(agent) = agent {
+        super::opencode::validate_agent_name(agent)?;
     }
     let target = if fork {
         let response = request(
@@ -279,26 +309,54 @@ fn prepare_identity(
         if let Some(model) = model {
             body["model"] = model_ref(model)?;
         }
+        if let Some(agent) = agent {
+            body["agent"] = serde_json::json!(agent);
+        }
         let response = request("POST", "/api/session", body)?;
         if response["data"]["id"].as_str() != Some(&target) {
             return Err("OpenCode 2 created a different session identity".into());
         }
-    } else if let Some(model) = model {
-        request(
-            "POST",
-            &format!("/api/session/{target}/model"),
-            serde_json::json!({"model":model_ref(model)?}),
-        )?;
+    } else {
+        if let Some(model) = model {
+            request(
+                "POST",
+                &format!("/api/session/{target}/model"),
+                serde_json::json!({"model":model_ref(model)?}),
+            )?;
+        }
+        if let Some(agent) = agent {
+            request(
+                "POST",
+                &format!("/api/session/{target}/agent"),
+                serde_json::json!({"agent": agent}),
+            )?;
+        }
     }
     Ok(target)
 }
 
 fn model_ref(model: &str) -> Result<serde_json::Value, String> {
-    let (provider, id) = model
+    let invalid =
+        || "OpenCode 2 model must be provider/model or provider/model#variant".to_string();
+    let (provider, rest) = model
         .split_once('/')
-        .filter(|(p, m)| !p.trim().is_empty() && !m.trim().is_empty() && !m.contains('#'))
-        .ok_or("OpenCode 2 model must be provider/model without a #variant")?;
-    Ok(serde_json::json!({"providerID": provider, "id": id}))
+        .filter(|(provider, id)| !provider.trim().is_empty() && !id.trim().is_empty())
+        .ok_or_else(invalid)?;
+    if provider.contains('#') {
+        return Err(invalid());
+    }
+    let (id, variant) = match rest.split_once('#') {
+        Some((id, variant)) if !id.is_empty() && !variant.is_empty() && !variant.contains('#') => {
+            (id, Some(variant))
+        }
+        Some(_) => return Err(invalid()),
+        None => (rest, None),
+    };
+    let mut model = serde_json::json!({"providerID": provider, "id": id});
+    if let Some(variant) = variant {
+        model["variant"] = serde_json::Value::String(variant.into());
+    }
+    Ok(model)
 }
 
 /// Windows PowerShell's legacy native-argument marshaller consumes JSON quotes.

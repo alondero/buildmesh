@@ -80,6 +80,22 @@ pub fn count_reserved_circuit_agent_slots_total() -> SqlResult<i64> {
 /// table invariant used by legacy Autopilot.
 type AgentOwnershipRow = (i64, i64, i64, String, String, Option<i64>);
 
+/// All live runs that would lose an agent when an operator closes it. Source
+/// ownership remains relevant even while the run is at a confirmation gate;
+/// step ownership remains relevant after its spawn step has completed.
+pub fn live_circuit_runs_for_agent(agent_id: i64) -> SqlResult<Vec<i64>> {
+    let db = crate::db::read_conn()?;
+    let mut stmt = db.prepare(&format!(
+        "SELECT r.id FROM autopilot_circuit_runs r \
+         WHERE r.state IN ({}) AND (r.source_agent_node_id = ?1 OR EXISTS (\
+             SELECT 1 FROM autopilot_circuit_run_steps s \
+             WHERE s.run_id = r.id AND s.agent_node_id = ?1)) ORDER BY r.id",
+        RunState::SQL_IN_LIVE
+    ))?;
+    let rows = stmt.query_map(params![agent_id], |row| row.get(0))?;
+    rows.collect()
+}
+
 pub fn list_circuit_agent_ownerships() -> SqlResult<Vec<AgentOwnershipRow>> {
     let db = crate::db::read_conn()?;
     list_circuit_agent_ownerships_inner(&db)
@@ -762,8 +778,9 @@ fn sweepable_runs_sql() -> String {
         AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_runs c \
                         WHERE json_extract(CASE WHEN json_valid(c.context_json) \
                                           THEN c.context_json ELSE '{{}}' END, \
-                                          '$.\"recovery.from_run_id\"') = r.id)",
-        RunState::SQL_IN_SWEEPABLE
+                                          '$.\"{}\"') = r.id)",
+        RunState::SQL_IN_SWEEPABLE,
+        crate::circuit::lineage::RECOVERY_PARENT_KEY
     )
 }
 

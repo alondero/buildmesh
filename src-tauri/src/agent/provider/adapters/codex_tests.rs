@@ -1116,13 +1116,13 @@ fn effort_config_override_escapes_embedded_quotes() {
 
 #[test]
 fn codex_declares_attention_hook_and_readable_transcript() {
-    assert!(CODEX.requires_attention_hook());
-    assert!(CODEX.produces_readable_transcript());
+    assert!(CODEX.descriptor().requires_attention_hook());
+    assert!(CODEX.descriptor().produces_readable_transcript);
     let crate::agent::capabilities::AttentionCapability::Hook {
         events,
         min_version,
         ..
-    } = CODEX.attention_capability()
+    } = CODEX.descriptor().attention_capability.clone()
     else {
         panic!("Codex must expose native hook capability");
     };
@@ -2109,7 +2109,7 @@ fn permission_mode_changes_argv_of_next_spawn() {
     use crate::agent::capabilities::{
         ResolvedAgentConfig, PERMISSION_MODE_PROMPT, PERMISSION_MODE_UNATTENDED,
     };
-    use crate::agent::launch::{default_prepare, HarnessLaunchInput, SessionIdModeRef};
+    use crate::agent::launch::{HarnessLaunchInput, SessionIdModeRef};
     use crate::models::EnvType;
 
     fn prepared_argv(mode: Option<&str>) -> Vec<String> {
@@ -2118,8 +2118,11 @@ fn permission_mode_changes_argv_of_next_spawn() {
             effort: None,
             extra_args: None,
             permission_mode: mode.map(str::to_string),
+            agent: None,
         };
         let input = HarnessLaunchInput {
+            routing: None,
+            node_id: None,
             platform: Platform::Windows,
             runtime: EnvType::Windows,
             session: SessionIdModeRef::Resume {
@@ -2130,7 +2133,7 @@ fn permission_mode_changes_argv_of_next_spawn() {
             prefill: None,
             sandbox: false,
         };
-        default_prepare(&CODEX, input).recipe.base_args
+        CODEX.prepare_launch(input).recipe.base_args
     }
 
     // No stored value: today's unattended behavior is preserved, and
@@ -2169,12 +2172,12 @@ fn permission_mode_changes_argv_of_next_spawn() {
     );
     // The mode descriptor the setting UI renders stays in sync with
     // the argv the spawn path emits.
-    let modes = CODEX.permission_modes();
+    let modes = CODEX.descriptor().permission_modes.clone();
     assert_eq!(modes.len(), 2);
     assert_eq!(modes[0].id, PERMISSION_MODE_UNATTENDED);
     assert!(modes[0].label.contains("--ask-for-approval"));
     assert_eq!(
-        CODEX.default_permission_mode().as_deref(),
+        CODEX.descriptor().default_permission_mode().as_deref(),
         Some(PERMISSION_MODE_UNATTENDED)
     );
 }

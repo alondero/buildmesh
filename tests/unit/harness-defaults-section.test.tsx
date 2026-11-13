@@ -37,6 +37,7 @@ function capsFixture(harness_id: string, opts: {
   effortKind: 'none' | 'closed' | 'inline_config';
   effortAllowed?: string[];
   effortKey?: string;
+  supportsAgent?: boolean;
   // Issue #2151: permission modes in the harness's own words. Omitted
   // (or empty) means the harness has no permission flag.
   permissionModes?: Array<{ id: string; label: string; description: string }>;
@@ -55,6 +56,7 @@ function capsFixture(harness_id: string, opts: {
     requires_attention_hook: false,
     produces_readable_transcript: false,
     supports_model_override: opts.supports_model,
+    supports_agent: opts.supportsAgent ?? false,
     supports_effort_override: opts.effortKind !== 'none',
     supports_prefill: false,
     is_plain_terminal: harness_id === 'terminal',
@@ -125,7 +127,7 @@ const OPENCODE_MODES = [
 const OPENCODE_ROW = providerFixture(
   'opencode',
   'opencode',
-  capsFixture('opencode', { supports_model: false, effortKind: 'none', permissionModes: OPENCODE_MODES }),
+  capsFixture('opencode', { supports_model: false, effortKind: 'none', supportsAgent: true, permissionModes: OPENCODE_MODES }),
 );
 // Kimi Code genuinely has no permission flag and supports model override —
 // the truthful fixture for the no-such-flag line (review round 1: AGY and
@@ -329,7 +331,7 @@ describe('Settings — Agent Harness defaults', () => {
     const last = calls['set_harness_default']!.at(-1);
     expect(last).toEqual({
       profileId: 'claude',
-      value: { model: 'opus-4-1', effort: null, permission_mode: null },
+      value: { model: 'opus-4-1', effort: null, permission_mode: null, agent: null },
     });
   });
 
@@ -457,7 +459,7 @@ describe('Settings — Agent Harness defaults', () => {
     const last = calls['set_harness_default']!.at(-1);
     expect(last).toEqual({
       profileId: 'claude',
-      value: { model: null, effort: null, permission_mode: 'prompt' },
+      value: { model: null, effort: null, permission_mode: 'prompt', agent: null },
     });
     // After commit the select keeps showing the stored choice.
     await waitFor(() => expect(select.value).toBe('prompt'));
@@ -483,6 +485,22 @@ describe('Settings — Agent Harness defaults', () => {
     expect(fixed.textContent).toBe('Full Access (permissionMode: bypassPermissions)');
     expect(screen.queryByTestId('harness-permission-select-mcode')).toBeNull();
     expect(screen.queryByTestId('harness-permission-effective-mcode')).toBeNull();
+  });
+
+  it('agent input is gated to agent-capable harnesses and commits on blur', async () => {
+    const calls = mockBackend({ providers: [OPENCODE_ROW, CLAUDE_ROW] });
+    render(<AppSettingsModal initialTab="harnesses" onClose={() => {}} />);
+    const input = await screen.findByTestId<HTMLInputElement>('harness-default-agent-input-opencode');
+    expect(screen.queryByTestId('harness-default-agent-input-claude')).toBeNull();
+    const user = userEvent.setup();
+    await user.click(input);
+    await user.type(input, 'build');
+    await user.tab();
+    await waitFor(() => expect(calls['set_harness_default']).toBeTruthy());
+    expect(calls['set_harness_default']!.at(-1)).toEqual({
+      profileId: 'opencode',
+      value: { model: null, effort: null, permission_mode: null, agent: 'build' },
+    });
   });
 
   it('harness with model control but no flag renders no permission control or explanation', async () => {

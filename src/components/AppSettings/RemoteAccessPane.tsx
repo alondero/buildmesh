@@ -22,10 +22,37 @@ import { useState } from 'react';
 import * as api from '../../lib/tauri';
 import { formatError } from '../../lib/errorUtils';
 import { optimisticToggle } from '../../lib/optimisticToggle';
+import { formatRelativeAge, parseSqliteTimestamp } from '../../lib/time';
 import { SettingsRow, SettingsSection } from './SettingsRow';
 import { ResourceLoadStatus } from './ResourceLoadStatus';
 import { useSettingsData, type CoordinatorPayload, type NetworkPayload } from './SettingsDataContext';
 import type { DeviceSession, RealizedBind } from '../../lib/tauri';
+
+/**
+ * How long ago a device was last seen, in the relative form the panel shows
+ * (issue #589).
+ *
+ * The backend stores SQLite's zoneless UTC text ("2026-06-22 09:30:00"), so
+ * the value has to be parsed with the zone forced on — a naive
+ * `new Date(...)` reads it as local time, and every age would then drift with
+ * the host's timezone. A value the parser cannot read is shown verbatim rather
+ * than as "NaNd ago".
+ */
+function relativeAge(timestamp: string, now: Date): string {
+  const then = parseSqliteTimestamp(timestamp);
+  return then ? formatRelativeAge(then, now) : timestamp;
+}
+
+/**
+ * The date a device paired, in the panel's absolute form. Pairs with the
+ * relative "last active" label so a stale duplicate row is recognisable at a
+ * glance: an old pairing date next to a long idle age is exactly the shape of
+ * an orphan.
+ */
+function absoluteDate(timestamp: string): string {
+  const then = parseSqliteTimestamp(timestamp);
+  return then ? then.toLocaleDateString() : timestamp;
+}
 
 export function RemoteAccessPane() {
   const {
@@ -54,6 +81,10 @@ export function RemoteAccessPane() {
   // toggle is on but the server is still loopback-only.
   const [tlsActive, setTlsActive] = useState(false);
   const [exposedInterfaces, setExposedInterfaces] = useState<RealizedBind[]>([]);
+
+  // The clock the device ages are measured against. Taken once per render so
+  // every row in the list reads against the same "now" (issue #589).
+  const now = new Date();
 
   const coordinatorLoaded = resources.coordinator.status === 'loaded';
   const devicesLoaded = resources.devices.status === 'loaded';
@@ -452,8 +483,18 @@ export function RemoteAccessPane() {
                   <div className="text-base text-text-primary truncate">
                     {device.label ?? 'Unknown device'}
                   </div>
-                  <div className="text-sm text-text-muted truncate">
-                    {device.last_ip ?? 'IP unknown'} · last active {device.last_active_at}
+                  <div
+                    className="text-sm text-text-muted truncate"
+                    title={device.last_active_at}
+                  >
+                    {device.last_ip ?? 'IP unknown'} · last active{' '}
+                    {relativeAge(device.last_active_at, now)}
+                  </div>
+                  <div
+                    className="text-sm text-text-muted truncate"
+                    title={device.created_at}
+                  >
+                    Paired {absoluteDate(device.created_at)}
                   </div>
                 </div>
                 {confirmingRevokeId === device.id ? (
@@ -461,7 +502,7 @@ export function RemoteAccessPane() {
                     <button
                       onClick={() => handleRevokeDevice(device.id)}
                       disabled={revokingId === device.id}
-                      className="px-4 py-2 bg-status-error text-white text-base rounded-md hover:bg-status-error/90 disabled:opacity-50"
+                      className="px-4 py-2 text-on-destructive bg-destructive/80 hover:bg-destructive active:bg-destructive-strong disabled:bg-bg-card-hover disabled:text-text-muted text-base rounded-md"
                     >
                       {revokingId === device.id ? 'Revoking…' : 'Confirm revoke'}
                     </button>

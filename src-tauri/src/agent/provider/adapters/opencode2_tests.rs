@@ -1,8 +1,6 @@
 use super::*;
 use crate::agent::{
-    capabilities::ResolvedAgentConfig,
-    launch::{default_prepare, HarnessLaunchInput},
-    spawn::ResumeCause,
+    capabilities::ResolvedAgentConfig, launch::HarnessLaunchInput, spawn::ResumeCause,
 };
 
 #[cfg(windows)]
@@ -122,6 +120,7 @@ fn api_preparation_creates_with_model_and_updates_a_distinct_regenerate_fork() {
     let id = prepare_identity(
         SessionIdModeRef::Assign("ses_assigned"),
         Some("anthropic/sonnet"),
+        None,
         &mut |_, path, body| {
             calls.push((path.to_string(), body));
             Ok(json!({"data":{"id":"ses_assigned"}}))
@@ -143,6 +142,7 @@ fn api_preparation_creates_with_model_and_updates_a_distinct_regenerate_fork() {
             cause: ResumeCause::Regenerate,
         },
         Some("openai/gpt"),
+        None,
         &mut |_, path, body| {
             calls.push((path.to_string(), body));
             Ok(json!({"data":{"id":"ses_sibling"}}))
@@ -168,6 +168,7 @@ fn api_preparation_creates_with_model_and_updates_a_distinct_regenerate_fork() {
                 cause,
             },
             Some("openai/gpt"),
+            None,
             &mut |method, path, body| {
                 calls.push((path.to_string(), body));
                 Ok(if method == "GET" {
@@ -188,15 +189,262 @@ fn api_preparation_creates_with_model_and_updates_a_distinct_regenerate_fork() {
             cause: ResumeCause::Regenerate
         },
         None,
+        None,
         &mut |_, _, _| Ok(json!({"data":{"id":"ses_parent"}}))
     )
     .is_err());
     assert!(prepare_identity(
         SessionIdModeRef::Assign("ses_assigned"),
         None,
+        None,
         &mut |_, _, _| Err(SessionApiError::Failed("API unavailable".into()))
     )
     .is_err());
+}
+
+#[test]
+fn model_refs_accept_one_variant_and_reject_malformed_suffixes() {
+    use serde_json::json;
+    assert_eq!(
+        model_ref("openrouter/particle-ai/particle-1").unwrap(),
+        json!({"providerID":"openrouter","id":"particle-ai/particle-1"})
+    );
+    assert_eq!(
+        model_ref("anthropic/claude-sonnet-4-5#high").unwrap(),
+        json!({"providerID":"anthropic","id":"claude-sonnet-4-5","variant":"high"})
+    );
+    for invalid in [
+        "",
+        "/",
+        "anthropic",
+        "anthropic/",
+        "/sonnet",
+        "anthropic/sonnet#",
+        "anthropic/sonnet#a#b",
+        "anthropic#x/sonnet",
+    ] {
+        assert!(model_ref(invalid).is_err(), "{invalid} must be rejected");
+    }
+    assert!(OPENCODE2.validate_model_override("openai/gpt#high").is_ok());
+    assert!(OPENCODE2.validate_model_override("openai/gpt#").is_err());
+}
+
+#[test]
+fn session_api_creation_and_update_carry_model_variants() {
+    use serde_json::json;
+    let mut create_calls = Vec::new();
+    prepare_identity(
+        SessionIdModeRef::Assign("ses_assigned"),
+        Some("openai/gpt#high"),
+        None,
+        &mut |_, path, body| {
+            create_calls.push((path.to_string(), body));
+            Ok(json!({"data":{"id":"ses_assigned"}}))
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        create_calls,
+        [(
+            "/api/session".into(),
+            json!({"id":"ses_assigned","model":{"providerID":"openai","id":"gpt","variant":"high"}})
+        )]
+    );
+    let mut resume_calls = Vec::new();
+    prepare_identity(
+        SessionIdModeRef::Resume {
+            id: "ses_parent",
+            cause: ResumeCause::Explicit,
+        },
+        Some("openai/gpt#high"),
+        None,
+        &mut |method, path, body| {
+            resume_calls.push((method.to_string(), path.to_string(), body));
+            Ok(if method == "GET" {
+                json!({"data":{"id":"ses_parent"}})
+            } else {
+                json!(null)
+            })
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        resume_calls,
+        [
+            ("GET".into(), "/api/session/ses_parent".into(), json!(null)),
+            (
+                "POST".into(),
+                "/api/session/ses_parent/model".into(),
+                json!({"model":{"providerID":"openai","id":"gpt","variant":"high"}})
+            )
+        ]
+    );
+}
+
+#[test]
+fn session_api_carries_agent_on_create_switch_and_fork_before_the_tui_starts() {
+    use serde_json::json;
+    // Fresh: agent rides the create body (issue #2716 P1).
+    let mut calls = Vec::new();
+    prepare_identity(
+        SessionIdModeRef::Assign("ses_assigned"),
+        Some("openai/gpt"),
+        Some("build"),
+        &mut |_, path, body| {
+            calls.push((path.to_string(), body));
+            Ok(json!({"data":{"id":"ses_assigned"}}))
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        calls,
+        [(
+            "/api/session".into(),
+            json!({"id":"ses_assigned","model":{"providerID":"openai","id":"gpt"},"agent":"build"})
+        )]
+    );
+    // Resumed existing session: model then agent switch.
+    let mut resume_calls = Vec::new();
+    prepare_identity(
+        SessionIdModeRef::Resume {
+            id: "ses_parent",
+            cause: ResumeCause::Explicit,
+        },
+        Some("openai/gpt"),
+        Some("plan"),
+        &mut |method, path, body| {
+            resume_calls.push((method.to_string(), path.to_string(), body));
+            Ok(if method == "GET" {
+                json!({"data":{"id":"ses_parent"}})
+            } else {
+                json!(null)
+            })
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        resume_calls,
+        [
+            ("GET".into(), "/api/session/ses_parent".into(), json!(null)),
+            (
+                "POST".into(),
+                "/api/session/ses_parent/model".into(),
+                json!({"model":{"providerID":"openai","id":"gpt"}})
+            ),
+            (
+                "POST".into(),
+                "/api/session/ses_parent/agent".into(),
+                json!({"agent":"plan"})
+            )
+        ]
+    );
+    // Regenerate fork: the fork target gets both switches.
+    let mut fork_calls = Vec::new();
+    let target = prepare_identity(
+        SessionIdModeRef::Resume {
+            id: "ses_parent",
+            cause: ResumeCause::Regenerate,
+        },
+        None,
+        Some("build"),
+        &mut |method, path, body| {
+            fork_calls.push((method.to_string(), path.to_string(), body));
+            Ok(if path.ends_with("/fork") {
+                json!({"data":{"id":"ses_sibling"}})
+            } else {
+                json!(null)
+            })
+        },
+    )
+    .unwrap();
+    assert_eq!(target, "ses_sibling");
+    assert_eq!(
+        fork_calls,
+        [
+            (
+                "POST".into(),
+                "/api/session/ses_parent/fork".into(),
+                json!({})
+            ),
+            (
+                "POST".into(),
+                "/api/session/ses_sibling/agent".into(),
+                json!({"agent":"build"})
+            )
+        ]
+    );
+    // Session-API harnesses never emit --agent on the interactive argv.
+    assert!(OPENCODE2.agent_args("build").is_empty());
+    assert!(OPENCODE2.agent_override_via_session_api());
+    assert_eq!(
+        OPENCODE2.background_agent_args("build"),
+        vec!["--agent".to_string(), "build".to_string()]
+    );
+    assert!(
+        OPENCODE2.background_agent_args("").is_empty(),
+        "background must never emit a dangling --agent"
+    );
+    // Malformed agents fail before any API traffic (and before spawn).
+    for bad in ["", "   ", "has space"] {
+        let mut made = 0;
+        let error = prepare_identity(
+            SessionIdModeRef::Assign("ses_assigned"),
+            None,
+            Some(bad),
+            &mut |_, _, _| {
+                made += 1;
+                Ok(json!({"data":{"id":"ses_assigned"}}))
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("agent"), "{bad:?}: {error}");
+        assert_eq!(made, 0, "{bad:?} must fail before any session-API request");
+    }
+    // Recovery create carries the agent too (failed first create -> resume).
+    let mut recovery = Vec::new();
+    prepare_identity(
+        SessionIdModeRef::Resume {
+            id: "ses_retry",
+            cause: ResumeCause::Startup,
+        },
+        None,
+        Some("build"),
+        &mut |method, path, body| {
+            recovery.push((method.to_string(), path.to_string(), body));
+            if method == "GET" {
+                Err(SessionApiError::MissingSession)
+            } else {
+                Ok(json!({"data":{"id":"ses_retry"}}))
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        recovery,
+        [
+            ("GET".into(), "/api/session/ses_retry".into(), json!(null)),
+            (
+                "POST".into(),
+                "/api/session".into(),
+                json!({"id":"ses_retry","agent":"build"})
+            )
+        ]
+    );
+    // Unknown agents fail before spawn via the daemon error (no new
+    // session is created when the daemon refuses the create).
+    let mut calls = 0;
+    let error = prepare_identity(
+        SessionIdModeRef::Assign("ses_assigned"),
+        None,
+        Some("no-such-agent"),
+        &mut |_, _, _| {
+            calls += 1;
+            Err(SessionApiError::Failed("Agent not found".into()))
+        },
+    )
+    .unwrap_err();
+    assert!(error.contains("Agent not found"), "{error}");
+    assert!(calls >= 1);
 }
 
 #[test]
@@ -206,6 +454,7 @@ fn resume_recovers_a_persisted_identity_after_a_failed_first_create() {
         assert!(prepare_identity(
             SessionIdModeRef::Assign("ses_retry"),
             model,
+            None,
             &mut |_, _, _| Err(SessionApiError::Failed("temporary failure".into()))
         )
         .is_err());
@@ -216,6 +465,7 @@ fn resume_recovers_a_persisted_identity_after_a_failed_first_create() {
                 cause: ResumeCause::Startup,
             },
             model,
+            None,
             &mut |method, path, body| {
                 calls.push((method.to_string(), path.to_string(), body));
                 if method == "GET" {
@@ -246,6 +496,7 @@ fn resume_recovers_a_persisted_identity_after_a_failed_first_create() {
             cause: ResumeCause::Explicit,
         },
         None,
+        None,
         &mut |_, _, _| {
             calls += 1;
             Err(SessionApiError::Failed("server unavailable".into()))
@@ -262,6 +513,7 @@ fn resume_recovers_a_persisted_identity_after_a_failed_first_create() {
             id: "ses_retry",
             cause: ResumeCause::Regenerate
         },
+        None,
         None,
         &mut |_, _, _| Err(SessionApiError::MissingSession)
     )
@@ -357,17 +609,16 @@ fn fresh_and_resume_use_standalone_assigned_identity_without_v1_flags() {
             cause: ResumeCause::Regenerate,
         },
     ] {
-        let prepared = default_prepare(
-            &OPENCODE2,
-            HarnessLaunchInput {
-                platform: Platform::Linux,
-                runtime: EnvType::Windows,
-                session,
-                config: &config,
-                prefill: Some("hello"),
-                sandbox: false,
-            },
-        );
+        let prepared = OPENCODE2.prepare_launch(HarnessLaunchInput {
+            routing: None,
+            node_id: None,
+            platform: Platform::Linux,
+            runtime: EnvType::Windows,
+            session,
+            config: &config,
+            prefill: Some("hello"),
+            sandbox: false,
+        });
         assert_eq!(
             prepared.recipe.base_args,
             [
@@ -383,11 +634,37 @@ fn fresh_and_resume_use_standalone_assigned_identity_without_v1_flags() {
             .recipe
             .base_args
             .iter()
-            .any(|a| a == "--model" || a == "--fork"));
+            .any(|a| a == "--model" || a == "--fork" || a == "--agent"));
         assert!(prepared.capabilities.supports_model_override);
+        assert!(prepared.capabilities.supports_agent);
     }
+    // An agent-bearing config still keeps the interactive argv flag-free:
+    // the value travels in session state (prepare_identity), not argv.
+    let agent_config = ResolvedAgentConfig {
+        model: Some("anthropic/claude-sonnet-5-5".into()),
+        agent: Some("build".into()),
+        ..Default::default()
+    };
+    let prepared = OPENCODE2.prepare_launch(HarnessLaunchInput {
+        routing: None,
+        node_id: None,
+        platform: Platform::Linux,
+        runtime: EnvType::Windows,
+        session: SessionIdModeRef::Assign(&id),
+        config: &agent_config,
+        prefill: None,
+        sandbox: false,
+    });
+    assert!(
+        !prepared.recipe.base_args.iter().any(|a| a == "--agent"),
+        "V2 agent must never reach the interactive argv; args = {:?}",
+        prepared.recipe.base_args
+    );
     assert!(model_ref("claude-sonnet-5-5").is_err());
-    assert!(model_ref("anthropic/model#variant").is_err());
+    assert_eq!(
+        model_ref("anthropic/model#variant").unwrap(),
+        serde_json::json!({"providerID":"anthropic","id":"model","variant":"variant"})
+    );
     assert_eq!(
         model_ref("custom/vendor/model").unwrap(),
         serde_json::json!({"providerID":"custom","id":"vendor/model"})
@@ -456,13 +733,17 @@ fn user_project_jsonc_is_left_to_the_cli_and_never_shadowed_for_v1() {
 }
 
 #[test]
-fn background_has_project_deny_rules_model_and_unchanged_json_decoder() {
+fn background_has_project_deny_rules_model_and_agent_and_unchanged_json_decoder() {
     use crate::preferences::launch_configurations::{capture, LaunchOverrides};
     let prefs = crate::preferences::AppPreferences::default();
     let mut plan = capture(&prefs, "opencode2", &LaunchOverrides::default()).unwrap();
     plan.model = Some("anthropic/claude-sonnet-5-5".into());
+    plan.agent = Some("build".into());
     let launch = crate::agent::background::resolve_plan(plan, &prefs).unwrap();
-    assert_eq!(launch.args, ["--model", "anthropic/claude-sonnet-5-5"]);
+    assert_eq!(
+        launch.args,
+        ["--model", "anthropic/claude-sonnet-5-5", "--agent", "build"]
+    );
     let recipe = OPENCODE2.background_recipe(Platform::Linux).unwrap();
     assert_eq!(
         recipe.spawn.base_args,

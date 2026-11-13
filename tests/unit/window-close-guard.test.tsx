@@ -76,7 +76,7 @@ function providerList(): ProviderInfo[] {
     produces_readable_transcript: true,
     supports_model_override: false,
     supports_effort_override: false,
-    supports_extra_args: false,
+    supports_extra_args: false, supports_agent: false,
     supports_prefill: false,
     is_plain_terminal: harness_id === 'terminal',
     effort_control: { kind: 'none', allowed: [] },

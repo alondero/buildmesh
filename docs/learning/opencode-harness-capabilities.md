@@ -122,7 +122,7 @@ TUI `validateSession` decodes the ID then `session.get({ throwOnError: true })` 
 | **Attention / Node Turn** | Plugin `session.idle` / `permission.asked`; SSE `/event` | **Yes** (`session.idle`, `permission.asked`) | Plugin installed via `OpenCode::provision_attention_hooks` (issue #1295). |
 | **Readable transcript** | Export JSON, HTTP messages, SQLite | **No** | Follow-up: `TranscriptFormat::OpenCode`. |
 | **Auto-approve** | `--auto` | **Yes** | Baked into `spawn_recipe()` `base_args`. |
-| **Agent selection** | `--agent` | Unmodeled | No trait flag today. |
+| **Agent selection** | `--agent` | **Yes** | `supports_agent` (issue #1552 / #2716); V1 argv, V2 session API, background `run --agent`. |
 | **ACP / serve** | `opencode acp`, `serve` / `web` / `attach` | Unmodeled | Not a PTY harness; attach could help capture. |
 
 ---
@@ -345,7 +345,7 @@ can read these reports.
 - Transcript reader (`opencode export` JSON) so the archive picker and coordinator rich layer work. — **DONE issue #1296.**
 - Harden capture further: plugin `session.created` or `--port` + HTTP. SQLite polling still cannot distinguish two Root Nodes in the same directory. — **DONE issue #1294. Plugin path is primary, SQLite poller is fallback.**
 - `--fork` regenerate-same-harness wire-up. — **DONE issue #1550.** See *Regenerate branches, it does not continue* below.
-- `--agent <name>` Mesh / app-default slot: add `agent` to `HarnessConfigValue` + `ResolvedAgentConfig`, plus a capability gate. The CLI shape is settled; the slot is the next slice.
+- `--agent <name>` Mesh / app-default slot: add `agent` to `HarnessConfigValue` + `ResolvedAgentConfig`, plus a capability gate. — **DONE issue #1552 / #2716 (P1 agent selection).** V1 applies it as `--agent` argv via `AgentProvider::agent_args` in `default_prepare`; OpenCode 2 applies it through the session API (`POST /api/session` on create, `POST /api/session/:id/agent` on resume/fork) in `prepare_identity` before the TUI starts; background inference passes `run --agent` via `background_agent_args`. The resolver masks the value for every harness without `supports_agent`, and `validate_harness_default` refuses it at the write boundary. Mesh row / Circuit `SpawnAgentNode` authoring slots are still out of scope (Launch Configurations + the application default carry it); there is no mesh column in this slice.
 - `run --variant` does not exist on the TUI recipe; the TUI is `EffortControlKind::None` and the capability-coherence test (`agent::spawn::command_tests::capability_recipe_coherence`) confirms Buildmesh never forwards a synthetic `--effort` to OpenCode.
 
 ---

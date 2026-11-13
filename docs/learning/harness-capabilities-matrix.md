@@ -89,29 +89,30 @@ Legend: ✅ advertised, ❌ not advertised. Column shorthand:
 - **Transcript** — `produces_readable_transcript`; the transcript reader can parse this harness (Coordinator Node Digest, [Node Glance](../development/node-glance.md), archive picker).
 - **Archive** — the derived `resumable` flag (`resume` **and** `transcript`); surfaces the harness in the archived-node resume picker.
 - **Model** — `supports_model_override` (`--model` or equivalent).
+- **Agent** — `supports_agent` (`--agent` on OpenCode 1, session-API `agent` on OpenCode 2, `run --agent` for background; issue #1552 / #2716).
 - **Effort** — `supports_effort_override` (see [Effort control vocabulary](#effort-control-vocabulary)).
 - **Extra args** — `supports_extra_args`; verbatim CLI flags from configuration are forwarded.
 - **Prefill** — `supports_prefill`; a seed prompt is delivered on the launch command line. Every other harness except Terminal still takes issue, PR and prompt spawns (`accepts_initial_prompt`): it launches plain and the prompt is typed into its terminal once the TUI has booted.
 - **Plain shell** — `is_plain_terminal`; all LLM paths are skipped.
 
-| Harness | Resume | Auto-resume | Attn hook | Watcher | Transcript | Archive | Model | Effort | Extra args | Prefill | Plain shell | Notes |
+| Harness | Resume | Auto-resume | Attn hook | Watcher | Transcript | Archive | Model | Agent | Effort | Extra args | Prefill | Plain shell | Notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| Claude Code | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Full hook event set under skip-permissions |
-| Codex | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Hook needs Codex 0.154.0+ and project trust |
-| Cursor | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | Completion and background signals only |
-| Antigravity | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Hook needs CLI 1.0.0+; workspace trust |
-| OpenCode | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | Attention arrives through the project plugin |
-| OpenCode 2 | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | Session API model/fork; private server; native runtime only |
-| Kimi Code | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ | ❌ | ❌ | Hook needs 0.27.0+; no transcript reader |
-| Grok Code | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Hook validated against 1.0.5 |
-| MiniMax Code | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | Session-only `--model` verified in native Windows help; `UserPromptSubmit` resumes work using the 0.6.13 hook contract; see the [capability review](mcode-harness-capabilities.md) for delivery evidence and platform limits |
-| DeepSeek Harness | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | Capabilities deliberately gated (no validated profile) |
-| Command Code | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Passive watcher replaces a native hook |
-| Freebuff | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | No model or effort override; initial prompts are typed after startup |
-| Meta Muse | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Native on Windows since Muse 1.3.0; workspace trust pre-provisioned (#1706); `--reasoning-effort` closed vocabulary (#1704) |
-| Cline | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Native Provider; hook delivers turn completion only (no clean-exit dispatch); reader over `<id>.messages.json` (#1776) |
-| Perch | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ | Resume via `--thread`; closed `--effort`; [deep dive](perch-harness-capabilities.md) |
-| Terminal | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | Plain shell; the only `PlainShell` launch mode |
+| Claude Code | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | Full hook event set under skip-permissions |
+| Codex | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | Hook needs Codex 0.154.0+ and project trust |
+| Cursor | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | Completion and background signals only |
+| Antigravity | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | Hook needs CLI 1.0.0+; workspace trust |
+| OpenCode | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | Attention arrives through the project plugin |
+| OpenCode 2 | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | Session API model/variant/agent/fork; native child sessions tracked as background work; private server; native runtime only |
+| Kimi Code | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | Hook needs 0.27.0+; no transcript reader |
+| Grok Code | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | Hook validated against 1.0.5 |
+| MiniMax Code | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | Session-only `--model` verified in native Windows help; `UserPromptSubmit` resumes work using the 0.6.13 hook contract; see the [capability review](mcode-harness-capabilities.md) for delivery evidence and platform limits |
+| DeepSeek Harness | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | Capabilities deliberately gated (no validated profile) |
+| Command Code | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | Passive watcher replaces a native hook |
+| Freebuff | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | No model or effort override; initial prompts are typed after startup |
+| Meta Muse | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | Native on Windows since Muse 1.3.0; workspace trust pre-provisioned (#1706); `--reasoning-effort` closed vocabulary (#1704) |
+| Cline | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | Native Provider; hook delivers turn completion only (no clean-exit dispatch); reader over `<id>.messages.json` (#1776) |
+| Perch | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | Resume via `--thread`; closed `--effort`; [deep dive](perch-harness-capabilities.md) |
+| Terminal | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | Plain shell; the only `PlainShell` launch mode |
 
 Ten harnesses are archive-resumable (Resume **and** Transcript): Claude Code,
 Codex, Cursor, Antigravity, OpenCode, Grok Code, MiniMax Code, Command Code, Meta
@@ -180,7 +181,7 @@ Non-boolean detail for the nine harnesses with a native attention hook
 | Cursor | Skip permissions | Turn completed, background | 1.0.0 | — |
 | Antigravity | Skip permissions | Turn completed, background | 1.0.0 | Workspace trust |
 | OpenCode | Permission ask | Turn completed, question, permission | — | — |
-| OpenCode 2 | Permission ask | Turn completed, permission; busy clears attention | 2.2.3 | Native runtime; question/child contracts unverified |
+| OpenCode 2 | Permission ask | Turn completed, question, permission; busy clears attention | 2.2.3 | Native runtime; native child sessions tracked as owned work |
 | Kimi Code | Permission ask | Turn completed, input required, question, permission | 0.27.0 | — |
 | Grok Code | Permission ask | Turn completed, input required, question, permission | 1.0.5 | Global hook directory |
 | MiniMax Code | Skip permissions (pinned: `permissionMode: bypassPermissions`) | Turn completed | 0.4.12 | — |
@@ -214,9 +215,14 @@ This is the harness half of the backend Autopilot gate
 (`src-tauri/src/autopilot/compatibility.rs`, reason `MissingAttentionHook` /
 `PlainTerminal`), so the same predicate that decides whether a Mesh may be
 Autopilot-managed also decides who may review. The frontend mirror is
-`blocksReviewCircuit` in `src/components/Circuits/harnessCapabilities.ts`. It
-gates the Agent Node title-bar review control and the two interactive reviewer
-provider pickers (the Start Review dialog and Settings → Providers).
+`blocksReviewCircuit` in `src/components/Circuits/harnessReviewEligibility.ts`.
+It reads the narrow generated artifact
+(`src/types/generated/HarnessReviewEligibility.ts`) rather than the full
+capability catalogue, because the surfaces that ask the question are rendered
+on first paint and must not carry the whole catalogue into the eager entry
+chunk (issue #2757). It gates the Agent Node title-bar review control and the
+two interactive reviewer provider pickers (the Start Review dialog and
+Settings → Providers).
 
 It deliberately does **not** gate the Circuit Inspector's provider field on a
 reviewer agent node. Authored Circuits carry their reviewer provider in the
@@ -226,6 +232,16 @@ reviewer harness has no turn signal — such a run advances only if nothing wait
 on that agent. The gate also passes any provider id it cannot resolve, because
 the column holds user-defined harness profile ids that resolve to a real
 executor at the spawn seam.
+
+One behaviour change came with the move to the narrow artifact (issue #2757).
+The predicate used to test membership with `normalised in HARNESS_CAPABILITIES`,
+which also matches `Object.prototype` names: a provider id of `"toString"` or
+`"constructor"` resolved to a harness that does not exist and **blocked** a
+review the app could not judge. The membership test is now against the id list
+(`HARNESS_IDS.includes(...)`), so such an id resolves to nothing and the gate
+passes it — the behaviour the paragraph above already describes. Every real
+harness id, spawn-option id, legacy id and profile alias resolves exactly as
+before.
 
 | Harness | Turn signal | Review circuit |
 |---|---|---|

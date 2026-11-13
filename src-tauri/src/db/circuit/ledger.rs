@@ -465,7 +465,7 @@ fn create_node_circuit_run_with_recovery_locked(
             max_rounds,
         );
         graph.validate()?;
-        let name = format!("Review agent {}", node_id);
+        let name = "Agent review".to_string();
         let description = "Review an existing agent and return findings until approved";
         let existing: Option<(i64, String)> = tx
             .query_row(
@@ -513,7 +513,7 @@ fn create_node_circuit_run_with_recovery_locked(
         {
             context.set("review.login_id", login_id);
         }
-        context.set("source.review_preset", "1");
+        crate::circuit::lineage::RunLineage::mark_local_preset(&mut context);
         context.set(
             "source.provider",
             node.launch_configuration
@@ -563,7 +563,7 @@ fn create_node_circuit_run_with_recovery_locked(
     }
     context.set("retry.attempt", "1");
     if let Some(recovery) = &recovery {
-        context.set("recovery.from_run_id", recovery.run_id.to_string());
+        crate::circuit::lineage::RunLineage::record_parent(&mut context, recovery.run_id);
     }
     context.set("retry.max_retries", max_rounds.to_string());
     // The run's context is one logical thing. The store decides which half
@@ -650,7 +650,8 @@ fn pin_review_launches(
             continue;
         };
         if !graph.nodes.iter().any(|gate| matches!(&gate.kind, CircuitNodeKind::ReviewVerdict { target_node_id } if target_node_id.as_deref() == Some(&node.id))) { continue; }
-        let preset = context.get("source.review_preset") == Some("1");
+        let preset =
+            crate::circuit::lineage::RunLineage::decode(|key| context.get(key)).is_local_preset();
         let parent_selection = graph
             .nearest_upstream_agent_step(&node.id)
             .and_then(|id| graph.node(&id))
@@ -676,6 +677,7 @@ fn pin_review_launches(
             model: model.clone().filter(|_| !preset),
             effort: effort.clone().filter(|_| !preset),
             extra_args: extra_args.clone(),
+            agent: None,
         };
         let mut launch_preferences = preferences.clone();
         if let Some(plan) = inherited_configuration
@@ -832,11 +834,40 @@ pub(crate) fn list_autopilot_circuits_inner(
     rows.collect()
 }
 
+#[cfg(test)]
+// allow-test-in-production: interval tick tests count these reads on the calling thread
+thread_local! {
+    static LIST_ENABLED_CIRCUITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static LATEST_RUN_CREATED_AT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static LIST_ACTIVE_CIRCUIT_RUNS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+// allow-test-in-production: interval tick tests read the enabled-circuit list count
+pub(crate) fn list_enabled_circuits_calls() -> u64 {
+    LIST_ENABLED_CIRCUITS.with(|count| count.get())
+}
+
+#[cfg(test)]
+// allow-test-in-production: interval tick tests read the cooldown-anchor read count
+pub(crate) fn latest_circuit_run_created_at_calls() -> u64 {
+    LATEST_RUN_CREATED_AT.with(|count| count.get())
+}
+
+#[cfg(test)]
+// allow-test-in-production: the watchdog tick test reads the active-run list count
+pub(crate) fn list_active_circuit_runs_calls() -> u64 {
+    LIST_ACTIVE_CIRCUIT_RUNS.with(|count| count.get())
+}
+
 /// Every enabled circuit across ALL meshes — the GitHub poll and
 /// interval trigger passes' input (issue #1208). Circuits are not
 /// mesh-scoped at the trigger layer: a circuit carries its own mesh_id,
 /// so one query serves the whole worker pass.
 pub fn list_enabled_circuits() -> SqlResult<Vec<AutopilotCircuit>> {
+    #[cfg(test)]
+    // allow-test-in-production: interval tick tests count this list on the calling thread
+    LIST_ENABLED_CIRCUITS.with(|count| count.set(count.get() + 1));
     let db = crate::db::read_conn()?;
     list_enabled_circuits_inner(&db)
 }
@@ -858,6 +889,9 @@ pub(crate) fn list_enabled_circuits_inner(db: &Connection) -> SqlResult<Vec<Auto
 /// Deliberately trigger-kind agnostic: ANY run (manual Trigger Now
 /// included) restarts the cadence, because the user just intervened.
 pub fn latest_circuit_run_created_at(circuit_id: i64) -> SqlResult<Option<String>> {
+    #[cfg(test)]
+    // allow-test-in-production: interval tick tests count this anchor read on the calling thread
+    LATEST_RUN_CREATED_AT.with(|count| count.set(count.get() + 1));
     let db = crate::db::read_conn()?;
     latest_circuit_run_created_at_inner(&db, circuit_id)
 }
@@ -900,6 +934,33 @@ pub struct CircuitRunLedger {
     pub run: AutopilotCircuitRun,
     pub steps: Vec<AutopilotCircuitRunStep>,
     pub review_round_limit: Option<i32>,
+    pub review_continuation: crate::circuit::review_continuation::ReviewContinuation,
+}
+
+/// Read recent runs, steps and continuation eligibility from one snapshot.
+pub fn list_circuit_run_ledgers(
+    circuit_id: i64,
+    limit: i64,
+) -> Result<Vec<CircuitRunLedger>, DbError> {
+    let db = crate::db::read_conn()?;
+    let tx = db.unchecked_transaction()?;
+    let runs = list_circuit_runs_inner(&tx, circuit_id, limit)?;
+    let continuation = super::recovery::ReviewContinuationReader::new(&tx);
+    let ledgers = runs
+        .into_iter()
+        .map(|run| {
+            let steps = list_circuit_run_steps_inner(&tx, run.id)?;
+            Ok(CircuitRunLedger {
+                review_round_limit: super::review_rounds::current_limit(&tx, &run)?,
+                review_continuation: continuation.project(&run, &steps)?,
+                run,
+                steps,
+            })
+        })
+        .collect::<Result<Vec<_>, DbError>>()?;
+    drop(continuation);
+    tx.commit()?;
+    Ok(ledgers)
 }
 
 /// Ensure the inspectable built-in exists before any review run is created.
@@ -913,7 +974,7 @@ pub(crate) fn ensure_review_blueprint_inner(db: &Connection, mesh_id: i64) -> Sq
         .to_json()
         .map_err(rusqlite::Error::InvalidParameterName)?;
     db.execute("INSERT INTO autopilot_circuits(mesh_id,name,description,enabled,graph_json,is_preset)
-        SELECT ?1,'Built-in Review Blueprint','Review an existing agent and return findings until approved',0,?2,1
+        SELECT ?1,'Agent review','Review an existing agent and return findings until approved',0,?2,1
         WHERE EXISTS(SELECT 1 FROM meshes WHERE id=?1)
         AND NOT EXISTS(SELECT 1 FROM autopilot_circuits WHERE mesh_id=?1 AND is_preset=1)", params![mesh_id,graph])?;
     Ok(())
@@ -923,17 +984,20 @@ pub(crate) fn ensure_review_blueprint_inner(db: &Connection, mesh_id: i64) -> Sq
 pub fn list_circuits_with_recent_runs(
     mesh_id: i64,
     runs_per_circuit: i64,
-) -> SqlResult<Vec<(AutopilotCircuit, Vec<CircuitRunLedger>)>> {
+) -> Result<Vec<(AutopilotCircuit, Vec<CircuitRunLedger>)>, DbError> {
     ensure_review_blueprint(mesh_id)?;
     let db = crate::db::read_conn()?;
-    list_circuits_with_recent_runs_inner(&db, mesh_id, runs_per_circuit)
+    let tx = db.unchecked_transaction()?;
+    let result = list_circuits_with_recent_runs_inner(&tx, mesh_id, runs_per_circuit)?;
+    tx.commit()?;
+    Ok(result)
 }
 
 pub(crate) fn list_circuits_with_recent_runs_inner(
     db: &Connection,
     mesh_id: i64,
     runs_per_circuit: i64,
-) -> SqlResult<Vec<(AutopilotCircuit, Vec<CircuitRunLedger>)>> {
+) -> Result<Vec<(AutopilotCircuit, Vec<CircuitRunLedger>)>, DbError> {
     let mut stmt = db.prepare(
         "SELECT id, mesh_id, name, description, enabled, \
                 graph_json, created_at, updated_at, is_preset \
@@ -1067,19 +1131,22 @@ pub(crate) fn list_circuits_with_recent_runs_inner(
         }
     }
 
+    let continuation = super::recovery::ReviewContinuationReader::new(db);
     let mut out = Vec::with_capacity(circuits.len());
     for circuit in circuits {
         let runs = runs_by_circuit.remove(&circuit.id).unwrap_or_default();
         let ledgers = runs
             .into_iter()
             .map(|run| {
+                let steps = steps_by_run.remove(&run.id).unwrap_or_default();
                 Ok(CircuitRunLedger {
+                    review_continuation: continuation.project(&run, &steps)?,
                     review_round_limit: super::review_rounds::current_limit(db, &run)?,
-                    steps: steps_by_run.remove(&run.id).unwrap_or_default(),
+                    steps,
                     run,
                 })
             })
-            .collect::<SqlResult<Vec<_>>>()?;
+            .collect::<Result<Vec<_>, DbError>>()?;
         out.push((circuit, ledgers));
     }
     Ok(out)
@@ -1425,13 +1492,31 @@ pub fn cancel_circuit_run(run_id: i64) -> SqlResult<Vec<i64>> {
     cancel_circuit_run_locked(&mut db, run_id)
 }
 
+/// The operator-close path owns this agent's retirement and worktree choice.
+/// Exclude it from both immediate retirement and durable cleanup intent, in
+/// the transaction that releases capacity, so the cleanup sweep cannot race it.
+pub fn cancel_circuit_run_for_agent_close(run_id: i64, agent_id: i64) -> SqlResult<Vec<i64>> {
+    let mut db = crate::db::write_conn();
+    let tx = db.transaction()?;
+    let result = cancel_circuit_run_inner(&tx, run_id, Some(agent_id))?;
+    tx.execute(
+        "INSERT INTO agent_node_lifecycle_leases (node_id, cleanup_requested)
+         SELECT id, 0 FROM agent_nodes WHERE id = ?1
+         ON CONFLICT(node_id) DO UPDATE SET
+           cleanup_requested = 0, updated_at = unixepoch()",
+        params![agent_id],
+    )?;
+    tx.commit()?;
+    Ok(result.agents)
+}
+
 /// Per-test isolated variant of [`cancel_circuit_run`] (issue #1691).
 /// The public function locks the process-global writer; this helper
 /// takes an explicit `&Connection` so parallel tests can each operate
 /// against their own in-memory DB.
 pub(crate) fn cancel_circuit_run_locked(conn: &mut Connection, run_id: i64) -> SqlResult<Vec<i64>> {
     let tx = conn.transaction()?;
-    let result = cancel_circuit_run_inner(&tx, run_id)?;
+    let result = cancel_circuit_run_inner(&tx, run_id, None)?;
     tx.commit()?;
     Ok(result.agents)
 }
@@ -1444,7 +1529,11 @@ struct CancelRunWrite {
     cancelled: bool,
 }
 
-fn cancel_circuit_run_inner(tx: &Connection, run_id: i64) -> SqlResult<CancelRunWrite> {
+fn cancel_circuit_run_inner(
+    tx: &Connection,
+    run_id: i64,
+    closing_agent_id: Option<i64>,
+) -> SqlResult<CancelRunWrite> {
     let row: Option<(String, Option<i64>)> = tx
         .query_row(
             "SELECT state, source_agent_node_id FROM autopilot_circuit_runs WHERE id = ?1",
@@ -1464,12 +1553,13 @@ fn cancel_circuit_run_inner(tx: &Connection, run_id: i64) -> SqlResult<CancelRun
     let agents = {
         let mut stmt = tx.prepare(&format!(
             "SELECT DISTINCT s.agent_node_id FROM autopilot_circuit_run_steps s \
-             WHERE s.run_id = ?1 AND s.agent_node_id IS NOT NULL AND {} \
+             WHERE s.run_id = ?1 AND s.agent_node_id IS NOT NULL \
+               AND s.agent_node_id IS NOT ?2 AND {} \
              ORDER BY s.agent_node_id",
             super::leases::RETIRABLE_STEP_AGENT
         ))?;
         let rows = stmt
-            .query_map(params![run_id], |row| row.get(0))?
+            .query_map(params![run_id, closing_agent_id], |row| row.get(0))?
             .collect::<SqlResult<Vec<i64>>>()?;
         rows
     };
@@ -1491,11 +1581,12 @@ fn cancel_circuit_run_inner(tx: &Connection, run_id: i64) -> SqlResult<CancelRun
              WHERE s.run_id = ?1 AND s.agent_node_id IS NOT NULL
                AND {}
                AND s.agent_node_id IS NOT (SELECT source_agent_node_id FROM autopilot_circuit_runs WHERE id = ?1)
+               AND s.agent_node_id IS NOT ?2
              ON CONFLICT(node_id) DO UPDATE SET
                cleanup_requested = 1, retired = 0, updated_at = unixepoch()",
                 super::leases::RETIRABLE_STEP_AGENT
             ),
-            params![run_id],
+            params![run_id, closing_agent_id],
         )?;
     }
     // Terminalise the ledger in the same transaction as the run state. A
@@ -1559,7 +1650,7 @@ pub(crate) fn cancel_circuit_runs_locked(
         if !seen.insert(run_id) {
             continue;
         }
-        let write = cancel_circuit_run_inner(&tx, *run_id)?;
+        let write = cancel_circuit_run_inner(&tx, *run_id, None)?;
         agents.extend(write.agents);
         if let Some(source) = write.source {
             if !sources.contains(&source) {
@@ -1619,6 +1710,9 @@ pub struct ActiveCircuitRun {
 }
 
 pub fn list_active_circuit_runs() -> SqlResult<Vec<ActiveCircuitRun>> {
+    #[cfg(test)]
+    // allow-test-in-production: the watchdog tick test counts this list on the calling thread
+    LIST_ACTIVE_CIRCUIT_RUNS.with(|count| count.set(count.get() + 1));
     let db = crate::db::read_conn()?;
     list_active_circuit_runs_inner(&db)
 }
@@ -1658,12 +1752,7 @@ pub(crate) fn list_active_circuit_runs_inner(db: &Connection) -> SqlResult<Vec<A
     rows.collect()
 }
 
-pub fn list_circuit_runs(circuit_id: i64, limit: i64) -> SqlResult<Vec<AutopilotCircuitRun>> {
-    let db = crate::db::read_conn()?;
-    list_circuit_runs_inner(&db, circuit_id, limit)
-}
-
-/// Per-test isolated variant of [`list_circuit_runs`] (issue #1691).
+/// Recent run rows with their served logical context.
 pub(crate) fn list_circuit_runs_inner(
     db: &Connection,
     circuit_id: i64,
@@ -2504,6 +2593,7 @@ mod reviewer_tests {
                         model: Some("gpt-6-luna".into()),
                         effort: Some("low".into()),
                         extra_args: None,
+                        agent: None,
                     },
                 )
                 .unwrap(),
@@ -2608,6 +2698,7 @@ mod reviewer_tests {
                 model: Some("gpt-6-luna".into()),
                 effort: Some("low".into()),
                 permission_mode: None,
+                agent: None,
             },
         );
         let run = create_circuit_run_prepared_locked(
@@ -2688,6 +2779,7 @@ mod reviewer_tests {
                 model: Some("gpt-6-luna".into()),
                 effort: Some("low".into()),
                 permission_mode: None,
+                agent: None,
             },
         );
         let first = create_node_circuit_run_with_recovery_locked(
@@ -2837,6 +2929,7 @@ mod reviewer_tests {
                 model: Some("gpt-6-luna".into()),
                 effort: Some("low".into()),
                 permission_mode: None,
+                agent: None,
             },
         );
         let first = create_node_circuit_run_with_recovery_locked(

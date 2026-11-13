@@ -63,7 +63,7 @@ To check the download, get the matching `SHA256SUMS-macos-aarch64.txt` or `SHA25
 Buildmesh itself has no host dependencies — it bundles WebView2 on Win 11 and ships the React UI as a Tauri webview. The **agents** you spawn are a separate question:
 
 - **`Terminal` harness** — works out of the box (PowerShell on Windows; routed through `wsl.exe` on WSL meshes).
-- **Every other harness** — install the agent CLI on the host (or inside WSL for a WSL mesh), then sign in or add an API key from **App Settings → Providers**. Buildmesh detects the CLI binary on `PATH` and surfaces enabled harnesses in the Spawn Menu.
+- **Every other harness** — install the agent CLI on the host (or inside WSL for a WSL mesh), then sign in or add an API key from **App Settings → Providers**. Buildmesh detects the CLI binary on `PATH` and surfaces enabled harnesses in the Spawn Menu. [Custom Responses and Anthropic APIs](docs/user-guide.md#add-a-custom-api-provider) can be added with a URL, model and key in one form.
 
 Buildmesh shows one entry per detected harness, preferring the host's native installation. On Windows, it also checks the default WSL distribution and adds **(WSL: distribution)** entries only for harnesses absent natively, such as Muse. Native Windows harnesses can run in WSL-backed meshes too. When Buildmesh itself runs inside WSL, Windows-only installations appear as **(Windows)** entries if Windows interoperability and `powershell.exe` are available. Restart Buildmesh after installing or removing a harness. Sign in inside the selected runtime. Cross-runtime worktrees stay managed by Buildmesh; use Buildmesh to remove them. WSL-backed repositories must be trusted by Windows Git, and Windows harnesses must support network-share paths. Muse supports fresh prompts and session resume; transcript display and turn-completion hooks are not yet available. Cross-runtime Grok attention hooks require mirrored networking. Process sandboxing cannot contain a harness across the Windows/WSL boundary.
 
@@ -305,7 +305,7 @@ Binaries land in `src-tauri/target/release/`:
 
 The development test bridge is a separate loopback listener on port 1991 (2991 for the dev profile). The release entry points do not pass the `dev-tools` feature that compiles it. A debug or dev-tools build listens only when started with `BUILDMESH_TEST_BRIDGE=1` and a per-launch token (`scripts/run-dev.ps1 -TestBridge` or `scripts/run-dev.sh --test-bridge`).
 
-The dev profile is what `/use` and `/verify` use — it never touches the stable hub. Run from a linked worktree, the launcher gives that worktree its own ports and its own app-data profile, and stops only the instance it launched before, so several worktrees can each verify their own build at once. It prints the `Dev ports:` and `Dev profile:` it chose; set `BUILDMESH_PORT_OFFSET` or `BUILDMESH_PROFILE_DIR` to pin either.
+The dev profile is what `/use` and `/verify` use — it never touches the stable hub. Run from a linked worktree, the launcher gives that worktree its own ports and its own app-data profile, and the app gives that profile its own webview folder, so each worktree keeps its own `localStorage`. The launcher stops only the instance it launched before, so several worktrees can each verify their own build at once. It prints the `Dev ports:` and `Dev profile:` it chose; set `BUILDMESH_PORT_OFFSET` or `BUILDMESH_PROFILE_DIR` to pin either.
 
 ## Test
 

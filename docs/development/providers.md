@@ -43,6 +43,34 @@ OAuth login.
 Never derive remaining allowance from local requests or MSP token/context
 events, and never fold it into a Meta Model API pay-as-you-go wallet.
 
+**OpenCode Go usage.** The native adapter reads
+`GET https://opencode.ai/inference/go/v1/usage`. `usage.rolling`, `.weekly`, and
+`.monthly` supply the 5-hour, Weekly, and Monthly percentages and reset
+datetimes. Preserve those server values; weekly resets are Monday UTC and
+monthly resets follow the subscription anniversary, including its time of day.
+The API may floor percentages where the Console rounds them. See the
+[investigation and authenticated comparison](../research/opencode-go-usage.md).
+
+OpenCode 2's selected `opencode` credential in `opencode.db` supplies the OAuth
+access token or API key plus `metadata.orgID` as `x-opencode-org-id`. Selection
+matches the CLI: active first, then newest creation time and ID. Legacy key
+`configuration` overrides matching metadata. The adapter opens SQLite read-only
+and follows `XDG_DATA_HOME` (default `~/.local/share`) and `OPENCODE_DB` (absolute
+or relative to the `opencode` data directory). Custom channel databases need an
+explicit `OPENCODE_DB`; custom Console hosts are not supported. If there is no
+native Console credential, V1's `auth.json` `opencode-go.key` supplies the bearer.
+A malformed or rejected selected credential does not fall back to another key.
+The salted cache identity includes the token and workspace.
+
+Quota reads do not use Buildmesh's legacy `opencode:console` credential or local
+session costs. Native OAuth renewal stays with OpenCode, which coordinates
+rotating refresh tokens across processes. Expired native sessions return a
+rejected outcome with guidance to open OpenCode and refresh usage. The shared
+meter gate may hide rejected native readings or show a last-known reading.
+Missing auth, rejected access, rate limits,
+transport errors, and malformed quota data use the shared outcome and last-known
+reading paths; a failed read does not manufacture zero usage or reset dates.
+
 **Where a new provider's usage endpoint goes.** The seam is
 `UsageAdapter` (`services/usage/adapter.rs`), and a new provider's file under
 `services/usage/adapters/` owns that provider's whole fetch: the credential
@@ -253,6 +281,18 @@ rows in `BUILTIN_PROVIDER_ACCOUNTS` — they live in
 `AppPreferences::provider_pairings` and `effective_pairings` returns stored
 rows only (ADR-0025: no auto-derived Claude pairing on key alone). Endpoint
 URL + model tiers live on the pairing (Harnesses page), not the account.
+Custom API setup on **Providers → Add provider → Other / custom** explicitly
+creates an account, a pairing and a user-owned Launch Configuration in one
+`PreferencesStore::try_update` transaction (`preferences::custom_providers`).
+The `create_custom_provider` command runs that blocking work off the async
+worker, emits `provider-list-changed`, and schedules the usual advisory
+Responses verification. It never treats a route's existence as verification.
+OpenAI means Responses for Codex; Anthropic means Messages for Claude Code.
+Provider identity, including Kimi, does not select a different OpenAI wire.
+The existing credentials-only option still stores no explicit pairing or
+launch configuration for custom accounts. Keys use the existing credential
+storage path; endpoints and models remain on the pairing, not the account.
+
 The desktop spawn picker renders harness parents and puts their saved Launch
 Configurations in each harness submenu — only user-saved recipes appear, so a
 fresh install shows none. The backend also retains
@@ -362,7 +402,16 @@ reach the disk. `preferences::recovery` owns the bytes: `classify` is pure and
 returns a content-free `CorruptionInfo` (a corrupt file may still hold API
 keys, so no diagnostic may echo a value), every successful write refreshes an
 owner-only `preferences.json.bak`, and `restore_backup` / `reset_to_defaults`
-archive the current bytes before replacing them. Surface the state as a
+archive the current bytes before replacing them. The replacement itself is a
+temp-file-then-`MoveFileExW(MOVEFILE_REPLACE_EXISTING)` write, and Windows
+refuses it while the destination is held by a handle that does not share
+delete access — an antivirus scanner walking the profile directory is one
+such holder, and a reader that still has the file open is another.
+`persist_bytes` therefore retries that refusal
+(`ERROR_ACCESS_DENIED`, `ERROR_SHARING_VIOLATION`, `ERROR_LOCK_VIOLATION`)
+within a bounded budget: each attempt writes a fresh temporary file and
+moves it over the target in one step, so a transient holder delays a
+settings write rather than losing it. Surface the state as a
 *successful* `get_preferences_health` call — never as an `Err` string the UI
 has to pattern-match, and never as a `failed` resource status, because the
 read itself did succeed.
@@ -406,7 +455,7 @@ The Buildmesh-managed OAuth secrets live in Windows Credential Manager under `CR
 - **Known targets** (extend-only — never delete from this list without a migration ticket):
   - `gemini:antigravity` — written by older Antigravity CLIs, read-only here. Current CLI (1.2+) refreshes `<agy_dir>/antigravity-oauth-token` instead and leaves this target stale; the Usage Meter prefers the file, then this keyring, and retries the alternate source on HTTP 401/403.
   - `buildmesh:<profile>:provider-account:<account id>` and `buildmesh:<profile>:minimax-api-key` — a provider account's API key and the deprecated flat MiniMax key, written by `preferences::secrets` (issue #830). The blob is the key as UTF-8 text. `<profile>` is the app-data directory's leaf, i.e. the bundle identifier, so the stable and dev builds (same OS user, one vault) never read or delete each other's keys. Never rename either segment without a migration: the entry name is the only link from an account to its key.
-  - `opencode:console` — written by Buildmesh for the OpenCode Go OAuth dance (issue #956). Persisted blob is JSON `{ access_token, workspace_id, refresh_token, expires_at, server_id }` (RFC-3339 string for `expires_at`, mirroring the original #957 fixture so the live probe still parses; the `server_id` field is the SolidStart deployment id captured into the `X-Server-Id` header).
+  - `opencode:console` — retained for the legacy Buildmesh Console account flow (issue #956). Persisted blob is JSON `{ access_token, workspace_id, refresh_token, expires_at, server_id }`. Go usage now reads the native CLI credential described above; this blob does not authenticate the meter.
 
 - **Provider API keys** (`src-tauri/src/preferences/secrets.rs`, issue #830) are ordinary `api_key` / `minimax_api_key` fields in memory and never fields on disk. `storage::write_to_disk` calls `secrets::externalize` (store each key, blank the ones the store accepted, delete the entry of a cleared key or removed account); `storage::read_state` calls `secrets::hydrate_json` through `recovery::classify_with` **before** the read-time migrations, because ADR-0025's migration creates a pairing only for an account that has a key. Rules a change must keep: a key leaves the file only after the store accepted it (no store means it stays in the file, never lost); a key present in the file wins over the stored one (hand edit, restored backup); a file from an older build is scrubbed in place on first load (`secrets::scrub_file`: only the secret fields change, no shape migration and no fabricated backup, preserving the read-never-persists rule), and so is its `.bak`; a recovery reset deletes nothing; a full-fidelity bundle (`state_recovery::build_bundle`) inlines the keys back through `secrets::with_keys_inlined`. Non-Windows builds have no store, so keys stay in the file. Tests use a per-thread in-memory vault (`secrets::test_support`), so they never touch the real Credential Manager; the OS wrapper has its own round-trip test that skips where Credential Manager is unreachable.
 
@@ -423,7 +472,7 @@ The Buildmesh-managed OAuth secrets live in Windows Credential Manager under `CR
   1. **`GetLastError` is mandatory after a `CredDeleteW` FALSE return.** Microsoft conflates "didn't exist" with "real failure" by returning FALSE for both, so a TRUE-only check would shadow the idempotent revoke the Settings UI relies on.
   2. **`from_raw_parts` requires non-null even for length 0.** Guard with `if cred.credential_blob.is_null() || cred.credential_blob_size == 0` to avoid UB on a freshly-written credential whose blob pointer hasn't been allocated.
   3. **`CRED_PERSIST_SESSION` is wrong for OAuth tokens.** A credential with this flag is gone after logoff — fine for session-only secrets (the kind cwrap adapters carry), wrong for a long-lived refresh token.
-  4. **The Rust blob format is implicit.** Buildmesh's parser (`services::opencode_oauth::parse_opencode_console_full_credential`) currently shapes a 5-field blob: `access_token` + `workspace_id` + `refresh_token` + `expires_at` + `server_id`. The first two are required for the live probe (see `parse_opencode_console_full_credential`); the last three ride along for the refresh path and the `X-Server-Id` header fallback. Any future extension that adds a sixth field must update both the writer (`services::opencode_oauth::persist_token_response`) AND the parsers atomically, or the live probe will silently drop the field (serde defaults — `skip_serializing_if = "Option::is_none"` on the writer + `#[serde(default)]` on the reader means both sides tolerate missing keys but never notice renamed ones). `parse_full_credential_round_trips_all_five_fields` pins the contract; CI's `git diff --exit-code src/types/generated/` is the wire-shape gate, but not the Rust-side wire-shape gate — keep both directories in sync by hand until both ts-rs exports and Rust struct shape are auto-derived.
+  4. **Keep legacy blob fields round-trippable.** `services::opencode_oauth::parse_opencode_console_full_credential` retains `access_token`, `workspace_id`, `refresh_token`, `expires_at`, and `server_id` for legacy Console commands. `parse_full_credential_round_trips_all_five_fields` pins this record. These fields no longer select or authenticate the Go Usage Meter.
 
 ## Agent runtime PATH on macOS and Linux
 
@@ -440,6 +489,29 @@ inherited PATH. Windows and cross-runtime launches keep their existing
 environment handling.
 
 ## Agent Spawning on Windows
+
+The selected adapter owns both advertised capabilities and launch construction.
+Its immutable `HarnessDescriptor` is authoritative; `capabilities_for` derives
+the wire descriptor used by the Spawn Menu, configuration validation and generated
+catalogue. Add or change a capability in the adapter's declaration. Attention-hook
+installation derives from `attention_capability`; effort support and permission
+defaults derive from the declared vocabulary and modes.
+
+Production calls `AgentProvider::prepare_launch` through the selected adapter.
+Adapters reuse private shared option assembly and own harness-specific routing
+arguments and environment changes. Routing resolves the pairing, credentials,
+executable and runtime; `spawn_environment::wrap` owns OS process arrangement.
+Launch output carries concrete environment removals and assignments, including
+Anthropic's shared backend-reset list.
+Codex's adapter supplies its profile flags, fallback model, scoped credential
+and login home. Session preparation remains adapter behavior, including OpenCode
+2's native session/fork API and Cline's self-assigned identities.
+
+Launch tests cross this dispatched interface. The characterization fixture in
+`agent/spawn/fixtures/harness-launch-contract.jsonl` pins option ordering and
+environment policy across all adapters, platforms and session modes; command
+tests additionally cover OS wrapping and resolved routes. Argument tests do not
+establish acceptance by an installed CLI.
 
 The shell a provider spawns through is **adapter-owned, and deliberately not
 enumerated here**. Each harness adapter's `spawn_recipe`
@@ -648,8 +720,8 @@ OpenCode 2 selects its managed project override through `OPENCODE_CONFIG` in
 the adapter's `launch_environment`; V1 does not read that per-node file.
 `new_session_id` supplies its `ses_` vocabulary. The blocking `prepare_session`
 seam runs before command construction and uses a private session API to apply
-the model or fork a regenerate. A returned fork id is persisted before argv is
-built. `model_override_via_session_api` keeps `--model` out of the full TUI;
+the model (including an optional `#variant`) or fork a regenerate. A returned
+fork id is persisted before argv is built. `model_override_via_session_api` keeps `--model` out of the full TUI;
 `background_model_args` retains the separate `run` CLI contract. Both launch
 paths call adapter-owned executable validation. The API adapter escapes JSON
 for Windows PowerShell's native argument marshaller and encodes cmd
@@ -719,7 +791,11 @@ round-trip. Codex shares only the writer, and only on its native arm.
   directory — can never land on one name. On unix it is created `0o600` and the
   rename carries that onto the target: `File::create` would inherit
   `0o666 & !umask`, which would have widened `.claude/settings.local.json` inside
-  the user's own repository among others.
+  the user's own repository among others. On Windows the rename is refused with
+  `ERROR_ACCESS_DENIED` while another writer replaces the same target, so the
+  replace is retried for a bounded, jittered window; each attempt is still one
+  atomic rename of the same temp file, so a reader sees one writer's complete
+  payload (issue #2626).
 - `read_document` treats a missing file as an empty document and refuses a
   malformed one through `refuse_malformed`, **one** wording for every harness and
   every format. Before issue #2235 that answer had drifted: AGY reported
@@ -764,6 +840,22 @@ a hook document, sets its own `0o600` on unix, and cleans up legacy profiles
 afterwards.
 
 ## Saved Spawn Configurations
+
+Reusable initial prompts are independent of Launch Configurations. The desktop
+project Spawn Menu opens `PromptLibrary` inside `CanvasSpawnMenu`; built-ins
+live in `src/lib/promptLibrary.ts`, while user prompts live in the profile's
+`AppPreferences.saved_prompts`. `preferences::prompt_library` validates and
+mutates individual prompts through `PreferencesStore::try_update`, preserving
+other preference writes. The three prompt-library commands offload disk work.
+Older preferences acquire an empty collection during read migration. Frontend
+drafts never replace that collection from a stale snapshot after a mutation.
+Launches use `selectProviderForMesh`, forwarding the edited initial prompt,
+configuration, login and worktree choice. Its optional creation callback retains
+the created node in the dialog. A failed launch offers Retry launch with the
+current prompt on that same node and its frozen configuration. A successful
+request can close only the dialog instance it started in. Prompted launches
+exclude Terminal from the picker; the
+backend retains the authoritative initial-prompt capability check.
 
 Companion's AI Assistant selection lives in Provider defaults and uses the
 same `backgroundInferenceOption` UI decoration and `agent::background::resolve_plan`
@@ -828,7 +920,7 @@ own placement and the action performed after a pick:
 
 | Context | Adapter | Shared menu behavior |
 |---|---|---|
-| Mesh sidebar, Issues and Pull Requests Probes | `SpawnButtonCluster` / `ProviderDropdown` | Harness → login → configuration; forwards configuration and login to node creation |
+| Mesh sidebar, Issues, Pull Requests and Prompts Probes | `SpawnButtonCluster` / `ProviderDropdown` | Harness → login → configuration; the main half shows the resolved default's mark and forwards configuration and login to node creation |
 | Canvas, command palette and PR reviewer dialog | `CanvasSpawnMenu`, `PrReviewerSpawnDialog` | Same selection ladder in a dialog |
 | Automated review loop | `AgentReviewButton` | Same ladder; excludes Terminal and decorates incompatible reviewers, including loaded recipes |
 | Regenerate in sidebar or node header | `RegenerateProviderMenu` | Adds Current to the shared navigation; explicit alternatives replace the launch plan |
@@ -844,7 +936,10 @@ Review circuits freeze the chosen login into their reviewer launch snapshot,
 so subsequent review rounds retain it.
 
 Mobile web and Android retain their touch/native render adapters over the same
-backend catalogue; they do not offer a separate Harness Login pick.
+backend catalogue. Their sheets group choices by harness and login; forms use
+platform selection controls. The HTTP adapters forward explicit login choices
+through the desktop resolver. See [the phone Spawn Menu](mobile.md#the-phones-spawn-menu)
+and [Android screens](android.md#screens-and-ownership).
 
 ## Harness Logins (more than one Codex subscription)
 
@@ -878,7 +973,8 @@ configuration (or, for defaults, a frozen default plan). A Launch Configuration
 can also pin `login_id`; a pinned configuration appears only under its own
 login, and an unpinned one under every login. Desktop spawn surfaces share this
 submenu, including issue and pull request spawns, regenerate alternatives and
-review circuits. Archived resume retains the frozen login; mobile uses the
+review circuits. Archived resume retains the frozen login. Mobile fresh launches
+and built-in reviewers support explicit logins; without a pick, they use the
 configuration's pin or the default.
 `launch_configurations::resolve_plan` freezes the choice on
 `ResolvedLaunchPlan.harness_login` (id, label and home), so resume keeps the

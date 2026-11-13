@@ -250,6 +250,61 @@ fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
 }
 
 impl AgentProvider for GrokAdapter {
+    fn descriptor(&self) -> &'static crate::agent::capabilities::HarnessDescriptor {
+        static DESCRIPTOR: std::sync::LazyLock<crate::agent::capabilities::HarnessDescriptor> =
+            std::sync::LazyLock::new(|| crate::agent::capabilities::HarnessDescriptor {
+                supports_resume: true,
+                auto_resume_on_startup: true,
+                attention_capability: {
+                    use crate::agent::capabilities::{AttentionCapability, AttentionLaunchMode};
+                    use crate::agent::session_lifecycle::LifecycleKind;
+                    AttentionCapability::Hook {
+                        events: vec![
+                            LifecycleKind::TurnCompleted,
+                            LifecycleKind::InputRequired,
+                            LifecycleKind::PermissionRequested,
+                            LifecycleKind::QuestionRequested,
+                        ],
+                        launch_mode: AttentionLaunchMode::PermissionAsk,
+                        trust: Some("global hook dir".into()),
+                        // Issue #1366: pin the Grok release the integration has
+                        // been validated against. A future Grok release that drops
+                        // `notificationType`, `$VAR` expansion, or the `Stop`
+                        // envelope would surface as "this is now an
+                        // unversioned/integration-at-risk harness" via the
+                        // Inspector capabilities table.
+                        min_version: Some(GROK_MIN_HOOK_VERSION.into()),
+                    }
+                },
+                produces_readable_transcript: {
+                    // Issue #1281: Grok Code writes per-session directories at
+                    // `~/.grok/sessions/<urlencoded-cwd>/<session-id>/{chat_history.jsonl,
+                    // updates.jsonl}` (and `summary.json`). Buildmesh's transcript
+                    // reader now parses both files via `TranscriptFormat::Grok`, so the
+                    // archived-node resume picker surfaces Grok sessions and the
+                    // Coordinator Node Digest rich layer hydrates them.
+                    true
+                },
+                supports_model_override: true,
+                supports_extra_args: true,
+                supports_prefill: {
+                    // Interactive TUI accepts a trailing positional [PROMPT] as the
+                    // first turn (`grok "fix the bug"`). There is no `--prefill` flag;
+                    // override `prefill_args` below. Headless `-p`/`--single` is a
+                    // different mode (print and exit) and is not used here.
+                    true
+                },
+                available_on: { &[Platform::Windows, Platform::Linux, Platform::Macos] },
+                effort_control: {
+                    EffortControlKind::Closed {
+                        allowed: GROK_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),
+                    }
+                },
+                ..Default::default()
+            });
+        &DESCRIPTOR
+    }
+
     fn id(&self) -> &'static str {
         "grok"
     }
@@ -273,10 +328,6 @@ impl AgentProvider for GrokAdapter {
             trailing_args: Vec::new(),
             windows_shell: WindowsShell::Direct,
         }
-    }
-
-    fn supports_resume(&self) -> bool {
-        true
     }
 
     fn paste_requires_cr_newlines(&self) -> bool {
@@ -308,46 +359,6 @@ impl AgentProvider for GrokAdapter {
             },
             BackgroundResultOutput::Stdout,
         ))
-    }
-
-    fn auto_resume_on_startup(&self) -> bool {
-        true
-    }
-
-    fn produces_readable_transcript(&self) -> bool {
-        // Issue #1281: Grok Code writes per-session directories at
-        // `~/.grok/sessions/<urlencoded-cwd>/<session-id>/{chat_history.jsonl,
-        // updates.jsonl}` (and `summary.json`). Buildmesh's transcript
-        // reader now parses both files via `TranscriptFormat::Grok`, so the
-        // archived-node resume picker surfaces Grok sessions and the
-        // Coordinator Node Digest rich layer hydrates them.
-        true
-    }
-
-    fn requires_attention_hook(&self) -> bool {
-        true
-    }
-
-    fn attention_capability(&self) -> crate::agent::capabilities::AttentionCapability {
-        use crate::agent::capabilities::{AttentionCapability, AttentionLaunchMode};
-        use crate::agent::session_lifecycle::LifecycleKind;
-        AttentionCapability::Hook {
-            events: vec![
-                LifecycleKind::TurnCompleted,
-                LifecycleKind::InputRequired,
-                LifecycleKind::PermissionRequested,
-                LifecycleKind::QuestionRequested,
-            ],
-            launch_mode: AttentionLaunchMode::PermissionAsk,
-            trust: Some("global hook dir".into()),
-            // Issue #1366: pin the Grok release the integration has
-            // been validated against. A future Grok release that drops
-            // `notificationType`, `$VAR` expansion, or the `Stop`
-            // envelope would surface as "this is now an
-            // unversioned/integration-at-risk harness" via the
-            // Inspector capabilities table.
-            min_version: Some(GROK_MIN_HOOK_VERSION.into()),
-        }
     }
 
     /// Provision Buildmesh attention hooks into Grok's always-trusted
@@ -430,29 +441,9 @@ impl AgentProvider for GrokAdapter {
         ensure_hooks_json(&dir.join(HOOK_FILE), hook_command(resolved.env_type))
     }
 
-    fn supports_model_override(&self) -> bool {
-        true
-    }
-
-    fn supports_extra_args(&self) -> bool {
-        true
-    }
-
     /// Grok fires the provisioned `UserPromptSubmit` hook when a prompt starts a turn.
     fn confirms_prompt_submission(&self) -> bool {
         true
-    }
-
-    fn supports_prefill(&self) -> bool {
-        // Interactive TUI accepts a trailing positional [PROMPT] as the
-        // first turn (`grok "fix the bug"`). There is no `--prefill` flag;
-        // override `prefill_args` below. Headless `-p`/`--single` is a
-        // different mode (print and exit) and is not used here.
-        true
-    }
-
-    fn available_on(&self) -> &'static [Platform] {
-        &[Platform::Windows, Platform::Linux, Platform::Macos]
     }
 
     fn resume_args(&self, id: &str) -> Vec<String> {
@@ -467,18 +458,6 @@ impl AgentProvider for GrokAdapter {
         // Trailing positional [PROMPT] on the interactive TUI. The trait
         // default would emit `["--prefill", text]`, which grok rejects.
         vec![text.into()]
-    }
-
-    /// Grok 1.0.5 accepts `--reasoning-effort <level>` (alias `--effort`)
-    /// with the seven canonical levels documented in
-    /// `docs/learning/grok-harness-capabilities.md` and kept in
-    /// [`GROK_EFFORT_ALLOWED`]. The trait default `effort_args` emits
-    /// `["--effort", value]` — the documented alias — so no recipe-shape
-    /// override is needed. Issue #1280.
-    fn effort_control(&self) -> EffortControlKind {
-        EffortControlKind::Closed {
-            allowed: GROK_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),
-        }
     }
 }
 
@@ -651,7 +630,7 @@ mod tests {
 
     #[test]
     fn available_on_all_three_platforms() {
-        let platforms = GROK.available_on();
+        let platforms = GROK.descriptor().available_on;
         assert_eq!(
             platforms.len(),
             3,
@@ -692,7 +671,7 @@ mod tests {
         // Interactive TUI takes a trailing [PROMPT] as the first turn
         // (`grok "fix the bug"`). There is no `--prefill` flag; emitting
         // the trait default would be rejected upstream.
-        assert!(GROK.supports_prefill());
+        assert!(GROK.descriptor().supports_prefill);
         assert_eq!(
             GROK.prefill_args("fix the auth bug"),
             vec!["fix the auth bug"]
@@ -711,10 +690,12 @@ mod tests {
     #[test]
     fn grok_interactive_recipe_carries_positional_prefill() {
         use crate::agent::capabilities::ResolvedAgentConfig;
-        use crate::agent::launch::{default_prepare, HarnessLaunchInput, SessionIdModeRef};
+        use crate::agent::launch::{HarnessLaunchInput, SessionIdModeRef};
 
         let config = ResolvedAgentConfig::default();
         let input = HarnessLaunchInput {
+            routing: None,
+            node_id: None,
             platform: Platform::Linux,
             runtime: EnvType::Windows,
             session: SessionIdModeRef::None,
@@ -722,7 +703,7 @@ mod tests {
             prefill: Some("fix the auth bug in handler.rs"),
             sandbox: false,
         };
-        let prepared = default_prepare(&GROK, input);
+        let prepared = GROK.prepare_launch(input);
         let args = &prepared.recipe.base_args;
         assert_eq!(
             args.last().map(String::as_str),
@@ -745,12 +726,14 @@ mod tests {
     fn grok_assign_recipe_carries_session_id_flag() {
         use crate::agent::capabilities::ResolvedAgentConfig;
         use crate::agent::launch::{
-            assert_flag_followed_by_value, default_prepare, HarnessLaunchInput, SessionIdModeRef,
+            assert_flag_followed_by_value, HarnessLaunchInput, SessionIdModeRef,
         };
 
         let config = ResolvedAgentConfig::default();
         let id = "550e8400-e29b-41d4-a716-446655440000";
         let input = HarnessLaunchInput {
+            routing: None,
+            node_id: None,
             platform: Platform::Linux,
             runtime: EnvType::Windows,
             session: SessionIdModeRef::Assign(id),
@@ -758,7 +741,7 @@ mod tests {
             prefill: None,
             sandbox: false,
         };
-        let prepared = default_prepare(&GROK, input);
+        let prepared = GROK.prepare_launch(input);
         let args = &prepared.recipe.base_args;
         assert_flag_followed_by_value(args, "--session-id", id);
         assert!(
@@ -773,7 +756,7 @@ mod tests {
     fn grok_resume_recipe_keeps_resume_flag_and_positional_prefill() {
         use crate::agent::capabilities::ResolvedAgentConfig;
         use crate::agent::launch::{
-            assert_flag_followed_by_value, default_prepare, HarnessLaunchInput, SessionIdModeRef,
+            assert_flag_followed_by_value, HarnessLaunchInput, SessionIdModeRef,
         };
 
         let config = ResolvedAgentConfig {
@@ -781,8 +764,11 @@ mod tests {
             effort: None,
             extra_args: None,
             permission_mode: None,
+            agent: None,
         };
         let input = HarnessLaunchInput {
+            routing: None,
+            node_id: None,
             platform: Platform::Linux,
             runtime: EnvType::Windows,
             session: SessionIdModeRef::Resume {
@@ -793,7 +779,7 @@ mod tests {
             prefill: Some("continue from the last turn"),
             sandbox: false,
         };
-        let prepared = default_prepare(&GROK, input);
+        let prepared = GROK.prepare_launch(input);
         let args = &prepared.recipe.base_args;
         assert_flag_followed_by_value(args, "--resume", "01a0400a-6ac5-7d90-a1a6-b5397ff81d62");
         assert_flag_followed_by_value(args, "--model", "grok-3");
@@ -816,7 +802,7 @@ mod tests {
     fn grok_interactive_recipe_carries_long_model_arg() {
         use crate::agent::capabilities::ResolvedAgentConfig;
         use crate::agent::launch::{
-            assert_flag_followed_by_value, default_prepare, HarnessLaunchInput, SessionIdModeRef,
+            assert_flag_followed_by_value, HarnessLaunchInput, SessionIdModeRef,
         };
 
         let config = ResolvedAgentConfig {
@@ -824,8 +810,11 @@ mod tests {
             effort: None,
             extra_args: None,
             permission_mode: None,
+            agent: None,
         };
         let input = HarnessLaunchInput {
+            routing: None,
+            node_id: None,
             platform: Platform::Linux,
             runtime: EnvType::Windows,
             session: SessionIdModeRef::None,
@@ -833,7 +822,7 @@ mod tests {
             prefill: None,
             sandbox: false,
         };
-        let prepared = default_prepare(&GROK, input);
+        let prepared = GROK.prepare_launch(input);
         assert_flag_followed_by_value(&prepared.recipe.base_args, "--model", "grok-3");
     }
 
@@ -852,7 +841,7 @@ mod tests {
     /// `produces_readable_transcript` flips to true.
     #[test]
     fn capabilities_descriptor_advertises_model_override() {
-        let caps = GROK.capabilities();
+        let caps = crate::agent::capabilities::capabilities_for(&GROK);
         assert_eq!(caps.harness_id, "grok");
         assert!(caps.supports_resume);
         assert!(caps.supports_model_override);
@@ -884,7 +873,7 @@ mod tests {
     /// here before reaching the Spawn Menu.
     #[test]
     fn capabilities_descriptor_advertises_effort_override() {
-        let caps = GROK.capabilities();
+        let caps = crate::agent::capabilities::capabilities_for(&GROK);
         assert!(
             caps.supports_effort_override,
             "Grok 1.0.5 accepts --effort; descriptor must advertise it"
@@ -915,13 +904,13 @@ mod tests {
             EffortControlKind, ResolvedAgentConfig, GROK_EFFORT_ALLOWED,
         };
         use crate::agent::launch::{
-            assert_flag_followed_by_value, default_prepare, HarnessLaunchInput, SessionIdModeRef,
+            assert_flag_followed_by_value, HarnessLaunchInput, SessionIdModeRef,
         };
 
         // Sanity check the adapter advertises the same vocabulary the
         // constant carries — protects a future refactor that moves the
         // vocabulary off into the constant.
-        let caps = GROK.capabilities();
+        let caps = crate::agent::capabilities::capabilities_for(&GROK);
         let advertised: Vec<String> = match &caps.effort_control {
             EffortControlKind::Closed { allowed } => allowed.clone(),
             other => panic!("expected Closed, got {other:?}"),
@@ -935,8 +924,11 @@ mod tests {
             effort: Some("high".into()),
             extra_args: None,
             permission_mode: None,
+            agent: None,
         };
         let input = HarnessLaunchInput {
+            routing: None,
+            node_id: None,
             platform: Platform::Linux,
             runtime: EnvType::Windows,
             session: SessionIdModeRef::None,
@@ -944,7 +936,7 @@ mod tests {
             prefill: None,
             sandbox: false,
         };
-        let prepared = default_prepare(&GROK, input);
+        let prepared = GROK.prepare_launch(input);
         assert_flag_followed_by_value(&prepared.recipe.base_args, "--effort", "high");
         // Pin the alias preference — Grok accepts both `--effort` and
         // `--reasoning-effort`; the documented alias is `--effort` and
@@ -964,6 +956,8 @@ mod tests {
         // (capability mask + default_prepare are the joint guarantee).
         let config = ResolvedAgentConfig::default();
         let input = HarnessLaunchInput {
+            routing: None,
+            node_id: None,
             platform: Platform::Linux,
             runtime: EnvType::Windows,
             session: SessionIdModeRef::None,
@@ -971,7 +965,7 @@ mod tests {
             prefill: Some("continue from where we left off"),
             sandbox: false,
         };
-        let prepared = default_prepare(&GROK, input);
+        let prepared = GROK.prepare_launch(input);
         assert!(
             !prepared.recipe.base_args.iter().any(|a| a == "--effort"),
             "no effort layer must produce no --effort flag; got {:?}",
@@ -996,9 +990,9 @@ mod tests {
     #[test]
     fn grok_resolver_keeps_in_vocabulary_drops_out_of_vocabulary() {
         use crate::agent::capabilities::{resolve_agent_config, AgentConfigInputs, FieldInputs};
-        use crate::agent::launch::{default_prepare, HarnessLaunchInput, SessionIdModeRef};
+        use crate::agent::launch::{HarnessLaunchInput, SessionIdModeRef};
 
-        let caps = GROK.capabilities();
+        let caps = crate::agent::capabilities::capabilities_for(&GROK);
 
         // "xhigh" is in the seven-level vocabulary — must pass through.
         let inputs = AgentConfigInputs {
@@ -1008,12 +1002,15 @@ mod tests {
                 ..FieldInputs::default()
             },
             permission_mode: FieldInputs::default(),
+            agent: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&caps, inputs, None);
         assert_eq!(resolved.effort.as_deref(), Some("xhigh"));
 
         // End-to-end: the prepared recipe carries --effort xhigh.
         let input = HarnessLaunchInput {
+            routing: None,
+            node_id: None,
             platform: Platform::Linux,
             runtime: EnvType::Windows,
             session: SessionIdModeRef::None,
@@ -1021,7 +1018,7 @@ mod tests {
             prefill: None,
             sandbox: false,
         };
-        let prepared = default_prepare(&GROK, input);
+        let prepared = GROK.prepare_launch(input);
         assert!(
             prepared.recipe.base_args.windows(2).any(|w| {
                 w.first().map(String::as_str) == Some("--effort")
@@ -1039,6 +1036,7 @@ mod tests {
                 ..FieldInputs::default()
             },
             permission_mode: FieldInputs::default(),
+            agent: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&caps, inputs, None);
         assert!(
@@ -1049,6 +1047,8 @@ mod tests {
 
         // End-to-end: a resolved-None effort produces no --effort flag.
         let input = HarnessLaunchInput {
+            routing: None,
+            node_id: None,
             platform: Platform::Linux,
             runtime: EnvType::Windows,
             session: SessionIdModeRef::None,
@@ -1056,7 +1056,7 @@ mod tests {
             prefill: Some("tail prompt"),
             sandbox: false,
         };
-        let prepared = default_prepare(&GROK, input);
+        let prepared = GROK.prepare_launch(input);
         assert!(
             !prepared.recipe.base_args.iter().any(|a| a == "--effort"),
             "masked-out effort must not reach the recipe; got {:?}",

@@ -62,4 +62,10 @@ describe("WS ticket target binding (issue #551)", () => {
     expect(body).toEqual({ surface: "events", node_id: null });
     expect(url).toContain("/ws/events?ticket=abc123");
   });
+
+  it('passes the event connection cancellation signal to its ticket fetch', async () => {
+    const controller = new AbortController();
+    await eventsWsUrl(controller.signal);
+    expect(fetchMock.mock.calls[0][1].signal).toBe(controller.signal);
+  });
 });

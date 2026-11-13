@@ -92,6 +92,7 @@ import {
   buildCircuitProbeRows,
   annotateCircuitRows,
   circuitActivityStats,
+  circuitActivitySummary,
   countActiveRuns,
   pendingAdmissionDetail,
   reviewCircuitForRun,
@@ -462,19 +463,71 @@ export function CircuitsProbeTab() {
     () => circuitActivityStats(annotatedRows, queue.length),
     [annotatedRows, queue.length]
   );
+  /**
+   * The Activity view's one summary (issue #2740).
+   *
+   * The mesh-wide outstanding count is the authority on "does anything still
+   * need a decision": it is not truncated by the Probe's per-circuit ledger
+   * window, and `null` means the count could not be read — which is not the
+   * same claim as zero. The summary refuses to present an all-clear in either
+   * case.
+   *
+   * A failed load keeps the previous snapshot in state, so the summary is
+   * withheld while the error banner is up: the counts on screen would be
+   * stale, and a stale all-clear is still an all-clear.
+   */
+  const activitySummary = useMemo(
+    () => circuitActivitySummary({
+      activeCount: activityStats.activeCount,
+      activeAttentionCount: activityStats.activeAttentionCount,
+      queuedCount: activityStats.queuedCount,
+      attentionCount: activityStats.historyAttentionCount,
+      outstandingAttention: resource.state.data === null ? null : resource.state.data.outstanding,
+    }),
+    [activityStats, resource.state.data]
+  );
+  /** The summary is only a statement about the mesh when the read succeeded. */
+  const activitySummaryReady = snapshotReady && loadError === null;
+  /**
+   * The route to the runs that need a person: History, filtered to them.
+   *
+   * The search box is cleared on the way, for the reason the cross-surface
+   * focus path clears it too — a leftover search term can filter the attention
+   * runs out of the very view this action opens, and the list then reads as
+   * "no run needs attention".
+   */
+  const openAttentionHistory = useCallback(() => {
+    setHistorySearch('');
+    setHistoryAttentionOnly(true);
+    setView('history');
+  }, []);
+  /**
+   * The tab's status line.
+   *
+   * It counts the dimensions that are non-zero. Its fallback is the only place
+   * the tab reports that no work is outstanding, and that is a claim about
+   * work, so it needs the same knowledge the Activity summary needs: a read
+   * that succeeded, and an outstanding attention count that is readable and
+   * zero. Without both, the line names the gap instead of reporting an empty
+   * mesh.
+   */
   const statusText = useMemo(() => {
     const parts = [
       activityStats.attentionCount > 0 ? `${activityStats.attentionCount} need attention` : null,
       activityStats.activeCount > 0 ? `${activityStats.activeCount} active` : null,
       activityStats.queuedCount > 0 ? `${activityStats.queuedCount} queued` : null,
     ].filter((part): part is string => part !== null);
-    return parts.join(' · ') ||
-      (rows.length > 0 ? `${rows.length} circuit${rows.length === 1 ? '' : 's'} idle` : 'No circuits configured');
-  }, [activityStats, rows.length]);
+    if (parts.length > 0) return parts.join(' · ');
+    if (rows.length === 0) return 'No circuits configured';
+    const outstanding = resource.state.data === null ? null : resource.state.data.outstanding;
+    if (outstanding === null) return 'Attention state unknown';
+    if (outstanding > 0) return `${outstanding} need attention`;
+    return `${rows.length} circuit${rows.length === 1 ? '' : 's'} idle`;
+  }, [activityStats, rows.length, resource.state.data]);
   // "Open Manage" is a dead end once the user is on Manage, so the empty
   // state there points at the Create disclosure instead (#2462).
   const emptyCircuitsHint =
-    !snapshotReady
+    !snapshotReady || loadError !== null
       ? undefined
       : view === 'manage'
         ? 'Expand Create a circuit above to add one to the flow editor.'
@@ -772,7 +825,7 @@ export function CircuitsProbeTab() {
     <div className="flex flex-col h-full min-h-0 text-sm" data-testid="circuits-probe-tab">
       <div className="px-3 py-2 border-b border-border-subtle shrink-0">
         <p className="text-xs text-text-secondary mb-2" role="status" data-testid="circuits-status">
-          {snapshotReady ? statusText : loadError ? 'Circuits unavailable' : 'Loading circuits…'}
+          {loadError !== null ? 'Circuits unavailable' : snapshotReady ? statusText : 'Loading circuits…'}
         </p>
 
         <div
@@ -972,6 +1025,57 @@ export function CircuitsProbeTab() {
       />
           </details>
         </section>}
+        {view === 'activity' && activitySummaryReady && rows.length > 0 && (
+          <section
+            className="px-3 py-2 border-b border-border-subtle"
+            aria-label="Activity summary"
+            data-testid="circuit-activity-summary"
+          >
+            {/* A row of its own, because no existing surface can carry it:
+                the status line above is one compact count strip shared with
+                the other views and has no action, and the empty state it
+                replaces is the absence-of-content primitive, which cannot
+                state that work is waiting or offer a route to it. The row
+                takes the place of the attention notice it absorbed, so the
+                view does not grow. */}
+            <p
+              className={`text-xs font-semibold break-words ${activitySummary.tone === 'attention' ? 'text-status-warning' : 'text-text-primary'}`}
+              data-testid="circuit-activity-summary-label"
+            >
+              {activitySummary.label}
+            </p>
+            <p
+              className="mt-0.5 text-2xs text-text-secondary break-words"
+              data-testid="circuit-activity-summary-detail"
+            >
+              {activitySummary.detail}
+            </p>
+            {/* The queue route is the queued-work block's own "View queue"
+                button below, so the summary does not repeat it. Every other
+                dimension's next action is offered here, where the headline
+                states why it matters. */}
+            {activitySummary.action === 'attention' && (
+              <button
+                type="button"
+                onClick={openAttentionHistory}
+                data-testid="circuit-activity-attention-action"
+                className="mt-1.5 text-xs text-status-warning hover:underline min-h-[24px]"
+              >
+                Review in History
+              </button>
+            )}
+            {activitySummary.action === 'manage' && (
+              <button
+                type="button"
+                onClick={() => setView('manage')}
+                data-testid="circuit-activity-manage-action"
+                className="mt-1.5 text-xs text-accent-cyan hover:underline min-h-[24px]"
+              >
+                Open Manage to trigger a circuit
+              </button>
+            )}
+          </section>
+        )}
         {view === 'activity' && snapshotReady && <section className="p-3 border-b border-border-subtle" aria-label="Run slots">
           <div className="flex justify-between gap-2 text-xs mb-2">
             <span className="font-semibold text-text-primary">{meshActiveRuns} / {meshRunCapacity || '—'} slots occupied</span>
@@ -995,15 +1099,12 @@ export function CircuitsProbeTab() {
             Cancel all
           </button>
           </details>}
-          {activityStats.historyAttentionCount > 0 && <button type="button" onClick={() => { setHistoryAttentionOnly(true); setView('history'); }} className="mt-2 text-xs text-status-warning min-h-[24px]">
-            {activityStats.historyAttentionCount} finished runs need attention
-          </button>}
         </section>}
         {view === 'activity' && queue.length > 0 && (
           <section className="mx-2 mt-2 rounded-md border border-status-warning/30 bg-status-warning/5 p-2" data-testid="circuit-activity-queue-summary">
             <div className="flex items-center justify-between gap-2">
               <h3 className="text-xs font-semibold text-text-primary">Waiting in queue</h3>
-              <button type="button" onClick={() => setView('queue')} className="text-2xs text-accent-cyan hover:underline">
+              <button type="button" onClick={() => setView('queue')} data-testid="circuit-activity-queue-action" className="text-2xs text-accent-cyan hover:underline">
                 View queue
               </button>
             </div>
@@ -1058,7 +1159,6 @@ export function CircuitsProbeTab() {
             )}
           </section>
         )}
-        {view === 'activity' && snapshotReady && activityStats.activeCount === 0 && rows.length > 0 && <EmptyState label="Ready for work" hint="No runs are active. Check the queue or trigger a circuit in Manage." />}
         {view === 'history' && snapshotReady && listedRows.length === 0 && rows.length > 0 && (
           <EmptyState
             label={historyEmptyState.label}
@@ -1068,7 +1168,7 @@ export function CircuitsProbeTab() {
         {view !== 'queue' && (rows.length === 0 ? (
           <div className="p-4">
             <EmptyState
-              label={snapshotReady ? 'No circuits yet' : loadError ? 'Circuits unavailable' : 'Loading circuits…'}
+              label={loadError !== null ? 'Circuits unavailable' : snapshotReady ? 'No circuits yet' : 'Loading circuits…'}
               hint={emptyCircuitsHint}
             />
           </div>
@@ -1118,7 +1218,7 @@ export function CircuitsProbeTab() {
                         type="button"
                         onClick={() => openCircuitEditor(circuit.id)}
                         data-testid={`circuit-edit-flow-${circuit.id}`}
-                        className="px-2 py-0.5 rounded-md bg-accent-violet/15 text-accent-violet hover:bg-accent-violet/25"
+                        className="px-2 py-0.5 rounded-md bg-accent-violet/15 text-accent-violet-strong hover:bg-accent-violet/25"
                       >
                         Edit Flow
                       </button>
@@ -1191,7 +1291,7 @@ export function CircuitsProbeTab() {
                           key={detail.run.id}
                           detail={detail}
                           context={context}
-                          reviewCircuit={reviewCircuitForRun(detail, reviewCircuit, context)}
+                          reviewCircuit={reviewCircuitForRun(detail, reviewCircuit)}
                           nodeIndex={nodeIndex}
                           agentName={agentName}
                           onFocusAgent={handleFocusAgent}

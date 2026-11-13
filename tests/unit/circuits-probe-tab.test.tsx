@@ -11,8 +11,9 @@
  */
 
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
+import { reviewContinuation } from './helpers/reviewContinuation';
 import { preloadProbeTabs } from './helpers/preloadProbeTabs';
-import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, act, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
@@ -254,6 +255,30 @@ beforeEach(() => {
 beforeAll(preloadProbeTabs, 60_000);
 
 describe('CircuitsProbeTab', () => {
+  it('distinguishes reviews sharing one preset in history and the queue', async () => {
+    const runs = ['Fix parser', 'Improve brakes'].map((name, index) => ({
+      ...RUN_DONE,
+      run: { ...RUN_DONE.run, id: 101 + index,
+        context_json: JSON.stringify({ 'source.review_preset': '1', 'source.name': name }),
+      },
+    }));
+    mockBackend({
+      circuits: [{ ...CIRCUIT, is_preset: true, name: 'Agent review' }],
+      runs,
+      queue: runs.map(({ run }, index) => ({
+        run: { ...run, id: 201 + index, state: 'pending' },
+        circuit_name: 'Agent review', queue_rank: index + 1,
+      })),
+    });
+    openProbeDestination('circuits');
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
+    expect((await screen.findByTestId('run-subject-101')).textContent).toBe('Review: Fix parser');
+    expect(screen.getByTestId('run-subject-102').textContent).toBe('Review: Improve brakes');
+    fireEvent.click(screen.getByTestId('circuits-view-queue'));
+    expect(await screen.findByText('Review: Fix parser')).toBeTruthy();
+    expect(screen.getByText('Review: Improve brakes')).toBeTruthy();
+  });
+
   it('uses the active run allowance when the editable blueprint no longer contains review', async () => {
     mockBackend({ circuits: [CIRCUIT], runs: [{ ...RUN_RUNNING, review_round_limit: 3 }] });
     openProbeDestination('circuits');
@@ -299,7 +324,7 @@ describe('CircuitsProbeTab', () => {
 
   it.each([1, 3, 10])('adds %i rounds to a failed review and focuses the same run', async (additionalRounds) => {
     const graph = { version: 3, nodes: [{ id: 'verdict', type: { type: 'review_verdict', target_node_id: 'reviewer' } }], edges: [] };
-    const failed = { run: { ...RUN_DONE.run, state: 'failed', source_agent_node_id: 42, context_json: '{"source.review_preset":"1"}' },
+    const failed = { review_continuation: reviewContinuation(), run: { ...RUN_DONE.run, state: 'failed', source_agent_node_id: 42, context_json: '{}' },
       steps: [{ ...RUN_DONE.steps[0], node_id: 'verdict', status: 'completed', outcome: 'working' }] };
     const circuits = [{ ...CIRCUIT, graph_json: JSON.stringify(graph) }];
     mockBackend({ circuits, runs: [failed] });
@@ -317,7 +342,7 @@ describe('CircuitsProbeTab', () => {
     expect(invoke).toHaveBeenCalledWith('continue_circuit_review', { runId: 11, additionalRounds });
     expect(screen.getByTestId('run-continue-review-11').hasAttribute('disabled')).toBe(true);
     expect(screen.getByLabelText('Additional review rounds').hasAttribute('disabled')).toBe(true);
-    mockBackend({ circuits, runs: [{ run: { ...failed.run, state: 'running', context_json: '{"source.review_preset":"1","review.extended":"1","retry.attempt":"4","retry.max_retries":"4"}' }, steps: [] }] });
+    mockBackend({ circuits, runs: [{ review_continuation: reviewContinuation({ available: false, refusal_reason: 'run_not_failed', lineage: { review_origin: 'local_preset', extended: true, recovery: { kind: 'none' } } }), run: { ...failed.run, state: 'running', context_json: '{"source.review_preset":"1","review.extended":"1","retry.attempt":"4","retry.max_retries":"4"}' }, steps: [] }] });
     await act(async () => { finish(11); });
     await waitFor(() => expect(screen.getByTestId('circuits-view-activity').getAttribute('aria-selected')).toBe('true'));
     expect(screen.getByTestId('run-card-11').getAttribute('data-run-focused')).toBe('true');
@@ -327,7 +352,8 @@ describe('CircuitsProbeTab', () => {
   it('keeps failed review evidence and shows a recovery error when the saved agent is unavailable', async () => {
     const graph = { version: 3, nodes: [{ id: 'verdict', type: { type: 'review_verdict', target_node_id: 'reviewer' } }], edges: [] };
     mockBackend({ circuits: [{ ...CIRCUIT, graph_json: JSON.stringify(graph) }], runs: [{
-      run: { ...RUN_DONE.run, state: 'failed', source_agent_node_id: 42, context_json: '{"source.review_preset":"1"}' },
+      review_continuation: reviewContinuation(),
+      run: { ...RUN_DONE.run, state: 'failed', source_agent_node_id: 42, context_json: '{}' },
       steps: [{ ...RUN_DONE.steps[0], node_id: 'verdict', outcome: 'working', error_message: 'Review requires changes' }],
     }] });
     const fallback = vi.mocked(invoke).getMockImplementation();
@@ -1660,6 +1686,59 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
       .toContain('No remaining findings. Approved.');
   });
 
+  it('opens a review run on the same stage and rounds summary as the node Overview tab', async () => {
+    const graph = {
+      version: 3,
+      nodes: [
+        { id: 'trigger', type: { type: 'manual' } },
+        { id: 'reviewer', type: { type: 'spawn_agent_node', prompt: '', name: 'Code reviewer', provider: null, model: null, effort: null, extra_args: null, timeout_seconds: null } },
+        { id: 'verdict', type: { type: 'review_verdict', target_node_id: 'reviewer' } },
+        { id: 'retry', type: { type: 'retry_limit', max_retries: 3 } },
+        { id: 'again', type: { type: 'inject_pty', prompt: '', target_node_id: 'reviewer' } },
+      ],
+      edges: [
+        { from: 'trigger', to: 'reviewer', condition: 'always' },
+        { from: 'reviewer', to: 'verdict', condition: 'always' },
+        { from: 'verdict', to: 'retry', condition: { on_outcome: 'working' } },
+        { from: 'retry', to: 'again', condition: { on_outcome: 'completed' } },
+        { from: 'again', to: 'verdict', condition: 'always' },
+      ],
+    };
+    const detail: CircuitRunDetail = {
+      run: {
+        ...RUN_DONE.run, id: 29,
+        context_json: JSON.stringify({ 'node.verdict.review_verdict': 'approved', 'node.verdict.review_verdict_attempt': '2', 'node.verdict.evaluated_output': 'Looks good.' }),
+      },
+      steps: [
+        step({ node_id: 'trigger', status: 'completed', outcome: 'completed' }),
+        step({ node_id: 'reviewer', status: 'completed', outcome: 'completed' }),
+        step({ node_id: 'verdict', status: 'completed', outcome: 'completed', attempt: 2 }),
+        step({ node_id: 'retry', status: 'completed', outcome: 'completed' }),
+        step({ node_id: 'again', status: 'completed', outcome: 'completed' }),
+      ],
+    };
+    mockBackend({ circuits: [{ ...CIRCUIT, graph_json: JSON.stringify(graph) }], runs: [detail] });
+    const fallback = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => cmd === 'circuit_run_overview'
+      ? Promise.resolve({ ...detail, circuit_name: CIRCUIT.name, graph, review_round_limit: 3, attention: { revision: 1, checkpoints: [], pushes: [] } })
+      : fallback!(cmd, args));
+    const user = userEvent.setup();
+    openProbeDestination('circuits');
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
+    // A closed card reads nothing more than the Probe snapshot.
+    await screen.findByTestId('run-toggle-29');
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === 'circuit_run_overview')).toBe(false);
+
+    await user.click(screen.getByTestId('run-toggle-29'));
+    const summary = await screen.findByTestId('run-progress-summary-29');
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('circuit_run_overview', { runId: 29 });
+    const stages = within(summary).getAllByRole('listitem').filter((item) => item.hasAttribute('data-stage-state'));
+    expect(stages.map((stage) => stage.getAttribute('data-stage-state'))).toEqual(['done']);
+    const rounds = within(within(summary).getByRole('list', { name: 'Review round results' })).getAllByRole('listitem');
+    expect(rounds.map((round) => round.getAttribute('title'))).toEqual(['Round 1: Changes requested', 'Round 2: Approved', 'Round 3: Not used']);
+    expect(within(summary).getByTestId('run-latest-review').textContent).toContain('Looks good.');
+  });
+
   it('distinguishes an exhausted review from an approved one', async () => {
     const REVIEW_GRAPH = {
       version: 3,
@@ -2380,5 +2459,192 @@ describe('Autopilot Circuits IPC contract (ADR-0010 seam)', () => {
       circuitId: 9,
       graphJson: '{"version":1,"nodes":[],"edges":[]}',
     });
+  });
+});
+
+/**
+ * The Activity view's one summary (issue #2740).
+ *
+ * Zero active runs used to render "Ready for work" next to a queued backlog
+ * and a finished run that still needed a person, so the user had to reconcile
+ * three statements about three different dimensions by hand. These tests pin
+ * the one summary that keeps them apart.
+ */
+describe('CircuitsProbeTab Activity summary (#2740)', () => {
+  const FAILED_RUN: CircuitRunDetail = {
+    ...RUN_DONE,
+    run: { ...RUN_DONE.run, id: 13, state: 'failed' },
+  };
+
+  it('labels the absence of active runs when the counts are zero', async () => {
+    mockBackend({ runs: [RUN_DONE] });
+    openProbeDestination('circuits');
+
+    expect(await screen.findByTestId('circuit-activity-summary')).toBeTruthy();
+    expect(screen.getByTestId('circuit-activity-summary-label').textContent).toBe('No active runs');
+    expect(screen.getByTestId('circuit-activity-summary-detail').textContent)
+      .toBe('Nothing running, queued, or waiting for a decision.');
+    // The old copy claimed readiness from the slot count alone.
+    expect(screen.queryByText('Ready for work')).toBeNull();
+    // An idle state still owes the reader a next action.
+    fireEvent.click(screen.getByTestId('circuit-activity-manage-action'));
+    expect(screen.getByTestId('circuits-view-manage').getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('keeps queued work visible instead of presenting zero active runs as an all-clear', async () => {
+    mockBackend({ runs: [RUN_DONE], queue: QUEUE });
+    openProbeDestination('circuits');
+
+    await screen.findByTestId('circuit-activity-summary');
+    expect(screen.getByTestId('circuit-activity-summary-label').textContent).toBe('No active runs');
+    expect(screen.getByTestId('circuit-activity-summary-detail').textContent).toBe('2 waiting in queue');
+    expect(screen.getByTestId('circuit-activity-summary-detail').textContent)
+      .not.toContain('Nothing running');
+    // The queued-work context and its existing action survive.
+    const queueSummary = screen.getByTestId('circuit-activity-queue-summary');
+    expect(queueSummary.textContent).toContain('Waiting in queue');
+    expect(queueSummary.textContent).toContain('2 waiting to start');
+    fireEvent.click(screen.getByRole('button', { name: 'View queue' }));
+    expect(screen.getByTestId('circuits-view-queue').getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('leads with the finished runs that need a person and routes to the filtered History', async () => {
+    mockBackend({ runs: [RUN_DONE, FAILED_RUN] });
+    openProbeDestination('circuits');
+
+    await screen.findByTestId('circuit-activity-summary');
+    expect(screen.getByTestId('circuit-activity-summary-label').textContent)
+      .toBe('1 finished run needs attention');
+    expect(screen.getByTestId('circuit-activity-summary-detail').textContent)
+      .toBe('No active runs · Nothing queued');
+    expect(screen.queryByText('Ready for work')).toBeNull();
+
+    // The attention route leads to History, filtered to the runs that need it.
+    fireEvent.click(screen.getByTestId('circuit-activity-attention-action'));
+    expect(screen.getByTestId('circuits-view-history').getAttribute('aria-selected')).toBe('true');
+    expect((screen.getByTestId('history-attention-toggle') as HTMLInputElement).checked).toBe(true);
+    await screen.findByTestId('run-card-13');
+  });
+
+  it('keeps the queued context while attention leads the summary', async () => {
+    mockBackend({ runs: [RUN_DONE, FAILED_RUN], queue: QUEUE });
+    openProbeDestination('circuits');
+
+    await screen.findByTestId('circuit-activity-summary');
+    expect(screen.getByTestId('circuit-activity-summary-label').textContent)
+      .toBe('1 finished run needs attention');
+    expect(screen.getByTestId('circuit-activity-summary-detail').textContent)
+      .toBe('No active runs · 2 queued');
+    expect(screen.getByTestId('circuit-activity-queue-summary').textContent).toContain('Waiting in queue');
+    expect(screen.getByRole('button', { name: 'View queue' })).toBeTruthy();
+  });
+
+  it('calls out the active runs that are waiting on a person', async () => {
+    // A paused run holds a slot without making progress, and it needs the
+    // operator: the summary must not present it as plain activity.
+    const paused = { ...RUN_RUNNING, run: { ...RUN_RUNNING.run, id: 14, state: 'paused' } };
+    mockBackend({ runs: [paused] });
+    openProbeDestination('circuits');
+
+    await screen.findByTestId('circuit-activity-summary');
+    expect(screen.getByTestId('circuit-activity-summary-label').textContent)
+      .toBe('1 active, 1 needs attention');
+    expect(screen.getByTestId('circuit-activity-summary-detail').textContent).toBe('Nothing queued');
+  });
+
+  it('offers the attention route to the keyboard', async () => {
+    mockBackend({ runs: [RUN_DONE, FAILED_RUN] });
+    openProbeDestination('circuits');
+
+    const action = await screen.findByTestId('circuit-activity-attention-action');
+    expect(action.tagName).toBe('BUTTON');
+    action.focus();
+    await userEvent.keyboard('{Enter}');
+    expect(screen.getByTestId('circuits-view-history').getAttribute('aria-selected')).toBe('true');
+    expect((screen.getByTestId('history-attention-toggle') as HTMLInputElement).checked).toBe(true);
+  });
+
+  it('clears a leftover History search so the attention route shows the runs that need a person', async () => {
+    mockBackend({ runs: [RUN_DONE, FAILED_RUN] });
+    openProbeDestination('circuits');
+    await screen.findByTestId('circuit-activity-summary');
+
+    // A search term left over from an earlier History visit would filter the
+    // attention runs out of the very view the action opens.
+    fireEvent.click(screen.getByTestId('circuits-view-history'));
+    fireEvent.change(screen.getByTestId('history-search-input'), { target: { value: 'nothing matches this' } });
+    fireEvent.click(screen.getByTestId('circuits-view-activity'));
+    fireEvent.click(screen.getByTestId('circuit-activity-attention-action'));
+
+    expect(screen.getByTestId('circuits-view-history').getAttribute('aria-selected')).toBe('true');
+    expect((screen.getByTestId('history-search-input') as HTMLInputElement).value).toBe('');
+    expect((screen.getByTestId('history-attention-toggle') as HTMLInputElement).checked).toBe(true);
+    await screen.findByTestId('run-card-13');
+  });
+
+  it('states no summary at all while the snapshot is still loading', async () => {
+    mockBackend({ runs: [RUN_DONE] });
+    const releaseProbe = deferCircuitProbe();
+    openProbeDestination('circuits');
+
+    expect(await screen.findByTestId('circuits-status')).toBeTruthy();
+    expect(screen.queryByTestId('circuit-activity-summary')).toBeNull();
+    await act(async () => { releaseProbe(); });
+    await screen.findByTestId('circuit-activity-summary');
+  });
+
+  it('withholds the summary when a refresh fails, so stale counts do not read as an all-clear', async () => {
+    mockBackend({ runs: [RUN_DONE] });
+    openProbeDestination('circuits');
+    await screen.findByTestId('circuit-activity-summary');
+
+    // The next read fails. The Probe keeps the previous snapshot, so the
+    // counts on screen are stale — a stale all-clear is still an all-clear.
+    const fallback = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'list_circuit_probe') return Promise.reject(new Error('probe unavailable'));
+      return fallback?.(cmd, args) ?? Promise.resolve({ cmd });
+    });
+    await act(async () => { await emit('circuit-run-updated', {}); });
+
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('probe unavailable'));
+    expect(screen.queryByTestId('circuit-activity-summary')).toBeNull();
+    expect(screen.queryByText('Ready for work')).toBeNull();
+  });
+
+  it('names the gap when the outstanding attention count is unavailable', async () => {
+    mockBackend({ runs: [RUN_DONE], countAttentionFails: true });
+    openProbeDestination('circuits');
+
+    await screen.findByTestId('circuit-activity-summary');
+    // No run needing attention is ruled out when the count failed, so the
+    // idle wording must not appear.
+    expect(screen.getByTestId('circuit-activity-summary-detail').textContent)
+      .toBe('The outstanding attention count could not be read.');
+    expect(screen.getByTestId('circuit-activity-summary-detail').textContent)
+      .not.toContain('Nothing running');
+    expect(screen.queryByText('Ready for work')).toBeNull();
+    // The status line above the views makes the same claim about idleness, so
+    // it has to name the gap too.
+    expect(screen.getByTestId('circuits-status').textContent).toBe('Attention state unknown');
+  });
+
+  it('does not report the mesh as idle while a refresh has failed', async () => {
+    mockBackend({ runs: [RUN_DONE] });
+    openProbeDestination('circuits');
+    await screen.findByTestId('circuit-activity-summary');
+    expect(screen.getByTestId('circuits-status').textContent).toBe('1 circuit idle');
+
+    const fallback = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'list_circuit_probe') return Promise.reject(new Error('probe unavailable'));
+      return fallback?.(cmd, args) ?? Promise.resolve({ cmd });
+    });
+    await act(async () => { await emit('circuit-run-updated', {}); });
+
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('probe unavailable'));
+    // The counts on screen are the previous snapshot's, so the line reports
+    // the failed read instead of an idle mesh.
+    expect(screen.getByTestId('circuits-status').textContent).toBe('Circuits unavailable');
   });
 });

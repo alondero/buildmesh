@@ -14,6 +14,7 @@ pub(crate) mod readers;
 pub(crate) use readers as adapters;
 mod file;
 pub(crate) mod glance;
+pub(crate) mod interruption;
 mod native_completion;
 pub(crate) mod report_snapshot;
 #[cfg(test)]
@@ -86,15 +87,34 @@ fn reader(format: TranscriptFormat) -> &'static dyn TranscriptReader {
     }
 }
 
+#[cfg(test)]
+// allow-test-in-production: the counter proves the capability gate runs before
+// discovery; it has no effect outside the test build.
+thread_local! {
+    /// Counts discovery calls so a capability gate can be proven to run before
+    /// any transcript lookup instead of merely returning `None` afterwards.
+    static TRANSCRIPT_LOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn locate_transcript(
     format: TranscriptFormat,
     session_id: &str,
     node_path: &str,
 ) -> Option<PathBuf> {
+    #[cfg(test)]
+    // allow-test-in-production: records that discovery was reached for the gate
+    // regression.
+    TRANSCRIPT_LOCATIONS.with(|calls| calls.set(calls.get() + 1));
     reader(format).locate(LocateCtx {
         session_id,
         node_path,
     })
+}
+
+#[cfg(test)]
+// allow-test-in-production: reads the gate regression's discovery counter.
+fn take_transcript_locations() -> usize {
+    TRANSCRIPT_LOCATIONS.with(std::cell::Cell::take)
 }
 
 fn resolve<'a>(
@@ -163,6 +183,13 @@ pub(crate) fn stalled_background_task(
     node_path: &str,
     now_ms: i64,
 ) -> Option<String> {
+    // The probe runs on every quiet Circuit poll tick, and most readers cannot
+    // record a background-task gap at all. Gate on the capability before
+    // resolving a path or opening the transcript: a harness that can never
+    // answer must not pay for discovery plus a full-history read first.
+    if !reader(format).observes_background_tasks() {
+        return None;
+    }
     let (path, _) = resolve(format, session_id, node_path).ok()?;
     stalled_background_task_at(format, &path, now_ms)
 }

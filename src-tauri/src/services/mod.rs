@@ -3,7 +3,12 @@
 pub mod agent_node;
 pub mod agent_node_discovery;
 pub mod agy_session;
+/// The transport-independent owner of Circuit control workflows (issue
+/// #2673): the desktop commands and the mobile routes are two adapters over
+/// these operations.
+pub mod circuit_control;
 pub(crate) mod circuit_prompt;
+pub mod circuit_trigger;
 pub mod circuit_triggers;
 pub mod circuit_worker;
 pub mod cline_session;
@@ -12,11 +17,16 @@ pub mod commandcode_session;
 pub mod commandcode_watcher;
 pub mod coordinator_ledger_maintenance;
 pub mod create_operation;
+/// The device-session expiry sweep (issue #589): deletes paired-device rows
+/// that have not authenticated for `DEVICE_SESSION_IDLE_DAYS`, so an orphan
+/// cannot stay a live Admin credential for the life of the install.
+pub mod device_session_expiry;
 pub mod freebuff_usage;
 pub mod gh_auth_cache;
 pub mod github;
 pub mod harness_logins;
 pub(crate) mod http_client;
+pub(crate) mod interruption_recovery;
 pub mod legacy_retirement;
 pub mod mcode_session;
 pub mod mesh;

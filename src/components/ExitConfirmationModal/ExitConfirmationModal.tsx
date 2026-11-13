@@ -102,7 +102,7 @@ export function ExitConfirmationModal({
           onClick={onExit}
           disabled={exiting}
           data-testid={ctaTestId}
-          className="px-3 py-1.5 text-sm text-white bg-status-error/80 hover:bg-status-error rounded-md transition-colors disabled:opacity-50"
+          className="px-3 py-1.5 text-sm text-on-destructive bg-destructive/80 hover:bg-destructive active:bg-destructive-strong disabled:bg-bg-card-hover disabled:text-text-muted rounded-md transition-colors"
         >
           {ctaLabel}
         </button>

@@ -1,6 +1,6 @@
 use super::*;
 use crate::agent::capabilities::ResolvedAgentConfig;
-use crate::agent::launch::{default_prepare, HarnessLaunchInput, SessionIdModeRef};
+use crate::agent::launch::{HarnessLaunchInput, SessionIdModeRef};
 
 #[test]
 fn id_and_ui_metadata() {
@@ -48,7 +48,7 @@ fn spawn_recipe_on_windows_host_with_wsl_runtime() {
 
 #[test]
 fn available_on_all_three_platforms() {
-    let platforms = FREEBUFF.available_on();
+    let platforms = FREEBUFF.descriptor().available_on;
     assert_eq!(platforms.len(), 3);
     assert!(platforms.contains(&Platform::Windows));
     assert!(platforms.contains(&Platform::Linux));
@@ -75,13 +75,13 @@ fn resume_args_format() {
 
 #[test]
 fn initial_prompt_is_typed_not_prefilled() {
-    assert!(!FREEBUFF.supports_prefill());
-    assert!(FREEBUFF.accepts_initial_prompt());
+    assert!(!FREEBUFF.descriptor().supports_prefill);
+    assert!(FREEBUFF.descriptor().accepts_initial_prompt());
 }
 
 #[test]
 fn capabilities_descriptor_shape() {
-    let caps = FREEBUFF.capabilities();
+    let caps = crate::agent::capabilities::capabilities_for(&FREEBUFF);
     assert_eq!(caps.harness_id, "freebuff");
     assert!(caps.supports_resume);
     assert!(caps.auto_resume_on_startup);
@@ -106,8 +106,11 @@ fn fresh_spawn_prepare_wires_session_assign_args() {
         effort: None,
         extra_args: None,
         permission_mode: None,
+        agent: None,
     };
     let input = HarnessLaunchInput {
+        routing: None,
+        node_id: None,
         platform: Platform::Windows,
         runtime: EnvType::Windows,
         session: SessionIdModeRef::Assign("fresh-uuid-99"),
@@ -115,7 +118,7 @@ fn fresh_spawn_prepare_wires_session_assign_args() {
         prefill: Some("start work"),
         sandbox: false,
     };
-    let prepared = default_prepare(&FREEBUFF, input);
+    let prepared = FREEBUFF.prepare_launch(input);
     assert_eq!(
         prepared.recipe.base_args,
         vec!["--continue", "fresh-uuid-99"],
@@ -130,8 +133,11 @@ fn resume_prepare_wires_resume_args() {
         effort: None,
         extra_args: None,
         permission_mode: None,
+        agent: None,
     };
     let input = HarnessLaunchInput {
+        routing: None,
+        node_id: None,
         platform: Platform::Linux,
         runtime: EnvType::Windows,
         session: SessionIdModeRef::Resume {
@@ -142,7 +148,7 @@ fn resume_prepare_wires_resume_args() {
         prefill: None,
         sandbox: false,
     };
-    let prepared = default_prepare(&FREEBUFF, input);
+    let prepared = FREEBUFF.prepare_launch(input);
     assert_eq!(
         prepared.recipe.base_args,
         vec!["--continue", "existing-uuid-100"],
@@ -152,5 +158,5 @@ fn resume_prepare_wires_resume_args() {
 
 #[test]
 fn produces_readable_transcript_is_false() {
-    assert!(!FREEBUFF.produces_readable_transcript());
+    assert!(!FREEBUFF.descriptor().produces_readable_transcript);
 }
