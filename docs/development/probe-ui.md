@@ -303,7 +303,10 @@ live-over-cache rules both probes must use if a snapshot store is added;
 live list methods fetch every time today. `services::github` re-exports the
 command-facing types, so handlers keep calling `services::github::...`.
 Issue-only parsing stays in `issues`; pull-request merge logic stays in
-`prs`. Repository lookup in `commands::pr` uses the shared host-path opener.
+`prs`. Repository lookup in `services::github::repository` uses the shared
+host-path opener, and the issue and pull-request wire shapes live in
+`services::github::wire` (issue #2236) — the command module imports them
+from there rather than declaring them.
 Unreadable repositories propagate errors to both feeds; only readable repos
 without a GitHub origin produce an empty list. WSL ownership trust is an exact
 `safe.directory` entry in Windows Git configuration, independent of GitHub

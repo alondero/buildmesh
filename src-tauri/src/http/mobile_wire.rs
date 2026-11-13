@@ -276,9 +276,9 @@ fn completeness() -> crate::services::github::pagination::GitHubPageCompleteness
 
 /// The issues feed: the `{items, completeness}` wrapper the desktop moved to
 /// in issue #2024.
-fn issues_feed() -> crate::commands::pr::GitHubIssueFeed {
-    crate::commands::pr::GitHubIssueFeed {
-        items: vec![crate::commands::pr::GitHubIssue {
+fn issues_feed() -> crate::services::github::wire::GitHubIssueFeed {
+    crate::services::github::wire::GitHubIssueFeed {
+        items: vec![crate::services::github::wire::GitHubIssue {
             number: 42,
             title: "Fix deadline".to_string(),
             body: "Issue details".to_string(),
@@ -293,9 +293,9 @@ fn issues_feed() -> crate::commands::pr::GitHubIssueFeed {
 }
 
 /// The pull request feed: the same `{items, completeness}` wrapper.
-fn pulls_feed() -> crate::commands::pr::GitHubPullRequestFeed {
-    crate::commands::pr::GitHubPullRequestFeed {
-        items: vec![crate::commands::pr::GitHubPullRequest {
+fn pulls_feed() -> crate::services::github::wire::GitHubPullRequestFeed {
+    crate::services::github::wire::GitHubPullRequestFeed {
+        items: vec![crate::services::github::wire::GitHubPullRequest {
             number: 42,
             title: "Fix deadline".to_string(),
             body: String::new(),
@@ -318,8 +318,8 @@ fn pulls_feed() -> crate::commands::pr::GitHubPullRequestFeed {
 
 /// The pull request feed with nothing in it: the mesh has no open pull
 /// requests.
-fn pulls_feed_empty() -> crate::commands::pr::GitHubPullRequestFeed {
-    crate::commands::pr::GitHubPullRequestFeed {
+fn pulls_feed_empty() -> crate::services::github::wire::GitHubPullRequestFeed {
+    crate::services::github::wire::GitHubPullRequestFeed {
         items: Vec::new(),
         completeness: crate::services::github::pagination::GitHubPageCompleteness {
             returned: 0,
@@ -490,21 +490,21 @@ fn fixtures() -> Vec<Fixture> {
         fixture("issue_labels", &issue_labels()),
         fixture(
             "pr_source",
-            &crate::commands::pr::PrSource {
+            &crate::services::github::wire::PrSource {
                 head_branch: "topic".to_string(),
                 base_branch: "main".to_string(),
             },
         ),
         fixture(
             "pr_mergeability",
-            &crate::commands::pr::PrMergeability {
+            &crate::services::github::wire::PrMergeability {
                 mergeable: Some(true),
                 mergeable_state: "clean".to_string(),
             },
         ),
         fixture(
             "create_pr_result",
-            &crate::commands::pr::CreatePrResult {
+            &crate::services::github::wire::CreatePrResult {
                 url: "https://example.invalid/pull/17".to_string(),
                 head_branch: "topic".to_string(),
                 base_branch: "main".to_string(),

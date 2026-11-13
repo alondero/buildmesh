@@ -307,7 +307,7 @@ pub async fn spawn_issue_agent(
 ) -> Result<crate::models::AgentNode, String> {
     let (mesh, owner, repo) = crate::commands::run_blocking("spawn_issue_agent_mesh", move || {
         let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
-        let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)
+        let (owner, repo) = crate::services::github::repository::resolve_github_owner_repo(&mesh)
             .map_err(|e| format!("{} — cannot derive issue URL", e))?;
         Ok((mesh, owner, repo))
     })
@@ -669,7 +669,7 @@ fn create_issue_node_impl_with(
     login_id: Option<String>,
 ) -> Result<(IssueNodeDraft, SpawnIntent), String> {
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
-    let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)
+    let (owner, repo) = crate::services::github::repository::resolve_github_owner_repo(&mesh)
         .map_err(|e| format!("{} — cannot derive issue URL", e))?;
     let intent = SpawnIntent::Issue(IssueContext {
         owner,
@@ -1080,7 +1080,7 @@ fn create_pr_node_impl_configured_with(
         validate_pr_spawn_inputs(&head_ref, head_repo_owner, head_repo_clone_url)?;
 
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
-    let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)
+    let (owner, repo) = crate::services::github::repository::resolve_github_owner_repo(&mesh)
         .map_err(|e| format!("{} — cannot derive PR URL", e))?;
 
     // Build the `SpawnIntent` ONCE here so the prefill the desktop draft

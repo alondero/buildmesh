@@ -142,7 +142,6 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/circuit/vocabulary_tests.rs': 'circuit::vocabulary::tests',
   'src-tauri/src/commands/git_status_bench.rs': 'commands::git_tests',
   'src-tauri/src/commands/git_status_counts_tests.rs': 'commands::git_tests::status_counts',
-  'src-tauri/src/commands/pr_tests.rs': 'commands::pr::tests',
   'src-tauri/src/db/circuit/evidence_tests.rs': 'db::circuit::evidence::tests',
   'src-tauri/src/db/circuit/history_compaction_tests.rs': 'db::circuit::history_compaction::tests',
   'src-tauri/src/db/circuit/evidence/prompt_delivery_tests.rs': 'db::circuit::evidence::prompt_delivery::tests',
@@ -331,9 +330,13 @@ export const RUST_IMPLEMENTATION_TESTS = {
   'src-tauri/src/db/circuit/evidence/waits.rs': 'db::circuit::evidence',
   'src-tauri/src/db/circuit/evidence/transition.rs': 'db::circuit::evidence',
   'src-tauri/src/db/circuit/evidence/effects.rs': 'db::circuit::evidence',
-  'src-tauri/src/services/github/feeds.rs': 'commands::pr',
-  'src-tauri/src/services/github/pr_workflow.rs': 'commands::pr',
-  'src-tauri/src/services/github/repository.rs': 'commands::pr',
+  // The GitHub service files carry no tests of their own: the suite the
+  // `services::github` module root declares (`pr_tests`) covers them, and
+  // it moved here from `commands::pr` with the functions it exercises
+  // (issue #2236).
+  'src-tauri/src/services/github/feeds.rs': 'services::github::pr_tests',
+  'src-tauri/src/services/github/pr_workflow.rs': 'services::github::pr_tests',
+  'src-tauri/src/services/github/repository.rs': 'services::github::pr_tests',
   // The committed schema snapshot. It is not Rust, so the path filter cannot
   // scope it, and without an entry the scoped check falls back to the whole
   // lib suite. The test that owns it is the seam test.
