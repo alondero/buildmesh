@@ -17,7 +17,7 @@ Activating a node focuses its terminal. The xterm chunk can still be loading, so
 `TerminalRegistry.getOrCreate` creates a `PendingCreation` alongside the in-flight `doCreate` promise, and every resource `doCreate` acquires is registered with that record as it is acquired: the xterm, its resize scheduler, the writer sink, the font-size and theme entries, both `listen` handles, and the binary PTY Channel. `dispose(nodeId)` marks an in-flight creation cancelled and releases what it already owns, so a node deleted while the lazy chunk fetch, a listener registration or the Channel subscription is still in flight never publishes a terminal and never retains a writer entry, a font-size or theme entry, or a listener. `doCreate` checkpoints after each await, abandons the creation, and — because the record is already closed — releases anything a late await acquires instead of parking it. A failure at any stage unwinds the same list, and the unsubscribe for the Channel is chained *behind* its subscribe so a deletion mid-registration still drops the Channel instead of racing it. The record is dropped when the creation settles; there is deliberately no deleted-id tombstone map, and `detach` never cancels anything — an unmount or mesh switch must leave the surviving node's terminal untouched. `destroy()` cancels in-flight creations and releases a module-level `listen` handle that resolves after teardown. `BuildRunTerminalRegistry` reaches the same outcomes through its own `PendingCreation` record plus the per-session queue.
 
 ## xterm + addon lazy-load (issue #1568)
-`@xterm/xterm` and the five `@xterm/addon-*` packages add ~430 kB minified / ~100 kB gzip to the desktop entry chunk if statically imported — too big to pay for users who never open a canvas. `TerminalRegistry.doCreate` and `BuildRunTerminalRegistry.doCreate` keep the runtime imports behind `await import(...)` inside the function body and use `import type { Terminal }` (and the other addon classes) at module scope, so Rollup erases the types and the dynamic imports emit a separate chunk fetched only when a terminal pane is first attached. `WebglRendererPool.activate` dynamic-imports `loadWebglRenderer` (which carries `@xterm/addon-webgl`); the pool reserves the LRU slot synchronously and schedules the renderer attach inside the awaited promise. **Do not** revert to static `@xterm/xterm` imports — see the budget cap at `scripts/bundle-budget.json`; the entry chunk's ceiling is enforced by `scripts/check-bundle-size.mjs` and CI. The budget bounds *how large* the entry chunk may get, not *what belongs in it*, so the split itself is gated separately by `scripts/check-bundle-composition.mjs`: it fails when a forbidden module's lazy chunk disappears (its code was inlined into the entry chunk) or becomes reachable through a static `import` edge, and names the eager import that caused it. Its forbidden list is every module the app reaches through `import()` — the xterm packages plus the lazy `loadUnicode11Widths` wrapper and the lazy Probe tabs — so adding a terminal dependency that should stay lazy means adding it there too. Two pre-existing Vite warnings remain (`Terminal.tsx` and `agentNodeStore.ts` are both statically and dynamically imported) because the dynamic imports in `meshStore.deleteMesh` are load-bearing workarounds for the `meshStore → agentNodeStore → Terminal.tsx → uiStore → meshStore` ESM cycle (`src/stores/meshStore.ts:5`); clearing them requires restructuring the store layer, which is out of scope for the cold-only-surface mandate.
+`@xterm/xterm` and the five `@xterm/addon-*` packages add ~430 kB minified / ~100 kB gzip to the desktop entry chunk if statically imported — too big to pay for users who never open a canvas. `TerminalRegistry.doCreate` and `BuildRunTerminalRegistry.doCreate` keep the runtime imports behind `await import(...)` inside the function body and use `import type { Terminal }` (and the other addon classes) at module scope, so Rollup erases the types and the dynamic imports emit a separate chunk fetched only when a terminal pane is first attached. `WebglRendererPool.activate` dynamic-imports `loadWebglRenderer` (which carries `@xterm/addon-webgl`); the pool reserves the LRU slot synchronously and schedules the renderer attach inside the awaited promise. **Do not** revert to static `@xterm/xterm` imports — see the budget cap at `scripts/bundle-budget.json`; the entry chunk's ceiling is enforced by `scripts/check-bundle-size.mjs` and CI. The budget bounds *how large* the entry chunk may get, not *what belongs in it*, so the split itself is gated separately by `scripts/check-bundle-composition.mjs`: it fails when a forbidden module's lazy chunk disappears (its code was inlined into the entry chunk) or becomes reachable through a static `import` edge, and names the eager import that caused it. Its forbidden list is every module the app reaches through `import()` — the xterm packages plus the lazy `loadUnicode11Widths` wrapper, the lazy Probe tabs, and the three cold-only surfaces that carry their own libraries (the circuit canvas editor, the settings modal and the remote-access modal, all behind `src/components/lazySurfaces.ts`) — so adding a dependency that should stay lazy means adding it there too. Two pre-existing Vite warnings remain (`Terminal.tsx` and `agentNodeStore.ts` are both statically and dynamically imported) because the dynamic imports in `meshStore.deleteMesh` are load-bearing workarounds for the `meshStore → agentNodeStore → Terminal.tsx → uiStore → meshStore` ESM cycle (`src/stores/meshStore.ts:5`); clearing them requires restructuring the store layer, which is out of scope for the cold-only-surface mandate.
 
 ## Link clicks have exactly one owner
 A press on a terminal link reaches two independent owners inside xterm. The `Linkifier` activates the link — an OSC 8 hyperlink through the `linkHandler` option (what Codex emits), a plain printed URL through `WebLinksAddon` — and, whenever the agent's TUI has turned mouse tracking on (`CSI ? 1003 h` with `CSI ? 1006 h`, which Codex does), xterm *also* forwards the press to the PTY as an SGR mouse report. Codex answers a press on its own OSC 8 hyperlink by opening that URL itself (`codex-rs/tui/src/tui/link_pointer.rs` → `open_url_in_browser`), so one click in a Codex session opened two browser tabs, while a harness printing plain URLs only ever reached ours.
@@ -141,9 +141,74 @@ The PTY reader thread still sees every OS `read()` (session-id capture, auto-nam
 
 The first-spawn path is the load-bearing one. The frontend subscribes as soon as the xterm exists, then `prepare_context` calls `kill_agent` even when there is no process. Unregistering there drops the Channel; the new reader's `ensure()` creates a disconnected pending sink and the viewport shows a cursor with no text. `kill_session` / the PTY-reader epilogue / `close_build_run` must not unregister. Pins: `kill_session_without_process_preserves_output_subscription`, `replacement_reader_reuses_the_live_channel`, `process_lifecycle_does_not_unregister_node_output_subscription`, `agent_and_build_run_maps_do_not_cross_talk`. Frontend: subscribe on `TerminalRegistry` / `BuildRunTerminalRegistry` create, unsubscribe only on `dispose` (never on remount, auto-spawn, detach, or `getOrCreate` reuse).
 
-Tauri 2.11's raw Channel transport has a payload-shape boundary: frames smaller than 1 KiB reach JavaScript directly as an `ArrayBuffer`, while frames at or above 1 KiB use the fetch path and arrive as a `Response`. `subscribeAgentOutput` / `subscribeBuildRunOutput` (shared `subscribeRawPtyOutput`) must consume `Response.arrayBuffer()` asynchronously and serialize those reads with later frames so terminal bytes cannot overtake each other. The boundary-to-xterm regression is pinned in `tests/integration/agent-terminal-auto-spawn.test.tsx` and `tests/unit/build-run-terminal-persistence.test.tsx`.
+Tauri's raw Channel transport uses eval below 1 KiB and fetch for larger frames. The pinned runtime materializes both paths as `ArrayBuffer`; older fetch paths may deliver a `Response`. `subscribeAgentOutput` / `subscribeBuildRunOutput` (shared `subscribeRawPtyOutput`) must consume Response bodies asynchronously and serialize those reads with later frames so terminal bytes cannot overtake each other. The boundary-to-xterm regression is pinned in `tests/integration/agent-terminal-auto-spawn.test.tsx` and `tests/unit/build-run-terminal-persistence.test.tsx`.
+
+The raw transport returns cumulative credit through `acknowledge_pty_output`
+only after ordered delivery to the consumer. `pty::output_window` admits at
+most 64 frames and 256 KiB of unacknowledged raw payload per subscription,
+with each frame at most 32 KiB, including Tauri's fetch storage, Channel reordering, and
+frontend body reads/queued frames. Tiny frames consume a frame slot too.
+Acknowledgements are coalesced in a microtask with at most one IPC in flight;
+small direct frames still reach the consumer synchronously. Both maps scope
+credit and cancellation by Channel id, so stale completions cannot release a
+replacement's credit or close its subscription. Decode or delivery failure
+closes that subscription rather than granting credit for unread bytes.
+
+At capacity the dedicated batcher waits on a condition variable without
+holding the sink or session-map lock. The existing 256-entry reader queue
+then fills (at most 2 MiB in 8 KiB reads), backpressuring the OS PTY. There is
+no new worker queue. Count one blocked batch (less than 40 KiB with current
+batching thresholds) and the reader's current 8 KiB read separately. Payload
+copies during IPC/body materialization may temporarily duplicate the 256 KiB
+window; these bounds describe retained logical payload, not allocator traffic
+or process RSS. Pre-subscription history retains its existing 4 MiB cap and
+is replayed through the same credit window ahead of live bytes. Registration
+can temporarily hold both the history and its filtered replay (up to 8 MiB);
+the replay backing allocation can remain until replay completes. TerminalWriter's budgets and
+xterm scrollback are additional, independent storage.
+
+Disposal and replacement clear frontend queued messages and consumer references
+and close the old credit window, waking blocked senders. A Response reader is
+owned and cancelled, including an in-progress read; legacy arrayBuffer-only
+messages use a cancellation race. The active stream decoder has one additional
+32 KiB scratch buffer. Teardown captures the original subscription promise,
+so cleanup delayed by registration still targets its own Channel.
+
+Each process batcher has a cancellation flag. Deliberate process teardown sets
+that flag and wakes credit waits before joining the reader; obsolete queued
+output from that killed incarnation is drained without entering the Channel.
+This prevents repeated retries from retaining an old reader queue per attempt.
+The subscription and its outstanding window survive. Process EOF does not
+close it: the final batch drains when credit returns, and the persistent
+terminal can receive output from the next process incarnation.
 
 `TerminalWriter` (`src/components/Terminal/TerminalWriter.ts`) buffers output per node behind one `requestAnimationFrame`, and it carries three independent budgets, because that flush scheduler suspends whenever the window is hidden. Bytes (`MAX_PENDING_BYTES`, 4 MiB) bound payload, chunk objects (`MAX_PENDING_CHUNKS`, 4096) bound the per-chunk headers a byte count cannot see, and in-flight parses (`MAX_INFLIGHT_WRITES`, 4) bound what xterm has been handed but not yet parsed. Eviction advances a head index and overwrites each dropped slot, so it is amortized constant-time and the discarded payload is released immediately; `slice` compaction keeps the backing array near twice the live window. The in-flight budget depends on xterm's parse-completion callback, so both registries register a completion-aware sink — a sink that ignores `done` cannot be budgeted and is therefore never deferred. While the cap is reached the writer holds its queue and does NOT re-arm a frame: that callback is the only wakeup, so a slow parse costs no polling and a finished burst costs no wakeup when nothing is waiting. The interactive fast path ignores the budget in both directions — a keystroke echo is never deferred and never consumes a bulk slot. The budgets bound queued work only: they must never dispose a hidden persistent terminal or shrink scrollback. `npm run bench:terminal-writer` measures append time, retained heap, queued chunks and in-flight depth against the real module; issue #2018 moved the paused-window case from ~11 s to ~65 ms for 200k lines and cut peak unparsed payloads from 200 to 4.
 
+The browser mobile screen (`src/mobile/screens/TerminalScreen.tsx`) and the Android WebView bundle (`android/terminal/terminal.js`) register a completion-aware sink on their own writer, so a phone frame goes through the same budgets. The browser screen still disposes its xterm on unmount. That terminal is created for the visit and is not retained by `TerminalManager`, so disposing it does not blank a later visit. Unmount also unregisters the writer and releases the scroll listener.
+
 Terminal container resize is coalesced by the shared `TerminalResizeScheduler`, used by both agent and build/run registries. It waits for 200 ms without a size change before fitting, so pane dragging causes one PTY resize after the drag settles. A horizontal xterm resize reflows normal-buffer scrollback, and full-screen TUIs redraw for the final PTY size. Codex uses its fullscreen transcript mode rather than inline scrollback, avoiding a transcript clear and replay on width changes; history navigation belongs to Codex while it is running. Keep DOM measurement on the next animation frame and do not restore per-observation or per-frame `fit()` calls.
 
+
+The native transport probe is `node scripts/bench-pty-output.mjs 9237`, after
+launching the dev profile with `scripts/run-dev.ps1 -Detach -CdpPort 9237`.
+It bundles the production subscriber with an observation hook at the invoke
+boundary, exercises both sink maps with deterministic raw frames, and holds
+one body-read promise while the real producer fills its window. Its
+`debug_pump_pty_output` command is compiled only for debug/dev-tools builds.
+The output reports frame/payload depth, byte-order validation, throughput,
+JavaScript heap/backing storage, and command-to-consumer latency around the
+1 KiB boundary. Those timings exclude OS PTY and xterm rendering latency;
+JavaScript heap measurements are not process RSS or allocator traffic.
+
+Set `BUILDMESH_PTY_PROBE_PATTERN=small` for the audit-shaped flood: one held
+2 KiB body followed by 20,000 distinct 512-byte frames. Set
+`BUILDMESH_PTY_PROBE_FRAMES` to vary the total frame count (minimum 65). The default mixes
+512-byte, 2 KiB, 32 KiB, three-byte and one-byte frames. For a baseline native
+app with the same dev-only pump command backported, pass its commit as the
+second positional argument; the probe then bundles that revision's subscriber.
+Process memory samples report Windows working sets and private committed bytes
+for the app and its WebView processes. Summed working sets can count shared
+pages more than once; they are not unique RSS. The echo phase launches actual
+Agent and Build/Run PowerShell PTYs with xterm answering terminal queries,
+and measures input invoke to received echo, including OS PTY and batching but
+excluding final display presentation.

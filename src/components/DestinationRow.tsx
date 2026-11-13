@@ -15,7 +15,7 @@ export function DestinationRow({ icon: Icon, label, description, active = false,
       type="button"
       title={description ? `${label}: ${description}` : label}
       aria-description={description}
-      className={`flex min-h-[24px] w-full items-center gap-2 rounded-md border-l-2 px-2 py-1 text-left text-xs transition-colors ${
+      className={`flex min-h-[24px] w-full items-center gap-2 rounded-md border-l-2 px-2 py-1 text-left text-label transition-colors ${
         active
           ? 'border-l-accent-cyan bg-bg-selection text-text-primary'
           : 'border-l-transparent text-text-primary hover:bg-bg-card-hover'

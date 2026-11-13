@@ -52,6 +52,19 @@ describe('tauri-mock harness', () => {
     await expect(invoke('this_command_has_no_fixture')).rejects.toThrow('this_command_has_no_fixture');
   });
 
+  it('answers the mesh scratchpad read instead of rejecting it', async () => {
+    install();
+    const invoke = window.__TAURI_INTERNALS__.invoke;
+    // The Probe panel's Scratch Pad lens reads the notes when it mounts. An
+    // unmocked command rejects, the app logs the failure, and the ui-shot
+    // console gate then fails a render that actually succeeded.
+    await expect(invoke('get_mesh_scratchpad', { meshId: 1 })).resolves.toBe('');
+    // A fixture that models the notes still wins.
+    install({ get_mesh_scratchpad: 'notes' });
+    await expect(window.__TAURI_INTERNALS__.invoke('get_mesh_scratchpad', { meshId: 1 }))
+      .resolves.toBe('notes');
+  });
+
   it('gives only explicitly modelled plugin commands benign defaults', async () => {
     install();
     const invoke = window.__TAURI_INTERNALS__.invoke;

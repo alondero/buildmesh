@@ -38,6 +38,8 @@ For the Circuit side-effect inventory and restart/replay policy, see the
 For the Rust backend's seams — which module owns git access, why the stepper is
 pure, where the large files still are — see the
 [Rust module map](module-map.md).
+For implicit and explicit workflow states across desktop, backend, web mobile
+and Android, see the [state-machine inventory](state-machines.md).
 For a Codex model-switch report checkpoint, see the
 [run 293 investigation](../archive/2026-10/circuit-run-293-codex-context.md).
 For Settings keyboard behavior, compact sidebar targets and the theme inventory,
@@ -119,7 +121,33 @@ when a path named in a skill does not exist.
   in the pull request.
 - Add screenshots or browser evidence for layout, accessibility, or interaction
   changes when the engineering contract calls for it.
+- Place an anchored overlay (help tip, popover, menu) so it stays inside the
+  area the user can see: measure in the coordinate space the panel is
+  positioned in — a canvas-relative drop point is not a viewport coordinate —
+  flip or clamp it against that space, and bound its height so long content
+  scrolls inside the panel instead of running off the edge. A panel inside a
+  scrolling ancestor is clipped by that ancestor whatever its z-index, so
+  portal it out first. `src/lib/overlayLayout.ts` owns that geometry and
+  `useAnchoredPosition({ constrainToViewport: true })` applies it to a
+  portalled menu.
 - Run `npm run check:docs` and the product checks appropriate to the boundary.
+
+### Changing a theme token
+
+- A colour token is declared twice in `src/App.css` — in `@theme` (dark) and
+  re-pointed by the `[data-theme="light"]` override. Change both, or the
+  utility flips at the cascade in one theme only.
+- Record the new value in `DESIGN.md`'s accent/colour table, and mirror it
+  into `src/mobile/styles.css` and `Theme.kt` if the phone client paints it.
+- The token-level contrast suites compare a foreground with a *neutral*
+  surface. When the token is painted on a composed one — the Mesh-tinted node
+  header (the Mesh colour at 8% over the card), a hover wash, a filled chip —
+  measure the composition, not the token:
+  `tests/unit/review-label-contrast.test.ts` recomposes the node header and
+  pins the Review label, the automation chip, the resume glyph, the review
+  dialog's primary action and the other violet-text surfaces in both themes
+  (issue #2737), plus the violet labels outside the node header — the Agent
+  History worktree name and the Circuits join-category label (issue #2745).
 
 ## Architecture documents
 

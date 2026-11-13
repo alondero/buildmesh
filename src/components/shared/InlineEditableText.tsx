@@ -8,6 +8,8 @@ interface InlineEditableTextProps {
   style?: React.CSSProperties;
   maxLength?: number;
   ariaLabel?: string;
+  /** When supplied, Enter/Space select the item and F2 starts renaming. */
+  onActivate?: () => void;
   /// Optional DOM id for the display-state span. Mirrors MeshItem's
   /// `mesh-item-name-${id}` pattern so a host row's context-menu
   /// `aria-labelledby` points at a name-only element (not the whole
@@ -40,6 +42,7 @@ export function InlineEditableText({
   style,
   maxLength = 80,
   ariaLabel = 'Rename',
+  onActivate,
   id,
 }: InlineEditableTextProps) {
   const [editing, setEditing] = useState(false);
@@ -117,15 +120,17 @@ export function InlineEditableText({
       id={id}
       role="button"
       tabIndex={0}
-      aria-label={ariaLabel}
+      aria-label={onActivate ? `Select ${value}` : ariaLabel}
       onDoubleClick={(e) => {
         e.stopPropagation();
         enterEdit();
       }}
       onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
+        if (e.key === 'F2' || e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
-          enterEdit();
+          e.stopPropagation();
+          if (onActivate && e.key !== 'F2') onActivate();
+          else enterEdit();
         }
       }}
       className={className}

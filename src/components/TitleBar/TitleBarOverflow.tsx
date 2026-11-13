@@ -97,7 +97,7 @@ export function TitleBarOverflow({ includeUtilities = false }: { includeUtilitie
           role="dialog"
           aria-label="Tools"
           data-testid="titlebar-overflow-panel"
-          className="absolute right-0 top-full z-50 mt-1 max-h-[calc(100dvh-4rem)] w-72 overflow-y-auto rounded-md border border-border-default bg-bg-card p-1 shadow-md animate-scale-in origin-top-right"
+          className="absolute right-0 top-full z-50 mt-1 max-h-[calc(100dvh-4rem)] w-84 overflow-y-auto rounded-md border border-border-default bg-bg-card p-1 shadow-md animate-scale-in origin-top-right"
         >
           {includeUtilities && (
             <>

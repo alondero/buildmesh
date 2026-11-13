@@ -33,10 +33,13 @@ import {
   edgeKey,
   traversedEdgeKeys,
   stepDurationMs,
-  layoutPositions,
   sampleValueForPath,
   stableGraphJson,
 } from '../../src/components/Circuits/circuitGraphModel';
+// The Dagre auto-layout moved to its own module (issue #2757, bundle size):
+// `circuitGraphModel` is imported eagerly, the layout is only used by the
+// lazy canvas editor.
+import { layoutPositions } from '../../src/components/Circuits/circuitLayout';
 
 const ALL_DISCRIMINATORS = [
   'manual',

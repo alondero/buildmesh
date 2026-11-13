@@ -215,9 +215,14 @@ This is the harness half of the backend Autopilot gate
 (`src-tauri/src/autopilot/compatibility.rs`, reason `MissingAttentionHook` /
 `PlainTerminal`), so the same predicate that decides whether a Mesh may be
 Autopilot-managed also decides who may review. The frontend mirror is
-`blocksReviewCircuit` in `src/components/Circuits/harnessCapabilities.ts`. It
-gates the Agent Node title-bar review control and the two interactive reviewer
-provider pickers (the Start Review dialog and Settings → Providers).
+`blocksReviewCircuit` in `src/components/Circuits/harnessReviewEligibility.ts`.
+It reads the narrow generated artifact
+(`src/types/generated/HarnessReviewEligibility.ts`) rather than the full
+capability catalogue, because the surfaces that ask the question are rendered
+on first paint and must not carry the whole catalogue into the eager entry
+chunk (issue #2757). It gates the Agent Node title-bar review control and the
+two interactive reviewer provider pickers (the Start Review dialog and
+Settings → Providers).
 
 It deliberately does **not** gate the Circuit Inspector's provider field on a
 reviewer agent node. Authored Circuits carry their reviewer provider in the
@@ -227,6 +232,16 @@ reviewer harness has no turn signal — such a run advances only if nothing wait
 on that agent. The gate also passes any provider id it cannot resolve, because
 the column holds user-defined harness profile ids that resolve to a real
 executor at the spawn seam.
+
+One behaviour change came with the move to the narrow artifact (issue #2757).
+The predicate used to test membership with `normalised in HARNESS_CAPABILITIES`,
+which also matches `Object.prototype` names: a provider id of `"toString"` or
+`"constructor"` resolved to a harness that does not exist and **blocked** a
+review the app could not judge. The membership test is now against the id list
+(`HARNESS_IDS.includes(...)`), so such an id resolves to nothing and the gate
+passes it — the behaviour the paragraph above already describes. Every real
+harness id, spawn-option id, legacy id and profile alias resolves exactly as
+before.
 
 | Harness | Turn signal | Review circuit |
 |---|---|---|

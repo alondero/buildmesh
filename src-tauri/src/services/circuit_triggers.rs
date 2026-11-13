@@ -13,7 +13,11 @@
 //! - **Interval pass** (every fast tick): fires an Interval-triggered
 //!   circuit when its configured cooldown has elapsed since its newest
 //!   run. The newest-run timestamp is the anchor, so restarts cannot
-//!   shortcut the cooldown.
+//!   shortcut the cooldown. The pass keeps each parsed graph keyed by
+//!   its `graph_json` and the earliest next-fire instant. A tick whose
+//!   cooldowns are all still ahead does not list circuits or read
+//!   anchors. A wake (mint, enable, disable, graph save) or a process
+//!   restart re-reads the anchor.
 //!
 //! Both passes are thin impure skins over pure decision cores
 //! ([`interval_should_fire`], [`parse_sqlite_datetime`], the identity
@@ -22,6 +26,7 @@
 //! on the circuit worker's dedicated OS thread (blocking reqwest +
 //! SQLite are fine there), invoked from its tick loop.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
@@ -372,7 +377,8 @@ fn repo_client_for(circuit: &AutopilotCircuit) -> Option<(String, String, GitHub
             return None;
         }
     };
-    let (owner, repo) = match crate::commands::pr::resolve_github_owner_repo(&mesh) {
+    let (owner, repo) = match crate::services::github::repository::resolve_github_owner_repo(&mesh)
+    {
         Ok(pair) => pair,
         Err(e) => {
             tracing::warn!(
@@ -453,11 +459,72 @@ fn mint_unseen_runs(
     }
 }
 
+/// Parsed graphs and the earliest next fire for this worker thread.
+///
+/// The schedule is thread-local so parallel tests, each with their own
+/// database, do not share a cooldown. A failed list leaves it untouched:
+/// dropping a warm schedule on a busy reader pool would forget cooldowns
+/// the next tick still needs, and marking it loaded would hide the retry.
+#[derive(Default)]
+struct IntervalSchedule {
+    loaded: bool,
+    refresh: bool,
+    earliest: Option<SystemTime>,
+    graphs: HashMap<String, CircuitGraph>,
+}
+
+thread_local! {
+    static INTERVAL_SCHEDULE: RefCell<IntervalSchedule> =
+        RefCell::new(IntervalSchedule::default());
+}
+
+/// The worker calls this once per loop. A condvar wake (`woke`) invalidates
+/// the schedule so the following pass re-reads anchors; a timeout tick does
+/// not. Tests call it on their own thread to model that loop.
+pub(crate) fn note_interval_wake(woke: bool) {
+    if !woke {
+        return;
+    }
+    INTERVAL_SCHEDULE.with(|slot| slot.borrow_mut().refresh = true);
+}
+
+/// Drop the in-memory schedule so the next pass reads from the database.
+///
+/// A process restart already starts cold. Tests call this when an isolated
+/// database guard drops, so a recycled libtest thread does not keep the
+/// previous test's cooldowns.
+#[cfg(test)]
+// allow-test-in-production: isolated-db teardown and the interval suite clear
+// this thread's schedule; a process restart starts cold without calling it.
+pub(crate) fn clear_interval_schedule() {
+    INTERVAL_SCHEDULE.with(|slot| *slot.borrow_mut() = IntervalSchedule::default());
+}
+
+fn interval_schedule_is_idle(now: SystemTime) -> bool {
+    INTERVAL_SCHEDULE.with(|slot| {
+        let schedule = slot.borrow();
+        if !schedule.loaded || schedule.refresh {
+            return false;
+        }
+        match schedule.earliest {
+            Some(due) => now < due,
+            None => true,
+        }
+    })
+}
+
 /// One interval pass (fast-tick cadence): fire every enabled
 /// Interval-triggered circuit whose cooldown has elapsed.
 pub fn run_interval_pass() {
+    run_interval_pass_at(SystemTime::now());
+}
+
+fn run_interval_pass_at(now: SystemTime) {
+    if interval_schedule_is_idle(now) {
+        return;
+    }
     let circuits = match db::list_enabled_circuits() {
-        Ok(c) => c,
+        Ok(circuits) => circuits,
         Err(e) => {
             tracing::warn!(
                 "circuits: interval pass could not list enabled circuits: {}",
@@ -466,59 +533,119 @@ pub fn run_interval_pass() {
             return;
         }
     };
-    let now = SystemTime::now();
-    for circuit in circuits {
-        let graph = match CircuitGraph::from_json(&circuit.graph_json) {
-            Ok(g) => g,
-            Err(_) => continue, // loudly logged by the poll pass; stay silent here
-        };
-        let interval_seconds = graph.nodes.iter().find_map(|n| match &n.kind {
-            CircuitNodeKind::Interval { interval_seconds } => Some(*interval_seconds),
-            _ => None,
-        });
-        let Some(interval_seconds) = interval_seconds else {
+    // Take the schedule only after the list succeeds. A panic while deciding
+    // leaves the default (cold) schedule, so the next tick reads again.
+    let mut schedule = INTERVAL_SCHEDULE.with(|slot| std::mem::take(&mut *slot.borrow_mut()));
+    schedule.refresh = false;
+    schedule.loaded = true;
+    let mut present = HashSet::new();
+    let mut earliest: Option<SystemTime> = None;
+    for circuit in &circuits {
+        present.insert(circuit.graph_json.clone());
+        let Some(graph) = cached_interval_graph(&mut schedule, &circuit.graph_json) else {
             continue;
         };
-        // A failed lookup is *unknown*, not "never fired" (issue #1533):
-        // `interval_should_fire(None, …)` means "this circuit has never run",
-        // so a busy reader pool would mint a new interval run with a fresh
-        // timestamp identity — a second run for a circuit that already has
-        // one. Skip this circuit's decision instead: the next pass retries.
-        let last = match db::latest_circuit_run_created_at(circuit.id) {
-            Ok(last) => last,
-            Err(e) => {
-                tracing::warn!(
-                    "circuits: circuit {} latest-run lookup failed, skipping this interval pass: {}",
-                    circuit.id,
-                    e
-                );
-                continue;
-            }
+        let Some(interval_seconds) = interval_seconds_of(&graph) else {
+            continue;
         };
-        let last_anchor = last.as_deref().and_then(parse_sqlite_datetime);
-        if interval_should_fire(last_anchor, interval_seconds, now) {
-            let identity = format!("interval:{}", now_millis());
-            let context = base_context(&circuit);
-            match db::create_circuit_run(
+        if let Some(due) = interval_due(circuit, interval_seconds, now) {
+            earliest = Some(match earliest {
+                Some(current) => current.min(due),
+                None => due,
+            });
+        }
+    }
+    schedule.graphs.retain(|json, _| present.contains(json));
+    schedule.earliest = earliest;
+    INTERVAL_SCHEDULE.with(|slot| *slot.borrow_mut() = schedule);
+}
+
+fn cached_interval_graph(schedule: &mut IntervalSchedule, json: &str) -> Option<CircuitGraph> {
+    if let Some(graph) = schedule.graphs.get(json) {
+        return Some(graph.clone());
+    }
+    let graph = CircuitGraph::from_json(json).ok()?;
+    schedule.graphs.insert(json.to_string(), graph.clone());
+    Some(graph)
+}
+
+fn interval_seconds_of(graph: &CircuitGraph) -> Option<i64> {
+    graph.nodes.iter().find_map(|node| match &node.kind {
+        CircuitNodeKind::Interval { interval_seconds } => Some(*interval_seconds),
+        _ => None,
+    })
+}
+
+/// When this circuit next becomes due, if it has a schedule at all.
+///
+/// `UNIX_EPOCH` means "still due": the anchor read or the mint failed, so
+/// the next tick must try again and must not treat the failure as a fire.
+/// A non-positive interval, an unreadable graph, and a cooldown that cannot
+/// be represented are omitted. Omitting them is not the same as epoch:
+/// epoch would make every later tick hit the database.
+fn interval_due(
+    circuit: &AutopilotCircuit,
+    interval_seconds: i64,
+    now: SystemTime,
+) -> Option<SystemTime> {
+    if interval_seconds <= 0 {
+        return None;
+    }
+    // A failed lookup is *unknown*, not "never fired" (issue #1533):
+    // `interval_should_fire(None, …)` means "this circuit has never run",
+    // so a busy reader pool would mint a new interval run with a fresh
+    // timestamp identity — a second run for a circuit that already has
+    // one. Skip this circuit's decision instead: the next pass retries.
+    let last = match db::latest_circuit_run_created_at(circuit.id) {
+        Ok(last) => last,
+        Err(e) => {
+            tracing::warn!(
+                "circuits: circuit {} latest-run lookup failed, skipping this interval pass: {}",
                 circuit.id,
-                circuit.mesh_id,
-                &identity,
-                &context.to_json().unwrap_or_else(|_| "{}".to_string()),
-            ) {
-                Ok(run_id) => {
-                    tracing::info!(
-                        "circuits: circuit {} ({}) interval fired ({}s cadence) → run {}",
-                        circuit.id,
-                        circuit.name,
-                        interval_seconds,
-                        run_id
-                    );
-                    super::circuit_worker::wake_circuit_worker();
-                }
-                Err(e) => {
-                    tracing::warn!("circuits: interval run creation failed: {}", e);
-                }
-            }
+                e
+            );
+            return Some(SystemTime::UNIX_EPOCH);
+        }
+    };
+    let last_anchor = last.as_deref().and_then(parse_sqlite_datetime);
+    if !interval_should_fire(last_anchor, interval_seconds, now) {
+        return last_anchor.and_then(|anchor| checked_interval_end(anchor, interval_seconds));
+    }
+    if mint_interval_run(circuit, interval_seconds) {
+        checked_interval_end(now, interval_seconds)
+    } else {
+        Some(SystemTime::UNIX_EPOCH)
+    }
+}
+
+fn checked_interval_end(anchor: SystemTime, interval_seconds: i64) -> Option<SystemTime> {
+    let seconds = u64::try_from(interval_seconds).ok()?;
+    anchor.checked_add(Duration::from_secs(seconds))
+}
+
+fn mint_interval_run(circuit: &AutopilotCircuit, interval_seconds: i64) -> bool {
+    let identity = format!("interval:{}", now_millis());
+    let context = base_context(circuit);
+    match db::create_circuit_run(
+        circuit.id,
+        circuit.mesh_id,
+        &identity,
+        &context.to_json().unwrap_or_else(|_| "{}".to_string()),
+    ) {
+        Ok(run_id) => {
+            tracing::info!(
+                "circuits: circuit {} ({}) interval fired ({}s cadence) → run {}",
+                circuit.id,
+                circuit.name,
+                interval_seconds,
+                run_id
+            );
+            super::circuit_worker::wake_circuit_worker();
+            true
+        }
+        Err(e) => {
+            tracing::warn!("circuits: interval run creation failed: {}", e);
+            false
         }
     }
 }
@@ -618,3 +745,7 @@ mod tests {
         assert_eq!(unseen_identities(&fetched, &other_circuits_known).len(), 1);
     }
 }
+
+#[cfg(test)]
+#[path = "circuit_triggers_interval_tests.rs"]
+mod interval_tests;

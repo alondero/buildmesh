@@ -145,6 +145,21 @@ describe('runSubject — which node is this run about?', () => {
       .toEqual({ label: 'feat: x', agentNodeId: null });
   });
 
+  it('names each built-in review from its own source, including retained history', () => {
+    for (const source of ['Fix parser', 'Improve brakes']) {
+      const context = { 'source.review_preset': '1', 'source.name': source };
+      expect(runSubject(run({ source_agent_node_id: 3991 }), [], context, nodes, () => null))
+        .toEqual({ label: `Review: ${source}`, agentNodeId: null });
+    }
+  });
+
+  it('uses the live source as a review fallback when the recorded name is blank', () => {
+    expect(runSubject(run({ source_agent_node_id: 3991 }), [], {
+      'source.review_preset': '1', 'source.name': '  ',
+    }, nodes, () => 'Fix parser'))
+      .toEqual({ label: 'Review: Fix parser', agentNodeId: 3991 });
+  });
+
   it('says nothing specific when the run never bound an agent', () => {
     expect(runSubject(run(), [], {}, nodes, () => null)).toEqual({ label: null, agentNodeId: null });
   });

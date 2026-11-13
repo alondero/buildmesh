@@ -30,6 +30,30 @@ interface FormatOptions {
 const DEFAULT_JUST_NOW_BELOW = 30;
 
 /**
+ * Parse a SQLite `datetime('now')` timestamp into a `Date`.
+ *
+ * SQLite writes UTC but WITHOUT a zone designator ("2026-08-22 10:05:00").
+ * V8's `Date.parse` happily accepts that shape and reads it as *local* time,
+ * so a naive parse is silently wrong by the host's UTC offset — every age
+ * computed from it drifts with the machine's timezone. Force the zone on a
+ * zoneless timestamp, and leave an explicitly-zoned ISO-8601 string to
+ * `Date.parse` (appending "Z" to it would yield "…ZZ" → NaN).
+ *
+ * `null` when the value is not a timestamp at all, so the caller can print
+ * the raw value instead of "NaNd ago".
+ *
+ * The shape is the same one `components/Circuits/circuitGraphModel.ts`
+ * recognises for ledger timestamps; this is the shared home for it.
+ */
+export function parseSqliteTimestamp(value: string): Date | null {
+  const ZONELESS_TIMESTAMP = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?$/;
+  const parsed = ZONELESS_TIMESTAMP.test(value)
+    ? new Date(value.replace(' ', 'T') + 'Z')
+    : new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+/**
  * Format the gap between `then` and `now` as a relative-age label.
  *
  * Pure — `now` is taken as an arg so React renderers (and tests)

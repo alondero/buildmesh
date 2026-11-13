@@ -35,42 +35,76 @@ pub(in crate::db::circuit) fn recovery_view(
     db: &Connection,
     run: &crate::models::AutopilotCircuitRun,
 ) -> Result<crate::circuit::stepper::RunView, DbError> {
+    let steps = crate::db::circuit::ledger::list_circuit_run_steps_inner(db, run.id)?;
+    let graph = run_graph(db, run.id)?;
+    recovery_view_from(db, run, &graph, &steps)
+}
+
+/// Assemble the recovery view from a graph and step list the caller already
+/// holds. An evidence read loads each once and passes them here.
+fn recovery_view_from(
+    db: &Connection,
+    run: &crate::models::AutopilotCircuitRun,
+    graph: &crate::circuit::model::CircuitGraph,
+    steps: &[crate::models::AutopilotCircuitRunStep],
+) -> Result<crate::circuit::stepper::RunView, DbError> {
     use crate::circuit::{
         model::StepOutcome,
         stepper::{RunState, RunView, StepStatus, StepView},
     };
-    let steps = crate::db::circuit::ledger::list_circuit_run_steps_inner(db, run.id)?;
     let mut view = RunView {
         run_id: run.id,
-        graph: run_graph(db, run.id)?,
+        graph: graph.clone(),
         state: RunState::from_db_str(&run.state),
         context: super::super::context_store::load_logical(db, run.id)?.runtime(),
         steps: steps
-            .into_iter()
+            .iter()
             .map(|step| StepView {
-                node_id: step.node_id,
+                node_id: step.node_id.clone(),
                 attempt: step.attempt,
                 status: StepStatus::from_db_str(&step.status),
                 outcome: step.outcome.as_deref().and_then(StepOutcome::from_db_str),
-                error: step.error_message,
+                error: step.error_message.clone(),
                 agent_node_id: step.agent_node_id,
             })
             .collect(),
     };
-    for step in view.steps.clone() {
-        let agent_id = step
+    // Primary-key searches for the agents these steps name, in batches of
+    // 500. A per-step lookup made an evidence read quadratic, because each
+    // unverified step rebuilt this view (issue #2766). The step list is
+    // cloned so the lifecycle write can borrow `view.context` on its own.
+    let steps = view.steps.clone();
+    let blockers =
+        crate::db::agent_node::circuit_lifecycle_blockers_inner(db, &step_agent_ids(&view))?;
+    for step in steps {
+        let Some(agent_id) = step
             .agent_node_id
-            .or_else(|| view.resolve_target_agent(&step.node_id));
-        if let Some(agent_id) = agent_id {
-            if let Some(blocker) =
-                crate::db::agent_node::circuit_lifecycle_blocker_inner(db, agent_id)?
-            {
-                let encoded = serde_json::to_string(&blocker)?;
-                view.context.set_lifecycle_blocker(&step.node_id, encoded);
-            }
+            .or_else(|| view.resolve_target_agent(&step.node_id))
+        else {
+            continue;
+        };
+        if let Some(blocker) = blockers.get(&agent_id).cloned().flatten() {
+            let encoded = serde_json::to_string(&blocker)?;
+            view.context.set_lifecycle_blocker(&step.node_id, encoded);
         }
     }
     Ok(view)
+}
+
+/// Agent ids named by the view's steps, once each.
+fn step_agent_ids(view: &crate::circuit::stepper::RunView) -> Vec<i64> {
+    let mut ids = Vec::new();
+    for step in &view.steps {
+        if let Some(agent_id) = step
+            .agent_node_id
+            .or_else(|| view.resolve_target_agent(&step.node_id))
+        {
+            ids.push(agent_id);
+        }
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    ids
 }
 
 /// What a person may record against one Unverified step. Shared by the history
@@ -141,7 +175,7 @@ pub(super) fn checkpoint_actions(
         _ => vec![],
     };
     let mut actions = actions;
-    if prompt_delivery::available(db, run_id, &step.node_id, step.attempt)? {
+    if prompt_delivery::available(db, view, &step.node_id, step.attempt)? {
         actions.insert(0, CheckpointAction::ManualDelivered);
     }
     Ok(actions)
@@ -162,23 +196,24 @@ pub(super) fn evidence_view_unresolved(
     let mut coverage = Vec::new();
     {
         let graph = run_graph(db, run_id)?;
-        let context = super::super::context_store::load_logical(db, run_id)?;
         let steps = crate::db::circuit::ledger::list_circuit_run_steps_inner(db, run_id)?;
-        let view = recovery_view(db, &run)?;
+        // One graph, one step list, and one stored context. Coverage reads
+        // the runtime map this view already built from those rows.
+        let view = recovery_view_from(db, &run, &graph, &steps)?;
+        let agents =
+            crate::db::agent_node::agent_coverage_identities_inner(db, &step_agent_ids(&view))?;
         let continuation =
-            crate::db::circuit::recovery::review_continuation_supported(&run, &graph);
-        for step in steps {
+            crate::db::circuit::recovery::review_continuation_supported(&run, &view.graph);
+        for step in &steps {
             if let Some(agent_id) = step
                 .agent_node_id
                 .or_else(|| view.resolve_target_agent(&step.node_id))
             {
-                let agent =
-                    crate::db::agent_node::get_agent_node_by_id_inner(db, agent_id).optional()?;
-                let (platform, capabilities, stored) = match agent {
+                let (platform, capabilities, stored) = match agents.get(&agent_id) {
                     Some(agent) => (
                         format!("{} host / {} launch", std::env::consts::OS, agent.env),
                         crate::services::circuit_worker::observer_policy::for_missing_agent(),
-                        Some(crate::circuit::strategy::selector_for_agent(&agent)),
+                        Some(agent.selector.clone()),
                     ),
                     None => (
                         "Agent record unavailable".to_string(),
@@ -200,7 +235,7 @@ pub(super) fn evidence_view_unresolved(
                         .or_else(|| {
                             (step.status == "unverified")
                                 .then(|| {
-                                    context
+                                    view.context
                                         .get(&format!("node.{}.observation_blocker", step.node_id))
                                 })
                                 .flatten()
@@ -208,7 +243,8 @@ pub(super) fn evidence_view_unresolved(
                         .and_then(|json| serde_json::from_str(json).ok()),
                     waits_active: run.state == "running"
                         && !matches!(step.status.as_str(), "completed" | "failed" | "cancelled"),
-                    human_waits: context
+                    human_waits: view
+                        .context
                         .get(&format!("node.{}.evidence.{}", step.node_id, step.attempt))
                         .and_then(|json| {
                             serde_json::from_str::<crate::circuit::observation::WorkEvidence>(json)
@@ -227,7 +263,7 @@ pub(super) fn evidence_view_unresolved(
             if run.state != "running" || step.status != "unverified" {
                 continue;
             }
-            let actions = checkpoint_actions(db, run_id, &graph, &view, &step)?;
+            let actions = checkpoint_actions(db, run_id, &view.graph, &view, step)?;
             let ends_review = view.completion_ends_review(&step.node_id);
             checkpoints.push(CircuitCheckpoint {
                 node_id: step.node_id.clone(),
@@ -269,14 +305,14 @@ pub(crate) fn attention_inner(
     let mut pushes = Vec::new();
     let continuation = crate::db::circuit::recovery::review_continuation_supported(&run, &graph);
     if run.state == "running" {
-        let view = recovery_view(db, &run)?;
+        let view = recovery_view_from(db, &run, &graph, &steps)?;
         pushes = crate::db::circuit::operator_push::pushes(&view, continuation);
         for step in steps.iter().filter(|step| step.status == "unverified") {
             let ends_review = view.completion_ends_review(&step.node_id);
             checkpoints.push(CircuitCheckpoint {
                 node_id: step.node_id.clone(),
                 attempt: step.attempt,
-                actions: checkpoint_actions(db, run_id, &graph, &view, step)?,
+                actions: checkpoint_actions(db, run_id, &view.graph, &view, step)?,
                 starts_next_review: view.completion_starts_next_review(&step.node_id),
                 ends_review,
                 review_again: ends_review && continuation,

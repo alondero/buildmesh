@@ -278,14 +278,15 @@ describe('SpawnButtonCluster (#575 / ADR-0016)', () => {
     expect(screen.getByTestId('spawn-dropdown-toggle').querySelector('svg')!.classList.contains('rotate-180')).toBe(true);
   });
 
-  it('keeps an overridden text label (e.g. Archive "Resume") instead of the icon', () => {
-    // The icon treatment applies only to the default `+` spawn idiom —
-    // surfaces with a real verb keep their text.
+  it('keeps the resume verb instead of the default mark', () => {
+    // Resume is a different action from a fresh spawn. Only that mode
+    // replaces the mark with a word.
     render(
       <SpawnButtonCluster
         providers={PROVIDERS}
         dropdownKey="session-abc"
         isOpen={false}
+        mode="resume"
         primaryLabel="Resume"
         busyLabel="Resuming..."
         primaryAriaLabel="Resume session"
@@ -296,6 +297,35 @@ describe('SpawnButtonCluster (#575 / ADR-0016)', () => {
     );
 
     expect(screen.getByTestId('spawn-default').textContent).toBe('Resume');
+  });
+
+  it('shows the default launch mark in spawn mode even when the caller passes a word', async () => {
+    // The Prompts probe passed primaryLabel="Spawn" and the main half
+    // rendered that word instead of the Mesh default's mark. Spawn mode
+    // keeps the mark when a caller passes a word.
+    const getDefaultProvider = vi.fn().mockResolvedValue('claude');
+    render(
+      <SpawnButtonCluster
+        providers={PROVIDERS}
+        dropdownKey="prompt-1"
+        isOpen={false}
+        primaryLabel="Spawn"
+        primaryAriaLabel="Spawn Review the diff"
+        onToggleDropdown={() => {}}
+        onSpawnDefault={() => {}}
+        onSelectProvider={() => {}}
+        getDefaultProvider={getDefaultProvider}
+      />,
+    );
+
+    const button = screen.getByTestId('spawn-default');
+    expect(button.textContent).toBe('+');
+    expect(screen.queryByText('Spawn')).toBeNull();
+
+    const name = await screen.findByText('Anthropic');
+    expect(button.contains(name)).toBe(true);
+    expect(screen.queryByText('Spawn')).toBeNull();
+    expect(button.getAttribute('aria-label')).toBe('Spawn Review the diff');
   });
 
   it('collapses the menu when the chevron is clicked while open', async () => {

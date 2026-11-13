@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { Suspense, useEffect, useRef, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { isMac } from '../../lib/platform';
 import { useWindowControlOverlay } from '../../hooks/useWindowControlOverlay';
@@ -21,8 +21,7 @@ import {
 } from './titleBarTiers';
 import { useMinWidth } from '../../hooks/useMinWidth';
 import { useTextScale } from '../../hooks/useTextScale';
-import { AppSettingsModal } from '../AppSettings/AppSettingsModal';
-import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
+import { LazyAppSettingsModal, LazyRemoteAccessModal } from '../lazySurfaces';
 import { useUIStore } from '../../stores/uiStore';
 import { SHORTCUT_CATALOG, shortcutLabel } from '../../lib/shortcutCatalog';
 import { UsageIcon } from '../Probe/probeIcons';
@@ -615,8 +614,20 @@ export function TitleBar() {
         </div>
       </header>
 
-      {appSettingsOpen && <AppSettingsModal onClose={() => useUIStore.getState().closeAppSettings()} initialTab={appSettingsTab} />}
-      {remoteAccessOpen && <RemoteAccessModal onClose={() => useUIStore.getState().closeRemoteAccess()} />}
+      {/* Both modals are lazy surfaces (`src/components/lazySurfaces.ts`): the
+          settings surface is ~105 kB of app code and the remote-access modal
+          carries the `qrcode` encoder, so neither belongs in the entry chunk
+          that every launch parses. */}
+      {appSettingsOpen && (
+        <Suspense fallback={null}>
+          <LazyAppSettingsModal onClose={() => useUIStore.getState().closeAppSettings()} initialTab={appSettingsTab} />
+        </Suspense>
+      )}
+      {remoteAccessOpen && (
+        <Suspense fallback={null}>
+          <LazyRemoteAccessModal onClose={() => useUIStore.getState().closeRemoteAccess()} />
+        </Suspense>
+      )}
     </>
   );
 }

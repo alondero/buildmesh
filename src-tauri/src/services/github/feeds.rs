@@ -1,7 +1,7 @@
 //! GitHub issue/PR feeds and batched mergeability queries using the shared GitHubClient.
 
 use super::repository::*;
-use crate::commands::pr::{
+use super::wire::{
     GitHubIssue, GitHubIssueFeed, GitHubPullRequest, GitHubPullRequestFeed, PrFileEntry,
     PrFileFeed, PrMergeability, PrMergeabilityEntry,
 };

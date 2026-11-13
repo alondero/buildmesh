@@ -63,7 +63,14 @@ the same change.
 
 Compact desktop controls still provide a **24 by 24 CSS pixel minimum hit
 area**. A small colour swatch or glyph may sit inside that area; the surrounding
-button owns pointer and keyboard input. Recovery actions remain visible in
+button owns pointer and keyboard input. The minimum applies in **both**
+dimensions: a control that is 24px tall is not yet a 24px target. Only the
+fixed spacing steps (`1`–`6` and `8`) are pixel values — a half step such as
+`px-1.5` falls back to the 13px root and measures 4.875px — so a compact
+control states its width explicitly (`min-w-[24px]`) instead of inheriting
+whatever padding surrounds its glyph. Give a quiet control its hover with the
+surface token rather than a colour rule: an inherited colour does not reach a
+child that sets its own. Recovery actions remain visible in
 waiting and failed rows. First-session guidance presents repository, runtime
 and session readiness before advanced shortcuts. Use a solid accent and
 inverse text for the primary action, bordered secondary actions, and the
@@ -127,6 +134,7 @@ not use `text-muted` for information the user needs to act on — that is what
 | `accent-cyan-dim` / `-glow` | 15% / 8% alpha | same hue | Selected fills, hover washes |
 | `accent-blue` | `#0ea5e9` | `#0284c7` | Pressed/deep step of the accent |
 | `accent-violet` | `#8b5cf6` | `#7c3aed` | AI/agent actions only (spawn, autopilot, rename suggestion) |
+| `accent-violet-strong` | `#c4b5fd` | `#5b21b6` | The violet **as text** — labels and links on agent actions |
 | `accent-green` | `#22c55e` | `#16a34a` | Success / diff-added |
 | `accent-amber` | `#f59e0b` | `#d97706` | Warning / diff-modified / needs attention |
 | `accent-red` | `#ef4444` | `#dc2626` | Error / diff-deleted / destructive |
@@ -134,6 +142,63 @@ not use `text-muted` for information the user needs to act on — that is what
 On light backgrounds the accents darken one step (cyan-500 → cyan-600 etc.)
 because the dark-theme hues fall below 3:1 on near-white. Always consume the
 token — never hardcode the dark hex into a component.
+
+**`accent-violet` is the graphic accent, not a text colour.** It is safe for
+icons, rings and washes, but it is not safe as body text: on the node header
+the background is the user's Mesh colour at 8% over the card, and the violet
+label measured 3.94:1 on the Mesh issue #2737 audited (3.45:1 at worst) and
+4.40:1 in the light theme — under the 4.5:1 body floor.
+`accent-violet-strong` is the same hue at a step that
+clears AA on the Mesh-tinted node header (6.72:1 dark, 5.65:1 light — the
+worst case over the eight palette colours and the corners of the RGB cube) and
+on the review dialog's surfaces: use it for the label, the link and the
+primary action; keep `accent-violet` for the icon, the ring and the washes.
+
+Violet **text** uses the strong step throughout the app — the Review label, the
+automation chip, the resume glyph, the Companion pill and omnibar links, the
+watched issue-label chip, the "Edit Flow" chip, the Agent History worktree name
+and the Circuits join-category label. The violet that is **not** text is the
+aria-hidden `✦` companion glyph, the Circuit automation orbit ring, and the
+Circuits category glyph, stripe and border. Icons and rings need only the 3:1
+non-text floor; the stripe is a decorative wash. All of them are the graphic
+accent by design. The diff-status vocabulary in `src/lib/status.ts` is a
+further exception — its `hex` is mirrored to the phone and the native client,
+so it moves with the palette rather than with a text step (tracked in #2742).
+`tests/unit/review-label-contrast.test.ts` recomposes the Mesh-tinted header
+and pins each of those text pairs — the strong step passes, the graphic accent
+fails — and pins the two violet labels that sit outside the node header on
+their own surfaces.
+
+### Action fills
+
+A filled action button paints a film of its own colour and draws its label on
+top of it, so the unit that has to clear WCAG AA is the **pair** (fill,
+foreground). A contrast check on the fill alone is not a check on what the
+reader sees: white on the dark theme's `status-error` measures 3.76:1, and a
+translucent fill composites against the surface beneath it. These four tokens
+cover the two pairs — a destructive fill, an accent-cyan fill, and the
+foreground each one takes — and they are deliberately separate from the accent
+and status hues above, which are the *graphic* colours.
+
+| Token | Dark | Light | Use |
+|---|---|---|---|
+| `destructive` | `#dc2626` | `#b91c1b` | Destructive action fill — the hover step |
+| `destructive-strong` | `#b91c1b` | `#991b1b` | Destructive action fill — the pressed step |
+| `on-destructive` | `#ffffff` | `#ffffff` | The label on a destructive fill |
+| `on-accent-cyan` | `#0a0a0e` | `#0a0a0e` | The label on an accent-cyan fill |
+
+The destructive fill is the error hue one step deeper than `status-error`,
+because the resting state is **translucent** (80%) and a translucent fill
+composites against the surface beneath it: over a near-black panel the
+composite stays dark, but over the light theme's white panel a translucent
+red lands *lighter*, not darker. The light theme therefore needs the deeper
+step — 4.68:1 with white text on pure white, the lightest surface in the app,
+so that number is the floor for the whole family.
+
+`on-accent-cyan` is dark in **both** themes, because the brand cyan is light
+in both (`#00d4ff` here, `#0891b2` in light). `text-inverse` is the wrong
+token for a cyan fill: it flips to white in the light theme, which is how
+the cyan buttons lost their labels (issue #2775).
 
 ### Status
 
@@ -247,6 +312,70 @@ client, which have their own scales. Rules for contributors:
 - The brand lockup (`Wordmark`) and icon glyphs sized from their box are
   pictures, not body text: they keep fixed pixel sizes.
 
+**Functional labels have roles.** The steps above say how big a size is; three
+**type roles** say what a piece of text *is*, so the decision is made once in
+the theme instead of once per component:
+
+| Role | What it is | Comfortable | Compact |
+|---|---|---|---|
+| `text-label` | A functional label — the name of the thing you act on: task and agent names, mesh names, action labels, form labels, tab labels | 13px | 11.375px |
+| `text-meta` | Supporting metadata — secondary lines, helper text, timestamps, the detail beside a label | 11.375px | 9.75px |
+| `text-micro` | Microcopy — section eyebrows, counts, badges, gutter labels | 10px | 10px |
+
+A functional label is **never** microcopy. The name of a task is the primary
+identifier in this app, so it is drawn at the interface size (13px) and reads
+without effort; metadata supports a label and never replaces one.
+
+**Compact is a ladder, not a restoration.** The compact column is the label and
+metadata ladder one step down: a functional label at 11.375px, metadata at
+9.75px, microcopy at the app's 10px floor. Before the roles existed every
+surface chose its own size, so Compact does not reproduce the old screens
+surface by surface: a place that used to be micro-sized (a menu row, a field
+label) reads at the label size, and a place that used to be drawn at the
+interface size (the Settings chrome) follows the label ladder as well. What
+Compact guarantees is the ladder itself — and that is what the tests pin.
+
+Rules for contributors:
+
+- Pick a role, not a size. Components use `text-label` / `text-meta` /
+  `text-micro`; reaching for a raw `text-xs` / `text-sm` means the role was
+  never decided.
+- The role tokens live in the `@theme` block as
+  `calc(<size> * var(--ui-text-scale))`, exactly like the size steps, so the
+  accessibility slider moves them with everything else.
+- `tests/unit/type-density.test.ts` pins the ladder, the compact sizes and the
+  13px root.
+
+**Density is a second, separate lever.** **Settings → General → Appearance →
+Text density** chooses which ladder renders: *Comfortable* (the default,
+13px functional labels) or *Compact* (the pre-contract label and metadata
+ladder in the table above). It is independent of the text scale — the scale
+multiplies whichever ladder is active — and it is a **type-only** lever like
+the scale: `rem`, spacing, control heights and the title-bar width tiers do
+not move either way. The choice is per machine and survives a restart
+(`src/lib/typeDensity.ts`, `data-type-density` on `<html>`).
+
+**Past 150% the window zoom takes over.** The text scale stops at 150% because
+the dense chrome clips rather than reflows, and this app has no room to
+reflow — several terminals share one window. **Settings → General → Appearance
+→ Window zoom** is the supported way to reach 200%: it sets the native webview
+zoom (`plugin:webview|set_webview_zoom`), so chrome, labels and content grow
+together and nothing is lost to clipping. It scales the whole window, so it is
+not a text setting, and it does not touch the terminal font — terminals keep
+their own 8–18px Zoom size, and Ctrl/Cmd + 0 / + / − still changes the
+terminal font. That chord is why the platform's own zoom hotkeys are left off
+and the zoom is set from Settings. Platform support is desktop-only: Tauri's
+`set_webview_zoom` is unsupported on Android and needs macOS 11+ / iOS 14+.
+
+The window zoom scales the **CSS viewport**, not just the type: at 200% a
+1280px window shows 640 CSS px, which is below the app's 900px minimum window
+width. The chrome survives it (the sidebar, the grid, the Probe and every
+dialog keep working, and the More panel still reaches every destination), but
+the title bar's command field is squeezed out of reach at that width — the
+narrow-header layout, which is tracked separately as #2420. A 200% zoom
+therefore wants a window of at least 1800 logical px, which a maximised
+1920px display at 100% scaling provides.
+
 **Mobile scale.** Slightly larger for touch: 13px body, 15px card titles,
 16px on text fields (prevents iOS focus auto-zoom), 11–12px metadata, 10px
 floor for micro-labels.
@@ -329,6 +458,15 @@ it is updated too.
   Compact desktop targets are at least 24 CSS pixels in each dimension; use
   explicit pixel bounds because the desktop root type scale is 13px.
   Resume/Restart stay visible when available; icons may remain compact.
+- **Filled actions (destructive and accent):** the fill and the label are a
+  pair, not a colour and a hope — see [Action fills](#action-fills).
+  Destructive: `text-on-destructive bg-destructive/80`, `hover:bg-destructive`,
+  `active:bg-destructive-strong`. Accent: `text-on-accent-cyan
+  bg-accent-cyan/80`, `hover:bg-accent-cyan`, `active:bg-accent-blue`. A
+  disabled filled button **restyles** rather than fades
+  (`disabled:bg-bg-card-hover disabled:text-text-muted`): the whole-control
+  `opacity` fade drops the label to 2.07:1 on the light theme's white
+  panel, because it fades the label and the fill together.
 - **Mobile:** `.btn-primary` (accent fill, `--on-accent` text), `.btn-ghost`,
   `.chip-btn` (hairline chip). Touch targets are ≥ 44×44px — flex-center the
   glyph inside an explicit box, don't pad your way to the size.
@@ -466,11 +604,24 @@ specificity and import order; custom properties don't.
   (focus rings, borders that carry meaning).
 - Text can be enlarged by the user without breaking the layout: the interface
   text setting scales the type tokens from 100% to 150% while `rem`, spacing
-  and control sizes stay put (see [Typography](#typography)).
+  and control sizes stay put, the text-density setting picks which type ladder
+  renders (13px functional labels, or the older 11.375px ones), and past 150%
+  the window zoom scales the whole native webview so nothing has to be
+  re-flowed to fit (see [Typography](#typography)).
 - The contract is executable: `tests/unit/theme-tokens-contrast.test.ts` and
   `tests/unit/theme-tokens-light-contrast.test.ts` recompute contrast from
   the CSS and fail the build if a token regresses; a static list in the same
-  test pins load-bearing text to `text-secondary`. The mobile mirror is
+  test pins load-bearing text to `text-secondary`. Token-only checks compare a
+  foreground with a *neutral* surface, so they do not measure a composed one:
+  `tests/unit/review-label-contrast.test.ts` recomposes the Mesh-tinted node
+  header (the Mesh colour at 8% over the card, then the hover wash) and
+  measures the Review label, the automation chip, the resume glyph, the review
+  dialog's primary action and the other violet-text surfaces against it, in
+  both themes, over the palette and the corners of the RGB cube (issue #2737).
+  The violet labels that live outside the node header — the Agent History
+  worktree name and the Circuits join-category label — are measured on their
+  own surfaces, the card's accent stripe included (issue #2745).
+  The mobile mirror is
   checked by `tests/unit/mobile-tokens-contrast.test.ts` for AA on mobile
   surfaces; equality with desktop token values is a design convention.
   The native client's mirror is recomputed the same way by
@@ -478,6 +629,15 @@ specificity and import order; custom properties don't.
   the dark tokens in `src/App.css`, the status alphas against
   `src/mobile/styles.css`, the type scale against the mobile scale above, and
   the status vocabulary against the table generated from `STATUS_CONFIG`.
+- A filled action button is a composed surface too, so its label is measured
+  against the fill composited over the surface the button actually sits on:
+  `tests/unit/action-button-contrast.test.ts` reads each button's own class
+  list, recomposes the translucent resting fill over the dialog panel, the
+  settings panel, the entry card and the discard banner's own wash, and
+  asserts 4.5:1 for the enabled label in the normal, hover and pressed
+  states of both themes (issue #2775). The pre-fix recipe — white on
+  `status-error`, white on `accent-cyan` — is measured in the same file and
+  asserted to FAIL, so the check cannot pass for the wrong reason.
 - `scripts/check-agent-diff.mjs` flags new bare radius classes in components;
   justified exceptions use an `allow-bare-rounded` marker.
 - Keyboard focus is always visible: 1.5px accent-cyan outline on button-like
@@ -486,6 +646,17 @@ specificity and import order; custom properties don't.
   card title bar, and the circle's shape (solid, hollow, dashed, slashed,
   half-filled, ringed dot, thin, cross) carries its own meaning so a reader
   who cannot rely on colour can still tell them apart.
+
+  The mesh colour picker is the same rule one level down: the selected
+  swatch carries a **checkmark** as well as a ring, so the selection does
+  not depend on the ring's hue. The ring is `ring-text-primary` with a
+  `ring-offset-bg-overlay` gap — the theme-aware step, because a white ring
+  on the light theme's white dialog was invisible (issue #2775) — and the
+  checkmark's ink is picked for contrast against the swatch itself
+  (`swatchInk` in `src/lib/meshColors.ts`), so a very light custom colour
+  still shows it. Keyboard focus stays a separate state: the app-wide
+  `:focus-visible` outline, which is a different shape and a different
+  colour from the selection ring.
 
   The actual shape+colour collision set in `STATUS_CONFIG` is exactly two
   pairs, both deliberate:
@@ -520,6 +691,11 @@ its shorthand names but holds the **same values** as the desktop dark theme:
 | `--amber-border` / `--red-border` / `--attention-ring` | 25% status borders; 40% needs-attention ring |
 
 Retune a colour in both files in the same change.
+
+`accent-violet-strong` has no mobile counterpart: the phone client paints
+violet as a Material tertiary role and a status ring rather than as text — it
+has no Review control. Desktop-only tokens (the caption and macOS chrome
+palettes) are likewise unmapped.
 
 ## Rules for contributors
 

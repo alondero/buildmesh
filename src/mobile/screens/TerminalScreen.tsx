@@ -9,6 +9,15 @@ import { QUICK_KEYS } from "./quickKeys";
 import { AppBar } from "../ui";
 import { loadUnicode11Widths } from "../../components/Terminal/loadUnicode11Widths";
 import { DARK_TERMINAL_THEME } from "../../components/Terminal/terminalConfig";
+import { TerminalWriter } from "../../components/Terminal/TerminalWriter";
+
+/**
+ * Bounds unparsed PTY output handed to this screen's xterm. `term.write`
+ * queues asynchronously and xterm does not cap that queue; the desktop
+ * registries use the same writer. One visit, one node, so the key is the
+ * node id and unmount unregisters it.
+ */
+export const mobileTerminalWriter = new TerminalWriter();
 
 const MAX_RECONNECT = 5;
 const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 16000];
@@ -285,6 +294,14 @@ export default function TerminalScreen({
       window.addEventListener("resize", onWindowResize);
     }
 
+    // Completion-aware so a parser that falls behind stops this screen from
+    // queueing one unparsed payload per WebSocket frame (issue #2765).
+    mobileTerminalWriter.register(
+      node.id,
+      (data, done) => term.write(data, done),
+      { completionAware: true },
+    );
+
     connect();
 
     // Mobile backgrounding is the normal case: the OS suspends timers and
@@ -313,6 +330,7 @@ export default function TerminalScreen({
         clearInterval(countdownRef.current);
       }
       wsRef.current?.close();
+      mobileTerminalWriter.unregister(node.id);
       term.dispose(); // allow-dispose — mobile SPA owns this per-mount xterm; no TerminalManager here
       termRef.current = null;
     };
@@ -429,14 +447,21 @@ export default function TerminalScreen({
 
     ws.onmessage = (event) => {
       if (ws !== wsRef.current) return; // stale: don't write PTY bytes from a dead socket
-      const term = termRef.current;
-      if (!term) return;
+      if (!termRef.current) return;
+      const nodeId = node.id;
       if (typeof event.data === "string") {
-        term.write(event.data);
+        mobileTerminalWriter.append(nodeId, event.data);
       } else if (event.data instanceof Blob) {
-        event.data.arrayBuffer().then((buf) => term.write(new Uint8Array(buf)));
+        // The bytes arrive on a later turn. Drop them when this socket is no
+        // longer current, or the visit has ended, so a late blob does not
+        // paint into the next connection's writer.
+        const socket = ws;
+        void event.data.arrayBuffer().then((buf) => {
+          if (socket !== wsRef.current || closedByUserRef.current) return;
+          mobileTerminalWriter.append(nodeId, new Uint8Array(buf));
+        });
       } else {
-        term.write(new Uint8Array(event.data as ArrayBuffer));
+        mobileTerminalWriter.append(nodeId, new Uint8Array(event.data as ArrayBuffer));
       }
     };
 

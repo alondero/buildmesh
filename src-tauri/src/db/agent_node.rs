@@ -831,6 +831,24 @@ fn lifecycle_snapshot_json_inner(conn: &Connection, id: i64) -> SqlResult<Option
         .flatten())
 }
 
+fn blocker_from_snapshot(
+    snapshot: Option<String>,
+) -> Option<crate::circuit::observation::CircuitObservationBlocker> {
+    let snapshot = snapshot?;
+    let lifecycle = match serde_json::from_str::<
+        crate::agent::session_lifecycle::LifecycleChangedPayload,
+    >(&snapshot)
+    {
+        Ok(lifecycle) => lifecycle,
+        Err(_) => {
+            return Some(
+                crate::circuit::observation::CircuitObservationBlocker::LifecycleEvidenceUnavailable,
+            );
+        }
+    };
+    crate::circuit::report_admission::lifecycle_blocker(Some(&lifecycle))
+}
+
 pub(crate) fn circuit_lifecycle_blocker_inner(
     conn: &Connection,
     id: i64,
@@ -848,23 +866,117 @@ pub(crate) fn circuit_lifecycle_blocker_inner(
             crate::circuit::observation::CircuitObservationBlocker::LifecycleEvidenceUnavailable,
         ));
     };
-    let Some(snapshot) = snapshot else {
-        return Ok(None);
-    };
-    let lifecycle = match serde_json::from_str::<
-        crate::agent::session_lifecycle::LifecycleChangedPayload,
-    >(&snapshot)
-    {
-        Ok(lifecycle) => lifecycle,
-        Err(_) => {
-            return Ok(Some(
-                crate::circuit::observation::CircuitObservationBlocker::LifecycleEvidenceUnavailable,
-            ));
+    Ok(blocker_from_snapshot(snapshot))
+}
+
+/// Ids per `IN (...)` lookup. Each statement stays well under SQLite's
+/// bound-variable limit, and a primary-key `IN` list is a search per id.
+const AGENT_ID_LOOKUP_CHUNK: usize = 500;
+
+/// The lifecycle-snapshot lookup the evidence read runs for many agents at once.
+pub(crate) fn lifecycle_snapshot_in_sql(count: usize) -> String {
+    let placeholders = std::iter::repeat_n("?", count)
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("SELECT id, lifecycle_snapshot FROM agent_nodes WHERE id IN ({placeholders})")
+}
+
+/// The narrow agent lookup the evidence coverage rows need: environment and
+/// the columns [`crate::circuit::strategy::selector_for_launch`] reads.
+pub(crate) fn agent_launch_in_sql(count: usize) -> String {
+    let placeholders = std::iter::repeat_n("?", count)
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "SELECT id, env, provider, spawn_configuration FROM agent_nodes WHERE id IN ({placeholders})"
+    )
+}
+
+/// One lifecycle veto per agent id.
+///
+/// A missing id is `Some(LifecycleEvidenceUnavailable)`, the same answer as
+/// [`circuit_lifecycle_blocker_inner`]. A present row with no snapshot is
+/// `None`. Empty input issues no query.
+pub(crate) fn circuit_lifecycle_blockers_inner(
+    conn: &Connection,
+    ids: &[i64],
+) -> SqlResult<BTreeMap<i64, Option<crate::circuit::observation::CircuitObservationBlocker>>> {
+    let mut unique = ids.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    let mut found = BTreeMap::new();
+    for chunk in unique.chunks(AGENT_ID_LOOKUP_CHUNK) {
+        let sql = lifecycle_snapshot_in_sql(chunk.len());
+        let mut statement = conn.prepare(&sql)?;
+        let rows = statement.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
+        })?;
+        for row in rows {
+            let (id, snapshot) = row?;
+            found.insert(id, blocker_from_snapshot(snapshot));
         }
-    };
-    Ok(crate::circuit::report_admission::lifecycle_blocker(Some(
-        &lifecycle,
-    )))
+    }
+    let mut blockers = BTreeMap::new();
+    for id in ids {
+        blockers.insert(
+            *id,
+            found.get(id).cloned().unwrap_or(Some(
+                crate::circuit::observation::CircuitObservationBlocker::LifecycleEvidenceUnavailable,
+            )),
+        );
+    }
+    Ok(blockers)
+}
+
+/// What an evidence coverage row needs from an agent, without the rest of the row.
+pub(crate) struct AgentCoverageIdentity {
+    pub env: EnvType,
+    pub selector: crate::circuit::strategy::HarnessSelector,
+}
+
+/// Environment and harness selector for many agents, one primary-key search
+/// per id. Ids with no row are absent. Empty input issues no query.
+pub(crate) fn agent_coverage_identities_inner(
+    conn: &Connection,
+    ids: &[i64],
+) -> SqlResult<BTreeMap<i64, AgentCoverageIdentity>> {
+    let mut unique = ids.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    let mut identities = BTreeMap::new();
+    for chunk in unique.chunks(AGENT_ID_LOOKUP_CHUNK) {
+        let sql = agent_launch_in_sql(chunk.len());
+        let mut statement = conn.prepare(&sql)?;
+        let rows = statement.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+            let id: i64 = row.get(0)?;
+            let env = EnvType::from_db_str(&row.get::<_, String>(1)?);
+            let provider: String = row.get(2)?;
+            let launch = parse_spawn_configuration(row.get(3)?)?;
+            let selector =
+                crate::circuit::strategy::selector_for_launch(&provider, launch.as_ref());
+            Ok((id, AgentCoverageIdentity { env, selector }))
+        })?;
+        for row in rows {
+            let (id, identity) = row?;
+            identities.insert(id, identity);
+        }
+    }
+    Ok(identities)
+}
+
+fn parse_spawn_configuration(
+    raw: Option<String>,
+) -> rusqlite::Result<Option<crate::preferences::spawn_configurations::SpawnConfiguration>> {
+    raw.map(|raw| {
+        serde_json::from_str(&raw).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                3,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })
+    })
+    .transpose()
 }
 
 /// Public read seam for report admission. The transaction commit repeats this

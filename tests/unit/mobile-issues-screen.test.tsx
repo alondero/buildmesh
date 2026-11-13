@@ -29,7 +29,7 @@ const mesh: Mesh = {
 };
 
 /// Full wire shape — matches the Rust `GitHubIssue` struct in
-/// `src-tauri/src/commands/pr.rs` and the upstream `services::github::Issue`
+/// `src-tauri/src/services/github/wire.rs` and the upstream `services::github::Issue`
 /// deserialiser. Every field is now guaranteed present on the wire, so
 /// the test uses the strict `GitHubIssue` type (no `Pick`/`?` elision).
 const BACKEND_ISSUES: GitHubIssue[] = [

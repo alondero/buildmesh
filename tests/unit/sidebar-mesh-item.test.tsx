@@ -246,6 +246,51 @@ describe('MeshItem', () => {
     expect(props.onSelectMesh).toHaveBeenCalledWith(3);
   });
 
+  // Issue #2774 — the sidebar's two compact controls (the mesh title, which
+  // selects the row, and the Show/Hide agents toggle, which expands it) were
+  // 18.85px and 16px high with a single pixel between them, so they were
+  // both undersized and easy to activate by accident. jsdom applies no CSS,
+  // so these assertions pin the class contract that produces the rendered
+  // result; `tests/integration/ui-shot-compact-controls.steps.mjs` measures
+  // the real bounds in Chromium.
+  it('gives the mesh title and the expand toggle a 24px minimum target in both dimensions (#2774)', () => {
+    renderMeshItem();
+    const title = meshTitleEl();
+    const titleClasses = title.className.split(/\s+/);
+    expect(titleClasses).toContain('min-h-[24px]');
+    expect(titleClasses).toContain('min-w-[24px]');
+
+    const expand = screen.getByRole('button', { name: 'Show agents for my-mesh' });
+    const expandClasses = expand.className.split(/\s+/);
+    expect(expandClasses).toContain('min-h-[24px]');
+    expect(expandClasses).toContain('min-w-[24px]');
+
+    // The two adjacent hit areas are separated, not one pixel apart.
+    expect(expandClasses).toContain('mt-1');
+    expect(expandClasses).not.toContain('mt-px');
+
+    // The name keeps its ellipsis: a flex button does not truncate its own
+    // text, so the name lives in a block child with `min-w-0`.
+    const name = title.querySelector('.truncate');
+    expect(name?.textContent).toBe('my-mesh');
+  });
+
+  it('expands the mesh without selecting it, and selects it without expanding it (#2774)', async () => {
+    const { props } = renderMeshItem({ nodeClusters: [loneCluster(makeNode())] });
+    const expand = screen.getByRole('button', { name: 'Show agents for my-mesh' });
+
+    await userEvent.click(expand);
+    // Only the expansion happened — the row did not also select the mesh.
+    expect(props.onSelectMesh).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Hide agents for my-mesh' })).toBeTruthy();
+
+    await userEvent.click(meshTitleEl());
+    expect(props.onSelectMesh).toHaveBeenCalledTimes(1);
+    expect(props.onSelectMesh).toHaveBeenCalledWith(3);
+    // Selecting did not toggle the expansion back.
+    expect(screen.getByRole('button', { name: 'Hide agents for my-mesh' })).toBeTruthy();
+  });
+
   it('renders a NodeItem per mesh node and selects it on click', async () => {
     const { props } = renderMeshItem({ nodeClusters: [loneCluster(makeNode())] });
     // The seeded node is `running`, which is not "hot", so the card

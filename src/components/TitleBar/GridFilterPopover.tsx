@@ -24,6 +24,10 @@ export function GridFilterPopover() {
   const changed = activeCount > 0 || sort !== 'custom' || direction !== 'asc';
   const actions = useUIStore.getState();
   const fieldClass = 'w-full min-w-0 rounded-md border border-border-default bg-bg-input px-2 py-1.5 text-text-primary';
+  // Issue #2774 — one shape for the three removable filter chips, so the
+  // surface hover token, the pressed state and the 24 CSS-pixel minimum
+  // target stay in step across them.
+  const chipClass = 'flex min-h-[24px] min-w-0 max-w-full items-center rounded-md bg-bg-card px-2 py-1 text-text-primary transition-colors hover:bg-bg-card-hover active:bg-bg-card-hover';
   return (
     <div className="relative flex shrink-0 items-center gap-1" data-dropdown-for="grid-filters"
       onKeyDown={e => { if (open && e.key === 'Escape') { e.stopPropagation(); setOpen(false); trigger.current?.focus(); } }}>
@@ -66,9 +70,32 @@ export function GridFilterPopover() {
             </label>
           </div>
           <div className="flex flex-wrap gap-1" aria-label="Active filters">
-            {query.trim() && <button title="Remove text filter" className="max-w-full break-all rounded-md bg-bg-card px-2 py-1 text-text-primary" onClick={() => actions.setGridSearchQuery('')}>Search: {query} ×</button>}
-            {provider && <button className="max-w-full break-all rounded-md bg-bg-card px-2 py-1 text-text-primary" onClick={() => actions.setGridProviderFilter(null)}>Provider: {provider} ×</button>}
-            {status && <button className="rounded-md bg-bg-card px-2 py-1 text-text-primary" onClick={() => actions.setGridStatusFilter(null)}>Status: {STATUS_CONFIG[status].label} ×</button>}
+            {/* Issue #2774 — a removable filter chip is a compact desktop
+                control, so it carries the same surface hover token as the
+                rest of the panel: the chips sat on `bg-bg-card` and the
+                hover rule did not exist, so in light mode Search stayed
+                `rgb(245,245,247)` with `rgb(15,23,42)` text on hover — no
+                computed change at all. `active:` gives the pressed state
+                the same wash, and `min-h-[24px]` restores the 24 CSS-pixel
+                minimum target. The visible label still names the filter and
+                its value; the accessible name says what pressing it does,
+                because "Provider: anthropic ×" alone does not tell a
+                screen reader that the chip removes the filter. */}
+            {query.trim() && <button type="button" aria-label={`Remove search filter: ${query}`}
+              title="Remove text filter" className={chipClass}
+              onClick={() => actions.setGridSearchQuery('')}>
+              <span className="min-w-0 break-all">Search: {query} ×</span>
+            </button>}
+            {provider && <button type="button" aria-label={`Remove provider filter: ${provider}`}
+              title="Remove provider filter" className={chipClass}
+              onClick={() => actions.setGridProviderFilter(null)}>
+              <span className="min-w-0 break-all">Provider: {provider} ×</span>
+            </button>}
+            {status && <button type="button" aria-label={`Remove status filter: ${STATUS_CONFIG[status].label}`}
+              title="Remove status filter" className={chipClass}
+              onClick={() => actions.setGridStatusFilter(null)}>
+              <span className="min-w-0 break-all">Status: {STATUS_CONFIG[status].label} ×</span>
+            </button>}
           </div>
           <button type="button" onClick={actions.resetGridControls} className="rounded-md border border-border-default px-3 py-1.5 text-text-primary hover:bg-bg-card-hover">Clear all</button>
         </div>

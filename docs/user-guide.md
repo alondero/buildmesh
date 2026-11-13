@@ -336,6 +336,11 @@ choices survive a restart, including a filter with no matches.
 
 ## Configure Autopilot Circuits
 
+In the Circuit editor, **Add node** opens or closes the node palette. It starts
+closed in a narrow editor. The palette occupies its own panel, and narrow
+editors show the palette, node inspector or Run History one at a time. At the
+smallest widths the panel sits below the canvas.
+
 In **GitHub Issues**, use the tag button beside an issue to change its GitHub
 labels. Search the repository's labels, then check or uncheck one to add or
 remove it. Changes save individually; permission and network errors
@@ -355,6 +360,16 @@ Open **Circuits** to configure automated flows and their triggers. **Max concurr
 circuit runs** controls how many runs the selected mesh can admit at once.
 Settings > Autopilot > **Circuit agent pool size** adds an optional cap on agents
 across all meshes; leave it empty for no global cap, or use 0 to pause new launches.
+
+The **Activity** view opens on a summary of what the circuits on this mesh are
+doing: runs holding a slot, runs waiting to start, and finished runs that are
+still asking for a decision. The summary names whichever of those needs you
+first, so a mesh with a backlog or a failed run does not read as an all-clear —
+**No active runs** says only that no run is executing at that moment. Choose
+**Review in History** to open the finished runs that need a decision, or
+**View queue** to reorder or cancel the waiting ones. When the count of runs
+asking for attention is unavailable, the summary says so instead of reporting
+an empty mesh.
 
 Agent steps use their explicit launch configuration, then the mesh default, then
 the application default. Review agents use their configured reviewer selection.
@@ -567,6 +582,13 @@ indent. Every agent in a group stays individually clickable, renameable, and
 deletable; grouping is a view, not a merged node.
 
 ## Find open work in the sidebar
+
+Tab to an agent name and press Enter or Space to select it. Press F2 to rename
+the focused agent; double-clicking its name also starts a rename.
+
+On narrow windows, terminal cards keep a readable width and the grid scrolls
+within the workspace. Selecting an offscreen card brings it into view. The
+sidebar and inspector yield space to keep the workspace available.
 
 Each mesh is a card. The card's left edge is a full-height colour bar that does
 two jobs: click it to change the mesh colour, drag it to reorder the mesh. From
@@ -970,9 +992,10 @@ Open **Prompts** from the tool picker or search for **Open Prompts**. The
 with that Mesh selected. The canvas spawn dialog offers the same shortcut.
 
 Search by title or prompt text. Expand a row to read and copy the complete
-prompt, or use its **Spawn** button immediately. **Spawn** uses the selected
-Mesh's default agent; the adjacent arrow offers the usual agent, Launch
-Configuration and login choices. Every launch creates a fresh agent using the
+prompt, or use its spawn button immediately. The button shows the selected
+Mesh's default agent icon and starts that agent; hover or focus it to reveal
+the agent's name. The adjacent arrow offers the usual agent,
+Launch Configuration and login choices. Every launch creates a fresh agent using the
 Mesh's spawn settings: Worktree Nodes start from its configured base ref; Root
 Nodes use its folder. The Mesh heading and launch summary identify the target.
 The focused agent's checkout, changes and conversation are never inherited.
@@ -1211,7 +1234,7 @@ answer there too.
 
 | Settings area | Use it for |
 |---|---|
-| General | Appearance (including interface text size), quit confirmation, and the default worktree directory |
+| General | Appearance (theme, interface text size, text density and window zoom), quit confirmation, and the default worktree directory |
 | Providers | Routing defaults, plus a compact expandable row per provider account for its API key and billing mode |
 | Launch Configurations | Spawn menu order, per-harness model, effort and permission defaults, advanced provider routes, and (behind a **Show launch configurations** toggle) named recipes |
 | Autopilot | The global Circuit agent pool size |
@@ -1227,6 +1250,52 @@ app ships with; drag the slider right in 5% steps to read the app at up to
 already applied on the next launch, without a flash of the smaller size.
 Terminals keep their own size: use the title bar's **Zoom** control or
 `Ctrl + +` / `Ctrl + -`.
+
+**Text density** (Settings → General → Appearance) picks how large Buildmesh
+draws its *functional labels* — the names of your tasks and agents, action
+labels, form labels and tab labels. **Comfortable** (the default) draws them
+at 13px, the size the interface reads at. **Compact** draws them at 11.375px
+if you want the denser presentation. Supporting metadata (timestamps, helper
+text) follows one step down either way, and terminals are unaffected. Compact is
+a ladder, not a copy of the presentation Buildmesh had before this setting
+existed: before the roles existed every surface chose its own size, so some
+labels grow in Compact (the ones that used to be micro-sized) and some shrink
+(the Settings chrome, which used to be drawn at the interface size). What is
+guaranteed is the ladder itself — 11.375px labels, 9.75px metadata and a 10px
+floor for microcopy. The choice is saved per machine and is already applied on
+the next launch. To go back, pick **Comfortable**: it applies immediately and
+leaves nothing behind.
+
+**Window zoom** (Settings → General → Appearance) is how to read the app at
+200%. The interface text size stops at 150% because past that the dense chrome
+starts clipping instead of reflowing, and several terminals share one window;
+the window zoom is the platform's own zoom, so the chrome, the labels and the
+content all grow together and nothing is cut off. It scales the whole window,
+so it is not a text setting — the interface text size and the terminal's own
+font size are both left alone (the terminal's glyphs do get bigger on
+screen, because everything does, which means fewer columns and rows fit).
+Pick 100%–200% in 25% steps; the choice is saved per machine and is re-applied
+on the next launch. To go back, pick **100%**. At every launch Buildmesh puts
+the window at your saved zoom (or at 100%), so a zoom set outside the app does
+not survive a restart.
+
+Two things to know about the window zoom:
+
+- `Ctrl + +` / `Ctrl + -` / `Ctrl + 0` change the **terminal** font size, not
+  the window. That shortcut is the terminal's own, and it is why the
+  platform's built-in zoom hotkeys are not switched on — set the window zoom
+  from Settings instead.
+- The window zoom needs the native desktop app. It is not available in the
+  mobile app or on Android, and Settings says so if the platform cannot apply
+  it. A zoom the platform refuses leaves the window at its previous size —
+  the control shows the size the window really is, not the one you asked for.
+
+The window zoom scales everything, including the layout, so it needs room. At
+200% a window that is 1280px wide shows a 640px-wide layout — narrower than
+Buildmesh's own minimum, so the title bar's search box is squeezed out of reach
+(press `Ctrl + K` instead, or use the **More** menu, which still reaches every
+tool). Widen the window before choosing 200%: 1800px is enough to keep the
+full layout, which a maximised window on a 1920px display gives you.
 
 **Probe spawn prompts** (Settings → Prompts) customise the initial prompt
 for agents spawned from the Probe's GitHub Issues and Pull Requests tabs.
@@ -1348,6 +1417,14 @@ doing, so the screen stays where it was. A phone without one — which includes
 any phone paired by scanning a QR code, because pairing hands the browser a
 cookie and nothing else — is shown the pairing screen instead. Pairing again is
 always required after you revoke a device or clear the browser's site data.
+
+A paired phone also stops being authorized on its own after **90 days without
+use**. Buildmesh then removes it from **Authorized Devices** and closes any
+connection it still holds, so a phone you have not used in months cannot stay
+a live administrator credential. A phone you are still using keeps its place:
+any request from it counts as use, so the entry only disappears once the phone
+has genuinely been gone. If a phone that you still own is removed this way,
+pair it again with a fresh QR code from **Settings → Remote Access**.
 
 The loopback listener stays plain HTTP for local agent hooks. LAN/VPN interfaces
 use HTTPS/WSS. The status panel lists the interfaces that are actually exposed;

@@ -56,6 +56,7 @@ pub mod preferences;
 pub mod project_detect;
 pub mod prompt_library;
 pub mod prune;
+pub mod pty_output;
 pub mod remote;
 pub mod scratchpad;
 pub mod state_recovery;

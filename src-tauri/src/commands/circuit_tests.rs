@@ -154,3 +154,30 @@ fn the_built_in_review_blueprint_cannot_be_triggered_on_its_own() {
         "the refused trigger left no run behind"
     );
 }
+
+/// Enabling or disabling a circuit wakes the worker. The interval pass
+/// trusts its in-memory schedule until that wake, so the command is the
+/// seam that makes a new interval circuit visible within one tick.
+#[test]
+fn set_circuit_enabled_wakes_the_worker() {
+    let _db = crate::db::test_support::isolated();
+    let mesh = crate::db::create_mesh(
+        "enable wake",
+        &format!("C:/buildmesh-enable-wake-{}", std::process::id()),
+    )
+    .unwrap();
+    let graph = crate::circuit::model::CircuitGraph::triggered_skeleton(
+        "task",
+        crate::circuit::model::CircuitNodeKind::Manual,
+    );
+    let circuit =
+        crate::db::create_autopilot_circuit(mesh.id, "draft", "", &graph.to_json().unwrap())
+            .unwrap();
+    let wakes = crate::services::circuit_worker::wake_circuit_worker_calls();
+    super::set_circuit_enabled(circuit.id, true).unwrap();
+    super::set_circuit_enabled(circuit.id, false).unwrap();
+    assert_eq!(
+        crate::services::circuit_worker::wake_circuit_worker_calls(),
+        wakes + 2
+    );
+}

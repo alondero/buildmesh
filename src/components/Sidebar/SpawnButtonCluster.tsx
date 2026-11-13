@@ -47,15 +47,20 @@ export function __resetDefaultChangedListeningForTests(): void {
  *   - Sidebar mesh row (via NodeCreationForm) → `create_agent_node`
  *   - Issues probe row → `create_issue_node` + `start_node_background`
  *   - PRs probe row   → `create_pr_node`   + `start_node_background`
+ *   - Prompts probe row and customise dialog (via PromptSpawnButton)
  *
  * Each parent owns the spawn *action* (different Tauri commands, different
  * default-resolution chains); the cluster owns the *visual* and the dropdown
- * wiring, so the three call sites compose the same `ProviderDropdown` →
+ * wiring, so those call sites compose the same `ProviderDropdown` →
  * `GroupedProviderMenu` ladder without duplicating the button pair.
  *
- * The quick-spawn half shows the resolved default harness icon (falling
- * back to the bare `+` idiom until it resolves) and expands to its name on
- * hover/focus; the picker half is a rotating chevron.
+ * The quick-spawn half shows the resolved default's mark (falling back to
+ * the bare `+` until it resolves) and expands to its name on hover/focus.
+ * Spawn mode ignores `primaryLabel` for that face. The cluster test
+ * "shows the default launch mark in spawn mode even when the caller
+ * passes a word" pins it. Resume mode shows the verb, because the
+ * action adopts an existing conversation. The picker half is a rotating
+ * chevron.
  */
 interface SpawnButtonClusterProps {
   /** Provider list — already filtered/sorted by the parent (per ADR-0016 §2
@@ -73,15 +78,10 @@ interface SpawnButtonClusterProps {
    * specific — issues, PRs, and archived sessions all used it too) so
    * the prefix-contract is obvious at the call site. */
   dropdownKey: string;
-  /** Visible label on the primary (+ default) action button. Defaults
-   *  to "+" — the canonical spawn idiom across the sidebar / issues /
-   *  PRs probe rows. Override for surfaces where the spawn is a
-   *  non-spawn action: the Archive Resume flow (issue #813) uses
-   *  "Resume" because the action imports + adopts an existing CLI
-   *  session rather than spawning fresh. Width-wise the cluster is
-   *  designed around a single character so a label like "Resume"
-   *  still fits inside the 360px dock without breaking the
-   *  row-resize-with-the-other-columns behaviour. */
+  /** Resume-mode verb on the main half. Spawn mode ignores it: that
+   *  face is the resolved default's mark, or "+" until the default
+   *  resolves. Archive resume passes "Resume" with `mode="resume"`
+   *  because the action adopts an existing conversation. */
   primaryLabel?: string;
   /** Visible label shown while `isSpawning` is true. Defaults to
    *  "Spawning..."; Resume uses "Resuming..." instead so the dock
@@ -204,13 +204,12 @@ export function SpawnButtonCluster({
 
   const isDisabled = disabled || isSpawning;
 
-  // Variant-B treatment: when the primary action is the default `+` spawn
-  // idiom (not an overridden text label like Archive "Resume"), the main
-  // half shows the resolved default harness icon and expands to its name
-  // on hover/focus of the quick-spawn half only — never on menu open.
-  // Before the default resolves it falls back to the bare `+` so the
-  // button never shows a wrong icon.
-  const iconMode = primaryLabel === '+';
+  // Spawn mode's resting face is the resolved default's mark. Resume mode
+  // is the exception: its verb replaces the mark. A word passed as
+  // `primaryLabel` does not change a fresh spawn's face. The Prompts probe
+  // used to pass "Spawn" and drew that word instead of the logo.
+  // Before the default resolves, spawn mode falls back to the bare `+`.
+  const showsDefaultMark = mode !== 'resume';
   const defaultOption = defaultProviderId
     ? providers.find(p => p.id === defaultProviderId) ?? null
     : null;
@@ -270,11 +269,11 @@ export function SpawnButtonCluster({
           // identity ("Anthropic") with no action. Name the action
           // explicitly — but only when the icon is actually showing, so
           // the bare-`+` fallback keeps its visible "+" name (WCAG 2.5.3).
-          aria-label={primaryAriaLabel ?? (iconMode && defaultOption && !isSpawning ? primaryTitle : undefined)}
-          className="group flex items-center justify-center px-2 min-w-[34px] h-[28px] text-xs font-medium text-accent-cyan hover:bg-accent-cyan/15 active:translate-y-px disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          aria-label={primaryAriaLabel ?? (showsDefaultMark && defaultOption && !isSpawning ? primaryTitle : undefined)}
+          className="group flex items-center justify-center px-2 min-w-[34px] h-[28px] text-label font-medium text-accent-cyan hover:bg-accent-cyan/15 active:translate-y-px disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           title={isSpawning ? busyLabel : primaryTitle}
         >
-          {isSpawning ? <span className="truncate">{busyLabel}</span> : iconMode && defaultOption ? (
+          {isSpawning ? <span className="truncate">{busyLabel}</span> : showsDefaultMark && defaultOption ? (
             <>
               <ProviderIcon
                 providerId={defaultOption.provider_id ?? defaultOption.harness_id}
@@ -284,7 +283,7 @@ export function SpawnButtonCluster({
                 {defaultOptionLabel}
               </span>
             </>
-          ) : <span className="truncate">{primaryLabel}</span>}
+          ) : <span className="truncate">{showsDefaultMark ? '+' : primaryLabel}</span>}
         </button>
         <span className="w-px h-5 shrink-0 bg-accent-cyan/30" />
         <button

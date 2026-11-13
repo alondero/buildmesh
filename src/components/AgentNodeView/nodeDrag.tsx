@@ -63,7 +63,7 @@ export function NodeDropCue({ nodeId }: { nodeId: number }) {
       <div className="pointer-events-none absolute inset-0 z-20 flex flex-col select-none">
         {(['group', 'swap'] as const).map(kind => <div key={kind}
           className={`flex flex-1 items-center justify-center ${intent.kind === kind ? 'ring-2 ring-inset ring-accent-cyan bg-accent-cyan/10' : 'bg-bg-card/60'}`}>
-          <span className={`px-2.5 py-1 rounded-full text-xs font-semibold font-sans ${intent.kind === kind ? 'bg-accent-cyan text-bg-base' : 'bg-bg-card text-text-secondary'}`}>
+          <span className={`px-2.5 py-1 rounded-full text-xs font-semibold font-sans ${intent.kind === kind ? 'bg-accent-cyan text-on-accent-cyan' : 'bg-bg-card text-text-secondary'}`}>
             {kind === 'group' ? 'Group as tabs' : '⇄ Swap'}
           </span>
         </div>)}

@@ -319,6 +319,8 @@ pub(crate) enum AlwaysStep {
     /// Collapse duplicate built-in review preset rows left by pre-v40 builds,
     /// preserving their run history on the oldest row for each mesh.
     DeduplicateReviewPresets,
+    /// Give the shared built-in a source-independent name on existing installs.
+    NameReviewPresets,
     /// Materialise node lifecycle leases and import legacy cleanup intents.
     EnsureAgentNodeLifecycleLeases,
     /// Move stock review graphs (the built-in preset and issue-review
@@ -1251,6 +1253,7 @@ const ALWAYS_STEPS: &[AlwaysStep] = &[
     AlwaysStep::EnforceCircuitRunCapacityRange,
     AlwaysStep::DropLegacySessionRecoveryKeys,
     AlwaysStep::DeduplicateReviewPresets,
+    AlwaysStep::NameReviewPresets,
     AlwaysStep::ConsolidateContinuedReviews,
     AlwaysStep::EnsureAgentNodeLifecycleLeases,
     AlwaysStep::UpgradeReviewPublicationFlow,
@@ -1727,6 +1730,13 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                 [],
             )?;
             tx.commit()?;
+        }
+        AlwaysStep::NameReviewPresets => {
+            conn.execute(
+                "UPDATE autopilot_circuits SET name='Agent review'
+                 WHERE is_preset=1 AND name<>'Agent review'",
+                [],
+            )?;
         }
         AlwaysStep::EnsureAgentNodeLifecycleLeases => {
             conn.execute_batch(

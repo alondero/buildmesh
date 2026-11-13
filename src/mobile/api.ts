@@ -520,7 +520,7 @@ export async function createPr(
 import type { ArchivedAgentNode } from "../types/generated/ArchivedAgentNode";
 export type { ArchivedAgentNode };
 
-// Generated from the Rust `GitHubIssue` struct (src-tauri/src/commands/pr.rs) —
+// Generated from the Rust `GitHubIssue` struct (src-tauri/src/services/github/wire.rs) —
 // the same struct the desktop Tauri path serialises (issue #359). #358 widened
 // the struct to carry url/state/labels (guaranteed present — the upstream
 // `services::github::Issue` deserialiser uses `#[serde(default)]`), so the
@@ -741,6 +741,7 @@ function sleep(ms: number): Promise<void> {
 /// but with zero risk of another test bleeding fake-timer state.
 interface MintOptions {
   sleep?: (ms: number) => Promise<void>;
+  signal?: AbortSignal;
 }
 const FALLBACK_RETRY_MS = 800;
 
@@ -755,18 +756,24 @@ const FALLBACK_RETRY_MS = 800;
 async function fetchMintTicket(
   target: WsTarget,
   retried = false,
+  signal?: AbortSignal,
 ): Promise<Response | string> {
+  signal?.throwIfAborted();
   const resp = await fetch("/api/ws-ticket", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
     body: JSON.stringify(target),
+    signal,
   });
   if (resp.status === 429) return resp; // carry the 429 (with headers) to the orchestrator
   if (!resp.ok) {
     if (resp.status === 401 && !retried) {
       const outcome = await recoverSession();
-      if (outcome.kind === "refreshed") return fetchMintTicket(target, true);
+      // The recovery is shared with other callers; cancelling one ticket
+      // leaves it running but must prevent this caller's replay.
+      signal?.throwIfAborted();
+      if (outcome.kind === "refreshed") return fetchMintTicket(target, true, signal);
       if (outcome.kind === "unavailable") throw outcome.error;
     }
     const detail = await safeJsonError(resp);
@@ -781,7 +788,7 @@ export async function mintWsTicketWithBackoff(
   options: MintOptions = {},
 ): Promise<string> {
   const snooze = options.sleep ?? sleep;
-  const first = await fetchMintTicket(target);
+  const first = await fetchMintTicket(target, false, options.signal);
   if (typeof first === "string") return first;
   // first is the 429 Response — honour its `Retry-After`, wait, retry
   // exactly once. NOT a loop.
@@ -789,7 +796,7 @@ export async function mintWsTicketWithBackoff(
   const waitMs =
     hint === null ? FALLBACK_RETRY_MS : Math.min(hint * 1000, MAX_RETRY_AFTER_MS);
   await snooze(waitMs);
-  const second = await fetchMintTicket(target);
+  const second = await fetchMintTicket(target, false, options.signal);
   if (typeof second === "string") return second;
   // second 429 still — surface the canonical toast text so the SPA renders
   // it uniformly across terminal & events surfaces.
@@ -827,13 +834,13 @@ export async function terminalWsUrl(nodeId: number): Promise<string> {
   return `${proto}//${host}/ws/terminal/${nodeId}?ticket=${encodeURIComponent(ticket)}`;
 }
 
-export async function eventsWsUrl(): Promise<string> {
+export async function eventsWsUrl(signal?: AbortSignal): Promise<string> {
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
   const host = window.location.host;
   const ticket = await mintWsTicketWithBackoff({
     surface: "events",
     node_id: null,
-  });
+  }, { signal });
   return `${proto}//${host}/ws/events?ticket=${encodeURIComponent(ticket)}`;
 }
 

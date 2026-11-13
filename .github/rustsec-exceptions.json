@@ -18,6 +18,11 @@
     "tree. `zip` left the tree entirely in issue #2438, which dropped the `zip` feature from",
     "`tauri-plugin-updater` and with it the RUSTSEC-2026-0367/0368/0369 extraction advisories.",
     "",
+    "`yaml-rust` left the tree in issue #2757, which dropped syntect's default features for the",
+    "`fancy-regex` engine and with them the `yaml-rust` dependency. RUSTSEC-2024-0320 therefore",
+    "stops being reported, and its entry is removed rather than left to expire against a crate the",
+    "tree no longer contains.",
+    "",
     "`zvariant`, `zvariant_derive` and `zbus_names` (RUSTSEC-2026-0370/0371/0372) are unmaintained",
     "upstream because they were merged into zbus 6.0.0, and each advisory lists `patched = []`, so no",
     "release of these crates clears it. All three reach the tree through one non-optional dependency —",
@@ -34,15 +39,6 @@
       "kind": "unsound",
       "owner": "maintainers (transitive, GTK3 runtime)",
       "rationale": "Unsound Iterator/DoubleEndedIterator impls in glib::VariantStrIter. glib is pulled in transitively by the GTK3 stack Tauri links on Linux; Buildmesh does not call VariantStrIter, and the crate cannot be upgraded without a Tauri GTK4 migration.",
-      "reviewBy": "2027-01-15"
-    },
-    {
-      "id": "RUSTSEC-2024-0320",
-      "crate": "yaml-rust",
-      "version": "0.4.5",
-      "kind": "unmaintained",
-      "owner": "maintainers (transitive, via syntect)",
-      "rationale": "yaml-rust is unmaintained and is pulled in by syntect, which Buildmesh uses for syntax highlighting of diffs and transcripts. It parses theme files that ship inside the repository, not user-supplied YAML, and syntect has no unmaintained replacement with a maintained API surface.",
       "reviewBy": "2027-01-15"
     },
     {

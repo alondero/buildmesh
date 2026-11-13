@@ -83,6 +83,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 
+use rusqlite::Connection;
+
 use super::SqlResult;
 
 /// Reader connections opened for an isolated test database. Production opens
@@ -439,6 +441,21 @@ pub fn isolated() -> IsolatedDbGuard {
     install(next_database_uri(), Vec::new())
 }
 
+/// Install a statement trace on every idle reader in the installed database.
+///
+/// The trace stays on the connection when [`super::read_conn`] returns it to
+/// the pool, so the next checkout — the one `history` and `attention` take
+/// for themselves — is counted. Returns how many readers were armed. Call
+/// this after the fixture is written and before the read under test.
+pub fn trace_readers(mut install: impl FnMut(&mut Connection)) -> usize {
+    let mut available = super::get().readers.available.lock();
+    let count = available.len();
+    for connection in available.iter_mut() {
+        install(connection);
+    }
+    count
+}
+
 /// Like [`isolated`], but the database is a real file, so every commit pays
 /// the fsync a production commit pays.
 ///
@@ -668,8 +685,11 @@ impl Drop for IsolatedDbGuard {
                 // The preferences store belongs to this install, so dropping it
                 // here hands this test's preferences to nobody: the next test
                 // on this recycled worker thread installs its own. Dropping
-                // the `TempDir` removes the files as well.
+                // the `TempDir` removes the files as well. The interval
+                // schedule is thread-local too: leave it and the next test
+                // would skip its database read on the strength of this one.
                 installed.prefs = None;
+                crate::services::circuit_triggers::clear_interval_schedule();
                 *slot = None;
             }
         });

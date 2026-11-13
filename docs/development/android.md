@@ -370,11 +370,50 @@ Only the terminal is a WebView: it loads bundled xterm assets from
 resize and ready callbacks. No remote page, cookie or credential enters that
 WebView. Kotlin owns HTTP and WebSockets. The server's initial terminal snapshot
 replaces local terminal state on reconnect; binary output retains UTF-8 decoder
-state inside xterm. Native composer and control buttons own input; the xterm
-display disables stdin so replayed terminal queries cannot inject synthetic
-responses into the current desktop prompt. Input controls report disconnection instead of silently
+state inside xterm. Kotlin owns input; the xterm display disables stdin so
+replayed terminal queries cannot inject synthetic responses into the current
+desktop prompt. Input controls report disconnection instead of silently
 queueing keystrokes. HTTP replies enforce the server's 1024-byte encoded-body
 limit. Enumerated answers are shown as guidance rather than guessed PTY keys.
+
+### Typing goes into the agent's own input box
+
+The phone types straight into the agent's own input box (issue #2747),
+because that is where the agent's slash-command menu, `@` file completion and
+Tab completion run. A separate line-buffered box under the terminal sent
+nothing until **Send**, so none of them could react.
+
+`TerminalSurface` (`TerminalKeyInput.kt`) wraps the WebView and is the soft
+keyboard's target. Android 9 and later refuse focus to a zero-sized view, so a
+hidden helper view cannot hold the keyboard. The wrapper also blocks focus
+from reaching the WebView (`FOCUS_BLOCK_DESCENDANTS`), and xterm's textarea is
+read-only with `inputmode="none"`, so Chromium has no focused field to raise a
+keyboard of its own for. A plain tap on the
+terminal calls `BuildmeshTerminal.focusInput()`; so does the keyboard button
+at the head of the quick-key row. A plain tap is short, still and
+single-finger, and is not a link tap: `attachMobileTerminalLinks` claims a
+link tap by cancelling its `touchend`.
+
+The keyboard connection asks for visible-password input with no suggestions,
+which keyboards honour by committing one character at a time; each commit goes
+to the socket at once. A keyboard that still holds back a word replaces the
+whole word on each key, so `ImeTextStream` sends only the difference: DEL for
+each changed code point, then the new tail. That keeps the agent's box equal
+to what the keyboard shows. The editable is cleared after each commit, so
+Backspace arrives as a key event. `terminalKeyBytes` maps key events,
+including a hardware keyboard's Ctrl and Alt chords, to the bytes a desktop
+terminal sends. Arrows, Home and End follow the agent's application-cursor
+mode. The WebView reports that mode and bracketed paste over
+`BuildmeshTerminal.modes` whenever either flips, and the desktop snapshot
+replays both, so a reconnect starts from the agent's current state.
+
+Character input turns off autocorrect, swipe typing and the keyboard's
+microphone, so **Compose** opens a sheet with an ordinary text field for prose
+and dictation. **Insert** pastes the text into the agent's box, bracketed when
+the agent has bracketed paste on so that newlines stay in the draft. **Send**
+pastes, then sends Enter as its own frame after `COMPOSE_SUBMIT_GAP_MS`: 1s,
+the desktop's ordinary paste gap, because an Enter in the same burst as a
+paste can be read as part of it. The draft survives dismissing the sheet.
 
 The terminal screen draws the desktop's semantic-turn banner directly above the
 terminal surface, where the request is read (issue #2609). The band is read
@@ -543,6 +582,8 @@ reaches the same conclusion, and that each node owns its own notification id),
 and one that drives the feed against MockWebServer to prove two owners share a
 single socket, that the socket closes with its last owner, and that a revoked
 device stops the feed instead of minting tickets forever.
+`TerminalKeyInputTest` covers the key-to-bytes mapping, cursor-key mode,
+held-back words and the Compose paste.
 The terminal's quick-key row has its own suite: the approval keys are not
 duplicated there, and the approval sequences the band sends are the desktop's
 `y\r` / `n\r`.
@@ -556,7 +597,11 @@ controls, dashboard filtering/navigation and Android Keystore persistence and
 forgetting, Main-thread network discipline, cancelled mutation callbacks,
 snapshot ownership, diff retry and the real bundled WebView's snapshot/binary
 rendering, visible pixels in the native window, viewport geometry, resize and
-input, including replayed queries that must not become keystrokes.
+input, including replayed queries that must not become keystrokes. Input
+starts with a tap on the terminal and drives the keyboard connection the
+surface hands a soft keyboard (not a real keyboard app), then the Compose
+sheet and the quick keys, whose arrows follow the agent's cursor-key mode. A
+link tap does not raise the keyboard.
 The semantic-turn band above the terminal is covered on the device too: it
 shows a permission request's own words and the desktop's `Allow (Y)` /
 `Reject (N)` pair above the terminal surface, posts `y\r` to the desktop,

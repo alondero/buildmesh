@@ -167,6 +167,7 @@ describe('IPC contract: dev-only commands stay out of the release window', () =>
       'create_test_mesh',
       'debug_crash_snapshot',
       'debug_list_agents',
+      'debug_pump_pty_output',
     ]);
   });
 

@@ -140,13 +140,29 @@ describe('App.css — the type scale follows --ui-text-scale', () => {
     expect(APP_CSS).toMatch(/--ui-text-scale:\s*1;/);
   });
 
-  it.each(['2xs', 'xs', 'sm', 'base', 'lg', 'xl', '2xl'])(
+  it.each(['2xs', 'xs', 'sm', 'base', 'lg', 'xl', '2xl', 'label', 'meta', 'micro'])(
     'multiplies the %s step by the scale',
     (step) => {
       const declaration = new RegExp(`--text-${step}:\\s*calc\\([^;]*var\\(--ui-text-scale\\)`);
       expect(APP_CSS).toMatch(declaration);
     },
   );
+
+  it('multiplies the compact type-density ladder by the scale too', () => {
+    // The compact variant restates the ladder outside @theme (App.css), so it
+    // has to carry the scale itself — a compact label that ignored the slider
+    // would stay small while the rest of the app grew.
+    const compactBlock = APP_CSS.match(
+      /:root\[data-type-density='compact'\][\s\S]*?\n\}/g,
+    );
+    expect(compactBlock).not.toBeNull();
+    for (const block of compactBlock ?? []) {
+      expect(block).toMatch(/font-size:\s*calc\([^;]*var\(--ui-text-scale\)/);
+    }
+    // Both roles have a compact variant; microcopy has none because it already
+    // sits at the app's 10px floor.
+    expect(compactBlock).toHaveLength(2);
+  });
 
   it('keeps the root font-size — and therefore rem — at the 13px base', () => {
     // The rem anchor: an html font-size that multiplied by the scale would

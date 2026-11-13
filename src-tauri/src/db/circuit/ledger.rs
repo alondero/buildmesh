@@ -465,7 +465,7 @@ fn create_node_circuit_run_with_recovery_locked(
             max_rounds,
         );
         graph.validate()?;
-        let name = format!("Review agent {}", node_id);
+        let name = "Agent review".to_string();
         let description = "Review an existing agent and return findings until approved";
         let existing: Option<(i64, String)> = tx
             .query_row(
@@ -834,11 +834,40 @@ pub(crate) fn list_autopilot_circuits_inner(
     rows.collect()
 }
 
+#[cfg(test)]
+// allow-test-in-production: interval tick tests count these reads on the calling thread
+thread_local! {
+    static LIST_ENABLED_CIRCUITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static LATEST_RUN_CREATED_AT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static LIST_ACTIVE_CIRCUIT_RUNS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+// allow-test-in-production: interval tick tests read the enabled-circuit list count
+pub(crate) fn list_enabled_circuits_calls() -> u64 {
+    LIST_ENABLED_CIRCUITS.with(|count| count.get())
+}
+
+#[cfg(test)]
+// allow-test-in-production: interval tick tests read the cooldown-anchor read count
+pub(crate) fn latest_circuit_run_created_at_calls() -> u64 {
+    LATEST_RUN_CREATED_AT.with(|count| count.get())
+}
+
+#[cfg(test)]
+// allow-test-in-production: the watchdog tick test reads the active-run list count
+pub(crate) fn list_active_circuit_runs_calls() -> u64 {
+    LIST_ACTIVE_CIRCUIT_RUNS.with(|count| count.get())
+}
+
 /// Every enabled circuit across ALL meshes — the GitHub poll and
 /// interval trigger passes' input (issue #1208). Circuits are not
 /// mesh-scoped at the trigger layer: a circuit carries its own mesh_id,
 /// so one query serves the whole worker pass.
 pub fn list_enabled_circuits() -> SqlResult<Vec<AutopilotCircuit>> {
+    #[cfg(test)]
+    // allow-test-in-production: interval tick tests count this list on the calling thread
+    LIST_ENABLED_CIRCUITS.with(|count| count.set(count.get() + 1));
     let db = crate::db::read_conn()?;
     list_enabled_circuits_inner(&db)
 }
@@ -860,6 +889,9 @@ pub(crate) fn list_enabled_circuits_inner(db: &Connection) -> SqlResult<Vec<Auto
 /// Deliberately trigger-kind agnostic: ANY run (manual Trigger Now
 /// included) restarts the cadence, because the user just intervened.
 pub fn latest_circuit_run_created_at(circuit_id: i64) -> SqlResult<Option<String>> {
+    #[cfg(test)]
+    // allow-test-in-production: interval tick tests count this anchor read on the calling thread
+    LATEST_RUN_CREATED_AT.with(|count| count.set(count.get() + 1));
     let db = crate::db::read_conn()?;
     latest_circuit_run_created_at_inner(&db, circuit_id)
 }
@@ -942,7 +974,7 @@ pub(crate) fn ensure_review_blueprint_inner(db: &Connection, mesh_id: i64) -> Sq
         .to_json()
         .map_err(rusqlite::Error::InvalidParameterName)?;
     db.execute("INSERT INTO autopilot_circuits(mesh_id,name,description,enabled,graph_json,is_preset)
-        SELECT ?1,'Built-in Review Blueprint','Review an existing agent and return findings until approved',0,?2,1
+        SELECT ?1,'Agent review','Review an existing agent and return findings until approved',0,?2,1
         WHERE EXISTS(SELECT 1 FROM meshes WHERE id=?1)
         AND NOT EXISTS(SELECT 1 FROM autopilot_circuits WHERE mesh_id=?1 AND is_preset=1)", params![mesh_id,graph])?;
     Ok(())
@@ -1678,6 +1710,9 @@ pub struct ActiveCircuitRun {
 }
 
 pub fn list_active_circuit_runs() -> SqlResult<Vec<ActiveCircuitRun>> {
+    #[cfg(test)]
+    // allow-test-in-production: the watchdog tick test counts this list on the calling thread
+    LIST_ACTIVE_CIRCUIT_RUNS.with(|count| count.set(count.get() + 1));
     let db = crate::db::read_conn()?;
     list_active_circuit_runs_inner(&db)
 }

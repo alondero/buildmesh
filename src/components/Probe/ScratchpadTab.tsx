@@ -84,8 +84,14 @@ export function ScratchpadTab() {
           testId="scratchpad-save-indicator"
         />
       </div>
+      {/* The focus border is the textarea's own border, not an outline:
+          the note fills the dock edge to edge, so an outline drawn outside
+          the box would be clipped by the panel's scroll container, and a
+          ring would be clipped with it. A transparent resting border keeps
+          the current look and gives the focus state a real edge to colour
+          (issue #2776). */}
       <textarea
-        className="flex-1 resize-none p-3 bg-bg-surface text-text-primary text-sm font-mono leading-relaxed focus:outline-none placeholder:text-text-muted"
+        className="flex-1 resize-none p-3 bg-bg-surface text-text-primary text-sm font-mono leading-relaxed border border-transparent focus:outline-none focus:border-accent-cyan placeholder:text-text-muted"
         value={scratchpad.text}
         // Disabled until the note for THIS mesh has been read: an edit
         // written against a row we never loaded would overwrite it blind.

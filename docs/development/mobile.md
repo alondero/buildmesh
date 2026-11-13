@@ -275,6 +275,19 @@ silently. Submitted fields are frozen while the request is in flight, so the val
 screen always match the ones GitHub received. `Sheet` also carries `role="dialog"`,
 `aria-modal`, and focus containment.
 
+### A sheet names itself
+
+`Sheet` takes a `label` and renders it as the dialog's accessible name. A sheet that
+says what it is for — "Actions for buildmesh" — tells a screen-reader user which
+thing the actions belong to; a sheet without one announces a bare dialog, and the
+mesh it acts on becomes unknowable (issue #2776). The name carries the **identity of
+the subject** (the mesh, the pull request), not the surface: the visible heading may
+repeat it, but the accessible name has to identify the subject on its own.
+
+Naming is the `label` prop rather than `aria-labelledby` on the visible heading. A
+heading label would announce the subject alone ("buildmesh") and drop the action
+context; `label` lets the name say both.
+
 ## Launch and resume visit ownership
 
 Creating an Agent Node from an Issue or resuming an archived session spawns a real
@@ -345,6 +358,38 @@ so the existing spawn orchestrator owns initial prompt delivery. The create
 route validates text size. Whether the harness can take an initial prompt is
 the rule in services::agent_node, shared with the desktop commands.
 Mobile never races terminal startup by injecting the idea as keystrokes.
+
+## Phone events connection lifecycle
+
+`useWsEvents` owns one connection for its mounted screen, including the ticket
+mint before a WebSocket exists. Its explicit states are `idle`, `minting`,
+`socket`, `backoff`, `rate-limited`, `unauthorized`, and `disposed`.
+
+Foreground and network-return events cannot start another mint while one is
+pending, or replace a socket that is connecting, open, or closing. A socket
+failure retires its handlers and closes it before the next attempt. Error and
+close callbacks from the same attempt consume one backoff slot; the ladder is
+1/2/4/8 seconds, capped, and a successful open resets it. Foreground/network
+return may bypass a pending delay.
+
+Each mint has a 15-second deadline covering ticket acquisition and any wait for
+shared cookie recovery. Expiry cancels its ticket fetch and takes the ordinary
+backoff path; late success or failure from that attempt has no authority over
+the replacement. The transport accepts an optional abort signal, checks it
+before retrying a rate-limited mint or replaying after cookie recovery, and
+leaves shared cookie recovery running for other callers.
+
+A mint rejected for authentication calls the screen's recovery handler once
+and ends that connection. A 429 pauses after the transport's bounded retry;
+foreground/network return can try again, while the list poll remains the
+fallback. Unmount retires the whole lifecycle before releasing its socket or
+timer. Late ticket success/failure and queued socket callbacks cannot publish,
+report auth failure, or re-arm a timer for a departed screen.
+
+`tests/unit/mobile-events-reconnect.test.tsx` covers this contract through the
+hook with controlled ticket promises, fake sockets, and fake time. The terminal
+screen has a separate bounded reconnect/countdown policy. See the
+[state-machine inventory](state-machines.md) for both owners.
 
 ## Phone polling lifecycle
 
@@ -523,6 +568,20 @@ drops sharply — scrolling is what keeps the history reachable. The client
 also tracks whether the viewport still sits on the live tail and offers
 **Jump to latest output** when it does not, because a panned-back terminal
 would otherwise have no way back to the running output.
+
+## The phone's terminal bounds unparsed output
+
+xterm parses `write` asynchronously and does not cap the payloads waiting on
+that parse. A PTY frame is up to 32 KiB and can arrive faster than the parser,
+so handing each frame straight to `write` retains one unparsed payload per
+frame until the stream stops. The browser screen and the Android WebView both
+feed those frames through the desktop `TerminalWriter` first. It keeps at most
+four bulk parses in flight and holds the rest behind a 4 MiB and 4096-chunk
+cap, dropping the oldest chunk. A keystroke-sized chunk still skips the queue.
+The browser screen disposes its xterm when the user leaves, because that
+terminal belongs to the visit; leaving also unregisters the writer and releases
+the scroll listener. The budgets are the ones in
+[Terminals](terminals.md#pty-output-streaming-issue-1385-1393).
 
 ## Mobile terminal socket lifecycle
 

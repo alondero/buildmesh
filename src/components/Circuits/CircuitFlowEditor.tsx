@@ -15,6 +15,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
+import { useResizeWidth } from '../../hooks/useResizeWidth';
 import { useUIStore } from '../../stores/uiStore';
 import { copyReviewBlueprint } from '../../lib/tauri/circuitBlueprint';
 import {
@@ -52,7 +53,6 @@ import {
   conditionFromHandle,
   defaultKind,
   edgeKey,
-  layoutPositions,
   makeNodeId,
   parseGraph,
   sourceOutcomes,
@@ -62,6 +62,7 @@ import {
   traversedEdgeKeys,
   type StepLike,
 } from './circuitGraphModel';
+import { layoutPositions } from './circuitLayout';
 
 // Stable component identities — redefining these per render would make
 // React Flow remount every card on any state change.
@@ -129,6 +130,8 @@ export function CircuitFlowEditor(props: CircuitFlowEditorProps) {
 }
 
 function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlowEditorProps) {
+  const editorRef = useRef<HTMLDivElement>(null);
+  const compact = useResizeWidth(editorRef) < 1100;
   const readOnly = circuit.is_preset;
   const openCircuitEditor = useUIStore((state) => state.openCircuitEditor);
   const { screenToFlowPosition } = useReactFlow();
@@ -144,6 +147,8 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
 
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [showRunDrawer, setShowRunDrawer] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState<boolean | null>(null);
+  const paletteVisible = !readOnly && (paletteOpen ?? !compact) && (!compact || !showRunDrawer);
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
   const [quickConnect, setQuickConnect] = useState<{
     fromNodeId: string;
@@ -315,8 +320,9 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
         { id, type: 'circuit', position, data: { circuitNode } },
       ]);
       setSelectedNodeId(id);
+      if (compact) { setPaletteOpen(false); setShowRunDrawer(false); }
     },
-    [nodes, setNodes]
+    [nodes, setNodes, compact]
   );
 
   const addWiredNode = useCallback(
@@ -537,7 +543,8 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
 
   return (
     <div
-      className="absolute inset-0 z-40 flex flex-col bg-bg-base"
+      ref={editorRef}
+      className="@container/circuit absolute inset-0 z-40 flex flex-col bg-bg-base"
       data-testid="circuit-flow-editor"
     >
       {confirmingDiscard && (
@@ -564,7 +571,7 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
               type="button"
               onClick={handleConfirmDiscard}
               data-testid="editor-discard-confirm"
-              className="px-3 py-1 text-sm rounded-md bg-status-error text-white hover:bg-status-error/90"
+              className="px-3 py-1 text-sm rounded-md text-on-destructive bg-destructive/80 hover:bg-destructive active:bg-destructive-strong disabled:bg-bg-card-hover disabled:text-text-muted"
             >
               Discard changes
             </button>
@@ -572,8 +579,8 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
         </div>
       )}
       {/* Header */}
-      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border-subtle bg-bg-surface shrink-0">
-        <span className="text-sm font-semibold text-text-primary">{circuit.name}</span>
+      <div className="flex flex-wrap items-center gap-2 px-3 py-1.5 border-b border-border-subtle bg-bg-surface shrink-0">
+        <span className="min-w-0 max-w-full truncate text-sm font-semibold text-text-primary" title={circuit.name}>{circuit.name}</span>
         {readOnly && <span className="text-xs text-text-muted">Read-only Review Blueprint</span>}
         {dirty && (
           <span className="text-2xs text-status-warning" data-testid="editor-dirty">
@@ -581,6 +588,12 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
           </span>
         )}
         <div className="flex-1" />
+        {!readOnly && <button type="button" data-testid="toggle-node-palette" aria-expanded={paletteVisible}
+          aria-controls="circuit-node-palette"
+          onClick={() => { setPaletteOpen(!paletteVisible); if (compact) setShowRunDrawer(false); }}
+          className="min-h-[24px] rounded-md px-2 text-xs text-text-secondary hover:bg-bg-card-hover">
+          Add node
+        </button>}
         <button
           type="button"
           onClick={() => autoLayout('LR')}
@@ -599,7 +612,7 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
         </button>
         <button
           type="button"
-          onClick={() => setShowRunDrawer((v) => !v)}
+          onClick={() => { setShowRunDrawer((v) => !v); if (compact) setPaletteOpen(false); }}
           data-testid="toggle-run-history"
           className={`px-2 py-0.5 rounded-md text-xs ${
             showRunDrawer
@@ -645,8 +658,14 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
       </div>
 
       {/* Canvas + side panels */}
-      <div className="relative flex flex-1 overflow-hidden">
-        <div className="relative flex-1" ref={wrapperRef} data-testid="canvas-wrapper">
+      <div className="relative flex min-h-0 flex-1 overflow-hidden @max-[600px]/circuit:flex-col">
+        {paletteVisible && <NodePalette onAdd={(d) => {
+          const rect = wrapperRef.current?.getBoundingClientRect();
+          const position = screenToFlowPosition({ x: (rect?.left ?? 0) + (rect?.width ?? 800) / 2,
+            y: (rect?.top ?? 0) + (rect?.height ?? 600) / 2 });
+          addNodeAt(d, { x: position.x - 110, y: position.y - 32 });
+        }} />}
+        <div key="canvas" className="relative min-h-[180px] min-w-0 flex-1" ref={wrapperRef} data-testid="canvas-wrapper">
           <ReactFlow
             nodes={nodes}
             edges={edges}
@@ -664,7 +683,10 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
             nodeTypes={nodeTypes}
             edgeTypes={edgeTypes}
             deleteKeyCode={null}
-            onNodeClick={(_, node) => setSelectedNodeId(node.id)}
+            onNodeClick={(_, node) => {
+              setSelectedNodeId(node.id);
+              if (compact) { setShowRunDrawer(false); setPaletteOpen(false); }
+            }}
             onPaneClick={() => {
               setSelectedNodeId(null);
               setQuickConnect(null);
@@ -676,19 +698,14 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
             <Background variant={BackgroundVariant.Dots} gap={16} size={1} />
             <Controls showInteractive={false} />
           </ReactFlow>
-          {!readOnly && <NodePalette
-            onAdd={(d) => {
-              const rect = wrapperRef.current?.getBoundingClientRect();
-              const position = screenToFlowPosition({
-                x: (rect?.left ?? 0) + (rect?.width ?? 800) / 2,
-                y: (rect?.top ?? 0) + (rect?.height ?? 600) / 2,
-              });
-              addNodeAt(d, { x: position.x - 110, y: position.y - 32 });
-            }}
-          />}
           {quickConnect && (
             <QuickConnectMenu
               position={quickConnect.screen}
+              // Issue #2773 — the menu is positioned in the canvas
+              // wrapper's coordinate space and has to stay inside the
+              // visible editor, so it is bounded by that wrapper rather
+              // than by the window.
+              boundsRef={wrapperRef}
               onSelect={(spec) => {
                 addWiredNode(
                   spec.discriminator,
@@ -703,11 +720,11 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
           )}
         </div>
 
-        <fieldset disabled={readOnly} className="contents"><InspectorPanel
+        {(!compact || (!showRunDrawer && !paletteVisible && currentNode !== null)) && <fieldset disabled={readOnly} className="contents"><InspectorPanel
           node={currentNode}
           onChange={updateSelectedKind}
           graph={currentGraph}
-        /></fieldset>
+        /></fieldset>}
         {!readOnly && currentNode !== null && (
           <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-20">
             <button

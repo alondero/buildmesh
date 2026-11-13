@@ -1,0 +1,121 @@
+{
+  "ids": [
+    "anthropic",
+    "agy",
+    "opencode",
+    "opencode2",
+    "codex",
+    "cursor",
+    "grok",
+    "kimi",
+    "mcode",
+    "dsh",
+    "commandcode",
+    "freebuff",
+    "muse",
+    "cline",
+    "perch",
+    "terminal"
+  ],
+  "aliases": {
+    "claude": "anthropic"
+  },
+  "eligibility": {
+    "agy": {
+      "is_plain_terminal": false,
+      "requires_attention_hook": true,
+      "supports_passive_turn_watcher": false,
+      "supports_result_file_handoff": true
+    },
+    "anthropic": {
+      "is_plain_terminal": false,
+      "requires_attention_hook": true,
+      "supports_passive_turn_watcher": false,
+      "supports_result_file_handoff": true
+    },
+    "cline": {
+      "is_plain_terminal": false,
+      "requires_attention_hook": true,
+      "supports_passive_turn_watcher": false,
+      "supports_result_file_handoff": true
+    },
+    "codex": {
+      "is_plain_terminal": false,
+      "requires_attention_hook": true,
+      "supports_passive_turn_watcher": false,
+      "supports_result_file_handoff": true
+    },
+    "commandcode": {
+      "is_plain_terminal": false,
+      "requires_attention_hook": false,
+      "supports_passive_turn_watcher": true,
+      "supports_result_file_handoff": true
+    },
+    "cursor": {
+      "is_plain_terminal": false,
+      "requires_attention_hook": true,
+      "supports_passive_turn_watcher": false,
+      "supports_result_file_handoff": true
+    },
+    "dsh": {
+      "is_plain_terminal": false,
+      "requires_attention_hook": false,
+      "supports_passive_turn_watcher": false,
+      "supports_result_file_handoff": true
+    },
+    "freebuff": {
+      "is_plain_terminal": false,
+      "requires_attention_hook": false,
+      "supports_passive_turn_watcher": false,
+      "supports_result_file_handoff": true
+    },
+    "grok": {
+      "is_plain_terminal": false,
+      "requires_attention_hook": true,
+      "supports_passive_turn_watcher": false,
+      "supports_result_file_handoff": true
+    },
+    "kimi": {
+      "is_plain_terminal": false,
+      "requires_attention_hook": true,
+      "supports_passive_turn_watcher": false,
+      "supports_result_file_handoff": true
+    },
+    "mcode": {
+      "is_plain_terminal": false,
+      "requires_attention_hook": true,
+      "supports_passive_turn_watcher": false,
+      "supports_result_file_handoff": true
+    },
+    "muse": {
+      "is_plain_terminal": false,
+      "requires_attention_hook": false,
+      "supports_passive_turn_watcher": true,
+      "supports_result_file_handoff": true
+    },
+    "opencode": {
+      "is_plain_terminal": false,
+      "requires_attention_hook": true,
+      "supports_passive_turn_watcher": false,
+      "supports_result_file_handoff": true
+    },
+    "opencode2": {
+      "is_plain_terminal": false,
+      "requires_attention_hook": true,
+      "supports_passive_turn_watcher": false,
+      "supports_result_file_handoff": true
+    },
+    "perch": {
+      "is_plain_terminal": false,
+      "requires_attention_hook": false,
+      "supports_passive_turn_watcher": false,
+      "supports_result_file_handoff": true
+    },
+    "terminal": {
+      "is_plain_terminal": true,
+      "requires_attention_hook": false,
+      "supports_passive_turn_watcher": false,
+      "supports_result_file_handoff": false
+    }
+  }
+}

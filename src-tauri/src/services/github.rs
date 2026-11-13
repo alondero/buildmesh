@@ -11,6 +11,13 @@
 //! - [`sync`] — host token, HTTP timeouts, and rate-limit errors. TTL and
 //!   live-over-cache helpers live here as tested policy for a future
 //!   snapshot store; live list methods fetch every time.
+//! - [`wire`] — the issue and pull-request wire shapes the probes and the
+//!   mobile routes serialise. They live beside the workflows that build
+//!   them so a service no longer imports the command layer for a data shape
+//!   (issue #2236; `scripts/check-pr-creation-source-ownership.mjs` fails the
+//!   build if one does).
+//! - [`repository`] — repository identity: which GitHub repo a path belongs
+//!   to, and the branch and remote facts the PR workflows read.
 
 pub(crate) mod feeds;
 pub(crate) mod pr_workflow;
@@ -20,6 +27,7 @@ pub mod issues;
 pub mod pagination;
 pub mod prs;
 pub mod sync;
+pub mod wire;
 
 // In scope for the `deserialize_opt_string` helper below.
 use serde::Deserialize;
@@ -46,16 +54,18 @@ where
 mod label_tests;
 #[cfg(test)]
 mod pagination_tests;
+#[cfg(test)]
+mod pr_tests;
 
 pub use issues::{parse_blocked_by, Issue};
 pub use pagination::GitHubPageCompleteness;
 pub use prs::{CollaboratorPermission, CreatePrRequest, PullRequest, PullRequestMergeState};
 pub use sync::{parse_clone_input, parse_owner_repo, CloneTarget, GitHubClient, GitHubError};
 
-/// Fake GitHub server used by command-layer tests. The implementation lives
-/// with the pull-request client; this re-export keeps `services::github::tests`
-/// stable.
-#[cfg(test)] // allow-test-in-production: preserve the shared fake-server export path used by command tests
+/// Fake GitHub server used by the GitHub service tests. The implementation
+/// lives with the pull-request client; this re-export keeps
+/// `services::github::tests` stable.
+#[cfg(test)] // allow-test-in-production: preserve the shared fake-server export path used by the sibling service suites
 pub(crate) mod tests {
     pub(crate) use super::prs::tests::{fake_node, fake_server, Scripted};
 }

@@ -626,3 +626,117 @@ test('rust advisories: the zip crate stays out of the tree (issue #2438)', () =>
   assert.match(line, /default-features = false/, 'the zip feature is back on via default features');
   assert.doesNotMatch(line, /"zip"/, 'the zip feature must not be re-enabled explicitly either');
 });
+
+test('rust advisories: the yaml-rust crate stays out of the tree (issue #2757)', () => {
+  // RUSTSEC-2024-0320 says yaml-rust is unmaintained. syntect pulls it in
+  // through its `yaml-load` feature, which the default feature set enables and
+  // this repository's feature choice drops, so the crate leaves the tree
+  // entirely. Its reviewed exception was removed with it, because a stale
+  // exception fails the gate rather than lingering against a crate the tree no
+  // longer contains.
+  //
+  // `cargo audit` is the authoritative gate and already fails if yaml-rust
+  // returns, but it needs a populated advisory database; these two assertions
+  // are the cheap local check that fails the moment the dependency line is
+  // reverted.
+  const lock = fs.readFileSync(path.join(repoRoot, 'src-tauri', 'Cargo.lock'), 'utf8');
+  assert.doesNotMatch(
+    lock,
+    /^\[\[package\]\]\r?\nname = "yaml-rust"$/m,
+    'yaml-rust is in Cargo.lock again: keep default-features = false on syntect',
+  );
+
+  const manifest = fs.readFileSync(path.join(repoRoot, 'src-tauri', 'Cargo.toml'), 'utf8');
+  const line = manifest.split('\n').find((l) => l.startsWith('syntect ='));
+  assert.ok(line, 'expected a syntect dependency line');
+  assert.match(line, /default-features = false/, 'the yaml feature is back on via default features');
+  assert.doesNotMatch(line, /"yaml-load"/, 'the yaml feature must not be re-enabled explicitly either');
+});
+
+function lockPackageVersions(lockText, name) {
+  const versions = [];
+  const re = /\[\[package\]\]\r?\nname = "([^"]+)"\r?\nversion = "([^"]+)"/g;
+  for (const match of lockText.matchAll(re)) {
+    if (match[1] === name) versions.push(match[2]);
+  }
+  return versions;
+}
+
+function parseCargoVersion(version) {
+  // Build metadata is not part of precedence. Split it off before the
+  // pre-release hyphen so `1.1.6-rc.1+build` stays a pre-release of 1.1.6.
+  const withoutBuild = version.split('+')[0];
+  const hyphen = withoutBuild.indexOf('-');
+  const core = hyphen === -1 ? withoutBuild : withoutBuild.slice(0, hyphen);
+  const parts = core.split('.').map((part) => Number(part));
+  if (core.length === 0 || parts.some((part) => !Number.isInteger(part))) {
+    throw new Error(`could not parse Cargo package version ${version}`);
+  }
+  return { parts, prerelease: hyphen === -1 ? null : withoutBuild.slice(hyphen + 1) };
+}
+
+function compareSemver(left, right) {
+  const a = parseCargoVersion(left);
+  const b = parseCargoVersion(right);
+  const length = Math.max(a.parts.length, b.parts.length);
+  for (let i = 0; i < length; i += 1) {
+    const delta = (a.parts[i] ?? 0) - (b.parts[i] ?? 0);
+    if (delta !== 0) return delta;
+  }
+  // Equal numbers: a pre-release sorts below the release (`1.1.6-rc.1` < `1.1.6`).
+  if (a.prerelease === null && b.prerelease === null) return 0;
+  if (a.prerelease === null) return 1;
+  if (b.prerelease === null) return -1;
+  if (a.prerelease === b.prerelease) return 0;
+  return a.prerelease < b.prerelease ? -1 : 1;
+}
+
+// RUSTSEC-2026-0486: rustix >=1.0.0, <1.1.6. The advisory lists <1.0.0 as unaffected.
+function rustixAffectedBy0486(version) {
+  return compareSemver(version, '1.0.0') >= 0 && compareSemver(version, '1.1.6') < 0;
+}
+
+test('rust advisories: rustix stays patched for RUSTSEC-2026-0486 (issue #2761)', () => {
+  // rustix 1.0.0 through 1.1.5 mark a zero-length xattr buffer as initialized.
+  // 1.1.6 returns an empty result for that call and adds *_query for the size.
+  // xattr 1.6.1 (src/sys/linux_macos.rs) passes `&mut []` to learn the size.
+  // xattr 1.7.0 calls the query functions instead. tar 0.4.46 depends on
+  // xattr at ^1.1.3, and tauri-plugin-updater 2.14.0 depends on that tar.
+  //
+  // `cargo audit` is the authoritative gate. This check fails when a locked
+  // rustix is inside >=1.0.0, <1.1.6, including a pre-release of 1.1.6, or
+  // when an xattr below 1.7.0 sits beside rustix >=1.1.6.
+  const lock = fs.readFileSync(path.join(repoRoot, 'src-tauri', 'Cargo.lock'), 'utf8');
+  const rustix = lockPackageVersions(lock, 'rustix');
+  assert.ok(rustix.length > 0, 'expected rustix in Cargo.lock');
+  for (const version of rustix) {
+    assert.equal(
+      rustixAffectedBy0486(version),
+      false,
+      `rustix ${version} is inside RUSTSEC-2026-0486 (>=1.0.0, <1.1.6)`,
+    );
+  }
+  if (rustix.some((version) => compareSemver(version, '1.1.6') >= 0)) {
+    for (const version of lockPackageVersions(lock, 'xattr')) {
+      assert.ok(
+        compareSemver(version, '1.7.0') >= 0,
+        `xattr ${version} still uses the pre-1.1.6 empty-buffer size query`,
+      );
+    }
+  }
+});
+
+test('rust advisories: a rustix pre-release below 1.1.6 stays affected (issue #2761)', () => {
+  // RustSec's patched bound is >=1.1.6. A pre-release sorts below its release,
+  // so 1.1.6-rc.1 is still inside >=1.0.0, <1.1.6. Build metadata does not.
+  assert.equal(rustixAffectedBy0486('1.1.6-rc.1'), true);
+  assert.equal(rustixAffectedBy0486('1.1.6-rc.1+build'), true);
+  assert.equal(rustixAffectedBy0486('1.0.0'), true);
+  assert.equal(rustixAffectedBy0486('1.1.5'), true);
+  assert.equal(rustixAffectedBy0486('1.1.6'), false);
+  assert.equal(rustixAffectedBy0486('1.1.6+build.1'), false);
+  assert.equal(rustixAffectedBy0486('0.38.44'), false);
+  assert.equal(rustixAffectedBy0486('1.0.0-alpha'), false);
+  assert.ok(compareSemver('1.7.0-rc.1', '1.7.0') < 0);
+  assert.equal(compareSemver('1.7.0+meta', '1.7.0'), 0);
+});

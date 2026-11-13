@@ -104,7 +104,17 @@ export function ViewSelector() {
         title={tooltip}
         // Styled as the switcher's active segment: this control IS the
         // active View Mode at this tier.
-        className="inline-flex h-9 min-w-0 items-center gap-1.5 rounded-md bg-bg-card px-2 py-1.5 text-sm font-sans font-medium transition-colors hover:text-text-primary"
+        //
+        // Issue #2774 — the old hover rule only changed the INHERITED text
+        // colour, and the visible children (the accent icon and label, the
+        // separator, the scope detail, the chevron) set their own colours, so
+        // hovering left the computed background and the visible child
+        // colours where they started. The surface hover token paints the
+        // control instead, and `active:` gives the pressed state the same
+        // wash. The children keep their own colours, so the active View
+        // Mode still reads as the active one and a hover does not overwrite
+        // the current state.
+        className="inline-flex h-9 min-w-0 items-center gap-1.5 rounded-md bg-bg-card px-2 py-1.5 text-sm font-sans font-medium transition-colors hover:bg-bg-card-hover active:bg-bg-card-hover"
       >
         <ActiveIcon className="h-4 w-4 shrink-0 text-accent-cyan" />
         <span className="shrink-0 whitespace-nowrap text-accent-cyan">{active.label}</span>

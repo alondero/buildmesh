@@ -440,6 +440,9 @@ pub fn run() {
             agent::process::handover_to_agent,
             // Binary PTY output Channel (issue #1385). Complements the
             // `agent-output` event fallback; see `agent::output`.
+            commands::pty_output::acknowledge_pty_output,
+            #[cfg(any(debug_assertions, feature = "dev-tools"))]
+            commands::pty_output::debug_pump_pty_output,
             agent::output::subscribe_agent_output,
             agent::output::unsubscribe_agent_output,
             commands::agent::auto_resume_agent_nodes,
@@ -563,10 +566,8 @@ pub fn run() {
             commands::attention::list_semantic_turns,
             commands::attention::is_attention_pending,
             // PR
-            commands::pr::create_pr,
             commands::pr::merge_pr,
             commands::pr::get_current_branch,
-            commands::pr::create_pr_for_mesh,
             commands::pr::create_pr_for_node_source,
             commands::agent::create_pr_node,
             commands::pr::get_repo_issues,
@@ -1081,6 +1082,16 @@ fn run_profile_startup(
     // worker because the prune isn't mesh-scoped (it's a single
     // bounded DELETE on `created_at`).
     services::coordinator_ledger_maintenance::start_worker();
+
+    // Device-session expiry sweep (issue #589). A paired device that re-pairs
+    // leaves its previous row behind as an orphan — a stale duplicate in the
+    // "Authorized Devices" panel that still authenticates as Admin. The sweep
+    // deletes rows that have not authenticated for
+    // `DEVICE_SESSION_IDLE_DAYS`, starting immediately (an install that was
+    // closed for months must not come back to a panel full of orphans) and
+    // then every six hours. A device that keeps authenticating keeps its row:
+    // the auth layer refreshes its activity.
+    services::device_session_expiry::start_worker();
 
     // Always-on resource diagnostics (issue: background-refresh grind).
     // A low-frequency sampler writes process vitals (memory, handles,

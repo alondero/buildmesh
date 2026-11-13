@@ -351,7 +351,7 @@ describe('TerminalRegistry creation/teardown races (issue #2016)', () => {
 
       control.subscribeGate.resolve();
       await waitFor(() => ipcFor('unsubscribe_agent_output').length === 1, 'the output unsubscribe');
-      expect(ipcFor('unsubscribe_agent_output')[0].args).toEqual({ sessionId: 1 });
+      expect(ipcFor('unsubscribe_agent_output')[0].args).toEqual({ sessionId: 1, channelId: control.channels.get(1)!.id });
 
       const held = listensFor('serialize-terminal-request')[0];
       held.gate.resolve(held.unlisten);
@@ -362,6 +362,31 @@ describe('TerminalRegistry creation/teardown races (issue #2016)', () => {
       emitChannelBytes(1, new Uint8Array([0x68]));
       expect(control.terminals[0].write).not.toHaveBeenCalled();
       expect(channel).toBeDefined();
+    });
+
+    it('does not let a cancelled creation unsubscribe its replacement after late registration', async () => {
+      control.holdListen = event => event === 'serialize-terminal-request';
+      control.subscribeGate = deferred<void>();
+      const oldGate = control.subscribeGate;
+      registry = await loadRegistry();
+      const oldCreated = registry.getOrCreate(1);
+      await waitFor(() => ipcFor('subscribe_agent_output').length === 1, 'old subscription');
+      const oldChannel = control.channels.get(1)!;
+      const serialize = listensFor('serialize-terminal-request')[0];
+      registry.dispose(1);
+      serialize.gate.resolve(serialize.unlisten);
+      expect(await oldCreated).toBeNull();
+
+      control.holdListen = () => false;
+      control.subscribeGate = null;
+      const replacement = await registry.getOrCreate(1);
+      const currentChannel = control.channels.get(1)!;
+      expect(currentChannel.id).not.toBe(oldChannel.id);
+      oldGate.resolve();
+      await waitFor(() => ipcFor('unsubscribe_agent_output').length === 1, 'old cleanup');
+      expect(ipcFor('unsubscribe_agent_output')[0].args).toEqual({ sessionId: 1, channelId: oldChannel.id });
+      currentChannel.onmessage(new Uint8Array([0x78]));
+      expect(replacement!.term.write).toHaveBeenCalledWith(new Uint8Array([0x78]), undefined);
     });
 
     it('releases the rest of the resources even when one disposer throws', async () => {
@@ -491,7 +516,7 @@ describe('TerminalRegistry creation/teardown races (issue #2016)', () => {
         expect(control.terminals[0].dispose).toHaveBeenCalledTimes(1);
         expect(listensFor('agent-output')[0].unlisten).toHaveBeenCalledTimes(1);
         await waitFor(() => ipcFor('unsubscribe_agent_output').length === 1, 'the output unsubscribe');
-        expect(ipcFor('unsubscribe_agent_output')[0].args).toEqual({ sessionId: 1 });
+        expect(ipcFor('unsubscribe_agent_output')[0].args).toEqual({ sessionId: 1, channelId: control.channels.get(1)!.id });
         emitChannelBytes(1, new Uint8Array([0x68]));
         expect(control.terminals[0].write).not.toHaveBeenCalled();
       } finally {

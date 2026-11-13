@@ -448,6 +448,8 @@ pub(super) fn teardown_incarnation(
     join: JoinPolicy,
     cleanup_sandbox: bool,
 ) -> TeardownOutcome {
+    // Release output credit waits after this incarnation's deliberate-kill flag is set.
+    crate::pty::sink::AGENT.wake_producers(session_id);
     // 1. Cancel input. Dropping the sender unblocks `recv()` so the
     //    writer join does not pay the two-second fallback.
     agent.close_input();

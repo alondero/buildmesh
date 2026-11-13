@@ -17,6 +17,10 @@ pub mod commandcode_session;
 pub mod commandcode_watcher;
 pub mod coordinator_ledger_maintenance;
 pub mod create_operation;
+/// The device-session expiry sweep (issue #589): deletes paired-device rows
+/// that have not authenticated for `DEVICE_SESSION_IDLE_DAYS`, so an orphan
+/// cannot stay a live Admin credential for the life of the install.
+pub mod device_session_expiry;
 pub mod freebuff_usage;
 pub mod gh_auth_cache;
 pub mod github;

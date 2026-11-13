@@ -188,6 +188,7 @@ describe('light theme token coverage (#734)', () => {
     'accent-blue',
     'accent-blue-dim',
     'accent-violet',
+    'accent-violet-strong',
     'accent-violet-dim',
     'accent-green',
     'accent-red',
@@ -203,6 +204,13 @@ describe('light theme token coverage (#734)', () => {
     'status-running',
     'status-running-bg',
     'status-blocked',
+    // Action fills and their foregrounds (#2775). The light theme needs its
+    // own destructive step — a translucent red over a white surface lands
+    // LIGHTER, not darker — so these have to flip with the rest.
+    'destructive',
+    'destructive-strong',
+    'on-destructive',
+    'on-accent-cyan',
     'border-subtle',
     'border-default',
     'border-strong',

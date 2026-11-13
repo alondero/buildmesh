@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { formatListTimestamp } from '../../src/lib/time';
+import { formatListTimestamp, parseSqliteTimestamp } from '../../src/lib/time';
 
 const NOW = new Date('2026-10-18T12:00:00.000Z');
 const ago = (ms: number) => new Date(NOW.getTime() - ms).toISOString();
@@ -36,5 +36,41 @@ describe('formatListTimestamp', () => {
 
   it('passes an unparseable value through instead of formatting NaN', () => {
     expect(formatListTimestamp('not-a-timestamp', NOW)).toBe('not-a-timestamp');
+  });
+});
+
+/**
+ * `parseSqliteTimestamp` — the reader for the backend's zoneless UTC
+ * timestamps (issue #589).
+ *
+ * SQLite writes `datetime('now')` as UTC but WITHOUT a zone designator, and
+ * V8 reads that shape as LOCAL time. A naive parse is therefore wrong by the
+ * host's UTC offset, which is exactly the kind of drift that makes a
+ * "last active 3h ago" label quietly wrong.
+ */
+describe('parseSqliteTimestamp', () => {
+  it('reads a zoneless SQLite timestamp as UTC, not local time', () => {
+    const parsed = parseSqliteTimestamp('2026-10-18T11:55:00');
+    expect(parsed?.toISOString()).toBe('2026-10-18T11:55:00.000Z');
+  });
+
+  it('accepts the space-separated shape SQLite actually writes', () => {
+    const parsed = parseSqliteTimestamp('2026-06-22 09:30:00');
+    expect(parsed?.toISOString()).toBe('2026-06-22T09:30:00.000Z');
+  });
+
+  it('accepts fractional seconds', () => {
+    const parsed = parseSqliteTimestamp('2026-06-22 09:30:00.250');
+    expect(parsed?.toISOString()).toBe('2026-06-22T09:30:00.250Z');
+  });
+
+  it('leaves an explicitly-zoned timestamp to Date.parse', () => {
+    const parsed = parseSqliteTimestamp('2026-10-18T11:55:00.000Z');
+    expect(parsed?.toISOString()).toBe('2026-10-18T11:55:00.000Z');
+  });
+
+  it('reports null for a value that is not a timestamp', () => {
+    expect(parseSqliteTimestamp('not-a-timestamp')).toBeNull();
+    expect(parseSqliteTimestamp('')).toBeNull();
   });
 });

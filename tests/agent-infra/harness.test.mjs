@@ -2506,6 +2506,7 @@ test('a Rust file attached with #[path] selects the module that owns it', () => 
   assert.equal(rustModule('src-tauri/src/git/mesh_health_tests.rs'), 'git::health::mesh_health_tests');
   assert.equal(rustModule('src-tauri/src/git/fetch_origin_tests.rs'), 'git::sync::fetch_origin_tests');
   assert.equal(rustModule('src-tauri/src/commands/prune_tests.rs'), 'commands::prune::prune_tests');
+  assert.equal(rustModule('src-tauri/src/commands/file_tree_tests.rs'), 'commands::file_tree::file_tree_tests');
   assert.equal(rustModule('src-tauri/src/services/legacy_retirement/retirement_crash_tests.rs'), 'services::legacy_retirement::retirement_crash_tests');
   assert.equal(rustModule('src-tauri/src/agent/terminal_input.rs'), 'agent::process::terminal_input');
   assert.equal(rustModule('src-tauri/src/agent/prompt_delivery_tests.rs'), 'agent::prompt_delivery::tests');
@@ -2569,7 +2570,7 @@ test('extracted Rust implementations and included worker tests select their cont
     ['agent/process/registry.rs', 'agent::process'],
     ['agent/provider/adapters/codex/install_probe.rs', 'agent::provider::adapters::codex'],
     ['services/agent_node/cleanup.rs', 'services::agent_node'],
-    ['services/github/pr_workflow.rs', 'commands::pr'],
+    ['services/github/pr_workflow.rs', 'services::github::pr_tests'],
     ['git/worktree/maintenance.rs', 'git::worktree'],
     ['db/circuit/evidence/transition.rs', 'db::circuit::evidence'],
     ['services/circuit_worker/tests/result_delivery.rs', 'services::circuit_worker::tests'],
