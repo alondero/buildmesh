@@ -461,7 +461,17 @@ further API calls. Ordering is server order across concatenated pages, deduplica
 identity so an item created between two requests appears once.
 
 The PR-summaries path uses GraphQL cursors rather than `Link`, but reports through the
-same `GitHubPageCompleteness` and shares the same budget.
+same `GitHubPageCompleteness` and shares the same budget. Unlike the other reads it is
+**lazy**: `get_repo_pulls` returns one 100-PR page plus `next_cursor`, and the Pull
+Requests tab renders that page immediately and appends older pages only when the user
+asks ("Load more"). The earlier read walked every page before answering, so a repo with
+a long closed history waited on up to ten sequential GraphQL round trips before showing
+a single row. `list_pr_summaries_paged` (the full walk) survives for the mergeability
+fallback and reconciliation paths; the mobile route keeps its "one response is the whole
+list" contract by following the cursor server-side. Closed pages also use a separate
+query without `mergeable`, `mergeStateStatus`, `reviewDecision` or
+`statusCheckRollup`: those rows are read-only in the panel, and those fields are the
+expensive part of each page.
 
 ## Probe Panel shell (scroll ownership + narrow width)
 The panel and keyed destination wrapper are layout-only, with `min-h-0`,

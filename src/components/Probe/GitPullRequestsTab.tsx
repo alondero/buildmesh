@@ -8,12 +8,27 @@ import { useProbeResource, type ProbeLoadContext } from '../../lib/probeResource
  * the active mesh's pull requests (open by default, with a toggle to closed)
  * and lets the user squash-merge a mergeable open PR straight from the panel.
  *
+ * Lazy, page-at-a-time history
+ * ----------------------------
+ * `getRepoPulls` returns ONE page of 100 PRs plus a `next_cursor`. The tab
+ * renders that page as soon as it arrives and offers "Load more", which reads
+ * the next page with the cursor and appends it. The backend used to walk every
+ * page (up to 10 sequential GraphQL round trips) before answering, so opening
+ * the closed list on a repo with a long history waited on the whole walk
+ * before showing a single row. Pages are kept on top of the first one across
+ * mergeability re-polls; they are dropped when the mesh, filter, manual
+ * refresh or a merge changes what the list means. `MAX_PR_PAGES` mirrors the backend's
+ * page budget so a user-driven walk stays bounded like the old full read.
+ *
  * Mergeability is a single cohesive query (issue #1529)
  * -----------------------------------------------------
  * `getRepoPulls` returns list fields plus `mergeable`/`mergeable_state`
  * inline via the backend's GraphQL PR-summaries connection — one HTTP
  * request per page, not one per PR. The panel never orchestrates per-row
  * enrichment calls. A draft PR is flagged without consulting mergeability.
+ * Closed pages skip those per-PR fields entirely on the backend: the closed
+ * view is read-only, and mergeability/checks are the expensive parts of the
+ * query.
  *
  * Re-poll on `mergeable: null` (issue #419, preserved through #1529)
  * ------------------------------------------------------------------
@@ -160,6 +175,11 @@ const BLOCKED_WORDING: Record<string, string> = {
 const MAX_POLL_ATTEMPTS = 3;
 const BASE_POLL_DELAY_MS = 1500;
 
+// Client-side page budget for "Load more". Mirrors the backend's
+// `pagination::DEFAULT_MAX_PAGES`: 10 pages × 100 PRs = the same 1,000-row
+// ceiling a single full read used to enforce, so lazy paging is bounded too.
+const MAX_PR_PAGES = 10;
+
 // --- Icon components ------------------------------------------------------
 // Tiny inline SVG icons used by the row's action buttons. The previous
 // text labels ("Merge", "View changes") ate ~50-80px each in the 360px
@@ -297,8 +317,52 @@ export function GitPullRequestsTab() {
   const [stateFilter, setStateFilter] = useState<StateFilter>('open');
   const resource = useProbeResource(PROBE_TAB_DEFINITIONS.pulls.load, { meshId: activeMeshId, filter: stateFilter }, `${activeMeshId}:${stateFilter}`);
   const { loading, error } = resource.state;
-  const prs = useMemo(() => resource.state.data?.items ?? [], [resource.state.data]);
-  const completeness = resource.state.data?.completeness ?? null;
+  // The first page is the resource's own read; every further page is appended
+  // here by "Load more". `morePages` keeps its own cursor because once a page
+  // has been appended, the next cursor comes from that page, not the first.
+  const basePrs = useMemo(() => resource.state.data?.items ?? [], [resource.state.data]);
+  const [morePages, setMorePages] = useState<{
+    items: GitHubPullRequest[];
+    cursor: string | null;
+    pages: number;
+  } | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [moreError, setMoreError] = useState<string | null>(null);
+  // The scope a "Load more" request belongs to. A filter/mesh change makes an
+  // in-flight page stale; comparing this after the await drops it instead of
+  // appending old-filter rows under the new heading.
+  const pageScope = useRef(`${activeMeshId}:${stateFilter}`);
+  useEffect(() => {
+    pageScope.current = `${activeMeshId}:${stateFilter}`;
+  }, [activeMeshId, stateFilter]);
+  // Deduplicate by PR number: a PR created between two page reads can shift
+  // the window, and the same number must not render twice.
+  const prs = useMemo(() => {
+    if (morePages === null) return basePrs;
+    const seen = new Set(basePrs.map((pr) => pr.number));
+    const appended = morePages.items.filter((pr) => {
+      if (seen.has(pr.number)) return false;
+      seen.add(pr.number);
+      return true;
+    });
+    return [...basePrs, ...appended];
+  }, [basePrs, morePages]);
+  const firstPageCompleteness = resource.state.data?.completeness ?? null;
+  const nextCursor = morePages === null
+    ? (resource.state.data?.next_cursor ?? null)
+    : morePages.cursor;
+  const pagesLoaded = morePages === null ? 1 : morePages.pages + 1;
+  const canLoadMore = nextCursor !== null && pagesLoaded < MAX_PR_PAGES;
+  // While more pages are available, the "Load more" button is the affordance
+  // and the truncation note would only repeat it. Once paging stops (end of
+  // list, or the page budget) the note describes what the list actually holds.
+  const completeness = useMemo(() => {
+    if (!firstPageCompleteness) return null;
+    if (nextCursor === null) {
+      return { ...firstPageCompleteness, returned: prs.length, complete: true, incomplete_reason: null };
+    }
+    return { ...firstPageCompleteness, returned: prs.length };
+  }, [firstPageCompleteness, nextCursor, prs.length]);
   // Which PR is awaiting an inline merge confirm, which is mid-merge,
   // and — for the confirming row — which strategy the user armed
   // (defaults to squash, the historical behaviour; the ▾ picker arms a
@@ -359,6 +423,8 @@ export function GitPullRequestsTab() {
   const clearRows = useCallback(() => {
     setConfirming(null);
     setMergeError({});
+    setMorePages(null);
+    setMoreError(null);
     clearExpanded();
   }, [clearExpanded]);
   const retryListLoad = useCallback(() => {
@@ -372,6 +438,31 @@ export function GitPullRequestsTab() {
     setPollExhausted(false);
     void reload();
   }, [reload]);
+
+  // Read the next (older) page and append it. Guarded by the page scope so a
+  // page that lands after the mesh/filter changed is dropped, and by
+  // `loadingMore` so two clicks cannot issue the same cursor twice.
+  const loadMore = useCallback(async () => {
+    if (activeMeshId === null || nextCursor === null || loadingMore) return;
+    const cursor = nextCursor;
+    const scope = pageScope.current;
+    setLoadingMore(true);
+    setMoreError(null);
+    try {
+      const feed = await getRepoPulls(activeMeshId, stateFilter, cursor);
+      if (pageScope.current !== scope) return;
+      setMorePages((prev) => ({
+        items: [...(prev?.items ?? []), ...feed.items],
+        cursor: feed.next_cursor ?? null,
+        pages: (prev?.pages ?? 0) + 1,
+      }));
+    } catch (e) {
+      if (pageScope.current !== scope) return;
+      setMoreError(formatError(e));
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [activeMeshId, stateFilter, nextCursor, loadingMore]);
   useEffect(() => {
     pollAttempts.current = 0;
     setPollExhausted(false);
@@ -666,7 +757,9 @@ export function GitPullRequestsTab() {
           />
         ) : (
           <div className="space-y-1">
-            <FeedCompletenessNote completeness={completeness} label="pull requests" />
+            {(nextCursor === null || !canLoadMore) && (
+              <FeedCompletenessNote completeness={completeness} label="pull requests" />
+            )}
             {filteredPrs.map((pr) => {
               const status = deriveMergeStatus(pr, pollExhausted);
               const isMerging = merging === pr.number;
@@ -1005,6 +1098,22 @@ export function GitPullRequestsTab() {
                 />
               );
             })}
+            {canLoadMore && (
+              <div className="pt-1">
+                <button
+                  type="button"
+                  onClick={() => void loadMore()}
+                  disabled={loadingMore}
+                  aria-label="Load older pull requests"
+                  className="w-full px-2 py-1.5 text-2xs font-medium rounded-md border border-border-subtle bg-bg-card text-text-secondary hover:text-accent-cyan hover:border-accent-cyan/40 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  {loadingMore ? 'Loading more…' : `Load more (${prs.length} loaded)`}
+                </button>
+                {moreError && (
+                  <p role="alert" className="text-2xs text-status-error mt-1 break-words">{moreError}</p>
+                )}
+              </div>
+            )}
           </div>
         )}
       </ProbeTabBody>

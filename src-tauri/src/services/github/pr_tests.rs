@@ -98,7 +98,7 @@ fn github_feeds_report_unreadable_repository() {
     let tmp = TempGitRepo::new();
     let mesh = db::create_mesh("unreadable-github-feed", tmp.path().to_str().unwrap()).unwrap();
     let issues = get_repo_issues_blocking(mesh.id);
-    let pulls = get_repo_pulls_blocking(mesh.id, "open".to_string());
+    let pulls = get_repo_pulls_blocking(mesh.id, "open".to_string(), None);
     db::delete_mesh(mesh.id).unwrap();
     assert!(issues.unwrap_err().contains("git error:"));
     assert!(pulls.unwrap_err().contains("git error:"));
@@ -117,7 +117,7 @@ fn github_feeds_without_github_origin_remain_empty() {
         }
         let mesh = db::create_mesh("non-github-feed", &path).unwrap();
         let issues = get_repo_issues_blocking(mesh.id).unwrap();
-        let pulls = get_repo_pulls_blocking(mesh.id, "open".to_string()).unwrap();
+        let pulls = get_repo_pulls_blocking(mesh.id, "open".to_string(), None).unwrap();
         assert!(issues.items.is_empty());
         assert!(pulls.items.is_empty());
         // A read that never happened has nothing to be incomplete about,

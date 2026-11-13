@@ -16,13 +16,23 @@ use crate::http::router::ParsedRequest;
 /// `commands::pr::get_repo_pulls`, which normalises any non-`"closed"`
 /// value (including empty/absent) to `"open"` — so this handler does
 /// no pre-processing of its own.
+///
+/// The desktop command answers one page at a time (the panel appends pages as
+/// the user asks). This route keeps its original contract — one response is
+/// the whole list — by following `next_cursor` to the end via
+/// [`get_all_repo_pulls_blocking`], so the mobile clients that predate lazy
+/// loading keep seeing every PR rather than only the newest 100.
 pub async fn list_pulls(req: &ParsedRequest) -> Response {
     let mesh_id = req.id0();
     let state = req.query_param("state").unwrap_or_default();
     // Await the async wrapper so the blocking GitHub call runs on the blocking
     // pool, not this route's Tauri async-runtime worker (http/server.rs spawns
     // each connection on the runtime).
-    match crate::commands::pr::get_repo_pulls(mesh_id, state).await {
+    match crate::commands::run_blocking("http_list_pulls", move || {
+        crate::services::github::feeds::get_all_repo_pulls_blocking(mesh_id, state)
+    })
+    .await
+    {
         Ok(prs) => {
             let body = serde_json::to_string(&prs).unwrap_or_else(|_| "[]".to_string());
             Response::json("200 OK", body)

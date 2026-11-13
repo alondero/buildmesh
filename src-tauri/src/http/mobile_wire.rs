@@ -313,6 +313,9 @@ fn pulls_feed() -> crate::services::github::wire::GitHubPullRequestFeed {
             review_decision: None,
         }],
         completeness: completeness(),
+        // The mobile route walks every page itself, so the body it sends is
+        // the whole list rather than a page plus a cursor.
+        next_cursor: None,
     }
 }
 
@@ -328,6 +331,7 @@ fn pulls_feed_empty() -> crate::services::github::wire::GitHubPullRequestFeed {
             incomplete_reason: None,
             reported_total: None,
         },
+        next_cursor: None,
     }
 }
 

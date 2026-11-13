@@ -86,9 +86,16 @@ pub(crate) fn get_repo_issues_filtered_blocking(
 
 /// Sync core for [`get_repo_pulls`](crate::commands::pr::get_repo_pulls) — see [`get_repo_issues_blocking`](crate::services::github::feeds::get_repo_issues_blocking) for the
 /// split rationale.
+///
+/// Reads ONE page of 100 PR summaries. `cursor` continues from the previous
+/// page's [`GitHubPullRequestFeed::next_cursor`]; `None` starts at the
+/// newest PR. Returning a single page instead of walking the whole history
+/// is what makes the panel render immediately — the old read waited on up
+/// to 10 sequential GraphQL pages before showing a row.
 pub(crate) fn get_repo_pulls_blocking(
     mesh_id: i64,
     state: String,
+    cursor: Option<String>,
 ) -> Result<GitHubPullRequestFeed, String> {
     // Only ever forward a known filter to GitHub; anything unexpected falls
     // back to "open" rather than letting an arbitrary string reach the API.
@@ -100,40 +107,93 @@ pub(crate) fn get_repo_pulls_blocking(
         return Ok(GitHubPullRequestFeed {
             items: Vec::new(),
             completeness: empty_feed_completeness(),
+            next_cursor: None,
         });
     };
 
     let client = GitHubClient::new().map_err(|e| e.to_string())?;
     let page = client
-        .list_pr_summaries_paged(&owner, &repo, state)
+        .list_pr_summaries_page(&owner, &repo, state, cursor.as_deref())
         .map_err(|e| e.to_string())?;
 
-    let items = page
-        .items
-        .into_iter()
-        .map(|pr| GitHubPullRequest {
-            number: pr.number,
-            title: pr.title,
-            body: pr.body,
-            url: pr.html_url,
-            state: pr.state,
-            draft: pr.draft,
-            head_ref: pr.head_ref,
-            head_repo_owner: pr.head_repo_owner,
-            head_repo_clone_url: pr.head_repo_clone_url,
-            head_sha: pr.head_sha,
-            author: pr.author,
-            mergeable: pr.mergeable,
-            mergeable_state: pr.mergeable_state,
-            checks_state: pr.checks_state,
-            review_decision: pr.review_decision,
-        })
-        .collect();
+    let items = page.items.into_iter().map(map_pull_summary).collect();
 
     Ok(GitHubPullRequestFeed {
         items,
         completeness: page.completeness,
+        next_cursor: page.next_cursor,
     })
+}
+
+/// Map one internal PR summary onto the wire row.
+fn map_pull_summary(pr: github::prs::PullRequestSummary) -> GitHubPullRequest {
+    GitHubPullRequest {
+        number: pr.number,
+        title: pr.title,
+        body: pr.body,
+        url: pr.html_url,
+        state: pr.state,
+        draft: pr.draft,
+        head_ref: pr.head_ref,
+        head_repo_owner: pr.head_repo_owner,
+        head_repo_clone_url: pr.head_repo_clone_url,
+        head_sha: pr.head_sha,
+        author: pr.author,
+        mergeable: pr.mergeable,
+        mergeable_state: pr.mergeable_state,
+        checks_state: pr.checks_state,
+        review_decision: pr.review_decision,
+    }
+}
+
+/// Follow [`GitHubPullRequestFeed::next_cursor`] to the end (bounded by the
+/// shared page budget) and return the concatenated list.
+///
+/// For callers whose contract is "one response is the whole list" — the mobile
+/// HTTP route and the companion tool. The desktop panel uses the single-page
+/// [`get_repo_pulls_blocking`] and appends pages itself as the user asks.
+/// Mesh resolution and the HTTP client are paid once, not once per page.
+pub(crate) fn get_all_repo_pulls_blocking(
+    mesh_id: i64,
+    state: String,
+) -> Result<GitHubPullRequestFeed, String> {
+    let state = if state == "closed" { "closed" } else { "open" };
+
+    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
+
+    let Some((owner, repo)) = resolve_owner_repo(&mesh.path)? else {
+        return Ok(GitHubPullRequestFeed {
+            items: Vec::new(),
+            completeness: empty_feed_completeness(),
+            next_cursor: None,
+        });
+    };
+
+    let client = GitHubClient::new().map_err(|e| e.to_string())?;
+    let mut items: Vec<GitHubPullRequest> = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut pages_fetched: usize = 0;
+    loop {
+        pages_fetched += 1;
+        let page = client
+            .list_pr_summaries_page(&owner, &repo, state, cursor.as_deref())
+            .map_err(|e| e.to_string())?;
+        items.extend(page.items.into_iter().map(map_pull_summary));
+        match page.next_cursor {
+            Some(next) if pages_fetched < github::pagination::DEFAULT_MAX_PAGES => {
+                cursor = Some(next);
+            }
+            _ => {
+                let mut completeness = page.completeness;
+                completeness.returned = items.len() as i64;
+                return Ok(GitHubPullRequestFeed {
+                    items,
+                    completeness,
+                    next_cursor: page.next_cursor,
+                });
+            }
+        }
+    }
 }
 
 /// Sync core for [`get_pr_mergeability`](crate::commands::pr::get_pr_mergeability) — see [`get_repo_issues_blocking`](crate::services::github::feeds::get_repo_issues_blocking).

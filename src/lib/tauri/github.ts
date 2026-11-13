@@ -66,11 +66,17 @@ export type { GitHubPullRequest, PrMergeability, PrMergeabilityEntry, PrFileEntr
 
 /** List PRs for a mesh's repo, filtered by `state` (`'open'` or `'closed'`).
  * Issue #1529: cohesive summary query — list fields plus `mergeable` /
- * `mergeable_state` inline via the GraphQL summaries connection (O(pages)).
- * The panel consumes this single call and never orchestrates per-row
- * enrichment. */
-export const getRepoPulls = (meshId: number, state: 'open' | 'closed') =>
-  _invoke<GitHubPullRequestFeed>('get_repo_pulls', { meshId, state });
+ * `mergeable_state` inline via the GraphQL summaries connection.
+ *
+ * One call returns ONE page of 100 PRs plus `next_cursor`; pass that cursor
+ * back to read the next (older) page. The panel renders the first page as soon
+ * as it arrives and appends further pages on demand. `cursor` is omitted from
+ * the IPC payload when absent so the first-page call is unchanged. */
+export const getRepoPulls = (meshId: number, state: 'open' | 'closed', cursor?: string | null) =>
+  _invoke<GitHubPullRequestFeed>(
+    'get_repo_pulls',
+    cursor ? { meshId, state, cursor } : { meshId, state },
+  );
 
 /// Per-PR mergeability enrichment — the `/pulls` list endpoint omits it, so
 /// the panel fetches this once per open PR. `mergeable` is `null` while

@@ -41,10 +41,20 @@ pub async fn get_repo_issues(mesh_id: i64) -> Result<GitHubIssueFeed, String> {
 /// ride inline via the GraphQL PR-summaries connection (O(pages), not O(PRs)).
 /// The panel consumes this single call and never orchestrates per-row
 /// enrichment.
+///
+/// One call returns ONE page of 100 PRs plus `next_cursor`; passing that
+/// cursor back reads the next (older) page. The read used to walk every page
+/// before answering, so a repo with a long closed history blocked the panel
+/// on up to ten sequential GraphQL round trips. Callers that want the whole
+/// list in one response (the mobile route) follow the cursor themselves.
 #[command]
-pub async fn get_repo_pulls(mesh_id: i64, state: String) -> Result<GitHubPullRequestFeed, String> {
+pub async fn get_repo_pulls(
+    mesh_id: i64,
+    state: String,
+    cursor: Option<String>,
+) -> Result<GitHubPullRequestFeed, String> {
     crate::commands::run_blocking("get_repo_pulls", move || {
-        get_repo_pulls_blocking(mesh_id, state)
+        get_repo_pulls_blocking(mesh_id, state, cursor)
     })
     .await
 }
