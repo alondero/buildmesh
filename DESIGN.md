@@ -63,7 +63,14 @@ the same change.
 
 Compact desktop controls still provide a **24 by 24 CSS pixel minimum hit
 area**. A small colour swatch or glyph may sit inside that area; the surrounding
-button owns pointer and keyboard input. Recovery actions remain visible in
+button owns pointer and keyboard input. The minimum applies in **both**
+dimensions: a control that is 24px tall is not yet a 24px target. Only the
+fixed spacing steps (`1`–`6` and `8`) are pixel values — a half step such as
+`px-1.5` falls back to the 13px root and measures 4.875px — so a compact
+control states its width explicitly (`min-w-[24px]`) instead of inheriting
+whatever padding surrounds its glyph. Give a quiet control its hover with the
+surface token rather than a colour rule: an inherited colour does not reach a
+child that sets its own. Recovery actions remain visible in
 waiting and failed rows. First-session guidance presents repository, runtime
 and session readiness before advanced shortcuts. Use a solid accent and
 inverse text for the primary action, bordered secondary actions, and the
@@ -149,12 +156,49 @@ primary action; keep `accent-violet` for the icon, the ring and the washes.
 
 Violet **text** uses the strong step throughout the app — the Review label, the
 automation chip, the resume glyph, the Companion pill and omnibar links, the
-watched issue-label chip, the "Edit Flow" chip. The two places the violet is
-not body text are the aria-hidden `✦` companion glyph and the diff-status
-vocabulary in `src/lib/status.ts`, whose `hex` is mirrored to the phone and so
-moves with the palette rather than with a text step.
+watched issue-label chip, the "Edit Flow" chip, the Agent History worktree name
+and the Circuits join-category label. The violet that is **not** text is the
+aria-hidden `✦` companion glyph, the Circuit automation orbit ring, and the
+Circuits category glyph, stripe and border. Icons and rings need only the 3:1
+non-text floor; the stripe is a decorative wash. All of them are the graphic
+accent by design. The diff-status vocabulary in `src/lib/status.ts` is a
+further exception — its `hex` is mirrored to the phone and the native client,
+so it moves with the palette rather than with a text step (tracked in #2742).
 `tests/unit/review-label-contrast.test.ts` recomposes the Mesh-tinted header
-and pins each of those pairs — the new step passes, the graphic accent fails.
+and pins each of those text pairs — the strong step passes, the graphic accent
+fails — and pins the two violet labels that sit outside the node header on
+their own surfaces.
+
+### Action fills
+
+A filled action button paints a film of its own colour and draws its label on
+top of it, so the unit that has to clear WCAG AA is the **pair** (fill,
+foreground). A contrast check on the fill alone is not a check on what the
+reader sees: white on the dark theme's `status-error` measures 3.76:1, and a
+translucent fill composites against the surface beneath it. These four tokens
+cover the two pairs — a destructive fill, an accent-cyan fill, and the
+foreground each one takes — and they are deliberately separate from the accent
+and status hues above, which are the *graphic* colours.
+
+| Token | Dark | Light | Use |
+|---|---|---|---|
+| `destructive` | `#dc2626` | `#b91c1b` | Destructive action fill — the hover step |
+| `destructive-strong` | `#b91c1b` | `#991b1b` | Destructive action fill — the pressed step |
+| `on-destructive` | `#ffffff` | `#ffffff` | The label on a destructive fill |
+| `on-accent-cyan` | `#0a0a0e` | `#0a0a0e` | The label on an accent-cyan fill |
+
+The destructive fill is the error hue one step deeper than `status-error`,
+because the resting state is **translucent** (80%) and a translucent fill
+composites against the surface beneath it: over a near-black panel the
+composite stays dark, but over the light theme's white panel a translucent
+red lands *lighter*, not darker. The light theme therefore needs the deeper
+step — 4.68:1 with white text on pure white, the lightest surface in the app,
+so that number is the floor for the whole family.
+
+`on-accent-cyan` is dark in **both** themes, because the brand cyan is light
+in both (`#00d4ff` here, `#0891b2` in light). `text-inverse` is the wrong
+token for a cyan fill: it flips to white in the light theme, which is how
+the cyan buttons lost their labels (issue #2775).
 
 ### Status
 
@@ -414,6 +458,15 @@ it is updated too.
   Compact desktop targets are at least 24 CSS pixels in each dimension; use
   explicit pixel bounds because the desktop root type scale is 13px.
   Resume/Restart stay visible when available; icons may remain compact.
+- **Filled actions (destructive and accent):** the fill and the label are a
+  pair, not a colour and a hope — see [Action fills](#action-fills).
+  Destructive: `text-on-destructive bg-destructive/80`, `hover:bg-destructive`,
+  `active:bg-destructive-strong`. Accent: `text-on-accent-cyan
+  bg-accent-cyan/80`, `hover:bg-accent-cyan`, `active:bg-accent-blue`. A
+  disabled filled button **restyles** rather than fades
+  (`disabled:bg-bg-card-hover disabled:text-text-muted`): the whole-control
+  `opacity` fade drops the label to 2.07:1 on the light theme's white
+  panel, because it fades the label and the fill together.
 - **Mobile:** `.btn-primary` (accent fill, `--on-accent` text), `.btn-ghost`,
   `.chip-btn` (hairline chip). Touch targets are ≥ 44×44px — flex-center the
   glyph inside an explicit box, don't pad your way to the size.
@@ -565,6 +618,9 @@ specificity and import order; custom properties don't.
   measures the Review label, the automation chip, the resume glyph, the review
   dialog's primary action and the other violet-text surfaces against it, in
   both themes, over the palette and the corners of the RGB cube (issue #2737).
+  The violet labels that live outside the node header — the Agent History
+  worktree name and the Circuits join-category label — are measured on their
+  own surfaces, the card's accent stripe included (issue #2745).
   The mobile mirror is
   checked by `tests/unit/mobile-tokens-contrast.test.ts` for AA on mobile
   surfaces; equality with desktop token values is a design convention.
@@ -573,6 +629,15 @@ specificity and import order; custom properties don't.
   the dark tokens in `src/App.css`, the status alphas against
   `src/mobile/styles.css`, the type scale against the mobile scale above, and
   the status vocabulary against the table generated from `STATUS_CONFIG`.
+- A filled action button is a composed surface too, so its label is measured
+  against the fill composited over the surface the button actually sits on:
+  `tests/unit/action-button-contrast.test.ts` reads each button's own class
+  list, recomposes the translucent resting fill over the dialog panel, the
+  settings panel, the entry card and the discard banner's own wash, and
+  asserts 4.5:1 for the enabled label in the normal, hover and pressed
+  states of both themes (issue #2775). The pre-fix recipe — white on
+  `status-error`, white on `accent-cyan` — is measured in the same file and
+  asserted to FAIL, so the check cannot pass for the wrong reason.
 - `scripts/check-agent-diff.mjs` flags new bare radius classes in components;
   justified exceptions use an `allow-bare-rounded` marker.
 - Keyboard focus is always visible: 1.5px accent-cyan outline on button-like
@@ -581,6 +646,17 @@ specificity and import order; custom properties don't.
   card title bar, and the circle's shape (solid, hollow, dashed, slashed,
   half-filled, ringed dot, thin, cross) carries its own meaning so a reader
   who cannot rely on colour can still tell them apart.
+
+  The mesh colour picker is the same rule one level down: the selected
+  swatch carries a **checkmark** as well as a ring, so the selection does
+  not depend on the ring's hue. The ring is `ring-text-primary` with a
+  `ring-offset-bg-overlay` gap — the theme-aware step, because a white ring
+  on the light theme's white dialog was invisible (issue #2775) — and the
+  checkmark's ink is picked for contrast against the swatch itself
+  (`swatchInk` in `src/lib/meshColors.ts`), so a very light custom colour
+  still shows it. Keyboard focus stays a separate state: the app-wide
+  `:focus-visible` outline, which is a different shape and a different
+  colour from the selection ring.
 
   The actual shape+colour collision set in `STATUS_CONFIG` is exactly two
   pairs, both deliberate:

@@ -294,4 +294,35 @@ describe('ScratchpadTab (issue / scratch-pad-probe)', () => {
     renderWithScratchpadOpen();
     expect(await screen.findByText('Load failed')).toBeTruthy();
   });
+
+  /**
+   * Issue #2776 — the note field removed the native outline with
+   * `focus:outline-none` and supplied no replacement, so a keyboard user moving
+   * focus into the Scratch pad had no visible focus at all (the global
+   * button-like focus rule in App.css does not cover inputs).
+   *
+   * The repair is an explicit focused border. It is a border and not an
+   * outline or a ring because the textarea fills the dock edge to edge: an
+   * outline drawn outside the box would be clipped by the panel's scroll
+   * container, and so would a ring.
+   */
+  it('shows an explicit focused border on the note field (issue #2776)', async () => {
+    renderWithScratchpadOpen();
+    const textarea = (await screen.findByLabelText('Scratch pad')) as HTMLTextAreaElement;
+    await waitFor(() => expect(textarea.disabled).toBe(false));
+
+    // Focus really lands on the field…
+    textarea.focus();
+    expect(document.activeElement).toBe(textarea);
+
+    const classes = textarea.className.split(/\s+/);
+    // The native outline is still suppressed — the focused border replaces
+    // it rather than doubling up with it.
+    expect(classes).toContain('focus:outline-none');
+    expect(classes).toContain('focus:border-accent-cyan');
+    // …and the field has a border box to colour: the border is transparent
+    // at rest, so the resting look is kept.
+    expect(classes).toContain('border');
+    expect(classes).toContain('border-transparent');
+  });
 });

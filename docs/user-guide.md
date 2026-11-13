@@ -336,6 +336,11 @@ choices survive a restart, including a filter with no matches.
 
 ## Configure Autopilot Circuits
 
+In the Circuit editor, **Add node** opens or closes the node palette. It starts
+closed in a narrow editor. The palette occupies its own panel, and narrow
+editors show the palette, node inspector or Run History one at a time. At the
+smallest widths the panel sits below the canvas.
+
 In **GitHub Issues**, use the tag button beside an issue to change its GitHub
 labels. Search the repository's labels, then check or uncheck one to add or
 remove it. Changes save individually; permission and network errors
@@ -577,6 +582,13 @@ indent. Every agent in a group stays individually clickable, renameable, and
 deletable; grouping is a view, not a merged node.
 
 ## Find open work in the sidebar
+
+Tab to an agent name and press Enter or Space to select it. Press F2 to rename
+the focused agent; double-clicking its name also starts a rename.
+
+On narrow windows, terminal cards keep a readable width and the grid scrolls
+within the workspace. Selecting an offscreen card brings it into view. The
+sidebar and inspector yield space to keep the workspace available.
 
 Each mesh is a card. The card's left edge is a full-height colour bar that does
 two jobs: click it to change the mesh colour, drag it to reorder the mesh. From
@@ -1405,6 +1417,14 @@ doing, so the screen stays where it was. A phone without one — which includes
 any phone paired by scanning a QR code, because pairing hands the browser a
 cookie and nothing else — is shown the pairing screen instead. Pairing again is
 always required after you revoke a device or clear the browser's site data.
+
+A paired phone also stops being authorized on its own after **90 days without
+use**. Buildmesh then removes it from **Authorized Devices** and closes any
+connection it still holds, so a phone you have not used in months cannot stay
+a live administrator credential. A phone you are still using keeps its place:
+any request from it counts as use, so the entry only disappears once the phone
+has genuinely been gone. If a phone that you still own is removed this way,
+pair it again with a fresh QR code from **Settings → Remote Access**.
 
 The loopback listener stays plain HTTP for local agent hooks. LAN/VPN interfaces
 use HTTPS/WSS. The status panel lists the interfaces that are actually exposed;

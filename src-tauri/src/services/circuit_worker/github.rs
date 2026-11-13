@@ -359,7 +359,7 @@ pub(super) fn call_github_effect(
     }
 
     let mesh = db::get_mesh_by_id(active.run.mesh_id).map_err(|e| e.to_string())?;
-    let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)?;
+    let (owner, repo) = crate::services::github::repository::resolve_github_owner_repo(&mesh)?;
     let client = GitHubClient::new().map_err(|e| e.to_string())?;
     let resolved_comment = comment.map(|c| view.context.resolve(c));
     let open_pr_policy = match view.graph.node(node_id).map(|node| &node.kind) {

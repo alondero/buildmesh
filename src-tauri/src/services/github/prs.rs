@@ -577,7 +577,7 @@ impl GitHubClient {
     /// message so the UI never has to guess which strategy landed.
     ///
     /// The `merge_method` argument is validated at the seam in
-    /// `commands::pr::merge_pr_blocking` — by the time it reaches this
+    /// `services::github::pr_workflow::merge_pr_blocking` — by the time it reaches this
     /// fn it is one of the three literals above, so the request body
     /// can carry it verbatim.
     pub fn merge_pull_request(
@@ -1245,7 +1245,11 @@ fn is_duplicate_pr_error(body: &str) -> bool {
         .is_some_and(|m| m.to_ascii_lowercase().contains(needle))
 }
 
-#[cfg(test)]
+// The fake GitHub server lives here, with the client it scripts, and the
+// sibling `services::github::pr_tests` suite drives the same fake. This
+// legacy inline module stays put: moving it is its own migration, not part
+// of the PR-service ownership change.
+#[cfg(test)] // allow-test-in-production: the fake GitHub server is shared with the sibling `services::github::pr_tests` suite
 pub(crate) mod tests {
     use super::*;
 
@@ -1961,7 +1965,7 @@ pub(crate) mod tests {
     /// `CreatePrError` drive the create-PR path tests (issue #771 optimistic
     /// recovery) — same fake, no second server.
     ///
-    /// `pub(crate)` so `commands::pr` tests can script the same fake for
+    /// `pub(crate)` so `services::github::pr_tests` can script the same fake for
     /// the summaries-then-detail fallback without a second server.
     pub(crate) enum Scripted {
         Page(serde_json::Value, bool, Option<String>),

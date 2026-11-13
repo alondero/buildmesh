@@ -520,7 +520,7 @@ export async function createPr(
 import type { ArchivedAgentNode } from "../types/generated/ArchivedAgentNode";
 export type { ArchivedAgentNode };
 
-// Generated from the Rust `GitHubIssue` struct (src-tauri/src/commands/pr.rs) —
+// Generated from the Rust `GitHubIssue` struct (src-tauri/src/services/github/wire.rs) —
 // the same struct the desktop Tauri path serialises (issue #359). #358 widened
 // the struct to carry url/state/labels (guaranteed present — the upstream
 // `services::github::Issue` deserialiser uses `#[serde(default)]`), so the

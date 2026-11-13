@@ -47,6 +47,35 @@
   --color-accent-violet-strong: #c4b5fd;
   --color-accent-violet-dim: rgba(139, 92, 246, 0.15);
 
+  /* Action fills and their foregrounds — issue #2775.
+
+     A destructive or accent button paints a FILM of its own colour with a
+     label on top of it, so the unit that has to clear WCAG AA is the PAIR
+     (fill, foreground) — never the fill on its own. The pre-fix recipe
+     painted white text on the raw status/accent hue: white on status-error
+     (#ef4444) measured 3.76:1 and white on accent-cyan (#00d4ff) 1.77:1 in
+     this theme, both under the 4.5:1 body-text floor, and the translucent
+     normal state made it worse — a translucent fill composites against the
+     surface it sits on, so a token-only comparison overstates the ratio.
+
+     `destructive` is the error hue one step deeper than this theme's
+     status-error (#ef4444 here): #dc2626, so that the translucent normal
+     fill — 80% of it over the surface beneath — still clears AA with
+     white text in BOTH themes. The light theme needs the deeper #b91c1b
+     because a translucent red over a white surface lands lighter, not
+     darker. `destructive-strong` is the pressed step. `on-destructive` is
+     the label colour on those fills.
+
+     `on-accent-cyan` is the label colour for the cyan family. The brand
+     cyan is light in BOTH themes (#00d4ff here, #0891b2 in light), so its
+     label is always the dark step — `text-inverse` is wrong here because it
+     flips to white in the light theme, which is exactly how the cyan
+     buttons lost their labels. */
+  --color-destructive: #dc2626;
+  --color-destructive-strong: #b91c1b;
+  --color-on-destructive: #ffffff;
+  --color-on-accent-cyan: #0a0a0e;
+
   /* Accent — Semantic green/red/amber. Used by the diff view (added /
      removed / modified lines and file badges), the changed-files list, and
      the file-tree status letters. Tailwind v4 only emits `text-accent-green`,
@@ -326,6 +355,18 @@
   --color-accent-green: #16a34a;
   --color-accent-red: #dc2626;
   --color-accent-amber: #d97706;
+
+  /* Action fills and their foregrounds — issue #2775. The light theme needs
+     the deeper destructive step: an 80% fill of #dc2626 over a white surface
+     composites to a LIGHTER red (4.83:1 with white text → 3.77:1 once
+     composited), which is under AA. #b91c1b composites to 4.68:1 with white
+     text — the worst surface in the light theme is pure white, so that
+     number is the floor for the whole family. `on-accent-cyan` stays the
+     dark step in both themes: the brand cyan is light in both. */
+  --color-destructive: #b91c1b;
+  --color-destructive-strong: #991b1b;
+  --color-on-destructive: #ffffff;
+  --color-on-accent-cyan: #0a0a0e;
 
   /* Semantic — Status */
   --color-status-success: #16a34a;

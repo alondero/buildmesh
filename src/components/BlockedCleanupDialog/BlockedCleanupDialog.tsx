@@ -164,7 +164,7 @@ export function BlockedCleanupDialog() {
                 <button
                   type="button"
                   onClick={() => void retry(entry.worktree_path)}
-                  className="px-3 py-1 text-2xs text-white bg-accent-cyan/80 hover:bg-accent-cyan rounded-md transition-colors"
+                  className="px-3 py-1 text-2xs text-on-accent-cyan bg-accent-cyan/80 hover:bg-accent-cyan active:bg-accent-blue disabled:bg-bg-card-hover disabled:text-text-muted rounded-md transition-colors"
                 >
                   Retry
                 </button>

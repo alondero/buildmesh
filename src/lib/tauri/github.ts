@@ -12,9 +12,6 @@ import type { PrFileEntry } from '../../types/generated/PrFileEntry';
 import type { PrFileFeed } from '../../types/generated/PrFileFeed';
 
 // PR
-export const createPr = (sessionId: number, title: string, body: string) =>
-  _invoke<string>('create_pr', { sessionId, title, body });
-
 export const mergePr = (prUrl: string, mergeMethod?: string) =>
   _invoke<string>('merge_pr', { prUrl, mergeMethod });
 
@@ -25,7 +22,7 @@ export const checkGhAuth = () =>
   _invoke<boolean>('check_gh_auth');
 
 /** Open PR summary for an agent node — surfaces as the "PR #N" chip.
- *  Generated from the Rust struct in `src-tauri/src/commands/pr.rs` (issue #404). */
+ *  Generated from the Rust struct in `src-tauri/src/services/github/wire.rs` (issue #404). */
 export type { OpenPr };
 
 export const getOpenPrForNode = (nodeId: number) =>
@@ -43,7 +40,7 @@ export const getGitHubUrlForMesh = (meshId: number) =>
   _invoke<string | null>('get_github_url_for_mesh', { meshId });
 
 // GitHub Issues — `GitHubIssue` is generated from the Rust struct
-// (src-tauri/src/commands/pr.rs) into src/types/generated/; see top import.
+// (src-tauri/src/services/github/wire.rs) into src/types/generated/; see top import.
 // Re-exported here so existing `import { GitHubIssue } from '../../lib/tauri'`
 // call sites keep working. Issue #359.
 export type { GitHubIssue };
@@ -61,7 +58,7 @@ export const setIssueLabel = (meshId: number, issueNumber: number, label: string
   _invoke<void>('set_issue_label', { meshId, issueNumber, label, present });
 
 // GitHub Pull Requests — `GitHubPullRequest` / `PrMergeability` are generated
-// from the Rust structs (src-tauri/src/commands/pr.rs) into
+// from the Rust structs (src-tauri/src/services/github/wire.rs) into
 // src/types/generated/; see top import. Re-exported here so the PR probe tab
 // can `import { GitHubPullRequest } from '../../lib/tauri'` alongside the issue
 // types. Issue #359.
@@ -113,9 +110,6 @@ export type { IssueNodeDraft };
 
 export const createIssueNode = (meshId: number, issueNumber: number, issueTitle: string, provider?: string, configurationId?: string, loginId?: string) =>
   _invoke<IssueNodeDraft>('create_issue_node', { meshId, issueNumber, issueTitle, provider, configurationId, ...(loginId ? { loginId } : {}) });
-
-export const createPrForMesh = (meshPath: string, title: string, body: string, baseBranch: string) =>
-  _invoke<string>('create_pr_for_mesh', { meshPath, title, body, baseBranch });
 
 /// One backend-owned acceptance call. The PR row's `+` button is on the
 /// `SpawnButtonCluster`; the tab now relies on `create_pr_node` to

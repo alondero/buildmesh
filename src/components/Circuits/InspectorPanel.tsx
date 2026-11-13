@@ -430,7 +430,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
     return (
       <aside
         data-testid="circuit-inspector"
-        className="w-64 shrink-0 border-l border-border-subtle bg-bg-surface p-3 text-xs text-text-muted"
+        className="w-64 shrink-0 border-l border-border-subtle bg-bg-surface p-3 text-xs text-text-muted @max-[600px]/circuit:max-h-[45%] @max-[600px]/circuit:w-full"
       >
         Select a node to inspect its configuration.
       </aside>
@@ -463,7 +463,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
   return (
     <aside
       data-testid="circuit-inspector"
-      className="w-64 shrink-0 border-l border-border-subtle bg-bg-surface p-3 overflow-y-auto"
+      className="w-64 shrink-0 border-l border-border-subtle bg-bg-surface p-3 overflow-y-auto @max-[600px]/circuit:max-h-[45%] @max-[600px]/circuit:w-full"
     >
       <div className="flex items-center gap-2 mb-1">
         <span className={`inline-block w-2 h-2 rounded-full ${accent.bg}`} aria-hidden />

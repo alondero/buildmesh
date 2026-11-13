@@ -3,6 +3,14 @@
 Status: current
 
 ## Canvas Layout (View Modes)
+
+The desktop shell reserves at least 300px for the workspace. Sidebar and Probe
+widths are preferred sizes: flex layout can reduce them to their 192px and 240px
+minimums when the window is narrow. Panel drags start from the rendered width.
+Terminal grids retain 300px-wide panes and scroll inside their workspace when
+the grid cannot fit; selecting a node brings its card into view without changing
+the grid's row topology or saved proportions.
+
 The canvas exposes four **View Modes** (wayfinder #982; state model #983; rendering #986) — Single plus the Mesh Grid, Pinned and All Nodes grids. Filtered (#1609) was a fifth mode until #2683 made search a narrowing of the chosen scope instead of a mode of its own. The active mode is a pure UI string-literal union — no backend serialises it. `deriveScope` in `src/lib/viewModes.ts` is the pure definition of the effective scope: the View Mode, the anchoring Mesh or none, whether the scope is Mesh-scoped, the visible and pre-filter node counts, and the Mesh the focused node contributes. `resolveSingleNode` is the Single-mode fallback (the active node, then the first node of the grid Single was entered from, then any node only when no filters are active).
 
 React surfaces read that answer through `useScope` (`src/hooks/useScope.ts`). The hook is the only place that joins View Mode, the selected Mesh, and the active Agent Node for the scope question, and it delegates to those two functions instead of restating them. Keyboard traversal calls `readScope`, the same assembly against the current store snapshot. Mesh names are opt-in (`useScope({ meshNames: true })`) so a rename re-renders the title-bar scope indicator and not the terminal grid. Two rules that are not the grid scope live in the same module: `diffLensDiverged` closes a diff when the focused node or the selected Mesh leaves the lens the diff was opened on, and `selectedActivityMember` chooses which member a Node Activity card shows. Card selections stay a per-card subscription, so a utility toggle does not re-render every scope consumer. The grid render, the canvas empty state's counts, keyboard traversal (#987), the title-bar scope indicator, and unit tests therefore cannot disagree about the scope (#2071).
@@ -295,7 +303,10 @@ live-over-cache rules both probes must use if a snapshot store is added;
 live list methods fetch every time today. `services::github` re-exports the
 command-facing types, so handlers keep calling `services::github::...`.
 Issue-only parsing stays in `issues`; pull-request merge logic stays in
-`prs`. Repository lookup in `commands::pr` uses the shared host-path opener.
+`prs`. Repository lookup in `services::github::repository` uses the shared
+host-path opener, and the issue and pull-request wire shapes live in
+`services::github::wire` (issue #2236) — the command module imports them
+from there rather than declaring them.
 Unreadable repositories propagate errors to both feeds; only readable repos
 without a GitHub origin produce an empty list. WSL ownership trust is an exact
 `safe.directory` entry in Windows Git configuration, independent of GitHub
@@ -312,6 +323,11 @@ while the sidebar, which only moves on success, kept the old name. The action no
 rethrows after recording the error, so the caller shows the real rejection and the
 draft the user typed survives for a retry. The pattern generalises: a store action
 that swallows a failure makes every success indicator above it a lie.
+
+Mesh colour saves use the same rejection contract. The colour dialog keeps its
+chosen swatch and shows an inline error after failure; retry closes it only
+after the backend acknowledges the write. Dismissal and colour edits are
+disabled while the save is pending.
 
 ## Per-Mesh editing session (issue #2242)
 
@@ -456,4 +472,17 @@ The panel and keyed destination wrapper are layout-only, with `min-h-0`,
 leave Retry visible. At the dock's 240px minimum, unbounded prose wraps and
 unspaced paths/errors use `break-all`. Stating only vertical overflow computes
 horizontal auto overflow. Keep Notes' mesh-aware save/restore ownership.
+
+### A field that fills the dock edge colours its own border to show focus
+
+The Scratch Pad's note field fills the Probe panel edge to edge, so its focus
+indicator is a **border**, not an outline and not a ring (issue #2776). The panel
+owns one scroll container, and a decoration drawn outside the field's border box
+— an outline, a ring — is cut off where it meets that container's edge. The
+border is transparent at rest, so the field keeps the look it had before, and
+the focused state has a real edge to colour with the accent token.
+
+The general rule: an input that suppresses the native outline (`focus:outline-none`)
+owes the user a replacement focus indicator in the same commit, and the
+replacement has to be something the surrounding scroll container does not clip.
 

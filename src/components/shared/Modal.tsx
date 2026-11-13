@@ -477,7 +477,7 @@ export function Modal({
                 type="button"
                 onClick={handleConfirmDiscard}
                 data-testid="modal-discard-confirm"
-                className="px-3 py-1 text-sm rounded-md bg-status-error text-white hover:bg-status-error/90"
+                className="px-3 py-1 text-sm rounded-md text-on-destructive bg-destructive/80 hover:bg-destructive active:bg-destructive-strong disabled:bg-bg-card-hover disabled:text-text-muted"
               >
                 {discardLabel}
               </button>

@@ -2,6 +2,7 @@ import { useRef, useState } from 'react';
 import { Modal, ModalCloseButton } from '../shared/Modal';
 import { MeshColorPicker } from './MeshColorPicker';
 import { useMeshStore } from '../../stores/meshStore';
+import { formatError } from '../../lib/errorUtils';
 
 interface MeshRecolorModalProps {
   meshId: number;
@@ -20,18 +21,26 @@ export function MeshRecolorModal({ meshId, meshName, currentColor, onClose }: Me
   const updateMeshColor = useMeshStore((s) => s.updateMeshColor);
   const [color, setColor] = useState(currentColor);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const saveButtonRef = useRef<HTMLButtonElement>(null);
 
   const handleSave = async () => {
+    if (saving) return;
     setSaving(true);
-    await updateMeshColor(meshId, color);
-    setSaving(false);
-    onClose();
+    setError(null);
+    try {
+      await updateMeshColor(meshId, color);
+      onClose();
+    } catch (cause) {
+      setError(formatError(cause));
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
     <Modal
-      onClose={onClose}
+      onClose={() => { if (!saving) onClose(); }}
       labelledBy="mesh-recolor-title"
       maxWidth="max-w-xs"
       defaultFocusRef={saveButtonRef}
@@ -43,14 +52,17 @@ export function MeshRecolorModal({ meshId, meshName, currentColor, onClose }: Me
         <ModalCloseButton onClose={onClose} />
       </div>
 
-      <div className="mb-5">
+      <fieldset disabled={saving} className="mb-5">
         <MeshColorPicker value={color} onChange={setColor} />
-      </div>
+      </fieldset>
+
+      {error && <p role="alert" className="mb-3 break-words text-xs text-status-error">{error}</p>}
 
       <div className="flex justify-end gap-2">
         <button
           type="button"
           onClick={onClose}
+          disabled={saving}
           className="px-3 py-1.5 text-xs text-text-secondary hover:text-text-primary border border-border-subtle rounded-md transition-colors"
         >
           Cancel

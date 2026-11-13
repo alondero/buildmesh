@@ -1,84 +1,11 @@
 //! Node/mesh PR creation, source validation, open-PR discovery, and merge workflows.
 
 use super::repository::*;
-use crate::commands::pr::{CreatePrResult, OpenPr, PrSource};
+use super::wire::{CreatePrResult, OpenPr, PrSource};
 use crate::db;
 use crate::env;
 use crate::models::SessionStatus;
 use crate::services::github::{CreatePrRequest, GitHubClient};
-
-/// Sync core for [`create_pr`](crate::commands::pr::create_pr) — see [`get_repo_issues_blocking`](crate::services::github::feeds::get_repo_issues_blocking).
-///
-/// Takes a `&GitHubClient` so tests can drive the full production boundary
-/// (DB lookup → worktree branch detection → owner_repo parsing → GitHub
-/// call) with a `GitHubClient::for_test(base, token)` pointed at a fake
-/// server, without needing to stand up a Tauri runtime or resolve a real
-/// token via env / gh-config / keyring.
-pub(crate) fn create_pr_blocking_with_client(
-    client: &GitHubClient,
-    session_id: i64,
-    title: &str,
-    body: &str,
-) -> Result<String, String> {
-    let node = db::get_agent_node_by_id(session_id).map_err(|e| e.to_string())?;
-
-    let base_branch = &node.branch;
-
-    // Read the branch from the worktree (if any) — the mesh root is on the
-    // Base Ref for worktree nodes, which would create a "main → main" PR.
-    let info = repo_info(&env::node_git_path(&node).host_path)?;
-    if info.branch.is_empty() {
-        return Err("Could not determine current branch".to_string());
-    }
-
-    let (owner, repo) = info.owner_repo()?;
-    let req = CreatePrRequest {
-        owner: &owner,
-        repo: &repo,
-        title,
-        body,
-        head: &info.branch,
-        base: base_branch,
-    };
-    client
-        .create_pull_request_idempotent(req)
-        .map(|pr| pr.html_url)
-        .map_err(|e| e.to_string())
-}
-
-/// Sync core for [`create_pr_for_mesh`](crate::commands::pr::create_pr_for_mesh) — see [`get_repo_issues_blocking`](crate::services::github::feeds::get_repo_issues_blocking).
-///
-/// `pub(crate)` for the same testability reason as
-/// [`create_pr_blocking_with_client`].
-pub(crate) fn create_pr_for_mesh_blocking_with_client(
-    client: &GitHubClient,
-    mesh_path: &str,
-    title: &str,
-    body: &str,
-    base_branch: &str,
-) -> Result<String, String> {
-    let info = repo_info(mesh_path)?;
-    if info.branch.is_empty() || info.branch == base_branch {
-        return Err(format!(
-            "Current branch '{}' is the same as Base Ref '{}' — nothing to compare",
-            info.branch, base_branch
-        ));
-    }
-
-    let (owner, repo) = info.owner_repo()?;
-    let req = CreatePrRequest {
-        owner: &owner,
-        repo: &repo,
-        title,
-        body,
-        head: &info.branch,
-        base: base_branch,
-    };
-    client
-        .create_pull_request_idempotent(req)
-        .map(|pr| pr.html_url)
-        .map_err(|e| e.to_string())
-}
 
 /// Owner/repo parsed from the node worktree's origin. Kept separate from
 /// [`PrSource`] because a preview must still render the branches for a
@@ -235,8 +162,10 @@ pub(crate) fn resolve_pr_source_for_node(
     })
 }
 
-/// Sync core for [`create_pr_for_node_source`](crate::commands::pr::create_pr_for_node_source) — see
-/// [`create_pr_for_mesh_blocking_with_client`] for why the client is injected.
+/// Sync core for [`create_pr_for_node_source`](crate::commands::pr::create_pr_for_node_source).
+///
+/// The client is injected so a test can drive a fake GitHub server instead of
+/// the network; production builds it inside `create_pr_for_node_source`.
 pub(crate) fn create_pr_for_node_source_blocking_with_client(
     client: &GitHubClient,
     mesh_id: i64,
@@ -292,6 +221,38 @@ pub(crate) fn create_pr_for_node_source_blocking_with_client(
             base_branch: source.base_branch,
         })
         .map_err(|e| PrSourceError::Other(e.to_string()))
+}
+
+/// Create a PR from an agent node's worktree, off the async worker pool.
+///
+/// The typed error is what lets the mobile route answer 404 / 403 / 422 / 500
+/// correctly. The desktop command flattens it to the Tauri wire's `String`,
+/// which is what loses that distinction — and a validation failure must
+/// never be reported as a server fault (#2190 review).
+///
+/// Both adapters call this one function, so the branches the sheet previews
+/// and the branches the create publishes cannot drift apart.
+pub(crate) async fn create_pr_for_node_source(
+    mesh_id: i64,
+    node_id: i64,
+    title: String,
+    body: String,
+    base_branch: Option<String>,
+    expected_head: Option<String>,
+) -> Result<CreatePrResult, PrSourceError> {
+    crate::blocking::run_blocking_typed("create_pr_for_node_source", move || {
+        let client = GitHubClient::new().map_err(|e| PrSourceError::Other(e.to_string()))?;
+        create_pr_for_node_source_blocking_with_client(
+            &client,
+            mesh_id,
+            node_id,
+            &title,
+            &body,
+            base_branch.as_deref(),
+            expected_head.as_deref(),
+        )
+    })
+    .await
 }
 
 /// Sync core for [`merge_pr`](crate::commands::pr::merge_pr) — see [`get_repo_issues_blocking`](crate::services::github::feeds::get_repo_issues_blocking).

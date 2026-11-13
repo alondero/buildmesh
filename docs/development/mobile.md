@@ -275,6 +275,19 @@ silently. Submitted fields are frozen while the request is in flight, so the val
 screen always match the ones GitHub received. `Sheet` also carries `role="dialog"`,
 `aria-modal`, and focus containment.
 
+### A sheet names itself
+
+`Sheet` takes a `label` and renders it as the dialog's accessible name. A sheet that
+says what it is for — "Actions for buildmesh" — tells a screen-reader user which
+thing the actions belong to; a sheet without one announces a bare dialog, and the
+mesh it acts on becomes unknowable (issue #2776). The name carries the **identity of
+the subject** (the mesh, the pull request), not the surface: the visible heading may
+repeat it, but the accessible name has to identify the subject on its own.
+
+Naming is the `label` prop rather than `aria-labelledby` on the visible heading. A
+heading label would announce the subject alone ("buildmesh") and drop the action
+context; `label` lets the name say both.
+
 ## Launch and resume visit ownership
 
 Creating an Agent Node from an Issue or resuming an archived session spawns a real

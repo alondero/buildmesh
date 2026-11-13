@@ -195,7 +195,7 @@ pub async fn pr_source(req: &ParsedRequest) -> Response {
     else {
         return Response::json_error("400 Bad Request", "node_id query parameter is required");
     };
-    match crate::commands::pr::resolve_pr_source_for_node(mesh_id, node_id) {
+    match crate::services::github::pr_workflow::resolve_pr_source_for_node(mesh_id, node_id) {
         Ok(resolved) => {
             // Serialise the derived `PrSource` struct directly — no
             // hand-assembled JSON, so the wire shape cannot drift from the
@@ -283,7 +283,7 @@ pub async fn create(req: &ParsedRequest) -> Response {
         }
     }
 
-    match crate::commands::pr::create_pr_for_node_source_http(
+    match crate::services::github::pr_workflow::create_pr_for_node_source(
         mesh_id,
         parsed.node_id,
         parsed.title,

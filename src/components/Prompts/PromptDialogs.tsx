@@ -9,7 +9,7 @@ import { Modal, ModalCloseButton } from '../shared/Modal';
 import { PromptSpawnButton } from './PromptSpawnButton';
 
 const fieldClass = 'w-full rounded-md border border-border-default bg-bg-input px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-cyan';
-const buttonClass = 'min-h-7 rounded-md bg-accent-cyan px-3 py-1.5 text-xs font-medium text-text-inverse hover:bg-accent-cyan/90 disabled:opacity-40';
+const buttonClass = 'min-h-7 rounded-md text-on-accent-cyan bg-accent-cyan/80 px-3 py-1.5 text-xs font-medium hover:bg-accent-cyan active:bg-accent-blue disabled:bg-bg-card-hover disabled:text-text-muted';
 
 export function PromptEditor({ prompt, mode, onSave, onClose }: {
   prompt: SavedPrompt; mode: 'new' | 'edit' | 'duplicate';

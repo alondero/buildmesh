@@ -214,7 +214,13 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
         aria-label={`${attentionOutcome.label}${outcomeCount > 1 ? ` (${outcomeCount} sessions)` : ''}. ${attentionOutcome.detail} ${outcomeCount > 1 ? 'Show next session.' : 'Show this session.'}`}
         title={attentionOutcome.detail}
         data-testid="circuit-outcome-chip" data-outcome={attentionOutcome.kind}
-        className={`flex h-6 shrink-0 items-center gap-1 rounded-full px-1.5 text-micro font-medium ring-1 ${CIRCUIT_OUTCOME_CLASSES[attentionOutcome.tone]}`}>
+        // Issue #2774 — `h-6` is 24px (the spacing scale is fixed in px, not
+        // rem), but the WIDTH was only ~21.75px: the 12px glyph plus
+        // `px-1.5`, which falls back to the rem-based 4.875px a side because
+        // `--spacing-1.5` is not part of the fixed 1–6 / 8 scale. Height
+        // alone therefore did not establish the 24x24 minimum target, so
+        // the chip now carries an explicit minimum width too.
+        className={`flex h-6 min-w-[24px] shrink-0 items-center gap-1 rounded-full px-1.5 text-micro font-medium ring-1 ${CIRCUIT_OUTCOME_CLASSES[attentionOutcome.tone]}`}>
         <CircuitIndicatorGlyph phase={attentionOutcome.phase} tone={attentionOutcome.tone} className="h-3 w-3 shrink-0" />
         {width >= HEADER_TIER_BREAKPOINTS.attentionLabel && <span className="truncate">{attentionOutcome.label}</span>}
         {outcomeCount > 1 && <span aria-hidden="true" className="tabular-nums">{outcomeCount}</span>}

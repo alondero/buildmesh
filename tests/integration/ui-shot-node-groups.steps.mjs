@@ -51,7 +51,10 @@ export default async function ({ page }) {
   await expect(cards).toHaveCount(2);
 
   await page.setViewportSize({ width: 730, height: 700 });
-  await expect.poll(async () => (await card(2).boundingBox()).width).toBeLessThanOrEqual(240);
+  // Cards retain their readable minimum; the compact 240px header itself is
+  // exercised by ui-shot-node-header.steps.mjs.
+  await expect.poll(async () => (await card(2).boundingBox()).width).toBeGreaterThanOrEqual(299);
+  await expect.poll(() => page.getByTestId('grid-scroll-viewport').evaluate(el => el.scrollWidth > el.clientWidth)).toBe(true);
   const sessions = card(2).getByRole('button', { name: 'All sessions (2)' });
   await expect(sessions).toBeVisible();
   await sessions.click();

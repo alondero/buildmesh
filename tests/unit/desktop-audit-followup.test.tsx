@@ -300,7 +300,12 @@ describe('October desktop audit follow-up', () => {
     fireEvent.change(screen.getByLabelText('Sort nodes'), { target: { value: 'name' } });
     fireEvent.change(screen.getByLabelText('Sort direction'), { target: { value: 'desc' } });
     expect(screen.getByRole('status').textContent).toBe('0 of 2 nodes');
-    expect(screen.getByRole('button', { name: 'Provider: codex ×' })).toBeTruthy();
+    // Issue #2774 — the removal chip now names the action it performs
+    // ("Remove provider filter"), because the visible text alone ("Provider:
+    // codex ×") does not tell a screen reader that pressing it removes the
+    // filter. The visible label still reads 'Provider: codex ×'.
+    expect(screen.getByRole('button', { name: 'Remove provider filter: codex' })).toBeTruthy();
+    expect(screen.getByText('Provider: codex ×')).toBeTruthy();
     expect(JSON.parse(localStorage.getItem('buildmesh.grid-controls')!).sortDirection).toBe('desc');
     fireEvent.click(screen.getByRole('button', { name: 'Clear all filters and sorting' }));
     expect(screen.getByRole('status').textContent).toBe('2 of 2 nodes');
