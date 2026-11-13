@@ -322,6 +322,54 @@ pub fn validate_coordinator_drive_token_inner(conn: &Connection, token: &str) ->
 // follow the lock-once + `_inner(&Connection)` pattern so the HTTP auth layer
 // can validate against an in-memory connection in tests (issue #500).
 
+/// How stale a device session's recorded activity may be before an
+/// authenticated request stamps it again (issue #589).
+///
+/// The refresh is what keeps a device that is *in use* out of the expiry
+/// sweep's reach: a phone that keeps polling keeps its `last_active_at` warm,
+/// so the idle window never opens under a device that is demonstrably alive.
+/// It is deliberately far shorter than the sweep's idle window
+/// (`services::device_session_expiry::DEVICE_SESSION_IDLE_DAYS`) — it only
+/// has to be wide enough that a busy client is not writing on every poll, and
+/// narrow enough that the panel's "last active" reading stays honest.
+pub const DEVICE_SESSION_ACTIVITY_WINDOW_HOURS: i64 = 1;
+
+/// Delete every device session that has not authenticated for `idle_days`
+/// days, and return the ids of the rows that were removed (issue #589).
+///
+/// The sweep is bounded by *activity*, not by age: a device that kept using
+/// its session keeps its row however old the pairing is, and a row whose
+/// `last_active_at` is exactly on the boundary survives (the comparison is
+/// strict `<`), so a device that just turned the idle age is not deleted on
+/// the same tick.
+///
+/// The ids come from the deleting statement itself (`DELETE ... RETURNING`),
+/// not from a pre-delete SELECT: a device that authenticated between such a
+/// snapshot and the delete would have its warm row deleted anyway, so the
+/// sweep could expire a device that is demonstrably alive. One statement has
+/// no such window, and the returned ids are exactly the rows that were
+/// removed — which is what the caller needs to kick the right live sockets.
+/// `RETURNING` needs SQLite 3.35+; the bundled build is 3.46.
+///
+/// The caller owns the side effect that matters: a deleted row stops the next
+/// request from authenticating, but an already-open WebSocket never re-checks
+/// auth — so the caller must also kick any live socket the device still held
+/// (`http::revocation::revoke`).
+///
+/// Only the `_inner` form exists: the caller holds the writer lock (the
+/// sweep is a write — it deletes rows).
+pub fn prune_inactive_device_sessions_inner(
+    conn: &Connection,
+    idle_days: i64,
+) -> SqlResult<Vec<i64>> {
+    let cutoff = format!("-{idle_days} days");
+    let mut stmt = conn.prepare(
+        "DELETE FROM device_sessions WHERE last_active_at < datetime('now', ?1) RETURNING id",
+    )?;
+    let rows = stmt.query_map(params![cutoff], |row| row.get::<_, i64>(0))?;
+    rows.collect::<SqlResult<Vec<i64>>>()
+}
+
 /// Pair a new device: mint a token, persist only its hash + metadata, and return
 /// the row id with the *raw* token (handed to the client exactly once, then only
 /// ever re-presented by the client). `label` is a human-friendly name derived
@@ -347,32 +395,100 @@ pub fn pair_device_session_inner(
 /// never matches. Only the `_inner` form exists: the auth layer
 /// (`http::auth`'s role resolver) already locks the DB once and passes the
 /// connection through.
+///
+/// Only `QueryReturnedNoRows` is absence — a real SQLite failure is an error,
+/// so a storage fault is reported as unavailable (503) rather than as a revoked
+/// credential (401). Use [`resolve_device_session_inner`] when the caller also
+/// needs to know whether the row's activity is stale.
 pub fn validate_device_token_inner(conn: &Connection, token: &str) -> SqlResult<Option<i64>> {
     if token.is_empty() {
         return Ok(None);
     }
-    let id: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM device_sessions WHERE token_hash = ?1",
-            params![hash_token(token)],
-            |row| row.get(0),
-        )
-        .ok();
-    Ok(id)
+    match conn.query_row(
+        "SELECT id FROM device_sessions WHERE token_hash = ?1",
+        params![hash_token(token)],
+        |row| row.get(0),
+    ) {
+        Ok(id) => Ok(Some(id)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// A device session resolved from a presented token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceSessionRef {
+    /// The row id — the device this credential belongs to.
+    pub id: i64,
+    /// The row's recorded activity predates
+    /// [`DEVICE_SESSION_ACTIVITY_WINDOW_HOURS`], so the row should be stamped
+    /// again before the expiry sweep measures its idleness.
+    pub activity_stale: bool,
+}
+
+/// Resolve a presented token to the device session it belongs to, and say
+/// whether that row's recorded activity is stale.
+///
+/// One query answers both halves: the id says *which* device presented the
+/// token, and the comparison against the refresh window says whether the row
+/// still needs its `last_active_at` stamped. Only `QueryReturnedNoRows` is
+/// absence — a real SQLite failure is an error, not "no such device", so a
+/// storage fault can never be reported as a revoked credential.
+///
+/// An empty token never matches. Only the `_inner` form exists: the auth
+/// layer (`http::auth`'s resolver) already locks the DB once and passes the
+/// connection through.
+pub fn resolve_device_session_inner(
+    conn: &Connection,
+    token: &str,
+) -> SqlResult<Option<DeviceSessionRef>> {
+    if token.is_empty() {
+        return Ok(None);
+    }
+    let window = format!("-{DEVICE_SESSION_ACTIVITY_WINDOW_HOURS} hour");
+    match conn.query_row(
+        "SELECT id, last_active_at < datetime('now', ?2) \
+         FROM device_sessions WHERE token_hash = ?1",
+        params![hash_token(token), window],
+        |row| {
+            Ok(DeviceSessionRef {
+                id: row.get(0)?,
+                activity_stale: row.get(1)?,
+            })
+        },
+    ) {
+        Ok(resolved) => Ok(Some(resolved)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 /// Record activity for a device: bump `last_active_at` to now and refresh the
-/// last-seen IP. Called on login refresh and WS-ticket mint, not per request, so
-/// a polling client doesn't write the DB on every poll. A no-op for an unknown
-/// id (the row may have just been revoked).
-pub fn touch_device_session(id: i64, ip: Option<&str>) -> SqlResult<()> {
+/// last-seen IP. A no-op for an unknown id (the row may have just been revoked).
+///
+/// The row's `last_active_at` is the clock the expiry sweep measures against
+/// (issue #589), so this is the write that keeps a device which is still in
+/// use out of the sweep's window.
+pub fn refresh_device_session_activity(id: i64, ip: Option<&str>) -> SqlResult<()> {
     let db = write_conn();
-    touch_device_session_inner(&db, id, ip)
+    refresh_device_session_activity_inner(&db, id, ip)
 }
 
-pub fn touch_device_session_inner(conn: &Connection, id: i64, ip: Option<&str>) -> SqlResult<()> {
+/// The lock-free core of [`refresh_device_session_activity`].
+///
+/// Unlike a plain touch, this never *clears* `last_ip`: a refresh that has no
+/// peer address to record must not erase the address the device was last seen
+/// from.
+pub fn refresh_device_session_activity_inner(
+    conn: &Connection,
+    id: i64,
+    ip: Option<&str>,
+) -> SqlResult<()> {
     conn.execute(
-        "UPDATE device_sessions SET last_active_at = datetime('now'), last_ip = ?2 WHERE id = ?1",
+        "UPDATE device_sessions \
+         SET last_active_at = datetime('now'), \
+             last_ip = COALESCE(?2, last_ip) \
+         WHERE id = ?1",
         params![id, ip],
     )?;
     Ok(())

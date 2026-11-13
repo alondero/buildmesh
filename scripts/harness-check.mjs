@@ -76,6 +76,11 @@ export function frontendInScope(paths) {
 // `pathIncludeDrift` below, so a new `#[path]` fails the gate that runs on the
 // Rust diff itself, not only the one CI happens to run (review of PR #2232).
 export const RUST_PATH_INCLUDES = {
+  // The HTTP auth layer's suite moved to a sibling file (issue #589): the
+  // module keeps the name `tests`, so every test path is unchanged.
+  'src-tauri/src/http/auth_tests.rs': 'http::auth::tests',
+  'src-tauri/src/http/routes/session_tests.rs': 'http::routes::session::tests',
+  'src-tauri/src/services/device_session_expiry_tests.rs': 'services::device_session_expiry::tests',
   'src-tauri/src/commands/build_run_tests.rs': 'commands::build_run::tests',
   'src-tauri/src/pty/output_window_tests.rs': 'pty::output_window::tests',
   'src-tauri/src/pty/sink_tests.rs': 'pty::sink::tests',

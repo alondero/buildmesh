@@ -1418,6 +1418,14 @@ any phone paired by scanning a QR code, because pairing hands the browser a
 cookie and nothing else — is shown the pairing screen instead. Pairing again is
 always required after you revoke a device or clear the browser's site data.
 
+A paired phone also stops being authorized on its own after **90 days without
+use**. Buildmesh then removes it from **Authorized Devices** and closes any
+connection it still holds, so a phone you have not used in months cannot stay
+a live administrator credential. A phone you are still using keeps its place:
+any request from it counts as use, so the entry only disappears once the phone
+has genuinely been gone. If a phone that you still own is removed this way,
+pair it again with a fresh QR code from **Settings → Remote Access**.
+
 The loopback listener stays plain HTTP for local agent hooks. LAN/VPN interfaces
 use HTTPS/WSS. The status panel lists the interfaces that are actually exposed;
 an enabled toggle with no exposed interface is not a usable phone connection.
