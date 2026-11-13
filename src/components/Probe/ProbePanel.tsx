@@ -62,6 +62,7 @@ import { ProbeToolRail, LABEL_COLLAPSE_WIDTH } from './ProbeToolRail';
 import { RelatedTools } from './RelatedTools';
 import { probeGroupId } from '../../lib/probeGroups';
 import { EmptyState } from '../shared/Spinner';
+import { Separator } from '../shared/Separator';
 import {
   CompassIcon,
   SearchIcon,
@@ -127,14 +128,6 @@ function ProbePanelContent() {
   const { width: bodyWidth, isResizing, handleMouseDown, setWidth: setBodyWidth } = useProbeResize(undefined, resolveWidth);
   const measuredWidth = useResizeWidth(panelRef);
   const renderedWidth = Number.isFinite(measuredWidth) ? measuredWidth : bodyWidth;
-  // Mirror bodyWidth into a ref so the keyboard handler reads the latest
-  // value on every keydown — the same stale-closure anti-pattern
-  // useResizable's valueRef guards against for the drag path. Without
-  // this, auto-repeat arrow keys (held) call setBodyWidth with the same
-  // stale bodyWidth N times before React commits, collapsing the rapid
-  // expansion into a single +8 step per render.
-  const bodyWidthRef = useRef(bodyWidth);
-  bodyWidthRef.current = renderedWidth;
   // Scope comes from the shared resolver so Host probes never inherit a Mesh name.
   const context = useProbeContext();
 
@@ -188,45 +181,31 @@ function ProbePanelContent() {
           to min/max). The 10px hit zone (`w-2.5`) extends 4px into the
           gap with the center workspace via `-left-1`; the 2px visible
           line (`after:w-0.5`) is centred at the panel's actual border
-          so the affordance reads as part of the dock. Reads the latest
-          width through `bodyWidthRef` (not the closed-over state) so
-          auto-repeat keydowns see the post-commit value on the next
-          event — mirrors useResizable's valueRef pattern. */}
-      <div
+          so the affordance reads as part of the dock.
+
+          Issue #2424 moved that pattern into the shared `Separator`
+          primitive, so the sidebar and the grid splitters announce
+          themselves the same way. The panel is the pane AFTER its
+          handle (the handle is on the panel's left edge), so the
+          primitive is in `reverse` mode: ArrowLeft grows the panel —
+          the same direction as dragging the handle left. The value is
+          the RENDERED width (measured), so the announced number is the
+          width on screen rather than the requested one. */}
+      <Separator
+        label="Resize probe panel"
+        orientation="vertical"
+        reverse
+        value={renderedWidth}
+        min={PROBE_PANEL_BOUNDS.MIN_WIDTH}
+        max={PROBE_PANEL_BOUNDS.MAX_WIDTH}
+        onResize={setBodyWidth}
+        // Read the width off the DOM at keydown time: the panel's width
+        // is a measurement, and a resize observer reports it a frame
+        // later than the next keydown can arrive — without this a held
+        // arrow key would repeat a step instead of taking the next one.
+        getValue={() => panelRef.current?.getBoundingClientRect().width || bodyWidth}
         onMouseDown={event => handleMouseDown(event, panelRef.current?.getBoundingClientRect().width || bodyWidth)}
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Resize probe panel"
-        aria-valuenow={Math.round(renderedWidth)}
-        aria-valuemin={PROBE_PANEL_BOUNDS.MIN_WIDTH}
-        aria-valuemax={PROBE_PANEL_BOUNDS.MAX_WIDTH}
-        tabIndex={0}
-        onKeyDown={(e) => {
-          // Drag-LEFT grows the panel (handle tracks cursor; the panel's
-          // right edge is the window edge — see useProbeResize for the
-          // geometry). Read the latest width through the ref so
-          // auto-repeat doesn't collapse rapid presses into one commit.
-          // setWidth clamps internally to PROBE_PANEL_BOUNDS.
-          const current = panelRef.current?.getBoundingClientRect().width || bodyWidthRef.current;
-          const min = PROBE_PANEL_BOUNDS.MIN_WIDTH;
-          const max = PROBE_PANEL_BOUNDS.MAX_WIDTH;
-          const small = e.shiftKey ? 32 : 8;
-          const large = e.shiftKey ? max - min : 80;
-          let next: number | null = null;
-          switch (e.key) {
-            case 'ArrowLeft':  next = Math.min(max, current + small); break;
-            case 'ArrowRight': next = Math.max(min, current - small); break;
-            case 'PageUp':     next = Math.min(max, current + large); break;
-            case 'PageDown':   next = Math.max(min, current - large); break;
-            case 'Home':       next = max; break;
-            case 'End':        next = min; break;
-          }
-          if (next !== null) {
-            setBodyWidth(next);
-            e.preventDefault();
-          }
-        }}
-        className={`absolute top-0 -left-1 w-2.5 h-full cursor-col-resize z-10 outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-cyan after:absolute after:inset-y-0 after:left-1 after:w-0.5 after:transition-colors ${
+        className={`absolute top-0 -left-1 w-2.5 h-full cursor-col-resize z-10 after:absolute after:inset-y-0 after:left-1 after:w-0.5 after:transition-colors ${
           isResizing ? 'after:bg-accent-cyan/60' : 'after:bg-transparent hover:after:bg-accent-cyan/40'
         }`}
       />

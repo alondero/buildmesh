@@ -264,6 +264,16 @@ bounds. Its toolbar and footer stay pinned around one inner scroller; diagnostic
 text and action rows wrap at the minimum width. The recovery modal is loaded
 after explicit Resolve.
 
+The Probe's resize handle is the shared `Separator` primitive
+(`src/components/shared/Separator.tsx`), the same one the sidebar and the
+agent grid's splitters use (issue #2424): it owns the ARIA surface (role,
+orientation, name, current/min/max values), the tab stop, the accent focus
+ring and the key map, and the call site owns the width, its bounds and its
+persistence. The Probe's controlled pane sits AFTER its handle (the handle
+is on the panel's left edge), so it renders the primitive in `reverse` mode
+— ArrowLeft grows the panel, the direction the handle travels when it is
+dragged left.
+
 ## Configuration vs maintenance destinations (issue #1460, ADR-0038)
 Two Mesh-lens destinations are split by job and must never merge again:
 `properties` (**Project Settings**) owns configuration, `worktrees`
