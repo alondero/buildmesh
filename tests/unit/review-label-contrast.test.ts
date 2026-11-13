@@ -25,6 +25,16 @@
  * class change in the components moves this test with it. The baseline
  * (`--color-accent-violet`, the graphic accent) is measured too and asserted
  * to FAIL: a check that the baseline passes would not be a regression test.
+ *
+ * Issue #2745 — the two violet labels that live *outside* the node header are
+ * measured here too, on the surfaces they actually sit on: the Agent History
+ * worktree name (the Probe panel, and the row's hover wash) and the Circuits
+ * join-category label (the node card's accent stripe, the inspector, the node
+ * palette and the quick-connect menu). Each fill and each text token is read
+ * with its own pattern out of the class list that identifies the element, so
+ * the two readings are independent of the class order: swapping
+ * `bg-accent-violet/20` with `text-accent-violet-strong` yields the same
+ * measured ratios.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -115,14 +125,38 @@ function token(tokens: Map<string, string>, name: string): Rgb {
   return hexToRgb(value);
 }
 
+/** The first capture of a pattern in a component's own source. */
+function capture(source: string, pattern: RegExp, where: string): string {
+  const match = pattern.exec(source);
+  if (!match) throw new Error(`Could not find ${where} in the component source`);
+  return match[1];
+}
+
 /**
  * The text token a component paints with, read from the component's own
  * source — so a class change there moves this measurement with it.
  */
 function foregroundToken(source: string, pattern: RegExp, where: string): string {
-  const match = pattern.exec(source);
-  if (!match) throw new Error(`Could not find ${where} in the component source`);
-  return match[1];
+  return capture(source, pattern, where);
+}
+
+/**
+ * A class list, located by what identifies the element rather than by the
+ * order of its utilities.
+ *
+ * The violet fill's alpha and the violet text token are then read out of the
+ * list with separate patterns, so the two readings are independent of each
+ * other and of the class order (issue #2745).
+ */
+function classList(source: string, pattern: RegExp, where: string): string {
+  return capture(source, pattern, where);
+}
+
+/** The violet fill's alpha, read from a class list on its own. */
+function violetFillAlpha(list: string, where: string): number {
+  const match = /bg-accent-violet\/(\d+)/.exec(list);
+  if (!match) throw new Error(`Could not find the violet fill on ${where}`);
+  return Number(match[1]) / 100;
 }
 
 /** The Review trigger (header label + icon). */
@@ -137,16 +171,46 @@ const reviewLinkToken = foregroundToken(
   /text-xs text-(accent-violet(?:-strong)?) mb-3/,
   'the "View circuit run" link class',
 );
+/**
+ * The dialog's primary-action class list ("Start review" / "Start Circuit").
+ *
+ * It is the class list that carries a *plain* violet fill. A variant-prefixed
+ * utility — the trigger's `hover:bg-accent-violet/15` — is a state, not the
+ * resting fill, so it is not one of these.
+ */
+const primaryActionClasses = (() => {
+  const lists = [...REVIEW_BUTTON.matchAll(/className="([^"]*)"/g)].map(match => match[1]);
+  const found = lists.filter(list => /(?:^|\s)bg-accent-violet/.test(list));
+  if (found.length !== 1) {
+    throw new Error(
+      `Expected exactly one class list with a plain violet fill in AgentReviewButton.tsx, found ${found.length}`,
+    );
+  }
+  return found[0];
+})();
+
 /** The dialog's primary action ("Start review" / "Start Circuit"). */
 const reviewPrimaryToken = foregroundToken(
-  REVIEW_BUTTON,
-  /bg-accent-violet\/\d+ text-(accent-violet(?:-strong)?)/,
+  primaryActionClasses,
+  /text-(accent-violet(?:-strong)?)/,
   'the review dialog primary-action class',
+);
+/**
+ * The automation chip on the node header.
+ *
+ * The chip's class list is read once and the fill and the token are read out
+ * of it separately, so the two do not depend on each other's class name or on
+ * the order the utilities are written in.
+ */
+const automationChipClasses = classList(
+  GRID_HEADER,
+  /automation: '([^']*bg-accent-violet[^']*)'/,
+  'the automation chip class',
 );
 /** The automation chip on the node header. */
 const automationChipToken = foregroundToken(
-  GRID_HEADER,
-  /automation: 'bg-accent-violet\/\d+ text-(accent-violet(?:-strong)?)/,
+  automationChipClasses,
+  /text-(accent-violet(?:-strong)?)/,
   'the automation chip class',
 );
 /** The resume glyph on the node header. */
@@ -166,6 +230,9 @@ const COMPANION_RESPONSE = read('src/components/CommandOmnibar/CompanionResponse
 const NODE_ITEM = read('src/components/Sidebar/NodeItem.tsx');
 const ISSUE_LABELS = read('src/components/Probe/IssueLabels.tsx');
 const CIRCUITS_PROBE = read('src/components/Probe/CircuitsProbeTab.tsx');
+const ARCHIVED_NODES = read('src/components/Probe/ArchivedNodesTab.tsx');
+const CIRCUIT_GRAPH_MODEL = read('src/components/Circuits/circuitGraphModel.ts');
+const CIRCUIT_NODE_CARD = read('src/components/Circuits/CircuitNodeCard.tsx');
 
 /** The violet text of the Companion pill in the title bar. */
 const companionPillToken = foregroundToken(
@@ -191,18 +258,49 @@ const sidebarResumeToken = foregroundToken(
   /hover:text-(accent-violet(?:-strong)?) hover:bg-bg-card-hover/,
   'the sidebar resume glyph class',
 );
+/**
+ * The watched issue-label chip's class list — the branch of the `watched(label)`
+ * conditional that carries the violet fill.
+ */
+const issueLabelChipClasses = classList(
+  ISSUE_LABELS,
+  /watched\(label\) \? '([^']*bg-accent-violet[^']*)'/,
+  'the watched issue-label chip class',
+);
 /** The violet text of a watched issue label chip. */
 const issueLabelToken = foregroundToken(
-  ISSUE_LABELS,
-  /bg-accent-violet\/\d+ text-(accent-violet(?:-strong)?)/,
+  issueLabelChipClasses,
+  /text-(accent-violet(?:-strong)?)/,
   'the watched issue-label chip class',
+);
+/** The "Edit Flow" chip's class list. */
+const editFlowChipClasses = classList(
+  CIRCUITS_PROBE,
+  /className="([^"]*bg-accent-violet[^"]*)"/,
+  'the "Edit Flow" chip class',
 );
 /** The violet text of the "Edit Flow" chip in the Circuits Probe. */
 const editFlowToken = foregroundToken(
-  CIRCUITS_PROBE,
-  /bg-accent-violet\/\d+ text-(accent-violet(?:-strong)?) hover:bg-accent-violet/,
+  editFlowChipClasses,
+  /text-(accent-violet(?:-strong)?)/,
   'the "Edit Flow" chip class',
 );
+
+/** The violet text of the worktree name in an Agent History row. */
+const archiveWorktreeToken = foregroundToken(
+  ARCHIVED_NODES,
+  /text-2xs text-(accent-violet(?:-strong)?) font-mono/,
+  'the Agent History worktree name class',
+);
+/**
+ * The label colour of the Circuits "join" category — the one category whose
+ * palette accent is also a text colour.
+ */
+const joinCategoryToken = (() => {
+  const match = /case 'join':[\s\S]*?text: 'text-(accent-violet(?:-strong)?)'/.exec(CIRCUIT_GRAPH_MODEL);
+  if (!match) throw new Error('Could not find the join category label class in circuitGraphModel.ts');
+  return match[1];
+})();
 
 /** The header tint: `${meshColor.hex}14` — 8% of the Mesh colour. */
 const headerTintAlpha = (() => {
@@ -218,13 +316,25 @@ const reviewHoverAlpha = (() => {
   return Number(match[1]) / 100;
 })();
 
-/** The chip wash and the dialog primary fill: `bg-accent-violet/15`, `/20`. */
-const chipWashAlpha = Number(
-  /automation: 'bg-accent-violet\/(\d+)/.exec(GRID_HEADER)?.[1] ?? NaN,
-) / 100;
-const primaryFillAlpha = Number(
-  /bg-accent-violet\/(\d+) text-accent-violet/.exec(REVIEW_BUTTON)?.[1] ?? NaN,
-) / 100;
+/**
+ * The chip wash and the dialog primary fill: `bg-accent-violet/15`, `/20`.
+ *
+ * Each alpha is read from its own class list, on its own, so it does not
+ * depend on the text token beside it nor on the order the two utilities are
+ * written in (issue #2745).
+ */
+const chipWashAlpha = violetFillAlpha(automationChipClasses, 'the automation chip class');
+const primaryFillAlpha = violetFillAlpha(primaryActionClasses, 'the review dialog primary-action class');
+/** The watched issue-label chip's wash: `bg-accent-violet/10`. */
+const issueLabelWashAlpha = violetFillAlpha(issueLabelChipClasses, 'the watched issue-label chip class');
+/** The "Edit Flow" chip's wash: `bg-accent-violet/15`. */
+const editFlowWashAlpha = violetFillAlpha(editFlowChipClasses, 'the "Edit Flow" chip class');
+/** The node card's category stripe wash: `${accent.bg}/15`. */
+const cardStripeAlpha = (() => {
+  const match = /\$\{accent\.bg\}\/(\d+)/.exec(CIRCUIT_NODE_CARD);
+  if (!match) throw new Error('Could not find the category stripe wash in CircuitNodeCard.tsx');
+  return Number(match[1]) / 100;
+})();
 
 // ---------- The compositions ------------------------------------------------
 
@@ -446,12 +556,12 @@ describe('the violet labels on the other surfaces (#2737)', () => {
     {
       name: 'the watched issue-label chip in the Probe',
       tokenName: issueLabelToken,
-      surface: tokens => over(token(tokens, 'accent-violet'), 0.10, token(tokens, 'bg-base')),
+      surface: tokens => over(token(tokens, 'accent-violet'), issueLabelWashAlpha, token(tokens, 'bg-base')),
     },
     {
       name: 'the "Edit Flow" chip in the Circuits Probe',
       tokenName: editFlowToken,
-      surface: tokens => over(token(tokens, 'accent-violet'), 0.15, token(tokens, 'bg-base')),
+      surface: tokens => over(token(tokens, 'accent-violet'), editFlowWashAlpha, token(tokens, 'bg-base')),
     },
   ];
 
@@ -468,5 +578,106 @@ describe('the violet labels on the other surfaces (#2737)', () => {
 
   it.each(SITES)('$name uses the text-safe violet step', ({ tokenName }) => {
     expect(tokenName).not.toBe('accent-violet');
+  });
+});
+
+describe('the Agent History worktree name (#2745)', () => {
+  /**
+   * The worktree name is violet text in a Probe row. At rest the row sits on
+   * the Probe panel, which is the app's `bg-bg-base`; hovering the row paints
+   * `bg-bg-card`. The graphic accent measured 4.67:1 at rest and 4.25:1 on the
+   * hover wash in the dark theme — under the 4.5:1 body-text floor.
+   */
+  it.each(['dark', 'light'] as const)(
+    'clears 4.5:1 at rest and on the row hover in the %s theme',
+    theme => {
+      const tokens = theme === 'dark' ? DARK : LIGHT;
+      const foreground = token(tokens, archiveWorktreeToken);
+      const rest = contrastRatio(foreground, token(tokens, 'bg-base'));
+      const hover = contrastRatio(foreground, token(tokens, 'bg-card'));
+      expect(
+        rest,
+        `${theme}: the worktree name on the Probe panel — ${rest.toFixed(2)}:1`,
+      ).toBeGreaterThanOrEqual(AA_BODY_TEXT);
+      expect(
+        hover,
+        `${theme}: the worktree name on the hovered row — ${hover.toFixed(2)}:1`,
+      ).toBeGreaterThanOrEqual(AA_BODY_TEXT);
+    },
+  );
+
+  it('uses the text-safe violet step', () => {
+    expect(archiveWorktreeToken).not.toBe('accent-violet');
+  });
+
+  it('the baseline accent FAILS on the hovered row, so this check is not vacuous', () => {
+    const baseline = token(DARK, 'accent-violet');
+    const hover = contrastRatio(baseline, token(DARK, 'bg-card'));
+    expect(
+      hover,
+      `dark: the graphic accent on the hovered row — ${hover.toFixed(2)}:1`,
+    ).toBeLessThan(AA_BODY_TEXT);
+  });
+});
+
+describe('the Circuits join-category label (#2745)', () => {
+  /**
+   * The join category is the one whose palette accent is also a text colour,
+   * and its label sits on four surfaces: the node card's category stripe, the
+   * inspector, the node palette and the quick-connect menu (at rest and on
+   * hover). The stripe is a *composed* surface — the category wash over the
+   * card — so the label is measured against the composition, not the token.
+   */
+  const SURFACES: Array<{
+    name: string;
+    surface: (tokens: Map<string, string>) => Rgb;
+  }> = [
+    {
+      name: 'the node card title strip',
+      surface: tokens => over(token(tokens, 'accent-violet'), cardStripeAlpha, token(tokens, 'bg-card')),
+    },
+    {
+      name: 'the inspector panel',
+      surface: tokens => token(tokens, 'bg-surface'),
+    },
+    {
+      name: 'the node palette',
+      surface: tokens => token(tokens, 'bg-overlay'),
+    },
+    {
+      name: 'the quick-connect menu',
+      surface: tokens => token(tokens, 'bg-overlay'),
+    },
+    {
+      name: 'the quick-connect menu on hover',
+      surface: tokens => token(tokens, 'bg-card-hover'),
+    },
+  ];
+
+  it.each(SURFACES)('$name clears 4.5:1', ({ surface }) => {
+    for (const theme of ['dark', 'light'] as const) {
+      const tokens = theme === 'dark' ? DARK : LIGHT;
+      const ratio = contrastRatio(token(tokens, joinCategoryToken), surface(tokens));
+      expect(
+        ratio,
+        `${theme}: the join-category label — ${ratio.toFixed(2)}:1`,
+      ).toBeGreaterThanOrEqual(AA_BODY_TEXT);
+    }
+  });
+
+  it('uses the text-safe violet step', () => {
+    expect(joinCategoryToken).not.toBe('accent-violet');
+  });
+
+  it('the baseline accent FAILS on the card title strip, so this check is not vacuous', () => {
+    for (const theme of ['dark', 'light'] as const) {
+      const tokens = theme === 'dark' ? DARK : LIGHT;
+      const baseline = token(tokens, 'accent-violet');
+      const ratio = contrastRatio(baseline, over(token(tokens, 'accent-violet'), cardStripeAlpha, token(tokens, 'bg-card')));
+      expect(
+        ratio,
+        `${theme}: the graphic accent on the card title strip — ${ratio.toFixed(2)}:1`,
+      ).toBeLessThan(AA_BODY_TEXT);
+    }
   });
 });

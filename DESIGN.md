@@ -156,12 +156,18 @@ primary action; keep `accent-violet` for the icon, the ring and the washes.
 
 Violet **text** uses the strong step throughout the app — the Review label, the
 automation chip, the resume glyph, the Companion pill and omnibar links, the
-watched issue-label chip, the "Edit Flow" chip. The two places the violet is
-not body text are the aria-hidden `✦` companion glyph and the diff-status
-vocabulary in `src/lib/status.ts`, whose `hex` is mirrored to the phone and so
-moves with the palette rather than with a text step.
+watched issue-label chip, the "Edit Flow" chip, the Agent History worktree name
+and the Circuits join-category label. The violet that is **not** text is the
+aria-hidden `✦` companion glyph, the Circuit automation orbit ring, and the
+Circuits category glyph, stripe and border. Icons and rings need only the 3:1
+non-text floor; the stripe is a decorative wash. All of them are the graphic
+accent by design. The diff-status vocabulary in `src/lib/status.ts` is a
+further exception — its `hex` is mirrored to the phone and the native client,
+so it moves with the palette rather than with a text step (tracked in #2742).
 `tests/unit/review-label-contrast.test.ts` recomposes the Mesh-tinted header
-and pins each of those pairs — the new step passes, the graphic accent fails.
+and pins each of those text pairs — the strong step passes, the graphic accent
+fails — and pins the two violet labels that sit outside the node header on
+their own surfaces.
 
 ### Action fills
 
@@ -612,6 +618,9 @@ specificity and import order; custom properties don't.
   measures the Review label, the automation chip, the resume glyph, the review
   dialog's primary action and the other violet-text surfaces against it, in
   both themes, over the palette and the corners of the RGB cube (issue #2737).
+  The violet labels that live outside the node header — the Agent History
+  worktree name and the Circuits join-category label — are measured on their
+  own surfaces, the card's accent stripe included (issue #2745).
   The mobile mirror is
   checked by `tests/unit/mobile-tokens-contrast.test.ts` for AA on mobile
   surfaces; equality with desktop token values is a design convention.

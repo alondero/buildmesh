@@ -146,7 +146,8 @@ when a path named in a skill does not exist.
   `tests/unit/review-label-contrast.test.ts` recomposes the node header and
   pins the Review label, the automation chip, the resume glyph, the review
   dialog's primary action and the other violet-text surfaces in both themes
-  (issue #2737).
+  (issue #2737), plus the violet labels outside the node header — the Agent
+  History worktree name and the Circuits join-category label (issue #2745).
 
 ## Architecture documents
 

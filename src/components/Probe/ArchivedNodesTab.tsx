@@ -334,8 +334,14 @@ export function ArchivedNodesTab({ meshId, meshPath }: { meshId?: number; meshPa
                       {session.branch && (
                         <span className="text-2xs text-text-secondary font-mono">{session.branch}</span>
                       )}
+                      {/* Issue #2745 — the graphic violet accent is not
+                          text-safe: it measured 4.25:1 on the row's hover
+                          wash in the dark theme, under the 4.5:1 body-text
+                          floor (4.67:1 at rest, which clears it). The
+                          text-safe step is the same rule the rest of the
+                          violet text follows. */}
                       {session.worktree_name && (
-                        <span className="text-2xs text-accent-violet font-mono">{session.worktree_name}</span>
+                        <span className="text-2xs text-accent-violet-strong font-mono">{session.worktree_name}</span>
                       )}
                       {/* Issue #2332 — which harness owns the conversation,
                           stated before the user opens the picker. */}
