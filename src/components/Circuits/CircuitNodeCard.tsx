@@ -94,7 +94,7 @@ export function CircuitNodeCard({ data }: NodeProps<CircuitFlowNode>) {
 
       {/* Category accent stripe */}
       <div className={`flex items-center gap-2 px-2 py-1.5 rounded-t-md ${accent.bg}/15`}>
-        <span className={`${accent.text}`}>
+        <span className={`${accent.graphic}`}>
           <CategoryGlyph category={category} className="w-4 h-4" />
         </span>
         {/* Issue #2739 — the card's title strip names the node, so it is a

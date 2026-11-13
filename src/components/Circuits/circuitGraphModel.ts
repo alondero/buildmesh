@@ -88,21 +88,58 @@ export function categoryOf(kind: CircuitNodeKind): NodeCategory {
   return specFor(kind.type).category;
 }
 
-/** Tailwind accent tokens per palette category (App.css @theme). */
+/**
+ * Tailwind accent tokens per palette category (App.css @theme).
+ *
+ * The graphic and text roles are separate because the violet accent is two
+ * steps of one hue (issue #2737): `accent-violet` is the **graphic** step —
+ * the category glyph, the stripe, the border — and `accent-violet-strong` is
+ * the **text-safe** step for labels painted in violet. The other three
+ * categories have no separate text step, so `graphic` and `text` are the same
+ * class for them.
+ *
+ * Issue #2745 — the join category's label sat on the graphic step and measured
+ * 3.62:1 (dark) / 4.21:1 (light) on the card's own accent stripe, under the
+ * 4.5:1 body-text floor. The label now takes the text-safe step; the glyph
+ * keeps the graphic accent, so the category still reads as one hue.
+ */
 export function categoryAccent(category: NodeCategory): {
+  /** The graphic step — icons, washes and borders. */
+  graphic: string;
+  /** The text step — labels. */
   text: string;
   bg: string;
   border: string;
 } {
   switch (category) {
     case 'trigger':
-      return { text: 'text-accent-cyan', bg: 'bg-accent-cyan', border: 'border-accent-cyan' };
+      return {
+        graphic: 'text-accent-cyan',
+        text: 'text-accent-cyan',
+        bg: 'bg-accent-cyan',
+        border: 'border-accent-cyan',
+      };
     case 'action':
-      return { text: 'text-status-success', bg: 'bg-status-success', border: 'border-status-success' };
+      return {
+        graphic: 'text-status-success',
+        text: 'text-status-success',
+        bg: 'bg-status-success',
+        border: 'border-status-success',
+      };
     case 'gate':
-      return { text: 'text-status-warning', bg: 'bg-status-warning', border: 'border-status-warning' };
+      return {
+        graphic: 'text-status-warning',
+        text: 'text-status-warning',
+        bg: 'bg-status-warning',
+        border: 'border-status-warning',
+      };
     case 'join':
-      return { text: 'text-accent-violet', bg: 'bg-accent-violet', border: 'border-accent-violet' };
+      return {
+        graphic: 'text-accent-violet',
+        text: 'text-accent-violet-strong',
+        bg: 'bg-accent-violet',
+        border: 'border-accent-violet',
+      };
   }
 }
 
