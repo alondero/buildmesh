@@ -84,20 +84,36 @@ describe('MeshColorPicker focus visibility (issue #2776)', () => {
     expect(classes).toContain('has-[:focus-visible]:outline-offset-2');
   });
 
-  it('shows the indicator for keyboard focus only, so a pointer does not masquerade as one', () => {
+  it('hangs the indicator off :focus-visible, the signal a pointer press does not raise', () => {
     const { input, wrapper } = renderPicker(MESH_PALETTE[0].hex);
 
-    // A pointer press on the swatch focuses the input, but that focus is not
-    // a keyboard focus: the indicator must stay off, or a mouse user would
-    // see a "keyboard" ring they did not ask for.
+    // jsdom 31 implements `:focus-visible` as an alias of `:focus`: it has no
+    // pointer/keyboard heuristic (`hasFocusVisible` in jsdom's
+    // `living/css/match/selector.js` just calls `hasFocus`). A pointer press
+    // that focuses the swatch therefore matches here, even though a browser
+    // keeps the keyboard ring off it. That half of the contract belongs to
+    // `tests/e2e/focus-visibility-verify-smoke.spec.ts`, which hovers and tabs
+    // the real swatch in both themes.
     fireEvent.mouseDown(input);
     fireEvent.click(input);
     input.focus();
     expect(document.activeElement).toBe(input);
     expect(wrapper.matches(':focus-within')).toBe(true);
-    expect(wrapper.matches(':has(input:focus-visible)')).toBe(false);
+    expect(wrapper.matches(':has(input:focus-visible)')).toBe(true);
 
-    // The keyboard path paints it.
+    // What this environment CAN pin is the selector the indicator hangs off:
+    // every focus-keyed token on the wrapper is a `has-[:focus-visible]`
+    // variant, so no `focus:` or `focus-within:` decoration exists that a
+    // pointer user's focus would paint in a browser.
+    const focusTokens = wrapper.className
+      .split(/\s+/)
+      .filter((token) => /^(?:focus|focus-within|has-\[)/.test(token));
+    expect(focusTokens.length).toBeGreaterThan(0);
+    for (const token of focusTokens) {
+      expect(token.startsWith('has-[:focus-visible]:')).toBe(true);
+    }
+
+    // The keyboard path paints it too.
     input.blur();
     fireEvent.keyDown(document, { key: 'Tab' });
     input.focus();
