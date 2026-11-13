@@ -582,9 +582,18 @@ function MeshItemView({
                 ref={meshTitleRef}
                 onClick={(e) => { e.stopPropagation(); onSelectMesh(mesh.id); }}
                 aria-current={isSelected ? 'true' : undefined}
-                className={`min-w-0 flex-1 truncate text-left cursor-pointer font-sans font-semibold text-label ${dimmed ? 'text-text-muted' : 'text-text-primary'}`}
+                // Issue #2774 — this button IS the row's select control, so it
+                // carries the desktop 24x24 CSS-pixel minimum hit area in
+                // BOTH dimensions. `text-label` is 13px at 1.45 line-height
+                // (18.85px), so the old inline button was 18.84px high and
+                // easy to miss. The name moved into a span because a flex
+                // button does not `truncate` its own text: the ellipsis needs
+                // a block child with `min-w-0` inside the button's content
+                // box. The hover wash stays on the header row, so hovering
+                // the title leaves the selected fill in place.
+                className={`flex min-h-[24px] min-w-[24px] flex-1 items-center text-left cursor-pointer font-sans font-semibold text-label ${dimmed ? 'text-text-muted' : 'text-text-primary'}`}
               >
-                {mesh.name}
+                <span className="min-w-0 truncate">{mesh.name}</span>
               </button>
               {drifted && (
                 <button
@@ -631,7 +640,14 @@ function MeshItemView({
               aria-expanded={expanded}
               aria-label={expanded ? `Hide agents for ${mesh.name}` : `Show agents for ${mesh.name}`}
               title={expanded ? `Hide agents for ${mesh.name}` : `Show agents for ${mesh.name}`}
-              className="mt-px flex w-full items-center gap-1 rounded-md pr-1 py-px text-left hover:bg-bg-card-hover/60 transition-colors"
+              // Issue #2774 — the expansion toggle is a compact desktop
+              // control, so it carries the same 24x24 CSS-pixel minimum as
+              // the title above it. `text-micro` is 10px at 1.4 line-height
+              // (14px) plus the two 1px paddings = 16px high, which is why
+              // it was easy to activate by accident. `mt-1` (4px) replaces
+              // the old `mt-px`, so the two adjacent hit areas are visibly
+              // separated rather than one pixel apart.
+              className="mt-1 flex min-h-[24px] min-w-[24px] w-full items-center gap-1 rounded-md pr-1 text-left hover:bg-bg-card-hover/60 transition-colors"
             >
               {members.length > 0 ? (
                 <span role="img" aria-label={dotSummary} className="inline-flex items-center gap-[3px]">

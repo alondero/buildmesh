@@ -63,7 +63,14 @@ the same change.
 
 Compact desktop controls still provide a **24 by 24 CSS pixel minimum hit
 area**. A small colour swatch or glyph may sit inside that area; the surrounding
-button owns pointer and keyboard input. Recovery actions remain visible in
+button owns pointer and keyboard input. The minimum applies in **both**
+dimensions: a control that is 24px tall is not yet a 24px target. Only the
+fixed spacing steps (`1`–`6` and `8`) are pixel values — a half step such as
+`px-1.5` falls back to the 13px root and measures 4.875px — so a compact
+control states its width explicitly (`min-w-[24px]`) instead of inheriting
+whatever padding surrounds its glyph. Give a quiet control its hover with the
+surface token rather than a colour rule: an inherited colour does not reach a
+child that sets its own. Recovery actions remain visible in
 waiting and failed rows. First-session guidance presents repository, runtime
 and session readiness before advanced shortcuts. Use a solid accent and
 inverse text for the primary action, bordered secondary actions, and the
