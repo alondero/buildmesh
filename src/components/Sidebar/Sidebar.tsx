@@ -22,9 +22,10 @@ import {
 import { NodeActivityCluster, clusterActivityNodes } from '../../lib/nodeActivities';
 import { MeshItem } from './MeshItem';
 import { dropdownId } from '../../lib/dropdownId';
-import { useSidebarResize } from './useSidebarResize';
+import { useSidebarResize, SIDEBAR_BOUNDS } from './useSidebarResize';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { preferredDockWidth } from '../../lib/dockSizing';
+import { Separator } from '../shared/Separator';
 
 // Shared empty cluster list so meshes without visible nodes keep a stable
 // `nodeClusters` reference instead of allocating a fresh `[]` per mesh on every
@@ -50,7 +51,7 @@ const POINTER_SENSOR_OPTIONS = { activationConstraint: { distance: 5 } };
 export function Sidebar() {
   const panelRef = useRef<HTMLDivElement>(null);
   const resolveWidth = useCallback((next: number) => preferredDockWidth(panelRef.current, next), []);
-  const { width, isResizing, handleMouseDown } = useSidebarResize(undefined, resolveWidth);
+  const { width, isResizing, handleMouseDown, setWidth } = useSidebarResize(undefined, resolveWidth);
   // Single shared Spawn Option snapshot (issue #1502 — one fetch + one
   // `provider-list-changed` subscription for the whole app, no matter
   // how many headers mount). Platform filtering (e.g. macOS-only
@@ -321,11 +322,25 @@ export function Sidebar() {
 
   return (
     <div ref={panelRef} data-workspace-dock className="relative flex h-full min-w-[192px] shrink" style={{ width }}>
-      <div
+      {/* Resize handle — issue #2424 made it operable by keyboard. The
+          shared `Separator` primitive carries the whole contract: the
+          `separator` role with an orientation, an accessible name, the
+          current/min/max values, a tab stop, the accent focus ring, and
+          the arrow-key key map. `setWidth` clamps to the same
+          [192, 480] range the drag does, and the existing persist
+          effect writes the settled width to localStorage, so a keyboard
+          resize is remembered exactly like a dragged one. The handle
+          sits on the RIGHT edge of the panel (the panel's outer edge is
+          on the left), so ArrowRight grows the sidebar — the same
+          direction as dragging the handle right. */}
+      <Separator
+        label="Resize sidebar"
+        orientation="vertical"
+        value={width}
+        min={SIDEBAR_BOUNDS.MIN_WIDTH}
+        max={SIDEBAR_BOUNDS.MAX_WIDTH}
+        onResize={setWidth}
         onMouseDown={event => handleMouseDown(event, panelRef.current?.getBoundingClientRect().width || width)}
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Resize sidebar"
         className={`absolute top-0 -right-1 w-2.5 h-full cursor-col-resize z-10 after:absolute after:inset-y-0 after:left-1 after:w-0.5 after:transition-colors ${
           isResizing ? 'after:bg-accent-cyan/60' : 'after:bg-transparent hover:after:bg-accent-cyan/40'
         }`}
