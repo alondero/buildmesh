@@ -1,4 +1,4 @@
-import { MESH_PALETTE } from '../../lib/meshColors';
+import { MESH_PALETTE, swatchInk } from '../../lib/meshColors';
 
 interface MeshColorPickerProps {
   /** Currently selected hex (`#rrggbb`). */
@@ -7,6 +7,22 @@ interface MeshColorPickerProps {
   /** Optional id for the group's label association. */
   labelId?: string;
 }
+
+/**
+ * The selection indicator on a swatch — issue #2775.
+ *
+ * The ring used to be `ring-white`, which resolved to white in BOTH themes:
+ * in the light theme the ring and its offset were both white, so the selected
+ * swatch dissolved into the dialog it sat in. `ring-text-primary` is the
+ * theme-aware step — near-white on the dark dialog, near-black on the light
+ * one — and the `ring-offset-bg-overlay` gap keeps the ring from touching the
+ * swatch it marks, so the ring reads against the dialog either way.
+ *
+ * The checkmark is the NON-COLOUR cue: it names the selection without relying
+ * on the ring's hue, and its ink is picked for contrast against the swatch
+ * itself (`swatchInk`), so a very light custom colour still shows it.
+ */
+const SELECTED_SWATCH = 'ring-2 ring-offset-2 ring-offset-bg-overlay ring-text-primary';
 
 /**
  * The shared mesh colour picker: the eight built-in palette swatches plus a
@@ -31,11 +47,21 @@ export function MeshColorPicker({ value, onChange, labelId }: MeshColorPickerPro
             aria-label={`Colour ${p.hex}`}
             aria-pressed={selected}
             title={p.hex}
-            className={`h-6 w-6 rounded-full transition-transform hover:scale-110 ${
-              selected ? 'ring-2 ring-offset-2 ring-offset-bg-overlay ring-white' : ''
+            className={`relative flex h-6 w-6 items-center justify-center rounded-full transition-transform hover:scale-110 ${
+              selected ? SELECTED_SWATCH : ''
             }`}
             style={{ backgroundColor: p.hex }}
-          />
+          >
+            {selected && (
+              <span
+                aria-hidden
+                className="text-2xs font-bold leading-none"
+                style={{ color: swatchInk(p.hex) }}
+              >
+                ✓
+              </span>
+            )}
+          </button>
         );
       })}
       {/* Custom colour — the native picker. The wrapper swatch shows the
@@ -48,21 +74,34 @@ export function MeshColorPicker({ value, onChange, labelId }: MeshColorPickerPro
           drawn on the input anyway (issue #2776). `has-[:focus-visible]`
           keeps the indicator keyboard-only — a mouse click on the swatch
           focuses the input without claiming a keyboard focus — and the
-          accent-cyan outline stays distinguishable from the white
-          selection ring used for the chosen colour. */}
+          accent-cyan outline stays distinguishable from the theme-aware
+          selection ring used for the chosen colour (issue #2775). */}
       <label
         title="Custom colour"
         className={`relative h-6 w-6 cursor-pointer rounded-full border border-dashed border-border-default flex items-center justify-center overflow-hidden has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-accent-cyan has-[:focus-visible]:outline-offset-2 ${
-          isCustom ? 'ring-2 ring-offset-2 ring-offset-bg-overlay ring-white' : ''
+          isCustom ? SELECTED_SWATCH : ''
         }`}
         style={isCustom ? { backgroundColor: value } : undefined}
       >
-        {!isCustom && <span className="text-text-muted text-xs leading-none">+</span>}
+        {isCustom ? (
+          <span
+            aria-hidden
+            className="text-2xs font-bold leading-none"
+            style={{ color: swatchInk(value) }}
+          >
+            ✓
+          </span>
+        ) : (
+          <span className="text-text-muted text-xs leading-none">+</span>
+        )}
         <input
           type="color"
           value={value}
           onChange={(e) => onChange(e.target.value)}
-          aria-label="Custom colour"
+          // The custom swatch is the selected one whenever the current colour
+          // is not a palette entry, so its accessible name says so — the
+          // checkmark is a visual cue and does not reach a screen reader.
+          aria-label={isCustom ? 'Custom colour (selected)' : 'Custom colour'}
           className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
         />
       </label>

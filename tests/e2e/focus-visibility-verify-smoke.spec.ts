@@ -34,6 +34,18 @@ const ACCENT = {
 } as const;
 
 /**
+ * The selection ring, per theme (`--color-text-primary` in App.css). The ring
+ * is the theme-aware step rather than white (issue #2775): in the light theme
+ * a white ring and a white offset dissolved into the dialog. It is still a
+ * different colour from the focus outline above, which is what the two
+ * signals need.
+ */
+const SELECTION_RING = {
+  dark: 'rgb(226, 232, 240)',
+  light: 'rgb(15, 23, 42)',
+} as const;
+
+/**
  * Walk the real focus order with Tab until the target holds focus. The app's
  * dialogs and rails put several controls in between, so the count is a bound
  * rather than a fixed number of presses.
@@ -107,14 +119,14 @@ for (const theme of ['dark', 'light'] as const) {
     await expect(swatch).toHaveCSS('outline-color', ACCENT[theme]);
 
     // A selected colour and a focused colour are two different signals: the
-    // chosen swatch wears the white selection ring while the focused swatch
-    // wears the accent outline.
+    // chosen swatch wears the theme-aware selection ring while the focused
+    // swatch wears the accent outline.
     const palette = dialog.getByRole('button', { name: /^Colour #/ }).first();
     await palette.click();
     await tabTo(page, custom);
     await expect(swatch).toHaveCSS('outline-color', ACCENT[theme]);
     const selectionRing = await palette.evaluate(element => getComputedStyle(element).boxShadow);
-    expect(selectionRing).toContain('255, 255, 255');
+    expect(selectionRing).toContain(SELECTION_RING[theme]);
   });
 
   test(`the scratch pad shows a focused border in the ${theme} theme`, async ({ page }) => {

@@ -571,7 +571,7 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
               type="button"
               onClick={handleConfirmDiscard}
               data-testid="editor-discard-confirm"
-              className="px-3 py-1 text-sm rounded-md bg-status-error text-white hover:bg-status-error/90"
+              className="px-3 py-1 text-sm rounded-md text-on-destructive bg-destructive/80 hover:bg-destructive active:bg-destructive-strong disabled:bg-bg-card-hover disabled:text-text-muted"
             >
               Discard changes
             </button>
