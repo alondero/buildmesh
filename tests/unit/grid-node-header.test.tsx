@@ -293,6 +293,23 @@ describe('GridNodeHeader contextual information and actions', () => {
     expect(screen.queryByTestId('circuit-outcome-chip')).toBeNull();
   });
 
+  // Issue #2774 — the chip's HEIGHT was already 24px (`h-6` is one of the
+  // fixed pixel steps in this spacing scale), but its WIDTH was only ~21.75px:
+  // a 12px glyph plus `px-1.5`, which falls back to the rem-based 4.875px a
+  // side because `--spacing-1.5` is not part of the fixed 1-6 / 8 scale. A
+  // 24px height therefore left the 24x24 minimum target unmet on its
+  // own, so the chip now carries an explicit minimum width too.
+  it('gives the attention chip a 24px minimum width as well as its 24px height (#2774)', () => {
+    const attentionOutcome = resolveCircuitOutcome(
+      [{ ...NODE, status: 'error' as const }],
+      { circuitOwnerships: {1: { node_id: 1, run_id: 2, circuit_id: 3, circuit_name: 'Review', state: 'failed', parent_node_id: null }}, semanticTurns: {} },
+    );
+    render(<GridNodeHeader nodeId={NODE.id} attentionOutcome={attentionOutcome} onBuildRun={() => {}} />);
+    const classes = screen.getByTestId('circuit-outcome-chip').className.split(/\s+/);
+    expect(classes).toContain('h-6');
+    expect(classes).toContain('min-w-[24px]');
+  });
+
   it('draws one glyph for the node and no orbit while it is unpiloted', () => {
     render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
     expect(screen.getAllByTestId('node-status-glyph')).toHaveLength(1);

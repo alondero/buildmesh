@@ -15,6 +15,19 @@ explicit 24px targets. Their glyphs remain compact. Available recovery actions
 and Close stay visible without hover. The existing event handlers, menu
 shortcuts, drag handle and terminal ownership are retained.
 
+The mesh title (which selects the mesh) and the Show/Hide agents toggle (which
+expands it) carry the same target in both dimensions, and the gap between them
+separates the two hit areas instead of leaving one pixel between them. The
+title bar's View selector trigger and the grid's removable Search, Provider and
+Status filter chips paint the surface hover token (`bg-bg-card-hover`) on hover
+and on press: a hover rule that only moves an inherited colour leaves the
+control looking the same, because the visible children set their own colours.
+The removal chips name the action they perform — "Remove provider filter" —
+while keeping the visible label that names the filter. The node header's
+attention chip keeps its 24px height and adds an explicit 24px minimum width,
+so its width no longer follows from the padding around its glyph.
+[DESIGN.md](../../../DESIGN.md) owns the target and hover rules.
+
 ## Theme inventory and action hierarchy
 
 The inventory used searches for white-alpha hover fills and extra opacity on
@@ -56,6 +69,15 @@ The `desktop polish` scenarios in `verify-smoke.spec.ts` exercise 900x600,
 actual targets, accessible names/tooltips, recovery opacity without hover,
 menu Escape focus return, panel fit, Tab order and dirty confirmation behavior.
 These automated Chromium scenarios use mock IPC; they do not verify spawning.
+
+The compact-control scenarios in
+`tests/integration/ui-shot-compact-controls.steps.mjs` measure the mesh title,
+the Show/Hide agents toggle, the node header's attention chip, the View
+selector trigger and the removable filter chips in Chromium with mock IPC,
+across 900x600 and 1440x900, 100% and 150% interface text, and both type
+densities. They assert the rendered target bounds, that the two adjacent
+sidebar hit areas do not overlap, and that hovering changes the computed
+background in the dark and the light theme.
 
 Native WebView2 screenshots use an isolated `com.alond.buildmesh.gh2003.dev`
 profile with real Tauri IPC and backend resources. Completed review fixtures
