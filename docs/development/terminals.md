@@ -188,6 +188,8 @@ The browser mobile screen (`src/mobile/screens/TerminalScreen.tsx`) and the Andr
 
 Terminal container resize is coalesced by the shared `TerminalResizeScheduler`, used by both agent and build/run registries. It waits for 200 ms without a size change before fitting, so pane dragging causes one PTY resize after the drag settles. A horizontal xterm resize reflows normal-buffer scrollback, and full-screen TUIs redraw for the final PTY size. Codex uses its fullscreen transcript mode rather than inline scrollback, avoiding a transcript clear and replay on width changes; history navigation belongs to Codex while it is running. Keep DOM measurement on the next animation frame and do not restore per-observation or per-frame `fit()` calls.
 
+A pane resize that is committed rather than dragged — the keyboard path on the agent grid's splitters (issue #2424) — reaches the same `persistAndFit` helper the drag reaches on mouseup, and it calls `terminalManager.fitAll()` when the resize commits. A resize must not dispose or remount a terminal to make it fit: `fitAll` re-measures the attached terminals and leaves the retained xterm instances in place.
+
 
 The native transport probe is `node scripts/bench-pty-output.mjs 9237`, after
 launching the dev profile with `scripts/run-dev.ps1 -Detach -CdpPort 9237`.

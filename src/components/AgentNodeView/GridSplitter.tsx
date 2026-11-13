@@ -9,27 +9,8 @@ import { getGridRows, equalSizes, minimumGridSize } from '../../hooks/useGridLay
 import { useResizable, SPLITTER_HANDLE_WIDTH } from '../../hooks/useResizable';
 import { useActiveCardScroll } from './useActiveCardScroll';
 import { useGridResizeFloor } from './useGridResizeFloor';
-
-const MIN_PANE_PX = 300;
-
-/**
- * Pull the i-th and (i+1)-th cells of `baseline` toward `+delta` and
- * `-delta` respectively, clamped to `minPct` on either side (when one
- * side hits the floor the other soaks up the slack so left+right stays
- * constant). Used by both the col-axis and row-axis `compute`s in
- * `GridSplitter`; collapses ~17 lines of duplicated math into one helper
- * so future bugfixes land in a single place.
- */
-function clampResizeAdjacentPair(baseline: number[], i: number, deltaPct: number, minPct: number): number[] {
-  let newLeft = baseline[i] + deltaPct;
-  let newRight = baseline[i + 1] - deltaPct;
-  if (newLeft < minPct) { newLeft = minPct; newRight = baseline[i] + baseline[i + 1] - minPct; }
-  if (newRight < minPct) { newRight = minPct; newLeft = baseline[i] + baseline[i + 1] - minPct; }
-  const next = [...baseline];
-  next[i] = newLeft;
-  next[i + 1] = newRight;
-  return next;
-}
+import { Separator } from '../shared/Separator';
+import { clampResizeAdjacentPair, minPaneSizePx } from './paneResize';
 
 interface GridSplitterProps {
   nodes: readonly AgentNode[];
@@ -90,14 +71,29 @@ export function GridSplitter({ nodes, activityMembersByRoot, draggable = true }:
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    const observer = new ResizeObserver(([entry]) => {
+    // jsdom ships no ResizeObserver, and an environment without the webview
+    // has none either. The grid's layout model only
+    // needs the container size to convert the pixel floor into a
+    // percentage, so the `containerSize` default below stands in when
+    // no observer is available — same pattern as `useResizeWidth`.
+    const Observer = (globalThis as unknown as { ResizeObserver?: typeof ResizeObserver }).ResizeObserver;
+    if (!Observer) {
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) setContainerSize({ width: rect.width, height: rect.height });
+      return;
+    }
+    const observer = new Observer(([entry]) => {
       const w = entry.contentRect.width;
       const h = entry.contentRect.height;
+      // A zero-sized box is a transient (hidden container), not a real
+      // measurement — keeping the last good size stops the keyboard
+      // range from collapsing.
+      if (w <= 0 || h <= 0) return;
       setContainerSize(prev => (prev.width === w && prev.height === h) ? prev : { width: w, height: h });
     });
     observer.observe(el);
     const rect = el.getBoundingClientRect();
-    setContainerSize({ width: rect.width, height: rect.height });
+    if (rect.width > 0 && rect.height > 0) setContainerSize({ width: rect.width, height: rect.height });
     return () => observer.disconnect();
   }, []);
 
@@ -114,19 +110,75 @@ export function GridSplitter({ nodes, activityMembersByRoot, draggable = true }:
   const dragContainerSizeRef = useRef<{ width: number; height: number } | null>(null);
 
   /**
-   * Persist the most recent widths/heights to the per-mesh layout store,
-   * then ask xterm to re-measure every terminal. Called on mouseup by both
-   * the col and row drag hooks via their shared onEnd helper.
+   * Persist the widths/heights to the per-mesh layout store, then ask xterm
+   * to re-measure the attached terminals. It is the `onEnd` of both the col
+   * and the row `useResizable` hook, so a dragged resize reaches it on
+   * mouseup.
+   *
+   * The optional arguments carry the NEXT values for the keyboard path
+   * (issue #2424): a key press commits its value through React state, so
+   * the refs still hold the PREVIOUS layout until the next render. The
+   * keyboard handler therefore hands over the values it just computed,
+   * and the store records those — a keyboard resize lands in the same
+   * per-mesh layout a dragged one writes.
    */
-  const persistAndFit = () => {
+  const persistAndFit = (
+    nextColWidths: number[][] = colWidthsRef.current,
+    nextRowHeights: number[] = rowHeightsRef.current,
+  ) => {
     const meshId = layoutMeshIdRef.current;
     if (meshId != null) {
       useGridLayoutStore.getState().setLayout(meshId, {
-        colWidths: colWidthsRef.current,
-        rowHeights: rowHeightsRef.current,
+        colWidths: nextColWidths,
+        rowHeights: nextRowHeights,
       });
     }
     terminalManager.fitAll();
+  };
+
+  /**
+   * Keyboard resize for a COLUMN separator (issue #2424).
+   *
+   * The separator controls the width of the pane in FRONT of it (the left
+   * pane of the pair), so ArrowRight grows it and ArrowLeft shrinks it —
+   * the same direction the handle moves when it is dragged. The value is
+   * expressed in pixels of the container so the announced range matches
+   * the pixel floor the drag enforces (`minPaneSizePx`).
+   */
+  const resizeColumnByKeyboard = (rowIdx: number, colIdx: number, nextPx: number) => {
+    const baseline = colWidthsRef.current[rowIdx];
+    if (!baseline) return;
+    const containerWidth = containerSize.width;
+    if (!containerWidth) return;
+    const columns = rowCounts[rowIdx];
+    const minPx = minPaneSizePx(columns);
+    const currentPx = (baseline[colIdx] / 100) * containerWidth;
+    const deltaPct = ((nextPx - currentPx) / containerWidth) * 100;
+    const minPct = (minPx / containerWidth) * 100;
+    const nextRow = clampResizeAdjacentPair(baseline, colIdx, deltaPct, minPct);
+    const nextColWidths = colWidthsRef.current.map((row, idx) => (idx === rowIdx ? nextRow : row));
+    setColWidths(nextColWidths);
+    persistAndFit(nextColWidths, rowHeightsRef.current);
+  };
+
+  /**
+   * Keyboard resize for a ROW separator (issue #2424). The separator
+   * controls the height of the row in FRONT of it (the top row of the
+   * pair), so ArrowDown grows it — the direction the handle moves when
+   * it is dragged.
+   */
+  const resizeRowByKeyboard = (rowIdx: number, nextPx: number) => {
+    const baseline = rowHeightsRef.current;
+    if (!baseline) return;
+    const containerHeight = containerSize.height;
+    if (!containerHeight) return;
+    const minPx = minPaneSizePx(rows);
+    const currentPx = (baseline[rowIdx] / 100) * containerHeight;
+    const deltaPct = ((nextPx - currentPx) / containerHeight) * 100;
+    const minPct = (minPx / containerHeight) * 100;
+    const nextRowHeights = clampResizeAdjacentPair(baseline, rowIdx, deltaPct, minPct);
+    setRowHeights(nextRowHeights);
+    persistAndFit(colWidthsRef.current, nextRowHeights);
   };
 
   // Two shared `useResizable` calls — one per axis. The col drag only edits
@@ -155,7 +207,7 @@ export function GridSplitter({ nodes, activityMembersByRoot, draggable = true }:
       const containerSize = dragContainerSizeRef.current?.width;
       if (!containerSize) return baseline;
       const columns = rowCounts[rowIdxRef.current];
-      const minPct = ((MIN_PANE_PX + (columns - 1) * SPLITTER_HANDLE_WIDTH / columns) / containerSize) * 100;
+      const minPct = (minPaneSizePx(columns) / containerSize) * 100;
       const deltaPct = (deltaPx / containerSize) * 100;
       return clampResizeAdjacentPair(baseline, idxRef.current, deltaPct, minPct);
     },
@@ -174,7 +226,7 @@ export function GridSplitter({ nodes, activityMembersByRoot, draggable = true }:
     compute: (baseline, deltaPx) => {
       const containerSize = dragContainerSizeRef.current?.height;
       if (!containerSize) return baseline;
-      const minPct = ((MIN_PANE_PX + (rows - 1) * SPLITTER_HANDLE_WIDTH / rows) / containerSize) * 100;
+      const minPct = (minPaneSizePx(rows) / containerSize) * 100;
       const deltaPct = (deltaPx / containerSize) * 100;
       return clampResizeAdjacentPair(baseline, idxRef.current, deltaPct, minPct);
     },
@@ -232,6 +284,13 @@ export function GridSplitter({ nodes, activityMembersByRoot, draggable = true }:
         const widths = colWidths[rowIdx] ?? equalSizes(rowCount);
         const totalHandleWidthPct = ((rowCount - 1) * SPLITTER_HANDLE_WIDTH / containerSize.width) * 100;
         const startIdx = rowCounts.slice(0, rowIdx).reduce((a, b) => a + b, 0);
+        // The pixel floor for ONE pane of this row, and the container
+        // width the percentages are measured against. The keyboard path
+        // (issue #2424) announces these two numbers as the separator's
+        // range, so the screen reader states the bounds the resize
+        // obeys.
+        const colMinPx = minPaneSizePx(rowCount);
+        const rowMinPx = minPaneSizePx(rows);
 
         return (
           <div key={`row-${rowIdx}`} className="flex flex-col shrink-0" style={{ height: rowHeight }}>
@@ -256,7 +315,20 @@ export function GridSplitter({ nodes, activityMembersByRoot, draggable = true }:
                     />
                   </div>
                     {colIdx < rowCount - 1 && (
-                      <div
+                      /* Column separator — issue #2424 made it operable by
+                         keyboard. The shared `Separator` primitive carries
+                         the role, orientation, name, range and the
+                         arrow-key key map; `resizeColumnByKeyboard`
+                         applies the same pixel floor the drag enforces and
+                         persists + refits the terminals exactly like the
+                         pointer path. */
+                      <Separator
+                        label={`Resize column ${colIdx + 1} of ${rowCount} in row ${rowIdx + 1}`}
+                        orientation="vertical"
+                        value={(widths[colIdx] ?? 0) / 100 * containerSize.width}
+                        min={colMinPx}
+                        max={Math.max(colMinPx, containerSize.width - colMinPx)}
+                        onResize={next => resizeColumnByKeyboard(rowIdx, colIdx, next)}
                         onMouseDown={startDrag('col', colIdx, rowIdx)}
                         className="cursor-col-resize hover:bg-accent-cyan/30 active:bg-accent-cyan/50 transition-colors shrink-0 self-stretch rounded-sm"
                         style={{ width: SPLITTER_HANDLE_WIDTH }}
@@ -267,7 +339,17 @@ export function GridSplitter({ nodes, activityMembersByRoot, draggable = true }:
               })}
             </div>
             {rowIdx < rows - 1 && (
-              <div
+              /* Row separator — the horizontal twin of the column
+                 separator above. ArrowDown grows the row above the
+                 handle, matching the direction the handle travels when
+                 it is dragged. */
+              <Separator
+                label={`Resize row ${rowIdx + 1} of ${rows}`}
+                orientation="horizontal"
+                value={(rowHeights[rowIdx] ?? 0) / 100 * containerSize.height}
+                min={rowMinPx}
+                max={Math.max(rowMinPx, containerSize.height - rowMinPx)}
+                onResize={next => resizeRowByKeyboard(rowIdx, next)}
                 onMouseDown={startDrag('row', rowIdx)}
                 className="cursor-row-resize hover:bg-accent-cyan/30 active:bg-accent-cyan/50 transition-colors shrink-0 rounded-sm mx-1"
                 style={{ height: SPLITTER_HANDLE_WIDTH }}

@@ -6,8 +6,9 @@
  * empty = no cap (null on the wire), negative input clamped to 0, and the
  * dirty-site wiring into the modal's discard-confirm.
  *
- * Also pins the sub-pane redesign's core invariant: inactive panes stay
- * MOUNTED (hidden) so child drafts survive tab switches.
+ * Also pins the sub-pane redesign's core invariant: an inactive pane stays
+ * MOUNTED (hidden) across a tab switch, so its component state — the committed
+ * value, the pane's own toggles — is still there when the user comes back.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
@@ -18,6 +19,10 @@ import { openSettingsPane } from '../utils/settings-panes';
 
 function mockBackend(poolSize: number | null = null) {
   const calls: Record<string, unknown[]> = {};
+  // The pool size is the one preference these tests write, so the mock keeps
+  // it: a real backend returns the value it just stored, and the post-write
+  // `get_app_preferences` reload has to observe that.
+  const stored = { poolSize };
   vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
     calls[cmd] = [...(calls[cmd] ?? []), args];
     switch (cmd) {
@@ -25,8 +30,11 @@ function mockBackend(poolSize: number | null = null) {
         return Promise.resolve({
           default_provider: null,
           minimax_api_key: null,
-          circuit_agent_pool_size: poolSize,
+          circuit_agent_pool_size: stored.poolSize,
         });
+      case 'set_app_circuit_agent_pool_size':
+        stored.poolSize = (args as { size: number | null }).size;
+        return Promise.resolve();
       case 'get_coordinator_status':
         return Promise.resolve({ enabled: false, has_token: false });
       case 'get_network_status':
@@ -140,8 +148,8 @@ describe('Settings — Circuit agent pool size', () => {
 describe('Settings — sub-pane navigation', () => {
   beforeEach(() => vi.mocked(invoke).mockReset());
 
-  it('switches panes via the nav rail, keeping inactive panes mounted so drafts survive', async () => {
-    mockBackend(null);
+  it('switches panes via the nav rail, hiding the inactive pane rather than unmounting it', async () => {
+    const calls = mockBackend(null);
     const user = userEvent.setup();
     render(<AppSettingsModal onClose={() => {}} />);
 
@@ -155,10 +163,18 @@ describe('Settings — sub-pane navigation', () => {
     await screen.findByRole('checkbox', { name: /expose to lan/i });
     expect(screen.queryByRole('spinbutton', { name: /Circuit agent pool size/i })).toBeNull();
 
-    // Back to Autopilot: the draft survived the round-trip because the pane
-    // was hidden, not unmounted (the modal's dirty tracking lives in
-    // component state — issue #730).
+    // Hiding the focused input takes it out of the focus order, so its blur
+    // lands and the blur-to-save contract commits the draft — the same blur a
+    // browser fires. (jsdom 30 left focus parked on the hidden element, which
+    // is why this test used to observe the UNCOMMITTED draft on the way back.)
+    await waitFor(() => expect(calls['set_app_circuit_agent_pool_size']).toBeTruthy());
+    expect(calls['set_app_circuit_agent_pool_size']![0]).toEqual({ size: 5 });
+
+    // Back to Autopilot: the pane was hidden, not unmounted, so this is the
+    // same input element, and its post-write reload shows the stored value.
     fireEvent.click(screen.getByRole('tab', { name: 'Autopilot' }));
-    expect(((await poolInput())).value).toBe('5');
+    const restored = await poolInput();
+    expect(restored).toBe(input);
+    await waitFor(() => expect(restored.value).toBe('5'));
   });
 });
