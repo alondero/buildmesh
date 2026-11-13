@@ -2570,7 +2570,7 @@ test('extracted Rust implementations and included worker tests select their cont
     ['agent/process/registry.rs', 'agent::process'],
     ['agent/provider/adapters/codex/install_probe.rs', 'agent::provider::adapters::codex'],
     ['services/agent_node/cleanup.rs', 'services::agent_node'],
-    ['services/github/pr_workflow.rs', 'commands::pr'],
+    ['services/github/pr_workflow.rs', 'services::github::pr_tests'],
     ['git/worktree/maintenance.rs', 'git::worktree'],
     ['db/circuit/evidence/transition.rs', 'db::circuit::evidence'],
     ['services/circuit_worker/tests/result_delivery.rs', 'services::circuit_worker::tests'],

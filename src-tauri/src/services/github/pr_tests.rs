@@ -1,19 +1,23 @@
-//! Tests for `commands::pr`.
+//! Tests for the GitHub issue / pull-request workflows.
 //!
-//! Split out of `src-tauri/src/commands/pr.rs` by issue #2451. The conventions this
+//! Moved here from `src-tauri/src/commands/pr_tests.rs` by issue #2236, so
+//! each test sits with the function it covers: the feeds in `feeds.rs`, the
+//! PR workflows in `pr_workflow.rs`, the repository identity in
+//! `repository.rs`, and the wire shapes in `wire.rs`. The conventions this
 //! layout depends on — why the module keeps the name `tests`, and why every
-//! `#[path]` module needs an entry in `RUST_PATH_INCLUDES` — are
-//! documented once in `docs/development/rust-conventions.md`, under *Rust unit
-//! tests live in sibling `*_tests.rs` files*.
+//! `#[path]` module needs an entry in `RUST_PATH_INCLUDES` — are documented
+//! once in `docs/development/rust-conventions.md`, under *Rust unit tests live
+//! in sibling `*_tests.rs` files*.
 //!
-//! Run with: cd src-tauri && cargo test commands::pr::tests
+//! Run with: cd src-tauri && cargo test services::github::pr_tests
 
-use super::*;
+use super::repository::*;
+use super::wire::*;
+use super::{feeds::*, pr_workflow::*};
 use crate::env::test_helpers::init_repo_with_commit as init_repo_for_test;
 use crate::git::worktree::create_git_worktree;
 use crate::models::AgentNode;
 use crate::services::github::tests::{fake_server, Scripted};
-use crate::services::github::{feeds::*, pr_workflow::*, repository::*};
 use crate::services::github::{GitHubClient, GitHubError};
 use crate::{db, env};
 use git2::Repository;
@@ -1056,11 +1060,18 @@ fn integration_find_open_pr_for_branch_live() {
 // The optimistic-with-422-recovery pattern that closes the duplicate-PR
 // gap #762 opened (180s write timeout → slow POST succeeds server-side,
 // client times out, retry duplicates the PR). Tests drive the PRODUCTION
-// boundary (`create_pr_for_mesh_blocking_with_client` and
-// `create_pr_blocking_with_client`) with a real temp repo + a `for_test`
-// `GitHubClient` pointed at a fake server, so wire-level expectations
-// (request method, URL encoding, status code, body shape) are pinned
-// against the same code path the desktop/mobile frontends exercise.
+// boundary (`create_pr_for_node_source_blocking_with_client`) with a real
+// temp repo + a `for_test` `GitHubClient` pointed at a fake server, so
+// wire-level expectations (request method, URL encoding, status code, body
+// shape) are pinned against the same code path the desktop/mobile frontends
+// exercise.
+//
+// This is the ONLY create-PR path. The mesh-scoped and session-scoped
+// commands that derived their source from the project root were removed
+// with no remaining callers (issue #2236); the behaviours they pinned —
+// duplicate-create recovery, the single-POST happy path, the same-branch
+// refusal and the recovery GET's URL encoding — are pinned here against
+// the surviving node-scoped path.
 //
 // Covered cases:
 //   - duplicate-create recovery       → POST 422 → GET existing → return URL
@@ -1073,8 +1084,6 @@ fn integration_find_open_pr_for_branch_live() {
 //   - fork head (Finding 1)           → qualified `fork_user:branch` is
 //                                       passed through verbatim, not
 //                                       double-prefixed
-//   - session_id path (Finding 6)     → `create_pr_blocking_with_client`
-//                                       drives the worktree/DB branch
 
 /// PR JSON for the existing-PR recovery fixture. Only `number` and
 /// `html_url` are required; `PullRequest` carries `#[serde(default)]`
@@ -1101,98 +1110,36 @@ fn created_pr_json(number: i64, html_url: &str) -> serde_json::Value {
     })
 }
 
-/// Init a temp repo with one commit, `origin` set to the given GitHub
-/// URL, and HEAD checked out to `branch`. Returns `(guard, path)` —
-/// caller MUST hold `guard` for the temp dir's lifetime.
-fn init_repo_on_branch(url: &str, branch: &str) -> (TempGitRepo, String) {
-    let (guard, path) = init_repo_with_origin(url);
-    let repo = git2::Repository::open(&path).expect("open fresh repo");
-    let head_commit = repo
-        .head()
-        .expect("head exists after init_repo_with_origin")
-        .peel_to_commit()
-        .expect("head is a commit");
-    repo.branch(branch, &head_commit, true)
-        .expect("create branch");
-    let refname = format!("refs/heads/{branch}");
-    repo.set_head(&refname).expect("set HEAD to branch");
-    repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
-        .expect("checkout branch");
-    (guard, path)
-}
-
-/// Pin the issue's exact failure mode: an open PR already exists, the
-/// user retries, and the production boundary must return the existing
-/// URL via the 422-recovery path. End-to-end (real temp repo →
-/// `repo_info` → `info.owner_repo()` → `client.create_pull_request_idempotent`).
-/// Two requests fire (POST 422 + GET recovery); the load-bearing
-/// assertion is `count == 2` — a regression that took the optimistic
-/// path but never recovered would hit `count == 1` and short-circuit
-/// to a confusing error.
-#[test]
-fn create_pr_for_mesh_recovers_from_duplicate_create_422() {
-    use std::sync::atomic::Ordering;
-
-    let (_guard, mesh_path) =
-        init_repo_on_branch("https://github.com/test-owner/test-repo.git", "feat/771");
-    let existing = existing_pr_json(771, "https://github.com/test-owner/test-repo/pull/771");
-    // Optimistic path: POST first, GitHub answers 422 ("already exists"),
-    // we recover by GET'ing the existing PR.
-    let (base, count, handle) = fake_server(vec![
-            Scripted::CreatePrConflict(
-                r#"{"message":"Validation Failed","errors":[{"message":"A pull request already exists for test-owner:feat/771."}]}"#.to_string(),
-            ),
-            // `expected_head` is the percent-encoded form the client must
-            // produce: `test-owner:feat/771` → `test-owner%3Afeat%2F771`.
-            Scripted::ListPulls {
-                body: existing,
-                expected_head: "test-owner%3Afeat%2F771".to_string(),
-            },
-        ]);
-    let client = GitHubClient::for_test(&base, "fake-token").expect("client");
-
-    let url = create_pr_for_mesh_blocking_with_client(
-        &client,
-        &mesh_path,
-        "new title",
-        "new body",
-        "main",
-    )
-    .expect("must return the existing PR's URL on 422 recovery");
-
-    assert_eq!(
-        url, "https://github.com/test-owner/test-repo/pull/771",
-        "must return the EXISTING PR's html_url, not the freshly-attempted one"
-    );
-    handle.join().expect("server");
-    assert_eq!(
-        count.load(Ordering::SeqCst),
-        2,
-        "POST (422) + GET (recovery) — count == 1 means the recovery GET was skipped"
-    );
-}
-
 /// Happy path: no duplicate → POST returns 201 → return new URL. ONE
 /// round trip total (no recovery GET). A regression that always
 /// pre-checks would inflate this to 2 requests, paying latency for
 /// nothing on the 99% path.
 #[test]
-fn create_pr_for_mesh_happy_path_no_duplicate() {
+fn create_pr_for_node_source_happy_path_posts_once() {
     use std::sync::atomic::Ordering;
 
-    let (_guard, mesh_path) =
-        init_repo_on_branch("https://github.com/test-owner/test-repo.git", "feat/771");
+    let _db = ensure_pr_blocking_db();
+    let (_tmp, mesh_id, node_id) = make_mesh_root_and_node(
+        "https://github.com/test-owner/test-repo.git",
+        "main",
+        "agent/fix-x",
+        "origin/main",
+    );
     let created = created_pr_json(772, "https://github.com/test-owner/test-repo/pull/772");
     let (base, count, handle) = fake_server(vec![Scripted::CreatePullRequest(created)]);
     let client = GitHubClient::for_test(&base, "fake-token").expect("client");
 
-    let url = create_pr_for_mesh_blocking_with_client(&client, &mesh_path, "title", "body", "main")
-        .expect("creates new PR");
+    let result = create_pr_for_node_source_blocking_with_client(
+        &client, mesh_id, node_id, "title", "body", None, None,
+    )
+    .expect("creates new PR");
 
     assert_eq!(
-        url, "https://github.com/test-owner/test-repo/pull/772",
+        result.url, "https://github.com/test-owner/test-repo/pull/772",
         "must return the CREATED PR's html_url"
     );
+    assert_eq!(result.head_branch, "agent/fix-x");
+    assert_eq!(result.base_branch, "main");
     handle.join().expect("server");
     assert_eq!(
         count.load(Ordering::SeqCst),
@@ -1207,22 +1154,29 @@ fn create_pr_for_mesh_happy_path_no_duplicate() {
 /// successful create, and a 422 for a missing-branch would silently
 /// mask as a successful create.
 #[test]
-fn create_pr_for_mesh_propagates_non_422_errors() {
+fn create_pr_for_node_source_propagates_non_422_errors() {
     use std::sync::atomic::Ordering;
 
-    let (_guard, mesh_path) =
-        init_repo_on_branch("https://github.com/test-owner/test-repo.git", "feat/771");
+    let _db = ensure_pr_blocking_db();
+    let (_tmp, mesh_id, node_id) = make_mesh_root_and_node(
+        "https://github.com/test-owner/test-repo.git",
+        "main",
+        "agent/fix-x",
+        "origin/main",
+    );
     let (base, count, handle) = fake_server(vec![Scripted::CreatePrError(
         403,
         r#"{"message":"Must have admin rights"}"#.to_string(),
     )]);
     let client = GitHubClient::for_test(&base, "fake-token").expect("client");
 
-    let err = create_pr_for_mesh_blocking_with_client(&client, &mesh_path, "title", "body", "main")
-        .expect_err("403 must propagate, not silently recover");
+    let err = create_pr_for_node_source_blocking_with_client(
+        &client, mesh_id, node_id, "title", "body", None, None,
+    )
+    .expect_err("403 must propagate, not silently recover");
 
     assert!(
-        err.contains("403") || err.contains("admin"),
+        err.to_string().contains("403") || err.to_string().contains("admin"),
         "error must surface the real GitHub diagnostic, got: {err}"
     );
     handle.join().expect("server");
@@ -1230,40 +1184,6 @@ fn create_pr_for_mesh_propagates_non_422_errors() {
         count.load(Ordering::SeqCst),
         1,
         "exactly one POST — non-422 errors must not trigger a recovery GET"
-    );
-}
-
-/// `same_branch` guard: production refuses to POST when the agent's
-/// current branch equals the base branch (would be a "main → main"
-/// PR). The optimistic helper doesn't need to fire — the guard fires
-/// first. Without this test, a regression that dropped the
-/// branch==base_branch check would only surface when a user
-/// accidentally ran Create PR with no feature branch checked out.
-#[test]
-fn create_pr_for_mesh_refuses_same_branch_as_base() {
-    // init_repo_with_origin lands HEAD on the default branch; pass
-    // that as the base_branch and watch the guard reject.
-    let (_guard, mesh_path) = init_repo_with_origin("https://github.com/test-owner/test-repo.git");
-    let (base, _count, _handle) = fake_server(vec![]);
-    let client = GitHubClient::for_test(&base, "fake-token").expect("client");
-
-    // Detect the default branch name — git2's `Repository::head_branch_name`
-    // isn't always set; fall back to inspecting the ref tree.
-    let repo = git2::Repository::open(&mesh_path).expect("open");
-    let head_name = repo
-        .head()
-        .ok()
-        .and_then(|h| h.shorthand().ok().map(str::to_string))
-        .unwrap_or_else(|| "main".to_string());
-
-    let err = create_pr_for_mesh_blocking_with_client(
-        &client, &mesh_path, "title", "body", &head_name, // base == head → guard rejects
-    )
-    .expect_err("must refuse same-branch create");
-
-    assert!(
-        err.contains("nothing to compare"),
-        "error must name the same-branch violation, got: {err}"
     );
 }
 
@@ -1277,21 +1197,24 @@ fn create_pr_for_mesh_refuses_same_branch_as_base() {
 /// assertion. The branch name uses both `:` (owner separator) and
 /// `/` (nested ref) to exercise the two most common special chars.
 #[test]
-fn create_pr_for_mesh_url_encodes_recovery_head_param() {
-    let (_guard, mesh_path) = init_repo_on_branch(
+fn create_pr_for_node_source_url_encodes_recovery_head_param() {
+    let _db = ensure_pr_blocking_db();
+    let (_tmp, mesh_id, node_id) = make_mesh_root_and_node(
         "https://github.com/test-owner/test-repo.git",
-        "feat/with/slashes",
+        "main",
+        "agent/with/slashes",
+        "origin/main",
     );
     let existing = existing_pr_json(773, "https://github.com/test-owner/test-repo/pull/773");
     // Both `:` (after owner) and `/` (in branch) must percent-encode:
-    // `test-owner:feat/with/slashes` → `test-owner%3Afeat%2Fwith%2Fslashes`.
+    // `test-owner:agent/with/slashes` → `test-owner%3Aagent%2Fwith%2Fslashes`.
     let (base, _count, handle) = fake_server(vec![
             Scripted::CreatePrConflict(
-                r#"{"message":"Validation Failed","errors":[{"message":"A pull request already exists for test-owner:feat/with/slashes."}]}"#.to_string(),
+                r#"{"message":"Validation Failed","errors":[{"message":"A pull request already exists for test-owner:agent/with/slashes."}]}"#.to_string(),
             ),
             Scripted::ListPulls {
                 body: existing,
-                expected_head: "test-owner%3Afeat%2Fwith%2Fslashes".to_string(),
+                expected_head: "test-owner%3Aagent%2Fwith%2Fslashes".to_string(),
             },
         ]);
     let client = GitHubClient::for_test(&base, "fake-token").expect("client");
@@ -1300,140 +1223,17 @@ fn create_pr_for_mesh_url_encodes_recovery_head_param() {
     // request handler — if the client didn't produce the exact encoded
     // head, `handle.join()` would never return (or would panic). So
     // the success of this test IS the URL-encoding pin.
-    let _url =
-        create_pr_for_mesh_blocking_with_client(&client, &mesh_path, "title", "body", "main")
-            .expect("recovery GET must use percent-encoded head");
+    let _result = create_pr_for_node_source_blocking_with_client(
+        &client, mesh_id, node_id, "title", "body", None, None,
+    )
+    .expect("recovery GET must use percent-encoded head");
     handle.join().expect("server");
 }
-
-// ----- session_id path (Finding 6) ----------------------------------
-//
-// `create_pr_blocking_with_client` is the documented test seam for the
-// production `create_pr` command. The PR only exercised the
-// `create_pr_for_mesh_blocking_with_client` boundary; this drives the
-// full DB → worktree → GitHub path so a regression in the session
-// translation is caught here rather than at e2e time.
 
 /// Install this test's private database and hand back the guard the test
 /// body holds for its remaining statements.
 fn ensure_pr_blocking_db() -> crate::db::test_support::IsolatedDbGuard {
     crate::db::test_support::isolated()
-}
-
-/// Insert a mesh row pointing at `path` and an agent_node row in
-/// `use_worktree` mode, then create the worktree the production path
-/// expects (`<root>/.claude/worktrees/<name>`). Returns
-/// `(tmp, session_id, branch)` — caller MUST hold `tmp` for the
-/// node's lifetime.
-fn make_session_node(mesh_name: &str, origin_url: &str, branch: &str) -> (TempGitRepo, i64) {
-    let tmp = TempGitRepo::new();
-    let root = tmp.path().to_path_buf();
-    // Init a real git repo + commit + ensure HEAD sits on a named
-    // `main` branch. `init_repo_for_test` commits via `Some("HEAD")`
-    // on an unborn HEAD; the resulting ref shape depends on git2
-    // version (sometimes symbolic to `refs/heads/<default>`, sometimes
-    // a direct SHA ref). Belt-and-suspenders: read whatever `head()`
-    // returns, then explicitly create+checkout a `main` branch
-    // anchored at the commit so the worktree below has a real
-    // branch ref to fork from.
-    let repo = init_repo_for_test(&root, &[("README.md", "init\n")]);
-    let head = repo.head().expect("head exists after commit");
-    let head_commit = head.peel_to_commit().expect("head is a commit");
-    // If HEAD is already on `main`, leave it. Otherwise create
-    // `main` and re-anchor HEAD to it.
-    let head_is_main = head.shorthand().map(|s| s == "main").unwrap_or(false);
-    if !head_is_main {
-        repo.set_head_detached(head_commit.id()).expect("detach");
-        repo.branch("main", &head_commit, true)
-            .expect("create main");
-    }
-    repo.set_head("refs/heads/main").expect("set HEAD to main");
-    repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
-        .expect("checkout main");
-    // Set the origin remote — required so `repo_info` can resolve
-    // owner/repo for the GitHub call. Set on the main repo; the
-    // worktree shares the same `.git` and inherits the remote.
-    repo.remote_set_url("origin", origin_url)
-        .expect("set origin");
-    // Create the branched worktree at the production path.
-    let wt_dir = root.join(".claude").join("worktrees").join("agent-1");
-    create_git_worktree(
-        root.to_str().unwrap(),
-        wt_dir.to_str().unwrap(),
-        branch,
-        "branched", // worktree_mode
-        "main",
-    )
-    .expect("worktree creation must succeed");
-    // Insert a mesh + node row so `db::get_agent_node_by_id` resolves.
-    let mesh = crate::db::create_mesh(mesh_name, root.to_str().unwrap()).expect("create_mesh");
-    let node = crate::db::create_agent_node(crate::db::NewAgentNode {
-        mesh_id: mesh.id,
-        name: "agent-1",
-        path: root.to_str().unwrap(),
-        branch: "main", // base_branch
-        env: crate::models::EnvType::Windows,
-        provider: "claude",
-        worktree_name: Some("agent-1"),
-        source_issue: None,
-        source_pr: None,
-        source_pr_pinned_sha: None,
-        use_worktree: true,
-        head_repo_owner: None,
-        head_repo_clone_url: None,
-        worktree_path: None,
-        spawn_configuration: None,
-    })
-    .expect("create_agent_node");
-    (tmp, node.id)
-}
-
-/// Pin the full session_id path end-to-end. A duplicate-create 422
-/// from GitHub must be recovered via `find_open_pr_for_branch` and
-/// return the existing PR's URL. The test proves:
-///   - the DB row is found
-///   - the worktree branch is read (`feat/771` is the agent's branch,
-///     NOT `main`)
-///   - the recovery GET uses the right `head=` parameter
-///
-/// Without a test here, a regression that always used `node.branch`
-/// (the base, "main") would only surface in the production app.
-#[test]
-fn create_pr_blocking_recovers_from_duplicate_create_422() {
-    use std::sync::atomic::Ordering;
-
-    let _db = ensure_pr_blocking_db();
-
-    let (_tmp, session_id) = make_session_node(
-        "pr-blocking-mesh",
-        "https://github.com/test-owner/test-repo.git",
-        "feat/771",
-    );
-    let existing = existing_pr_json(771, "https://github.com/test-owner/test-repo/pull/771");
-    let (base, count, handle) = fake_server(vec![
-            Scripted::CreatePrConflict(
-                r#"{"message":"Validation Failed","errors":[{"message":"A pull request already exists for test-owner:feat/771."}]}"#.to_string(),
-            ),
-            Scripted::ListPulls {
-                body: existing,
-                expected_head: "test-owner%3Afeat%2F771".to_string(),
-            },
-        ]);
-    let client = GitHubClient::for_test(&base, "fake-token").expect("client");
-
-    let url = create_pr_blocking_with_client(&client, session_id, "new title", "new body")
-        .expect("must return the existing PR's URL on 422 recovery");
-
-    assert_eq!(
-        url, "https://github.com/test-owner/test-repo/pull/771",
-        "must return the EXISTING PR's html_url, not the freshly-attempted one"
-    );
-    handle.join().expect("server");
-    assert_eq!(
-        count.load(Ordering::SeqCst),
-        2,
-        "POST (422) + GET (recovery) — count == 1 means the recovery GET was skipped"
-    );
 }
 
 // ----- structured 422 detection (Finding 2) -------------------------
@@ -1444,32 +1244,39 @@ fn create_pr_blocking_recovers_from_duplicate_create_422() {
 /// falsely fire here; the structured `errors[].message` parse must
 /// distinguish real duplicate-create errors from validation echoes.
 #[test]
-fn create_pr_for_mesh_does_not_recover_on_unrelated_422() {
+fn create_pr_for_node_source_does_not_recover_on_unrelated_422() {
     use std::sync::atomic::Ordering;
 
-    let (_guard, mesh_path) =
-        init_repo_on_branch("https://github.com/test-owner/test-repo.git", "feat/echo");
+    let _db = ensure_pr_blocking_db();
+    let (_tmp, mesh_id, node_id) = make_mesh_root_and_node(
+        "https://github.com/test-owner/test-repo.git",
+        "main",
+        "agent/echo",
+        "origin/main",
+    );
     // 422 with a body that contains "already exists" only as a
     // echoed input field — GitHub's "Validation Failed" envelope
-    // names a different field ("No commits between main and feat/echo")
+    // names a different field ("No commits between main and agent/echo")
     // and has no "already exists" in `errors[].message`.
     let (base, count, handle) = fake_server(vec![Scripted::CreatePrError(
             422,
-            r#"{"message":"Validation Failed","errors":[{"message":"No commits between main and feat/echo."}]}"#.to_string(),
+            r#"{"message":"Validation Failed","errors":[{"message":"No commits between main and agent/echo."}]}"#.to_string(),
         )]);
     let client = GitHubClient::for_test(&base, "fake-token").expect("client");
 
-    let err = create_pr_for_mesh_blocking_with_client(
+    let err = create_pr_for_node_source_blocking_with_client(
         &client,
-        &mesh_path,
+        mesh_id,
+        node_id,
         "title with 'already exists' in it",
         "body",
-        "main",
+        None,
+        None,
     )
     .expect_err("422 without duplicate-create message must propagate");
 
     assert!(
-        err.contains("422") || err.contains("No commits"),
+        err.to_string().contains("422") || err.to_string().contains("No commits"),
         "error must surface the real GitHub diagnostic, got: {err}"
     );
     handle.join().expect("server");
@@ -1774,6 +1581,13 @@ fn local_base_branch_strips_a_configured_remote_but_not_a_real_slash_branch() {
 /// branch. The scripted fake asserts the exact percent-encoded head in
 /// the request line, so a regression to mesh-root resolution fails here
 /// instead of quietly publishing the root's branch.
+///
+/// It also pins the #771 duplicate-create recovery: GitHub answers 422
+/// ("already exists"), the client GETs the existing PR, and the answer
+/// is that PR's URL rather than the freshly-attempted one. `count == 2`
+/// is the load-bearing assertion — a regression that took the optimistic
+/// path but never recovered would hit `count == 1` and short-circuit to a
+/// confusing error.
 #[test]
 fn create_pr_for_node_source_asks_github_about_the_node_branch() {
     use std::sync::atomic::Ordering;

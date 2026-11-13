@@ -377,7 +377,8 @@ fn repo_client_for(circuit: &AutopilotCircuit) -> Option<(String, String, GitHub
             return None;
         }
     };
-    let (owner, repo) = match crate::commands::pr::resolve_github_owner_repo(&mesh) {
+    let (owner, repo) = match crate::services::github::repository::resolve_github_owner_repo(&mesh)
+    {
         Ok(pair) => pair,
         Err(e) => {
             tracing::warn!(
