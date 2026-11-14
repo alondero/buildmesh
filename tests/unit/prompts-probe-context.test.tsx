@@ -41,7 +41,7 @@ describe('Prompts Probe context', () => {
     render(<ProbePanel />);
     await screen.findByTestId('prompt-library');
     expect(screen.queryByTestId('probe-context-empty')).toBeNull();
-    expect(screen.getByLabelText('Spawn target Mesh')).toBeTruthy();
+    expect(screen.getByRole('combobox', { name: 'Spawn in Mesh' })).toBeTruthy();
     await waitFor(() => expect((screen.getByRole('button', { name: 'New prompt' }) as HTMLButtonElement).disabled).toBe(false));
     expect(getDefaultProvider).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'New prompt' }));

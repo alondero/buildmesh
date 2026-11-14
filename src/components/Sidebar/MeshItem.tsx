@@ -6,6 +6,8 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import type { Mesh } from '../../stores/meshStore';
 import { useAgentNodeStore, type AgentNode } from '../../stores/agentNodeStore';
 import { getMeshColor } from '../../lib/meshColors';
+import { enterMesh } from '../../lib/navigation';
+import { PromptsIcon } from '../Probe/probeIcons';
 import type { MeshHealth } from '../../lib/tauri';
 import { runMeshSync, useMeshSyncCompletion } from '../../lib/meshSyncFeedback';
 import { useToastStore } from '../../stores/toastStore';
@@ -409,11 +411,7 @@ function MeshItemView({
   // user right-clicks the value is in the cache; non-GitHub meshes get
   // `url === null` and the menu item is simply not rendered.
   const { url: githubUrl } = useMeshGitHubUrl(mesh.id, mesh.path);
-  // Render-time item count: 5 always-present items + the conditional
-  // 6th when the mesh has a GitHub origin. The hook uses this as its
-  // `itemCount` so a non-GitHub mesh's menu correctly wraps at 5 and a
-  // GitHub mesh's wraps at 6.
-  const itemCount = 5 + (githubUrl ? 1 : 0);
+  const itemCount = 6 + (githubUrl ? 1 : 0);
 
   // Issue #735 — close the menu and return focus to the row. Used by
   // Escape and any menuitem click so the user's focus stays predictable
@@ -807,9 +805,18 @@ function MeshItemView({
             </svg>
             GitHub Issues
           </button>
+          <button
+            role="menuitem"
+            tabIndex={activeIndex === 5 ? 0 : -1}
+            onClick={() => { closeContextMenu(); enterMesh(mesh.id, { probeTab: 'prompts' }); }}
+            className="w-full text-left px-3 py-1.5 text-label text-text-secondary hover:bg-bg-card-hover flex items-center gap-2"
+          >
+            <PromptsIcon className="h-3.5 w-3.5" />
+            Prompts
+          </button>
           {/* "View on GitHub" — only rendered when the mesh has a
               github.com origin (conditional render so non-GitHub meshes
-              keep their 5-item menu and the keyboard-nav count in
+              keep their 6-item menu and the keyboard-nav count in
               `itemCount` stays accurate). The arrow-out-of-a-box icon
               matches the `↗` glyph used in the rest of the codebase
               (SafeLink, GridNodeHeader's open-PR chip). The click goes
@@ -819,7 +826,7 @@ function MeshItemView({
           {githubUrl && (
             <button
               role="menuitem"
-              tabIndex={activeIndex === 5 ? 0 : -1}
+              tabIndex={activeIndex === 6 ? 0 : -1}
               onClick={() => {
                 closeContextMenu();
                 openUrl(githubUrl).catch(console.error);

@@ -621,6 +621,9 @@ specificity and import order; custom properties don't.
   The violet labels that live outside the node header — the Agent History
   worktree name and the Circuits join-category label — are measured on their
   own surfaces, the card's accent stripe included (issue #2745).
+  The same suite measures the Probe header's Mesh wash over the app backing
+  surface and its subject hover fill, reading the text tokens and wash alpha
+  from the component source (issue #2791).
   The mobile mirror is
   checked by `tests/unit/mobile-tokens-contrast.test.ts` for AA on mobile
   surfaces; equality with desktop token values is a design convention.

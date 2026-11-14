@@ -23,6 +23,8 @@ import { reportMeshSync, useMeshSyncCompletion } from '../../src/lib/meshSyncFee
 import { useToastStore } from '../../src/stores/toastStore';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import type { Mesh } from '../../src/stores/meshStore';
+import { useMeshStore } from '../../src/stores/meshStore';
+import { useUIStore } from '../../src/stores/uiStore';
 import type { SpawnOption } from '../../src/lib/groups';
 import type { NodeActivityCluster } from '../../src/lib/nodeActivities';
 
@@ -1237,15 +1239,15 @@ describe('MeshItem', () => {
       openContextMenu();
       const menu = document.querySelector('[role="menu"]')!;
       expect(menu).toBeTruthy();
-      // Five menuitems, in render order: Properties, File Explorer,
-      // Force sync from upstream, Archive, GitHub Issues.
+      // Always-present destinations and actions in render order.
       const items = document.querySelectorAll('[role="menuitem"]');
-      expect(items).toHaveLength(5);
+      expect(items).toHaveLength(6);
       expect(items[0].textContent).toMatch(/Properties/);
       expect(items[1].textContent).toMatch(/File Explorer/);
       expect(items[2].textContent).toMatch(/Force sync from upstream/);
       expect(items[3].textContent).toMatch(/Archive/);
       expect(items[4].textContent).toMatch(/GitHub Issues/);
+      expect(items[5].textContent).toMatch(/Prompts/);
     });
 
     it('paints menu rows with the contrasting hover surface, not bg-bg-card', () => {
@@ -1263,10 +1265,22 @@ describe('MeshItem', () => {
       }
     });
 
-    it('adds a "View on GitHub" item as the 6th menuitem when the mesh has a GitHub origin', async () => {
+    it('opens Prompts for the context-menu Mesh', async () => {
+      useMeshStore.setState({ selectedMeshId: null });
+      useUIStore.setState({ probeOpen: false, viewMode: 'all' });
+      renderMeshItem();
+      openContextMenu();
+      await userEvent.click(screen.getByRole('menuitem', { name: 'Prompts' }));
+      expect(useMeshStore.getState().selectedMeshId).toBe(MESH.id);
+      expect(useUIStore.getState().probeTab).toBe('prompts');
+      expect(useUIStore.getState().probeOpen).toBe(true);
+      expect(useUIStore.getState().viewMode).toBe('mesh');
+    });
+
+    it('adds a "View on GitHub" item as the 7th menuitem when the mesh has a GitHub origin', async () => {
       // Wire `get_github_url_for_mesh` to resolve a URL so the
       // conditional render in MeshItem shows the new item. The test
-      // also re-asserts the base 5 items in render order so a future
+      // also re-asserts the base items in render order so a future
       // refactor that shuffles the menu doesn't break this contract.
       vi.mocked(invoke).mockImplementation((cmd: string) => {
         if (cmd === 'get_github_url_for_mesh') {
@@ -1281,13 +1295,14 @@ describe('MeshItem', () => {
       // to mount — `findByText` is the async query that retries.
       await screen.findByText('View on GitHub');
       const items = document.querySelectorAll('[role="menuitem"]');
-      expect(items).toHaveLength(6);
+      expect(items).toHaveLength(7);
       expect(items[0].textContent).toMatch(/Properties/);
       expect(items[1].textContent).toMatch(/File Explorer/);
       expect(items[2].textContent).toMatch(/Force sync from upstream/);
       expect(items[3].textContent).toMatch(/Archive/);
       expect(items[4].textContent).toMatch(/GitHub Issues/);
-      expect(items[5].textContent).toMatch(/View on GitHub/);
+      expect(items[5].textContent).toMatch(/Prompts/);
+      expect(items[6].textContent).toMatch(/View on GitHub/);
     });
 
     it('hides "View on GitHub" when the mesh has no GitHub origin (returns null)', async () => {
@@ -1312,7 +1327,7 @@ describe('MeshItem', () => {
         expect(screen.queryByText('View on GitHub')).toBeNull();
       });
       const items = document.querySelectorAll('[role="menuitem"]');
-      expect(items).toHaveLength(5);
+      expect(items).toHaveLength(6);
     });
 
     it('clicking "View on GitHub" opens the resolved URL via openUrl', async () => {

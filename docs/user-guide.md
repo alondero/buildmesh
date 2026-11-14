@@ -1025,14 +1025,15 @@ current text visible so you can retry editing before leaving the tool.
 Open **Prompts** from the tool picker or search for **Open Prompts**. The
 **Choose a prompt…** shortcut in a project's spawn menu opens the same Probe
 with that Mesh selected. The canvas spawn dialog offers the same shortcut.
+You can also choose **Prompts** from a Mesh's right-click menu.
 
 Search by title or prompt text. Expand a row to read and copy the complete
-prompt, or use its spawn button immediately. The button shows the selected
+prompt, or use its spawn button immediately. The button shows the target
 Mesh's default agent icon and starts that agent; hover or focus it to reveal
 the agent's name. The adjacent arrow offers the usual agent,
 Launch Configuration and login choices. Every launch creates a fresh agent using the
 Mesh's spawn settings: Worktree Nodes start from its configured base ref; Root
-Nodes use its folder. The Mesh heading and launch summary identify the target.
+Nodes use its folder. The **Spawn in** selector identifies the launch target.
 The focused agent's checkout, changes and conversation are never inherited.
 Plain Terminal cannot receive an initial prompt. If it is your default, choose
 an agent from the arrow menu.
@@ -1041,12 +1042,18 @@ Choose **New prompt**, enter a title and prompt, then **Save prompt**. The row's
 **Actions** menu offers **Duplicate** and, for your saved prompts, **Edit saved
 prompt** and **Delete prompt** with confirmation. Built-ins remain unchanged.
 Saved prompts are shared across Meshes in this Buildmesh profile and survive
-restarts. You can browse and create prompts without a selected Mesh; select
-one in the Probe to enable spawning.
+restarts. You can browse and create prompts without a selected Mesh. With one
+Mesh, it becomes the launch target automatically; with several, Prompts reuses
+your last-used prompt launch Mesh if it still exists. Change **Spawn in** to
+choose another destination without leaving **All Nodes** or **Pinned**. Selecting
+a Mesh in the sidebar or focusing another agent updates the launch target.
+If no target is set, clicking a prompt's spawn button asks you to choose a Mesh
+and then starts the agent there. Launching requires a Mesh and an installed or
+configured agent that accepts an initial prompt.
 
 For a single-use variation, expand the row and choose **Customise for this
-launch**. Its dialog names the launch target and never saves your changes to
-the library. Closing either editor asks before discarding edits. Save and
+launch**. Choose the target Mesh at the top of its dialog. It never saves your
+changes to the library. Closing either editor asks before discarding edits. Save and
 launch failures retain the draft for retry.
 
 Prompt text is sent as written, without placeholder substitution. The

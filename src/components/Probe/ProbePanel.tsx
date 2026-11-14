@@ -48,6 +48,9 @@
 
 import { Suspense, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import { useUIStore, type ProbeTab } from '../../stores/uiStore';
+import { useMeshStore } from '../../stores/meshStore';
+import { getMeshColor } from '../../lib/meshColors';
+import { enterMesh } from '../../lib/navigation';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import {
   PROBE_TAB_DEFINITIONS,
@@ -130,6 +133,9 @@ function ProbePanelContent() {
   const renderedWidth = Number.isFinite(measuredWidth) ? measuredWidth : bodyWidth;
   // Scope comes from the shared resolver so Host probes never inherit a Mesh name.
   const context = useProbeContext();
+  const mesh = useMeshStore(state => context.lens === 'host' || context.activeMeshId === null
+    ? null : state.meshesById.get(context.activeMeshId) ?? null);
+  const meshColor = mesh ? getMeshColor(mesh.id, mesh.color) : null;
 
   // Issue #1375 — the inspector is fully on-demand: closed means GONE. There
   // is no rail or always-visible button to reopen it; the palette, the
@@ -217,7 +223,9 @@ function ProbePanelContent() {
       >
         {/* Two lines: destination, then current scope. */}
         <div
+          data-testid="probe-context-header"
           className="flex items-center justify-between gap-2 pl-3 pr-2 py-2 border-b border-border-subtle min-h-[56px]"
+          style={meshColor ? { backgroundColor: `${meshColor.hex}14` } : undefined}
         >
           <div className="flex items-center gap-2.5 min-w-0 flex-1">
             <span
@@ -272,6 +280,8 @@ function ProbePanelContent() {
                   title={scopeTitle}
                   aria-label={scopeTitle}
                 >
+                  {meshColor && <span data-testid="probe-context-mesh-color" aria-hidden="true"
+                    className="w-[3px] self-stretch shrink-0 rounded-full" style={{ backgroundColor: meshColor.hex }} />}
                   <span
                     data-testid="probe-context-subject-name"
                     className="truncate min-w-0 text-label font-medium text-text-primary"
@@ -382,6 +392,7 @@ function ProbeTabBody({ tab }: { tab: ProbeTab }) {
 }
 
 function ProbeContextEmptyState({ context }: { context: ProbeContext }) {
+  const meshes = useMeshStore(state => state.meshes);
   // Issue #2073 — losing the subject through ordinary selection loss lands
   // here with the destination's recovery instruction. There is no pin to
   // unpin: the destination simply has no subject yet.
@@ -397,13 +408,20 @@ function ProbeContextEmptyState({ context }: { context: ProbeContext }) {
     );
   }
 
-  return (
+  return <div className="flex h-full min-w-0 flex-col items-center justify-center px-3">
     <EmptyState
       icon={<CompassIcon className="w-5 h-5" />}
       label="No project selected"
-      hint="Mesh lens: select a mesh in the sidebar, or focus an agent node, to inspect its files, changes, and settings here."
-      fill
+      hint={meshes.length > 0
+        ? 'Mesh lens: choose a Mesh below, or focus an agent node, to inspect its files, changes, and settings here.'
+        : 'Mesh lens: add a Mesh in the sidebar to inspect its files, changes, and settings here.'}
       testId="probe-context-empty"
     />
-  );
+    {context.lens === 'mesh' && meshes.length > 0 && <select aria-label="Inspect Mesh" value=""
+      onChange={event => { if (event.target.value) enterMesh(Number(event.target.value)); }}
+      className="min-h-[24px] w-full min-w-0 max-w-[240px] rounded-md border border-border-default bg-bg-input px-2 text-xs text-text-primary focus:outline-none focus:border-accent-cyan">
+      <option value="" disabled>Select a Mesh…</option>
+      {meshes.map(mesh => <option key={mesh.id} value={mesh.id}>{mesh.name}</option>)}
+    </select>}
+  </div>;
 }
