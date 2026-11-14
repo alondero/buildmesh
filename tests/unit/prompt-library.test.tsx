@@ -10,6 +10,7 @@ import * as preferences from '../../src/lib/tauri/preferences';
 import { getDefaultProvider } from '../../src/lib/tauri/provider';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import { useMeshStore } from '../../src/stores/meshStore';
+import { useUIStore } from '../../src/stores/uiStore';
 
 vi.mock('../../src/lib/tauri/preferences', () => ({ listSavedPrompts: vi.fn(), savePrompt: vi.fn(), deleteSavedPrompt: vi.fn() }));
 vi.mock('../../src/lib/tauri/provider', () => ({ getDefaultProvider: vi.fn() }));
@@ -51,6 +52,7 @@ function deferred<T>() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.removeItem('buildmesh.prompt-spawn-mesh');
   vi.mocked(preferences.listSavedPrompts).mockResolvedValue([SAVED]);
   vi.mocked(getDefaultProvider).mockResolvedValue('claude');
   create.mockImplementation(async () => {
@@ -65,6 +67,82 @@ beforeEach(() => {
 });
 
 describe('Prompts Probe library', () => {
+  it('defaults to the only Mesh with no active nodes or selection', async () => {
+    useMeshStore.setState({ meshes: [MESH], meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: null });
+    useAgentNodeStore.setState({ nodesById: {}, activeNodeId: null });
+    useUIStore.getState().setViewMode('all');
+    setup(null);
+    expect((screen.getByLabelText('Spawn target Mesh') as HTMLSelectElement).value).toBe('7');
+    fireEvent.click(await screen.findByRole('button', { name: `Spawn ${SAVED.name}` }));
+    await waitFor(() => expect(create).toHaveBeenCalledWith(7, MESH.name, MESH.path, 'main', 'claude', true, undefined, SAVED.body, undefined));
+    expect(useUIStore.getState().viewMode).toBe('all');
+    expect(useMeshStore.getState().selectedMeshId).toBeNull();
+  });
+
+  it.each(['all', 'pinned'] as const)('changes the inline target without changing %s canvas scope', async mode => {
+    useUIStore.getState().setViewMode(mode);
+    const selected = useMeshStore.getState().selectedMeshId;
+    setup();
+    fireEvent.change(screen.getByLabelText('Spawn target Mesh'), { target: { value: '8' } });
+    fireEvent.click(await screen.findByRole('button', { name: `Spawn ${SAVED.name}` }));
+    await waitFor(() => expect(create).toHaveBeenCalledWith(8, OTHER.name, OTHER.path, 'main', 'claude', true, undefined, SAVED.body, undefined));
+    expect(useUIStore.getState().viewMode).toBe(mode);
+    expect(useMeshStore.getState().selectedMeshId).toBe(selected);
+  });
+
+  it('asks for a Mesh on quick spawn and retains the chosen provider, configuration and login', async () => {
+    setup(null);
+    await screen.findByRole('button', { name: SAVED.name });
+    fireEvent.click(within(row()).getByRole('button', { name: 'Spawn with configuration' }));
+    expect(create).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('menuitem', { name: OTHER.name }));
+    await waitFor(() => expect(create).toHaveBeenCalledWith(8, OTHER.name, OTHER.path, 'main', 'codex', true, 'launch/fast', SAVED.body, 'work'));
+  });
+
+  it('lets an unresolved custom launch select a Mesh before spawning', async () => {
+    setup(null);
+    fireEvent.click(await screen.findByRole('button', { name: SAVED.name }));
+    fireEvent.click(within(row()).getByRole('button', { name: 'Customise for this launch' }));
+    const dialog = within(screen.getByRole('dialog'));
+    fireEvent.change(dialog.getByLabelText('Spawn target Mesh'), { target: { value: '8' } });
+    fireEvent.change(dialog.getByLabelText('Prompt for this launch'), { target: { value: 'One launch only' } });
+    fireEvent.click(dialog.getByRole('button', { name: 'Spawn with configuration' }));
+    await waitFor(() => expect(create).toHaveBeenCalledWith(8, OTHER.name, OTHER.path, 'main', 'codex', true, 'launch/fast', 'One launch only', 'work'));
+  });
+
+  it('restores a valid last-used spawn target and follows explicit Mesh changes', async () => {
+    localStorage.setItem('buildmesh.prompt-spawn-mesh', '8');
+    const view = setup(null);
+    expect((screen.getByLabelText('Spawn target Mesh') as HTMLSelectElement).value).toBe('8');
+    view.rerender(<PromptLibrary mesh={MESH} providers={PROVIDERS} />);
+    expect((screen.getByLabelText('Spawn target Mesh') as HTMLSelectElement).value).toBe('7');
+    fireEvent.change(screen.getByLabelText('Spawn target Mesh'), { target: { value: '8' } });
+    view.rerender(<PromptLibrary mesh={OTHER} providers={PROVIDERS} />);
+    view.rerender(<PromptLibrary mesh={MESH} providers={PROVIDERS} />);
+    expect((screen.getByLabelText('Spawn target Mesh') as HTMLSelectElement).value).toBe('7');
+  });
+
+  it('ignores a deleted last-used Mesh and disables launch when no Meshes exist', async () => {
+    localStorage.setItem('buildmesh.prompt-spawn-mesh', '999');
+    setup(null);
+    expect((screen.getByLabelText('Spawn target Mesh') as HTMLSelectElement).value).toBe('');
+    await screen.findByRole('button', { name: SAVED.name });
+    act(() => useMeshStore.setState({ meshes: [], meshesById: new Map() }));
+    expect((screen.getByRole('button', { name: `Spawn ${SAVED.name}` }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('follows a newly focused agent or sidebar selection even within the same inspection Mesh', async () => {
+    useMeshStore.setState({ selectedMeshId: null });
+    setup();
+    await screen.findByRole('button', { name: SAVED.name });
+    fireEvent.change(screen.getByLabelText('Spawn target Mesh'), { target: { value: '8' } });
+    act(() => useAgentNodeStore.setState({ activeNodeId: NODE.id, nodesById: { [NODE.id]: NODE } }));
+    expect((screen.getByLabelText('Spawn target Mesh') as HTMLSelectElement).value).toBe('7');
+    fireEvent.change(screen.getByLabelText('Spawn target Mesh'), { target: { value: '8' } });
+    act(() => useMeshStore.setState({ selectedMeshId: MESH.id }));
+    expect((screen.getByLabelText('Spawn target Mesh') as HTMLSelectElement).value).toBe('7');
+  });
+
   it('browses read-only, searches full text and expands a selectable prompt without launching', async () => {
     setup();
     await screen.findByRole('button', { name: SAVED.name });
@@ -87,7 +165,8 @@ describe('Prompts Probe library', () => {
     fireEvent.click(await screen.findByRole('button', { name: `Spawn ${SAVED.name}` }));
     await waitFor(() => expect(spawnAgent).toHaveBeenCalledWith(42, 'codex', { prefill: SAVED.body }));
     expect(create).toHaveBeenCalledWith(7, MESH.name, MESH.path, 'main', 'claude', true, undefined, SAVED.body, undefined);
-    expect(screen.getByTestId('prompt-launch-context').textContent).toBe('Fresh spawn · from origin/develop');
+    expect(screen.getByTestId('prompt-launch-context').textContent).toContain('from origin/develop');
+    expect((screen.getByLabelText('Spawn target Mesh') as HTMLSelectElement).value).toBe('7');
     expect(useAgentNodeStore.getState().activeNodeId).toBe(99);
     expect(useMeshStore.getState().selectedMeshId).toBe(7);
     expect(screen.getByText(/Started fresh-agent in Target Mesh/)).toBeTruthy();

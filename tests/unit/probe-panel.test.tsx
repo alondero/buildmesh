@@ -79,6 +79,47 @@ const DIFF: DiffResult = {
 beforeAll(preloadProbeTabs, 60_000);
 
 describe('ProbePanel', () => {
+  it.each(['files', 'review'] as const)('shows Mesh colour in the %s header without colouring subject text', tab => {
+    const mesh = { ...MESH, color: '#ff8800' };
+    useMeshStore.setState({ meshesById: new Map([[mesh.id, mesh]]) });
+    useUIStore.setState({ probeOpen: true, probeTab: tab });
+    render(<ProbePanel />);
+    const header = screen.getByTestId('probe-context-header');
+    expect(header.style.backgroundColor).toBe('rgba(255, 136, 0, 0.08)');
+    const indicator = screen.getByTestId('probe-context-mesh-color');
+    expect(indicator.getAttribute('aria-hidden')).toBe('true');
+    expect(indicator.style.backgroundColor).toBe('rgb(255, 136, 0)');
+    expect(screen.getByTestId('probe-context-subject-name').className).toContain('text-text-primary');
+    expect(screen.getByTestId('probe-context-subject-name').style.color).toBe('');
+  });
+
+  it('keeps Host headers neutral and updates the indicator with Mesh selection', () => {
+    useUIStore.setState({ probeOpen: true, probeTab: 'files' });
+    render(<ProbePanel />);
+    expect(screen.getByTestId('probe-context-mesh-color').style.backgroundColor).toBeTruthy();
+    act(() => useUIStore.getState().openProbeTab('usage'));
+    expect(screen.getByTestId('probe-context-header').style.backgroundColor).toBe('');
+    expect(screen.queryByTestId('probe-context-mesh-color')).toBeNull();
+    const other = { ...MESH, id: 2, color: '#123456' };
+    act(() => {
+      useMeshStore.setState({ meshesById: new Map([[other.id, other]]), selectedMeshId: other.id });
+      useUIStore.getState().openProbeTab('files');
+    });
+    expect(screen.getByTestId('probe-context-mesh-color').style.backgroundColor).toBe('rgb(18, 52, 86)');
+  });
+
+  it('offers inline Mesh selection only for an empty Mesh lens', () => {
+    useMeshStore.setState({ meshes: [MESH], selectedMeshId: null });
+    seedAgentNodes([], null);
+    useUIStore.setState({ probeOpen: true, probeTab: 'files', viewMode: 'all' });
+    render(<ProbePanel />);
+    expect(screen.queryByTestId('probe-context-mesh-color')).toBeNull();
+    fireEvent.change(screen.getByLabelText('Inspect Mesh'), { target: { value: String(MESH.id) } });
+    expect(useMeshStore.getState().selectedMeshId).toBe(MESH.id);
+    expect(useUIStore.getState().viewMode).toBe('mesh');
+    expect(screen.queryByTestId('probe-context-empty')).toBeNull();
+  });
+
   beforeEach(() => {
     // Default to a context with both a selected mesh and a focused node so the
     // body renders content rather than an empty state. Individual tests narrow
@@ -210,7 +251,7 @@ describe('ProbePanel', () => {
     useUIStore.setState({ probeOpen: true, probeTab: 'files' });
     render(<ProbePanel />);
 
-    const header = screen.getByRole('region', { name: 'Probe panel' });
+    const header = screen.getByTestId('probe-context-header');
     expect(header.textContent).not.toContain('demo');
   });
 

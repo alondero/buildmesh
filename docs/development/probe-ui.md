@@ -161,7 +161,15 @@ Failed preferences disable writes, and retries/unmount invalidate stale reads.
 Prompts is a Mesh-following destination with mixed ownership: saved prompts
 belong to the profile, while spawning uses the selected Mesh's normal defaults.
 The registry's `allowsMissingContext` permits browsing and authoring without a
-Mesh; only launch controls require a target. The shared library resource keeps
+Mesh. The inline launch selector can target a different Mesh without changing
+sidebar selection or canvas View Mode; it is launch-only state, not a Probe
+Context Pin. A changed sidebar selection or focused Agent resets that launch
+choice, including a different Agent within the same Mesh. Without an
+inspection Mesh, the target defaults to the sole Mesh, then the last-used
+prompt launch Mesh if it still exists (persisted locally). An unresolved quick
+launch asks for a Mesh in an anchored menu; customisation has its own target
+selector. Failed launches that already created a node keep that node's Mesh
+and configuration fixed for retry. The shared library resource keeps
 one Host-wide read identity across Mesh selection changes. Focused agent paths
 and conversations are never inputs to a prompt launch.
 
@@ -179,6 +187,13 @@ through the Agent Node store without changing selection; success offers an
 explicit View agent action. A failed launch retains its created node and draft
 in the retry dialog, so retry does not allocate another node. Spawn shortcuts
 open this destination instead of mounting a library inside the Spawn Menu.
+The Mesh row context menu also opens Prompts for that Mesh.
+
+Mesh and Agent Probe headers use the resolved Mesh's colour for an 8% tint
+and a 3px indicator beside the subject; text retains the standard theme tokens.
+Host and unresolved Mesh headers stay neutral. Empty Mesh-lens destinations
+offer an inline selector that enters the chosen Mesh, following the same
+navigation contract as the sidebar.
 
 ## Notifications
 
