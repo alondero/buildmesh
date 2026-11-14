@@ -421,3 +421,7 @@ harness-enforced rules, and the triage workflow.
 ## License
 
 [MIT](LICENSE) — Copyright (c) 2026 Adam Londero.
+
+## Star history
+
+[![Star history chart](https://api.star-history.com/svg?repos=alondero%2Fbuildmesh&type=date)](https://www.star-history.com/#alondero/buildmesh&Date)
