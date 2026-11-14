@@ -33,13 +33,14 @@ import { pushCircuitStep } from '../../lib/tauri/circuitEvidence';
 import { formatError } from '../../lib/errorUtils';
 import { LiveRunDuration } from '../Probe/CircuitRunCard';
 import { CircuitEvidenceHistory } from './CircuitEvidenceHistory';
-import { setCircuitReviewRoundLimit } from '../../lib/tauri/circuit';
+import { continueCircuitReview, setCircuitReviewRoundLimit } from '../../lib/tauri/circuit';
+import { ReviewExtension } from './ReviewExtension';
 import { ReviewRoundLimit } from './ReviewRoundLimit';
 import { RunNextSteps, runNeedsNextSteps } from './RunNextStepsPanel';
 import { ReviewRoundsPanel, RunStageTracker, SectionHeading } from './RunProgressSummary';
 import { formatDurationMs, ledgerTimestampMs, statusTextClass, stepDurationMs } from './circuitGraphModel';
 import { runStateLabel, stepStatusLabel } from './circuitVocabulary';
-import { reviewCircuitMetadata, reviewResult } from './runDiagnostics';
+import { canContinueReview, reviewCircuitMetadata, reviewResult } from './runDiagnostics';
 import { formatWallClock, runStartedMs } from './runIdentity';
 import { lastRoundGuidance } from './runNextSteps';
 import { distinctRailLabels, pushOutcomeLabel, railRows, type RailRow, type RailState } from './runOverviewModel';
@@ -116,7 +117,7 @@ export function CircuitRunOverview({ overview, error, onRefresh, onChanged, onOp
     setActionError(null);
     Promise.resolve(onOpenAgent(nodeId)).catch((cause: unknown) => setActionError(formatError(cause)));
   };
-  const review = reviewResult({ run, steps: overview.steps }, reviewCircuitMetadata({ graph_json: JSON.stringify(overview.graph) }), context);
+  const review = reviewResult(overview, reviewCircuitMetadata({ graph_json: JSON.stringify(overview.graph) }), context);
   const rounds = reviewRounds(overview, context);
   const stages = runStages(overview.graph, rows, plainRole);
   const headline = runHeadline({ overview, rows, rounds, review, roleOf: plainRole, agentName });
@@ -214,6 +215,10 @@ export function CircuitRunOverview({ overview, error, onRefresh, onChanged, onOp
         </header>
 
         {/* 2. Anything that needs a person */}
+        {canContinueReview(overview) && (
+          <ReviewExtension key={`extension-${run.id}`} runId={run.id} busy={busy}
+            onContinue={(additionalRounds) => void act(() => continueCircuitReview(run.id, additionalRounds))} />
+        )}
         {(blocked.length > 0 || runNeedsNextSteps(run, overview.steps) || overview.attention.pushes.length > 0) && (
           <div className="space-y-2">
             {blocked.map((step) => (
