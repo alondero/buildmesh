@@ -259,6 +259,50 @@ fn initial_prompt_recovery_requires_current_delivery_uncertainty_not_an_inconclu
 }
 
 #[test]
+fn manual_delivery_survives_new_history_for_the_same_payload() {
+    let (mut db, identity, request) = fixture(DeliveryKind::Inject);
+    append_history(
+        &db,
+        HistoryEvent {
+            run_id: 1,
+            node_id: Some("send"),
+            attempt: Some(1),
+            kind: "native_hook_received",
+            detail: "{}",
+            source: Some(SOURCE_NATIVE_HOOK),
+            disposition: Some(DISPOSITION_RECEIVED),
+        },
+    )
+    .unwrap();
+    attest_locked(&mut db, &request, &identity).unwrap();
+    let status: String = db
+        .query_row("SELECT status FROM autopilot_circuit_run_steps", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(status, "running");
+}
+
+#[test]
+fn manual_delivery_rejects_a_payload_replaced_after_the_snapshot() {
+    let (mut db, identity, request) = fixture(DeliveryKind::Inject);
+    append_history(
+        &db,
+        HistoryEvent {
+            run_id: 1,
+            node_id: Some("send"),
+            attempt: Some(1),
+            kind: "prompt_payload",
+            detail: &serde_json::to_string(&identity).unwrap(),
+            source: Some(SOURCE_PROMPT_SUBMISSION),
+            disposition: Some(DISPOSITION_RECORDED),
+        },
+    )
+    .unwrap();
+    assert!(attest_locked(&mut db, &request, &identity).is_err());
+}
+
+#[test]
 fn stale_revision_attempt_target_and_replaced_submission_cannot_attest() {
     for sql in [
         "UPDATE autopilot_circuit_run_steps SET attempt=2",

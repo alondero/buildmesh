@@ -184,6 +184,12 @@ Missing app-data storage preserves automatic delivery but cannot retain this
 manual fallback. Existing checkpoints without a retained payload keep their
 previous recovery actions.
 
+Prompt copy and `manual_delivered` accept newer unrelated run history when the
+retained payload was present in the requested snapshot and is still the latest
+payload for the same current checkpoint. A replaced payload, changed attempt,
+target, submission or run state is still refused. The backend rechecks the
+payload identity inside the acknowledgement transaction.
+
 `manual_delivered` acknowledges the prompt journal without allocating another
 submission sequence. Inject steps resume through the normal `PromptDelivered`
 transition; initial and continuation prompts resume observing their agent.
