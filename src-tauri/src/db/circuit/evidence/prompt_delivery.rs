@@ -277,8 +277,20 @@ pub(crate) fn park_initial(fence: &InitialDeliveryFence, reason: &str) -> Result
 }
 
 fn validate(db: &Connection, request: &CircuitPromptRequest) -> Result<PayloadIdentity, DbError> {
-    if revision_moved(db, request.run_id, request.expected_revision)? {
-        return Err(DbError::conflict("The run changed. Refresh before acting."));
+    // The run's history can advance while the operator submits the prompt.
+    // Fence to the actual retained payload instead of unrelated history: it
+    // must already have existed in the snapshot and remain the latest payload.
+    let latest_id: Option<i64> = db.query_row(
+        "SELECT MAX(id) FROM circuit_run_history WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND kind='prompt_payload'",
+        params![request.run_id, request.node_id, request.attempt],
+        |row| row.get(0),
+    )?;
+    if request.expected_revision > revision_inner(db, request.run_id)?
+        || latest_id.is_none_or(|id| id > request.expected_revision)
+    {
+        return Err(DbError::conflict(
+            "This prompt changed. Review the current checkpoint before continuing.",
+        ));
     }
     current(db, request.run_id, &request.node_id, request.attempt)?.ok_or_else(|| {
         DbError::conflict(
