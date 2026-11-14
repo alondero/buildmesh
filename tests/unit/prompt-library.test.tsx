@@ -129,6 +129,31 @@ describe('Prompts Probe library', () => {
     await waitFor(() => expect(create).toHaveBeenCalledWith(8, OTHER.name, OTHER.path, 'main', 'claude', true, undefined, 'Custom draft', undefined));
   });
 
+  it.each(['create', 'default provider'] as const)('retains a custom picker Mesh and draft after %s fails, then retries in that Mesh', async failure => {
+    if (failure === 'create') create.mockRejectedValueOnce(new Error('Attempt failed before node creation'));
+    else vi.mocked(getDefaultProvider).mockRejectedValueOnce(new Error('Attempt failed before node creation'));
+    setup(null);
+    fireEvent.click(await screen.findByRole('button', { name: SAVED.name }));
+    fireEvent.click(within(row()).getByRole('button', { name: 'Customise for this launch' }));
+    const dialog = within(screen.getByRole('dialog'));
+    fireEvent.change(dialog.getByLabelText('Prompt for this launch'), { target: { value: 'Keep this launch draft' } });
+    fireEvent.click(dialog.getByRole('button', { name: `Spawn ${SAVED.name}` }));
+    fireEvent.click(screen.getByRole('menuitem', { name: OTHER.name }));
+    await dialog.findByText('Attempt failed before node creation');
+    expect((dialog.getByRole('combobox', { name: 'Spawn in Mesh' }) as HTMLSelectElement).value).toBe(String(OTHER.id));
+    expect((dialog.getByLabelText('Prompt for this launch') as HTMLTextAreaElement).value).toBe('Keep this launch draft');
+    const failedCreates = failure === 'create' ? 1 : 0;
+    expect(create).toHaveBeenCalledTimes(failedCreates);
+    expect(spawnAgent).not.toHaveBeenCalled();
+    fireEvent.click(dialog.getByRole('button', { name: `Spawn ${SAVED.name}` }));
+    expect(screen.queryByRole('menu', { name: 'Choose a Mesh to spawn in' })).toBeNull();
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(failedCreates + 1));
+    expect(create).toHaveBeenLastCalledWith(8, OTHER.name, OTHER.path, 'main', 'claude', true, undefined, 'Keep this launch draft', undefined);
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(spawnAgent).toHaveBeenCalledTimes(1);
+    expect(preferences.savePrompt).not.toHaveBeenCalled();
+  });
+
   it('lets an unresolved custom launch select a Mesh before spawning', async () => {
     setup(null);
     fireEvent.click(await screen.findByRole('button', { name: SAVED.name }));

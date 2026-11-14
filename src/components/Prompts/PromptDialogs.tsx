@@ -104,7 +104,12 @@ export function PromptLaunchDialog({ launch, providers, busy, onSpawn, onClose }
         onClick={() => { if (mesh) onSpawn(mesh, body, launch.providerId, launch.configurationId, launch.loginId); }}>{busy ? 'Starting…' : 'Retry launch'}</button>
         : <PromptSpawnButton meshId={mesh?.id ?? null} meshes={meshes} promptId={`custom-${launch.prompt.id}`} name={launch.prompt.name}
           providers={providers} busy={busy} disabled={busy || meshes.length === 0 || !body.trim() || providers.length === 0} portalMenu={false}
-          onSpawn={(providerId, configurationId, loginId, pickedMesh) => { const selected = pickedMesh ?? mesh; if (selected) return onSpawn(selected, body, providerId, configurationId, loginId); }} />}
+          onSpawn={(providerId, configurationId, loginId, pickedMesh) => {
+            const selected = pickedMesh ?? mesh;
+            if (!selected) return;
+            setMeshId(selected.id);
+            return onSpawn(selected, body, providerId, configurationId, loginId);
+          }} />}
     </div>
   </Modal>;
 }

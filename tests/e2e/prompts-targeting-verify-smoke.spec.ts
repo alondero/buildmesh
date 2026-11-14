@@ -16,11 +16,15 @@ const fixtures = {
   test_prompt_node: { ...defaultFixtures.list_agent_nodes[0], id: 901, status: 'idle', is_pinned: false },
 };
 
-async function boot(page: Page, theme: string) {
+async function boot(page: Page, theme: string, createFailures = 0) {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.addInitScript(buildInitScript(fixtures, {
+  await page.addInitScript(buildInitScript({ ...fixtures, test_prompt_create_failures: createFailures }, {
     create_agent_node: (args, responses) => {
       responses.test_prompt_launches.push(args);
+      if (responses.test_prompt_create_failures > 0) {
+        responses.test_prompt_create_failures -= 1;
+        throw new Error('Fixture creation failed before node creation');
+      }
       const node = { ...responses.test_prompt_node, mesh_id: args.meshId, path: args.path, provider: args.provider };
       responses.list_agent_nodes.push(node);
       return node;
@@ -141,5 +145,30 @@ for (const theme of ['dark', 'light']) {
     });
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ meshId: 2, initialPrompt: 'Launch-only draft' });
+  });
+
+  test(`custom picker Mesh and draft survive failed creation and retry (${theme})`, async ({ page }, testInfo) => {
+    await boot(page, theme, 1);
+    await page.getByRole('button', { name: 'Explore this project', exact: true }).click();
+    await page.getByRole('button', { name: 'Customise for this launch', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByRole('textbox', { name: 'Prompt for this launch' }).fill('Keep this launch draft');
+    const spawn = dialog.getByRole('button', { name: 'Spawn Explore this project', exact: true });
+    await spawn.click();
+    await page.getByRole('menuitem', { name: 'playground', exact: true }).click();
+    await expect(dialog.getByRole('alert')).toContainText('Fixture creation failed before node creation');
+    await expect(dialog.getByRole('combobox', { name: 'Spawn in Mesh' })).toHaveValue('2');
+    await expect(dialog.getByRole('textbox', { name: 'Prompt for this launch' })).toHaveValue('Keep this launch draft');
+    await dialog.screenshot({ path: testInfo.outputPath('failed-create-target.png') });
+    await spawn.click();
+    await expect(page.getByRole('menu', { name: 'Choose a Mesh to spawn in' })).toHaveCount(0);
+    await expect(dialog).toHaveCount(0);
+    await expect(page.getByRole('status').filter({ hasText: 'Started' })).toContainText('playground');
+    const calls = await page.evaluate(() => {
+      const bridge = window as unknown as { __TAURI_INTERNALS__: { invoke: (cmd: string) => Promise<unknown[]> } };
+      return bridge.__TAURI_INTERNALS__.invoke('test_prompt_launches');
+    });
+    expect(calls).toHaveLength(2);
+    for (const call of calls) expect(call).toMatchObject({ meshId: 2, initialPrompt: 'Keep this launch draft' });
   });
 }
