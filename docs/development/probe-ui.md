@@ -174,7 +174,9 @@ keeps focus in the launch group while its button is disabled, then returns it
 to the button unless the user moved elsewhere. Escape restores trigger focus;
 Tab closes the picker without moving focus to the trigger. Base refs in the
 launch strip wrap at narrow widths so their complete branch identity stays
-visible. Failed launches that already created a node keep that node's Mesh
+visible. Customisation keeps its chosen Mesh and draft if provider resolution
+or node creation fails; retry starts a new attempt in that Mesh. Failed
+launches that already created a node keep that node's Mesh
 and configuration fixed for retry. The shared library resource keeps
 one Host-wide read identity across Mesh selection changes. Focused agent paths
 and conversations are never inputs to a prompt launch.

@@ -35,6 +35,10 @@
  * the two readings are independent of the class order: swapping
  * `bg-accent-violet/20` with `text-accent-violet-strong` yields the same
  * measured ratios.
+ *
+ * Issue #2791: the Probe header also composes a Mesh wash. Its title,
+ * subject, detail and chevron are measured against the app's backing surface
+ * and the subject's hover fill, using the foregrounds and alphas in source.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -451,6 +455,89 @@ describe('the Review label on a composed node header (#2737)', () => {
       ).toBeLessThan(AA_BODY_TEXT);
     },
   );
+});
+
+describe('the Probe text on a composed Mesh header (#2791)', () => {
+  const panel = read('src/components/Probe/ProbePanel.tsx');
+  const app = read('src/App.tsx');
+  const header = capture(
+    panel,
+    /data-testid="probe-context-header"([\s\S]*?)\n\s*>/,
+    'the Probe header opening tag',
+  );
+  const tintAlpha = parseInt(capture(
+    header,
+    /backgroundColor: `\$\{meshColor\.hex\}([0-9a-f]{2})`/i,
+    'the Probe Mesh wash alpha',
+  ), 16) / 255;
+  const subject = capture(
+    panel,
+    /<summary\s+data-testid="probe-context-subject"([\s\S]*?)<\/summary>/,
+    'the Probe subject control',
+  );
+  const subjectClasses = capture(subject, /className="([^"]*)"/, 'the subject classes');
+  const hoverToken = capture(
+    subjectClasses,
+    /(?:^|\s)hover:bg-([a-z-]+)(?:\/\d+)?(?=\s|$)/,
+    'the subject hover background token',
+  );
+  const hoverAlpha = Number(/(?:^|\s)hover:bg-[a-z-]+\/(\d+)(?=\s|$)/.exec(subjectClasses)?.[1] ?? 100) / 100;
+
+  // Probe's dock and section are transparent; the main App shell paints the
+  // backing surface. Read that shell (not the loading splash) from source.
+  const shells = [...app.matchAll(/className="([^"]*)"/g)]
+    .map(match => match[1])
+    .filter(list => ['h-screen', 'w-screen', 'overflow-hidden'].every(name => list.split(/\s+/).includes(name)));
+  if (shells.length !== 1) throw new Error(`Expected one main App shell, found ${shells.length}`);
+  const backingToken = capture(shells[0], /(?:^|\s)bg-([a-z-]+)(?=\s|$)/, 'the App backing surface');
+
+  const textSites = [
+    { name: 'title', id: 'probe-context-title' },
+    { name: 'subject', id: 'probe-context-subject-name' },
+    { name: 'detail', id: 'probe-context-subject-detail' },
+  ].map(({ name, id }) => ({
+    name,
+    classes: capture(panel, new RegExp(`data-testid="${id}"[^>]*className="([^"]*)"`), `the Probe ${name} classes`),
+  }));
+  textSites.push({
+    name: 'chevron',
+    classes: capture(subject, /<svg[^>]*className="([^"]*)"/, 'the Probe chevron classes'),
+  });
+  const foregrounds = textSites.map(({ name, classes }) => ({
+    name,
+    tokenName: capture(classes, /(?:^|\s)text-((?:text|accent|status)-[a-z-]+)(?=\s|$)/, `the Probe ${name} foreground`),
+  }));
+
+  for (const theme of ['dark', 'light'] as const) {
+    const tokens = theme === 'dark' ? DARK : LIGHT;
+    // Include the actual backing surface plus conservative neutral surfaces
+    // used elsewhere in the app. MESH_COLOURS covers the palette, all eight
+    // RGB-cube corners and a 9x9x9 grid for custom colours.
+    for (const surface of new Set([backingToken, 'bg-surface', 'bg-card'])) {
+      it.each(foregrounds)(`${theme}: $name clears 4.5:1 on the Mesh wash over ${surface}`, ({ name, tokenName }) => {
+        const worst = worstCase(token(tokens, tokenName), mesh => over(mesh, tintAlpha, token(tokens, surface)));
+        expect(
+          worst.ratio,
+          `${theme}: Probe ${name} (${tokenName}) on ${surface}, Mesh ${worst.mesh}: ${worst.ratio.toFixed(2)}:1`,
+        ).toBeGreaterThanOrEqual(AA_BODY_TEXT);
+      });
+    }
+
+    it.each(foregrounds.filter(site => site.name !== 'title'))(
+      `${theme}: $name clears 4.5:1 on the subject hover background`,
+      ({ name, tokenName }) => {
+        const worst = worstCase(token(tokens, tokenName), mesh => over(
+          token(tokens, hoverToken),
+          hoverAlpha,
+          over(mesh, tintAlpha, token(tokens, backingToken)),
+        ));
+        expect(
+          worst.ratio,
+          `${theme}: Probe ${name} (${tokenName}) on hover, Mesh ${worst.mesh}: ${worst.ratio.toFixed(2)}:1`,
+        ).toBeGreaterThanOrEqual(AA_BODY_TEXT);
+      },
+    );
+  }
 });
 
 describe('the other violet labels on the same header (#2737)', () => {
