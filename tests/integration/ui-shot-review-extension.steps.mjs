@@ -117,5 +117,29 @@ export default async function ({ page, mock }) {
   });
   await card.evaluate((el) => { el.style.width = ''; el.style.flex = ''; });
   await panel.getByRole('button', { name: /Review again/ }).scrollIntoViewIfNeeded();
-  console.log('PASS: Overview and collapsed Probe offer review extension; IPC, pending controls, refresh and narrow layout checked with mock IPC.');
+
+  // An older reviewer's card can still display the failed ancestor while a
+  // different run already owns the implementation agent. Reveal that run.
+  const reused = { ...failed, review_continuation: { ...continuation, target_run_id: 92 } };
+  const live = { ...scenarios.reviewing,
+    run: { ...scenarios.reviewing.run, id: 92 },
+    steps: scenarios.reviewing.steps.map((s) => ({ ...s, run_id: 92 })),
+    review_continuation: { ...continuation, available: false, target_run_id: 92, refusal_reason: 'run_not_failed' },
+  };
+  await mock.on('list_circuit_probe', { circuits: [{ circuit, runs: [live, reused] }], queue: [], queue_waits: {} });
+  await page.evaluate(([ancestor, current]) => {
+    window.__BUILDMESH_MOCK__.on('circuit_run_overview', ({ runId }) => runId === 92 ? current : ancestor);
+  }, [reused, live]);
+  await mock.emit('circuit-run-updated', { run_id: 91, state: 'failed' });
+  await expect(page.getByTestId('circuits-view-activity')).toContainText('Activity (1)');
+  await panel.getByLabel('Additional review rounds').selectOption('2');
+  await panel.getByRole('button', { name: 'Review again · +2 rounds' }).click();
+  expect(await page.evaluate(() => window.extensionArgs)).toEqual({ runId: 91, additionalRounds: 2 });
+  await page.evaluate(() => window.finishExtension(92));
+  await expect(page.getByTestId('circuits-view-activity')).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByTestId('run-card-92')).toHaveAttribute('data-run-focused', 'true');
+  await expect(page.getByTestId('run-toggle-92')).toHaveAttribute('aria-expanded', 'true');
+  await expect(panel).toHaveAttribute('data-run-state', 'failed');
+  await page.getByTestId('run-card-92').screenshot({ path: '.tmp/review-extension-reused-run.png' });
+  console.log('PASS: Overview and collapsed Probe offer review extension; IPC, pending controls, refresh, narrow layout and revealing a reused live run checked with mock IPC.');
 }

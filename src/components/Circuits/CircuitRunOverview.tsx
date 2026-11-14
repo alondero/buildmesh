@@ -22,7 +22,7 @@
  * against the revision that was on screen.
  */
 
-import { useId, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import type { CircuitRunOverview as Overview } from '../../types/generated/CircuitRunOverview';
 import type { CircuitStepPush } from '../../types/generated/CircuitStepPush';
@@ -31,6 +31,8 @@ import type { StepPushOutcome } from '../../types/generated/StepPushOutcome';
 import { approveCircuitStep, cancelCircuitRun, pauseCircuitRun, resumeCircuitRun } from '../../lib/tauri';
 import { pushCircuitStep } from '../../lib/tauri/circuitEvidence';
 import { formatError } from '../../lib/errorUtils';
+import { useUIStore } from '../../stores/uiStore';
+import { useMeshStore } from '../../stores/meshStore';
 import { LiveRunDuration } from '../Probe/CircuitRunCard';
 import { CircuitEvidenceHistory } from './CircuitEvidenceHistory';
 import { continueCircuitReview, setCircuitReviewRoundLimit } from '../../lib/tauri/circuit';
@@ -89,6 +91,11 @@ export function CircuitRunOverview({ overview, error, onRefresh, onChanged, onOp
   const stepsId = useId();
 
   const run = overview?.run;
+  const currentRunId = useRef<number | null>(null);
+  useEffect(() => {
+    currentRunId.current = run?.id ?? null;
+    return () => { currentRunId.current = null; };
+  }, [run?.id]);
   const context = useMemo(() => parseRunContext(run?.context_json ?? '{}'), [run?.context_json]);
   const kinds = useMemo(
     () => new Map((overview?.graph.nodes ?? []).map((node) => [node.id, node.type] as const)),
@@ -217,7 +224,14 @@ export function CircuitRunOverview({ overview, error, onRefresh, onChanged, onOp
         {/* 2. Anything that needs a person */}
         {canContinueReview(overview) && (
           <ReviewExtension key={`extension-${run.id}`} runId={run.id} busy={busy}
-            onContinue={(additionalRounds) => void act(() => continueCircuitReview(run.id, additionalRounds))} />
+            onContinue={(additionalRounds) => void act(async () => {
+              const selectedMeshId = useMeshStore.getState().selectedMeshId;
+              const nextRunId = await continueCircuitReview(run.id, additionalRounds);
+              if (nextRunId !== run.id && currentRunId.current === run.id
+                && useMeshStore.getState().selectedMeshId === selectedMeshId) {
+                useUIStore.getState().focusCircuitRun(nextRunId);
+              }
+            })} />
         )}
         {(blocked.length > 0 || runNeedsNextSteps(run, overview.steps) || overview.attention.pushes.length > 0) && (
           <div className="space-y-2">
