@@ -66,7 +66,7 @@ export interface PromptLaunch {
 
 export function PromptLaunchDialog({ launch, providers, busy, onSpawn, onClose }: {
   launch: PromptLaunch; providers: SpawnOption[]; busy: boolean;
-  onSpawn: (mesh: Mesh, body: string, providerId?: string, configurationId?: string, loginId?: string) => void;
+  onSpawn: (mesh: Mesh, body: string, providerId?: string, configurationId?: string, loginId?: string) => void | Promise<void>;
   onClose: () => void;
 }) {
   const [body, setBody] = useState(launch.body ?? launch.prompt.body);
@@ -102,9 +102,9 @@ export function PromptLaunchDialog({ launch, providers, busy, onSpawn, onClose }
     <div className="mt-3 flex shrink-0 justify-end">
       {launch.node ? <button type="button" disabled={busy || !mesh || !body.trim()} className={buttonClass}
         onClick={() => { if (mesh) onSpawn(mesh, body, launch.providerId, launch.configurationId, launch.loginId); }}>{busy ? 'Starting…' : 'Retry launch'}</button>
-        : <PromptSpawnButton key={mesh?.id ?? 'none'} meshId={mesh?.id ?? null} promptId={`custom-${launch.prompt.id}`} name={launch.prompt.name}
-          providers={providers} busy={busy} disabled={busy || !mesh || !body.trim() || providers.length === 0} portalMenu={false}
-          onSpawn={(providerId, configurationId, loginId) => { if (mesh) onSpawn(mesh, body, providerId, configurationId, loginId); }} />}
+        : <PromptSpawnButton meshId={mesh?.id ?? null} meshes={meshes} promptId={`custom-${launch.prompt.id}`} name={launch.prompt.name}
+          providers={providers} busy={busy} disabled={busy || meshes.length === 0 || !body.trim() || providers.length === 0} portalMenu={false}
+          onSpawn={(providerId, configurationId, loginId, pickedMesh) => { const selected = pickedMesh ?? mesh; if (selected) return onSpawn(selected, body, providerId, configurationId, loginId); }} />}
     </div>
   </Modal>;
 }

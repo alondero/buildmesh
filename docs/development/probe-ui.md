@@ -168,7 +168,13 @@ choice, including a different Agent within the same Mesh. Without an
 inspection Mesh, the target defaults to the sole Mesh, then the last-used
 prompt launch Mesh if it still exists (persisted locally). An unresolved quick
 launch asks for a Mesh in an anchored menu; customisation has its own target
-selector. Failed launches that already created a node keep that node's Mesh
+selector and can also pick a Mesh from Spawn. Picker choices are discarded if
+launching becomes unavailable or the target context changes. Picking a Mesh
+keeps focus in the launch group while its button is disabled, then returns it
+to the button unless the user moved elsewhere. Escape restores trigger focus;
+Tab closes the picker without moving focus to the trigger. Base refs in the
+launch strip wrap at narrow widths so their complete branch identity stays
+visible. Failed launches that already created a node keep that node's Mesh
 and configuration fixed for retry. The shared library resource keeps
 one Host-wide read identity across Mesh selection changes. Focused agent paths
 and conversations are never inputs to a prompt launch.
@@ -190,7 +196,8 @@ open this destination instead of mounting a library inside the Spawn Menu.
 The Mesh row context menu also opens Prompts for that Mesh.
 
 Mesh and Agent Probe headers use the resolved Mesh's colour for an 8% tint
-and a 3px indicator beside the subject; text retains the standard theme tokens.
+and a 3px indicator stretching along the subject row, matching the sidebar;
+text retains the standard theme tokens.
 Host and unresolved Mesh headers stay neutral. Empty Mesh-lens destinations
 offer an inline selector that enters the chosen Mesh, following the same
 navigation contract as the sidebar.

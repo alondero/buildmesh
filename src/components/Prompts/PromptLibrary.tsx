@@ -136,10 +136,10 @@ export function PromptLibrary({ mesh: contextMesh, providers }: { mesh: Mesh | n
         className="min-h-7 w-full min-w-0 rounded-md border border-border-default bg-bg-input px-2 text-xs text-text-primary focus:outline-none focus:border-accent-cyan" />
     </ProbeToolbar>
     <div className="shrink-0 space-y-1 border-b border-border-subtle px-3 py-2 text-xs text-text-secondary">
-      <div data-testid="prompt-launch-context" className="flex min-w-0 items-center gap-1">
+      <div data-testid="prompt-launch-context" className="flex min-w-0 flex-wrap items-center gap-1">
         <span className="shrink-0">Spawn in</span>
         <PromptMeshSelector meshes={meshes} mesh={mesh} disabled={busy} onSelect={selectTarget} />
-        {mesh && <span title={promptLaunchLocation(mesh)} className="min-w-0 truncate">· {promptLaunchLocation(mesh)}</span>}
+        {mesh && <span className="min-w-0 max-w-full break-words">· {promptLaunchLocation(mesh)}</span>}
       </div>
       {meshes.length === 0 && <p>Add a Mesh to spawn an agent.</p>}
       {promptProviders.length === 0 && <p>Install an agent CLI or add a provider in Settings to spawn.</p>}
@@ -161,9 +161,9 @@ export function PromptLibrary({ mesh: contextMesh, providers }: { mesh: Mesh | n
           return <ProbeRow key={prompt.id} dataAttr="prompt" rowKey={prompt.id} title={prompt.name} url="" iconAriaLabel=""
             isExpanded={expanded[prompt.id] ?? false} onToggle={() => setExpanded(current => ({ ...current, [prompt.id]: !current[prompt.id] }))}
             body={prompt.body} bodyFormat="text" rightSlot={<div className="flex max-w-full items-center gap-1">
-              <PromptSpawnButton key={`${mesh?.id ?? 'none'}-${prompt.id}`} meshId={mesh?.id ?? null} promptId={prompt.id} name={prompt.name}
+              <PromptSpawnButton meshId={mesh?.id ?? null} promptId={prompt.id} name={prompt.name}
                 meshes={meshes} providers={promptProviders} busy={spawningId === prompt.id} disabled={busy || meshes.length === 0 || promptProviders.length === 0}
-                onSpawn={(providerId, configurationId, loginId, pickedMesh) => { const selected = pickedMesh ?? mesh; if (selected) void spawn({ prompt, mesh: selected, providerId, configurationId, loginId }); }} />
+                onSpawn={(providerId, configurationId, loginId, pickedMesh) => { const selected = pickedMesh ?? mesh; if (selected) return spawn({ prompt, mesh: selected, providerId, configurationId, loginId }); }} />
               <PromptActions name={prompt.name} custom={custom} disabled={busy || saved === null}
                 onEdit={() => setEditor({ prompt, mode: 'edit' })}
                 onDuplicate={() => setEditor({ prompt: { ...prompt, name: `${prompt.name.slice(0, 113)} (copy)` }, mode: 'duplicate' })}
@@ -178,6 +178,6 @@ export function PromptLibrary({ mesh: contextMesh, providers }: { mesh: Mesh | n
     {deleting && <ConfirmDialog title="Delete prompt" message={`Delete “${deleting.name}” from your library?`} confirmLabel="Confirm delete"
       onCancel={() => { if (!deletingBusy) setDeleting(null); }} onConfirm={remove} />}
     {launch && <PromptLaunchDialog launch={launch} providers={promptProviders} busy={spawningId !== null} onClose={() => setLaunch(null)}
-      onSpawn={(mesh, body, providerId, configurationId, loginId) => void spawn({ ...launch, mesh, body, providerId, configurationId, loginId })} />}
+      onSpawn={(mesh, body, providerId, configurationId, loginId) => spawn({ ...launch, mesh, body, providerId, configurationId, loginId })} />}
   </div>;
 }

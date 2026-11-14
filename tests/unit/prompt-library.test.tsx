@@ -72,7 +72,7 @@ describe('Prompts Probe library', () => {
     useAgentNodeStore.setState({ nodesById: {}, activeNodeId: null });
     useUIStore.getState().setViewMode('all');
     setup(null);
-    expect((screen.getByLabelText('Spawn target Mesh') as HTMLSelectElement).value).toBe('7');
+    expect((screen.getByLabelText('Spawn in Mesh') as HTMLSelectElement).value).toBe('7');
     fireEvent.click(await screen.findByRole('button', { name: `Spawn ${SAVED.name}` }));
     await waitFor(() => expect(create).toHaveBeenCalledWith(7, MESH.name, MESH.path, 'main', 'claude', true, undefined, SAVED.body, undefined));
     expect(useUIStore.getState().viewMode).toBe('all');
@@ -83,7 +83,7 @@ describe('Prompts Probe library', () => {
     useUIStore.getState().setViewMode(mode);
     const selected = useMeshStore.getState().selectedMeshId;
     setup();
-    fireEvent.change(screen.getByLabelText('Spawn target Mesh'), { target: { value: '8' } });
+    fireEvent.change(screen.getByLabelText('Spawn in Mesh'), { target: { value: '8' } });
     fireEvent.click(await screen.findByRole('button', { name: `Spawn ${SAVED.name}` }));
     await waitFor(() => expect(create).toHaveBeenCalledWith(8, OTHER.name, OTHER.path, 'main', 'claude', true, undefined, SAVED.body, undefined));
     expect(useUIStore.getState().viewMode).toBe(mode);
@@ -99,12 +99,42 @@ describe('Prompts Probe library', () => {
     await waitFor(() => expect(create).toHaveBeenCalledWith(8, OTHER.name, OTHER.path, 'main', 'codex', true, 'launch/fast', SAVED.body, 'work'));
   });
 
+  it('asks for a Mesh from primary Spawn and resolves that Mesh default provider', async () => {
+    setup(null);
+    fireEvent.click(await screen.findByRole('button', { name: `Spawn ${SAVED.name}` }));
+    expect(create).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('menuitem', { name: OTHER.name }));
+    await waitFor(() => expect(create).toHaveBeenCalledWith(8, OTHER.name, OTHER.path, 'main', 'claude', true, undefined, SAVED.body, undefined));
+    expect(getDefaultProvider).toHaveBeenCalledWith(OTHER.id);
+  });
+
+  it('wraps the complete launch base ref instead of truncating its meaningful tail', async () => {
+    const mesh = { ...MESH, base_ref: `origin/${'long-branch-'.repeat(20)}meaningful-tail` };
+    useMeshStore.setState({ meshes: [mesh], meshesById: new Map([[mesh.id, mesh]]) });
+    setup(mesh);
+    await screen.findByRole('button', { name: SAVED.name });
+    const location = screen.getByText(`· from ${mesh.base_ref}`);
+    expect(location.className).toContain('break-words');
+    expect(location.className).not.toContain('truncate');
+  });
+
+  it('honours a Mesh picked from an unresolved custom launch Spawn button', async () => {
+    setup(null);
+    fireEvent.click(await screen.findByRole('button', { name: SAVED.name }));
+    fireEvent.click(within(row()).getByRole('button', { name: 'Customise for this launch' }));
+    const dialog = within(screen.getByRole('dialog'));
+    fireEvent.change(dialog.getByLabelText('Prompt for this launch'), { target: { value: 'Custom draft' } });
+    fireEvent.click(dialog.getByRole('button', { name: `Spawn ${SAVED.name}` }));
+    fireEvent.click(screen.getByRole('menuitem', { name: OTHER.name }));
+    await waitFor(() => expect(create).toHaveBeenCalledWith(8, OTHER.name, OTHER.path, 'main', 'claude', true, undefined, 'Custom draft', undefined));
+  });
+
   it('lets an unresolved custom launch select a Mesh before spawning', async () => {
     setup(null);
     fireEvent.click(await screen.findByRole('button', { name: SAVED.name }));
     fireEvent.click(within(row()).getByRole('button', { name: 'Customise for this launch' }));
     const dialog = within(screen.getByRole('dialog'));
-    fireEvent.change(dialog.getByLabelText('Spawn target Mesh'), { target: { value: '8' } });
+    fireEvent.change(dialog.getByLabelText('Spawn in Mesh'), { target: { value: '8' } });
     fireEvent.change(dialog.getByLabelText('Prompt for this launch'), { target: { value: 'One launch only' } });
     fireEvent.click(dialog.getByRole('button', { name: 'Spawn with configuration' }));
     await waitFor(() => expect(create).toHaveBeenCalledWith(8, OTHER.name, OTHER.path, 'main', 'codex', true, 'launch/fast', 'One launch only', 'work'));
@@ -113,19 +143,19 @@ describe('Prompts Probe library', () => {
   it('restores a valid last-used spawn target and follows explicit Mesh changes', async () => {
     localStorage.setItem('buildmesh.prompt-spawn-mesh', '8');
     const view = setup(null);
-    expect((screen.getByLabelText('Spawn target Mesh') as HTMLSelectElement).value).toBe('8');
+    expect((screen.getByLabelText('Spawn in Mesh') as HTMLSelectElement).value).toBe('8');
     view.rerender(<PromptLibrary mesh={MESH} providers={PROVIDERS} />);
-    expect((screen.getByLabelText('Spawn target Mesh') as HTMLSelectElement).value).toBe('7');
-    fireEvent.change(screen.getByLabelText('Spawn target Mesh'), { target: { value: '8' } });
+    expect((screen.getByLabelText('Spawn in Mesh') as HTMLSelectElement).value).toBe('7');
+    fireEvent.change(screen.getByLabelText('Spawn in Mesh'), { target: { value: '8' } });
     view.rerender(<PromptLibrary mesh={OTHER} providers={PROVIDERS} />);
     view.rerender(<PromptLibrary mesh={MESH} providers={PROVIDERS} />);
-    expect((screen.getByLabelText('Spawn target Mesh') as HTMLSelectElement).value).toBe('7');
+    expect((screen.getByLabelText('Spawn in Mesh') as HTMLSelectElement).value).toBe('7');
   });
 
   it('ignores a deleted last-used Mesh and disables launch when no Meshes exist', async () => {
     localStorage.setItem('buildmesh.prompt-spawn-mesh', '999');
     setup(null);
-    expect((screen.getByLabelText('Spawn target Mesh') as HTMLSelectElement).value).toBe('');
+    expect((screen.getByLabelText('Spawn in Mesh') as HTMLSelectElement).value).toBe('');
     await screen.findByRole('button', { name: SAVED.name });
     act(() => useMeshStore.setState({ meshes: [], meshesById: new Map() }));
     expect((screen.getByRole('button', { name: `Spawn ${SAVED.name}` }) as HTMLButtonElement).disabled).toBe(true);
@@ -135,12 +165,12 @@ describe('Prompts Probe library', () => {
     useMeshStore.setState({ selectedMeshId: null });
     setup();
     await screen.findByRole('button', { name: SAVED.name });
-    fireEvent.change(screen.getByLabelText('Spawn target Mesh'), { target: { value: '8' } });
+    fireEvent.change(screen.getByLabelText('Spawn in Mesh'), { target: { value: '8' } });
     act(() => useAgentNodeStore.setState({ activeNodeId: NODE.id, nodesById: { [NODE.id]: NODE } }));
-    expect((screen.getByLabelText('Spawn target Mesh') as HTMLSelectElement).value).toBe('7');
-    fireEvent.change(screen.getByLabelText('Spawn target Mesh'), { target: { value: '8' } });
+    expect((screen.getByLabelText('Spawn in Mesh') as HTMLSelectElement).value).toBe('7');
+    fireEvent.change(screen.getByLabelText('Spawn in Mesh'), { target: { value: '8' } });
     act(() => useMeshStore.setState({ selectedMeshId: MESH.id }));
-    expect((screen.getByLabelText('Spawn target Mesh') as HTMLSelectElement).value).toBe('7');
+    expect((screen.getByLabelText('Spawn in Mesh') as HTMLSelectElement).value).toBe('7');
   });
 
   it('browses read-only, searches full text and expands a selectable prompt without launching', async () => {
@@ -166,7 +196,7 @@ describe('Prompts Probe library', () => {
     await waitFor(() => expect(spawnAgent).toHaveBeenCalledWith(42, 'codex', { prefill: SAVED.body }));
     expect(create).toHaveBeenCalledWith(7, MESH.name, MESH.path, 'main', 'claude', true, undefined, SAVED.body, undefined);
     expect(screen.getByTestId('prompt-launch-context').textContent).toContain('from origin/develop');
-    expect((screen.getByLabelText('Spawn target Mesh') as HTMLSelectElement).value).toBe('7');
+    expect((screen.getByLabelText('Spawn in Mesh') as HTMLSelectElement).value).toBe('7');
     expect(useAgentNodeStore.getState().activeNodeId).toBe(99);
     expect(useMeshStore.getState().selectedMeshId).toBe(7);
     expect(screen.getByText(/Started fresh-agent in Target Mesh/)).toBeTruthy();
@@ -198,7 +228,7 @@ describe('Prompts Probe library', () => {
   it('allows creating prompts without a Mesh or agent installation while disabling spawn', async () => {
     render(<PromptLibrary mesh={null} providers={[]} />);
     await screen.findByRole('button', { name: SAVED.name });
-    expect(screen.getByLabelText('Spawn target Mesh')).toBeTruthy();
+    expect(screen.getByLabelText('Spawn in Mesh')).toBeTruthy();
     expect((screen.getByRole('button', { name: `Spawn ${SAVED.name}` }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: 'New prompt' }));
     fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'A reusable task' } });

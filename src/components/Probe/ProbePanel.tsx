@@ -281,7 +281,7 @@ function ProbePanelContent() {
                   aria-label={scopeTitle}
                 >
                   {meshColor && <span data-testid="probe-context-mesh-color" aria-hidden="true"
-                    className="h-3 w-[3px] shrink-0 rounded-full" style={{ backgroundColor: meshColor.hex }} />}
+                    className="w-[3px] self-stretch shrink-0 rounded-full" style={{ backgroundColor: meshColor.hex }} />}
                   <span
                     data-testid="probe-context-subject-name"
                     className="truncate min-w-0 text-label font-medium text-text-primary"

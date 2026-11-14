@@ -87,6 +87,8 @@ describe('ProbePanel', () => {
     const header = screen.getByTestId('probe-context-header');
     expect(header.style.backgroundColor).toBe('rgba(255, 136, 0, 0.08)');
     const indicator = screen.getByTestId('probe-context-mesh-color');
+    expect(indicator.className).toContain('self-stretch');
+    expect(indicator.className).not.toContain('h-3');
     expect(indicator.getAttribute('aria-hidden')).toBe('true');
     expect(indicator.style.backgroundColor).toBe('rgb(255, 136, 0)');
     expect(screen.getByTestId('probe-context-subject-name').className).toContain('text-text-primary');
@@ -120,17 +122,36 @@ describe('ProbePanel', () => {
     expect(screen.queryByTestId('probe-context-empty')).toBeNull();
   });
 
+  it('does not offer Mesh selection for an empty Agent lens even when Meshes exist', () => {
+    useMeshStore.setState({ meshes: [MESH], selectedMeshId: null });
+    seedAgentNodes([], null);
+    useUIStore.setState({ probeOpen: true, probeTab: 'review', viewMode: 'all' });
+    render(<ProbePanel />);
+    expect(screen.getByText('No active agent node')).toBeTruthy();
+    expect(screen.queryByLabelText('Inspect Mesh')).toBeNull();
+  });
+
+  it('does not offer Mesh selection when no Meshes exist', () => {
+    useMeshStore.setState({ meshes: [], meshesById: new Map(), selectedMeshId: null });
+    seedAgentNodes([], null);
+    useUIStore.setState({ probeOpen: true, probeTab: 'files', viewMode: 'all' });
+    render(<ProbePanel />);
+    expect(screen.getByText('No project selected')).toBeTruthy();
+    expect(screen.queryByLabelText('Inspect Mesh')).toBeNull();
+  });
+
   beforeEach(() => {
     // Default to a context with both a selected mesh and a focused node so the
     // body renders content rather than an empty state. Individual tests narrow
     // this to exercise the empty-state branches.
-    useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
+    useMeshStore.setState({ meshes: [MESH], meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
     seedAgentNodes([NODE], NODE.id);
     useUIStore.setState({
       probeOpen: false,
       probeTab: 'files',
       probeWorkingSet: { tabs: [], mru: [] },
       activeDiffFile: null,
+      viewMode: 'mesh',
     });
     vi.mocked(invoke).mockImplementation((cmd: string) => {
       if (cmd === 'get_provider_meters' || cmd === 'get_provider_accounts') return Promise.resolve([]);
@@ -246,17 +267,17 @@ describe('ProbePanel', () => {
     // Empty-state header: the title is still there, but with no mesh
     // there is no name to render so the subheading line is omitted
     // (not blank-padded) — keeps the no-project empty state tidy.
-    useMeshStore.setState({ meshesById: new Map(), selectedMeshId: null });
+    useMeshStore.setState({ meshes: [], meshesById: new Map(), selectedMeshId: null });
     seedAgentNodes([]);
     useUIStore.setState({ probeOpen: true, probeTab: 'files' });
     render(<ProbePanel />);
 
-    const header = screen.getByTestId('probe-context-header');
+    const header = screen.getByRole('region', { name: 'Probe panel' });
     expect(header.textContent).not.toContain('demo');
   });
 
   it('renders a friendly empty state when no project is active', () => {
-    useMeshStore.setState({ meshesById: new Map(), selectedMeshId: null });
+    useMeshStore.setState({ meshes: [], meshesById: new Map(), selectedMeshId: null });
     seedAgentNodes([]);
     useUIStore.setState({ probeOpen: true, probeTab: 'files' });
     render(<ProbePanel />);
