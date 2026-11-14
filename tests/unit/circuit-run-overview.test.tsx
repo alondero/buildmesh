@@ -3,9 +3,12 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { emit } from '@tauri-apps/api/event';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import { useNodeActivityStore } from '../../src/stores/nodeActivityStore';
+import { useUIStore } from '../../src/stores/uiStore';
+import { useMeshStore } from '../../src/stores/meshStore';
 import { NodeCard } from '../../src/components/AgentNodeView/NodeCard';
 import { CircuitRunOverview } from '../../src/components/Circuits/CircuitRunOverview';
-import { setCircuitReviewRoundLimit } from '../../src/lib/tauri/circuit';
+import { continueCircuitReview, setCircuitReviewRoundLimit } from '../../src/lib/tauri/circuit';
+import { reviewContinuation } from './helpers/reviewContinuation';
 import { circuitRunOverview, pushCircuitStep } from '../../src/lib/tauri/circuitEvidence';
 import { approveCircuitStep, cancelCircuitRun, pauseCircuitRun, resumeCircuitRun } from '../../src/lib/tauri';
 import type { CircuitRunOverview as Overview } from '../../src/types/generated/CircuitRunOverview';
@@ -51,6 +54,7 @@ vi.mock('../../src/lib/tauri', async (importOriginal) => ({
 vi.mock('../../src/lib/tauri/circuit', async (importOriginal) => ({
   ...await importOriginal<typeof import('../../src/lib/tauri/circuit')>(),
   setCircuitReviewRoundLimit: vi.fn(),
+  continueCircuitReview: vi.fn(),
 }));
 
 const node = (id: number, overrides: Partial<AgentNode> = {}): AgentNode => ({
@@ -120,6 +124,9 @@ function card() {
 }
 
 beforeEach(() => {
+  useUIStore.setState({ pendingCircuitRunFocus: null });
+  useMeshStore.setState({ selectedMeshId: 1 });
+  vi.mocked(continueCircuitReview).mockReset();
   vi.mocked(setCircuitReviewRoundLimit).mockReset();
   vi.mocked(circuitRunOverview).mockReset();
   vi.mocked(pushCircuitStep).mockReset();
@@ -132,6 +139,86 @@ beforeEach(() => {
 });
 
 describe('Overview tab on a circuit card', () => {
+  it.each([1, 3, 10])('extends an exhausted review by %i rounds directly from Overview', async (additionalRounds) => {
+    const failed = overview({ review_continuation: reviewContinuation() });
+    failed.run.state = 'failed';
+    const pending = deferred<number>();
+    vi.mocked(continueCircuitReview).mockReturnValue(pending.promise);
+    const onChanged = vi.fn();
+    const onRefresh = vi.fn();
+    const view = render(<CircuitRunOverview overview={failed} error={null} onChanged={onChanged}
+      onRefresh={onRefresh} onOpenAgent={vi.fn()} agentName={() => null} />);
+    const select = screen.getByRole('combobox', { name: 'Additional review rounds' });
+    fireEvent.change(select, { target: { value: String(additionalRounds) } });
+    const button = screen.getByRole('button', { name: `Review again · +${additionalRounds} ${additionalRounds === 1 ? 'round' : 'rounds'}` });
+    fireEvent.click(button);
+    expect(continueCircuitReview).toHaveBeenCalledWith(10, additionalRounds);
+    expect(button.hasAttribute('disabled')).toBe(true);
+    expect(select.hasAttribute('disabled')).toBe(true);
+    fireEvent.click(button);
+    expect(continueCircuitReview).toHaveBeenCalledOnce();
+    await act(async () => pending.resolve(10));
+    expect(useUIStore.getState().pendingCircuitRunFocus).toBeNull();
+    expect(onChanged).toHaveBeenCalledOnce();
+    expect(onRefresh).toHaveBeenCalledOnce();
+    view.rerender(<CircuitRunOverview overview={{ ...failed, run: { ...failed.run, state: 'running' },
+      review_continuation: reviewContinuation({ available: false, refusal_reason: 'run_not_failed' }) }}
+      error={null} onChanged={onChanged} onRefresh={onRefresh} onOpenAgent={vi.fn()} agentName={() => null} />);
+    expect(screen.queryByRole('combobox', { name: 'Additional review rounds' })).toBeNull();
+  });
+
+  it('reveals the live run returned when continuation reuses another review', async () => {
+    const failed = overview({ review_continuation: reviewContinuation({ target_run_id: 20 }) });
+    failed.run.state = 'failed';
+    vi.mocked(continueCircuitReview).mockResolvedValue(20);
+    render(<CircuitRunOverview overview={failed} error={null} onChanged={vi.fn()}
+      onRefresh={vi.fn()} onOpenAgent={vi.fn()} agentName={() => null} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Review again · +1 round' }));
+    await waitFor(() => expect(useUIStore.getState().pendingCircuitRunFocus).toBe(20));
+  });
+
+  it.each(['unmounted', 'different run', 'different mesh'])(
+    'does not reveal a delayed continuation after switching to %s', async (destination) => {
+      const failed = overview({ review_continuation: reviewContinuation({ target_run_id: 20 }) });
+      failed.run.state = 'failed';
+      const pending = deferred<number>();
+      vi.mocked(continueCircuitReview).mockReturnValue(pending.promise);
+      const props = { error: null, onChanged: vi.fn(), onRefresh: vi.fn(), onOpenAgent: vi.fn(), agentName: () => null };
+      const view = render(<CircuitRunOverview overview={failed} {...props} />);
+      fireEvent.click(screen.getByRole('button', { name: 'Review again · +1 round' }));
+      if (destination === 'unmounted') view.unmount();
+      else if (destination === 'different run') view.rerender(<CircuitRunOverview overview={{ ...failed, run: { ...failed.run, id: 30 } }} {...props} />);
+      else useMeshStore.setState({ selectedMeshId: 2 });
+      await act(async () => pending.resolve(20));
+      expect(useUIStore.getState().pendingCircuitRunFocus).toBeNull();
+    },
+  );
+
+  it('keeps the failed review and a retryable error when continuation fails', async () => {
+    const failed = overview({ review_continuation: reviewContinuation() });
+    failed.run.state = 'failed';
+    vi.mocked(continueCircuitReview).mockRejectedValue('The retained reviewer is unavailable.');
+    const onChanged = vi.fn();
+    render(<CircuitRunOverview overview={failed} error={null} onChanged={onChanged}
+      onRefresh={vi.fn()} onOpenAgent={vi.fn()} agentName={() => null} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Review again · +1 round' }));
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'The retained reviewer is unavailable.');
+    expect(screen.getByTestId('run-overview-10').getAttribute('data-run-state')).toBe('failed');
+    expect(screen.getByRole('button', { name: 'Review again · +1 round' }).hasAttribute('disabled')).toBe(false);
+    expect(onChanged).not.toHaveBeenCalled();
+    expect(useUIStore.getState().pendingCircuitRunFocus).toBeNull();
+  });
+
+  it.each([undefined, reviewContinuation({ available: false, refusal_reason: 'source_missing' })])(
+    'does not infer permission to extend a failed review', (review_continuation) => {
+      const failed = overview({ review_continuation });
+      failed.run.state = 'failed';
+      render(<CircuitRunOverview overview={failed} error={null} onChanged={vi.fn()}
+        onRefresh={vi.fn()} onOpenAgent={vi.fn()} agentName={() => null} />);
+      expect(screen.queryByRole('combobox', { name: 'Additional review rounds' })).toBeNull();
+    },
+  );
+
   it('changes review rounds on a paused run, shows pending and errors, and refreshes saved values', async () => {
     const review = overview();
     review.review_round_limit = 5;

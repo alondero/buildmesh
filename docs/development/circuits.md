@@ -64,7 +64,11 @@ Lowering the limit below the current round lets that round finish and prevents
 another round. Unlimited keeps allowing another review when changes are
 requested; approval still follows the circuit's normal completion route.
 Completed or failed runs keep their history and recovery actions; use
-**Review again** to extend an exhausted run.
+**Review again** to extend an exhausted run. Eligible runs show **Additional
+review rounds** (1–10) and **Review again** directly on both the agent card's
+Circuit Overview and the Probe run card, without opening details. Both use the
+backend's continuation eligibility and extend the same run with its retained
+reviewer; pending requests disable the controls and failures remain visible.
 
 The numbered round boxes select the feedback shown below them in both the
 Circuit Overview and Probe run card. The latest review is selected initially;
