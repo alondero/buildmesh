@@ -1287,12 +1287,30 @@ jobs:
   macos-candidate-audit-test:
     name: macOS candidate audit and Intel bundle names
     needs: changes
-    # A cold native Tauri build costs about nine minutes. Run it for Rust,
-    # workflow, script, and other unknown changes; skip it when Rust is
-    # explicitly unchanged (docs-only or frontend-only PRs).
-    if: github.event_name == 'pull_request' && needs.changes.outputs.rust != 'false'
+    # A cold native Tauri build costs about twelve minutes, and it is the
+    # whole pull-request critical path when Rust changed (measured p50 14
+    # minutes over the first attempts of 8–14 Nov 2026). The compile, not
+    # the DMG, is that time. rust-cache restores the dependency artifacts
+    # and works around the macOS cache corruption itself, so this job no
+    # longer stays cold on purpose.
+    #
+    # A pull request must not save the cache. GitHub keeps a pull-request
+    # cache private to that pull request, and the repository is already at
+    # its 10 GB cap from copies no other pull request can read. Only a run
+    # on `main` publishes a cache every pull request can restore. Pushes
+    # and the weekly schedule are those runs; a pull request only restores.
+    # The first push after a lockfile change pays the cold build once.
+    #
+    # Debug info is off for the same reason as the platform smoke: the
+    # bundle-name check does not read symbols, and they dominate the link
+    # and the cache entry.
+    if: (github.event_name == 'pull_request' && needs.changes.outputs.rust != 'false') || (github.event_name != 'pull_request' && github.ref == 'refs/heads/main')
     runs-on: macos-15-intel
     timeout-minutes: 35
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
 
     steps:
       - name: Checkout
@@ -1311,6 +1329,18 @@ jobs:
         uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           targets: x86_64-apple-darwin
+
+      # Dependency artifacts only. The workspace crate is rebuilt every run,
+      # which is what a source change has to compile. `save-if` is false on
+      # a pull request, so a fork or a feature branch cannot write a private
+      # copy of this entry. The key is not the Linux one: a Darwin target
+      # directory must not restore over `linux-rust-target`.
+      - name: Cache the Intel Rust dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: "src-tauri -> target"
+          shared-key: macos-intel-audit
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install frontend dependencies
         run: npm ci

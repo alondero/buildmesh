@@ -160,7 +160,14 @@ test('native PR verification exercises the audit CLI and reports real Intel bund
   assert.notEqual(start, -1, 'verify.yml has no macOS candidate audit job');
   const job = verifyWorkflow.slice(start);
   assert.match(job, /needs: changes/);
-  assert.match(job, /if: github\.event_name == 'pull_request' && needs\.changes\.outputs\.rust != 'false'/);
+  assert.match(job, /github\.event_name == 'pull_request' && needs\.changes\.outputs\.rust != 'false'/);
+  // A pull request can restore a cache but cannot publish one the next
+  // pull request is allowed to read. The seed has to be a run on main.
+  assert.match(job, /github\.event_name != 'pull_request' && github\.ref == 'refs\/heads\/main'/);
+  assert.match(job, /shared-key: macos-intel-audit/);
+  assert.match(job, /save-if: \$\{\{ github\.ref == 'refs\/heads\/main' \}\}/);
+  assert.match(job, /CARGO_PROFILE_DEV_DEBUG: "0"/);
+  assert.doesNotMatch(job, /shared-key: linux-rust-target/);
   assert.match(job, /runs-on: macos-15-intel/);
   assert.match(job, /node --test tests\/agent-infra\/macos-candidate-audit\.test\.mjs/);
   assert.match(job, /npm run tauri -- build --debug --target x86_64-apple-darwin/);
@@ -173,6 +180,20 @@ test('native PR verification exercises the audit CLI and reports real Intel bund
   assert.match(gate, /MACOS_AUDIT_RESULT: \$\{\{ needs\.macos-candidate-audit-test\.result \}\}/);
   assert.match(gate, /if\s+\[\s+"\$EVENT_NAME"\s+=\s+pull_request\s+\]\s+&&\s+\[\s+"\$MACOS_AUDIT_RESULT"\s+!=\s+success\s+\];\s+then/);
   assert.match(gate, /the native macOS candidate audit did not pass/);
+});
+
+test('the release guide records that only main publishes the Intel bundle cache', () => {
+  const guide = readFileSync(new URL('../../docs/development/releasing.md', import.meta.url), 'utf8');
+  const heading = '### Caching, and the 10 GB budget';
+  const start = guide.indexOf(heading);
+  assert.notEqual(start, -1, 'releasing.md has no cache-budget section');
+  const section = guide.slice(start);
+  // The workflow change is behavior-sensitive. The guide has to name the
+  // entry and who may write it, or the documentation gate fails the pull request.
+  assert.match(section, /shared-key: macos-intel-audit/);
+  assert.match(section, /That key is not\s+`linux-rust-target`/);
+  assert.match(section, /A pull request restores that entry and must not save one\./);
+  assert.match(section, /github\.ref == 'refs\/heads\/main'/);
 });
 
 // The load-bearing invariant of the whole change: three jobs write one
