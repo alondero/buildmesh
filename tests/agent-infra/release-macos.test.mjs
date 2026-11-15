@@ -160,7 +160,14 @@ test('native PR verification exercises the audit CLI and reports real Intel bund
   assert.notEqual(start, -1, 'verify.yml has no macOS candidate audit job');
   const job = verifyWorkflow.slice(start);
   assert.match(job, /needs: changes/);
-  assert.match(job, /if: github\.event_name == 'pull_request' && needs\.changes\.outputs\.rust != 'false'/);
+  assert.match(job, /github\.event_name == 'pull_request' && needs\.changes\.outputs\.rust != 'false'/);
+  // A pull request can restore a cache but cannot publish one the next
+  // pull request is allowed to read. The seed has to be a run on main.
+  assert.match(job, /github\.event_name != 'pull_request' && github\.ref == 'refs\/heads\/main'/);
+  assert.match(job, /shared-key: macos-intel-audit/);
+  assert.match(job, /save-if: \$\{\{ github\.ref == 'refs\/heads\/main' \}\}/);
+  assert.match(job, /CARGO_PROFILE_DEV_DEBUG: "0"/);
+  assert.doesNotMatch(job, /shared-key: linux-rust-target/);
   assert.match(job, /runs-on: macos-15-intel/);
   assert.match(job, /node --test tests\/agent-infra\/macos-candidate-audit\.test\.mjs/);
   assert.match(job, /npm run tauri -- build --debug --target x86_64-apple-darwin/);
