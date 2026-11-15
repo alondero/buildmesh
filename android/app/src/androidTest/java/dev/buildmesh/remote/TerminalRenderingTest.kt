@@ -226,15 +226,29 @@ class TerminalRenderingTest {
                 compose.onNodeWithText("Send").performClick()
                 compose.waitUntil(5000) { input().size >= 7 }
 
-                listOf("Shift+Tab", "←", "→", "Enter").forEach {
+                // Shift applies to the next key, so Shift then Tab is the mode
+                // chord. There is no dedicated Shift+Tab button.
+                compose.onNodeWithText("Shift").performScrollTo().performClick()
+                compose.onNodeWithText("⇧Tab").performScrollTo().performClick()
+                listOf("←", "→", "Enter").forEach {
                     compose.onNodeWithText(it).performScrollTo().performClick()
                 }
-                compose.waitUntil(5000) { input().size >= 11 }
+                // Ctrl applies to the next typed character. J is the newline
+                // Claude Code, Codex and OpenCode share, because Enter submits.
+                compose.onNodeWithText("Ctrl").performScrollTo().performClick()
+                compose.runOnUiThread {
+                    val editor = EditorInfo()
+                    val keyboard = surface.onCreateInputConnection(editor)
+                    keyboard.commitText("j", 1)
+                }
+                compose.waitUntil(5000) { input().size >= 12 }
                 assertEquals("Only explicit native input reaches the PTY; arrows follow the agent's cursor-key mode",
                     listOf("/", "s", "k", "\u007f",
                         "\u001b[200~pwd\u001b[201~", "\u001b[200~two\rlines\u001b[201~", "\r",
-                        "\u001b[Z", "\u001bOD", "\u001bOC", "\r"),
+                        "\u001b[Z", "\u001bOD", "\u001bOC", "\r", "\n"),
                     input())
+                assertTrue("Shift+Tab is Shift then Tab, not its own key",
+                    compose.onAllNodesWithText("Shift+Tab").fetchSemanticsNodes().isEmpty())
                 // The approval keys live in the band above the terminal now,
                 // where the request they answer is named. A bare `y` in the
                 // quick-key row would approve whichever prompt the agent

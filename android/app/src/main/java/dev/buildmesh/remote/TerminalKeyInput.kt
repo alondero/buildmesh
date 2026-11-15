@@ -78,6 +78,20 @@ fun terminalKeyBytes(
     }
 }
 
+/**
+ * Ctrl applies to the first character of a commit. Leading DELs are
+ * corrections the keyboard already made and stay deletions.
+ */
+internal fun applyCtrlToFirstCharacter(bytes: String, ctrl: Boolean): String {
+    if (!ctrl) return bytes
+    var index = 0
+    while (index < bytes.length && bytes[index] == '\u007f') index++
+    if (index >= bytes.length) return bytes
+    val point = bytes.codePointAt(index)
+    val controlled = printable(point, ctrl = true) ?: return bytes
+    return bytes.substring(0, index) + controlled + bytes.substring(index + Character.charCount(point))
+}
+
 private fun printable(char: Int, ctrl: Boolean): String? {
     if (char <= 0) return null
     val text = String(Character.toChars(char))
@@ -184,6 +198,7 @@ class TerminalSurface(
     context: Context,
     val terminal: WebView,
     private val modes: () -> TerminalInputModes,
+    private val modifiers: QuickModifierLatch,
     private val send: (String) -> Unit,
 ) : FrameLayout(context) {
     private val stream = ImeTextStream()
@@ -227,7 +242,9 @@ class TerminalSurface(
             // event (which [onKeyDown] maps) instead of editing text it
             // believes is there.
             override fun commitText(text: CharSequence, newCursorPosition: Int): Boolean {
-                emit(stream.commit(text))
+                // Ctrl, if armed, changes the character that is sent. Ctrl+J
+                // is a newline. The stream keeps the keyboard's own text.
+                emit(modifiers.onCommit(stream.commit(text)))
                 super.commitText(text, newCursorPosition)
                 editable?.clear()
                 return true
@@ -247,7 +264,7 @@ class TerminalSurface(
                 return super.deleteSurroundingText(beforeLength, afterLength)
             }
             override fun performEditorAction(editorAction: Int): Boolean {
-                emit("\r")
+                emit(modifiers.onSubmit())
                 return true
             }
         }
@@ -259,8 +276,14 @@ class TerminalSurface(
         // character Android would map the chord to.
         val base = event.getUnicodeChar(event.metaState and (KeyEvent.META_CTRL_MASK or KeyEvent.META_ALT_MASK).inv())
         if (base and KeyCharacterMap.COMBINING_ACCENT != 0) return true
-        val bytes = terminalKeyBytes(keyCode, base, shift = event.isShiftPressed, ctrl = event.isCtrlPressed,
+        // A latched Shift or Ctrl counts as held for this key, then drops.
+        // A key the terminal does not own (Back, volume) leaves the latch
+        // armed, because that key was not the chord.
+        val bytes = terminalKeyBytes(keyCode, base,
+            shift = modifiers.effectiveShift(event.isShiftPressed),
+            ctrl = modifiers.effectiveCtrl(event.isCtrlPressed),
             alt = event.isAltPressed, modes = modes()) ?: return super.onKeyDown(keyCode, event)
+        modifiers.consume()
         emit(bytes)
         return true
     }
@@ -268,7 +291,7 @@ class TerminalSurface(
     override fun onKeyMultiple(keyCode: Int, repeatCount: Int, event: KeyEvent): Boolean {
         val characters = event.characters
         if (keyCode != KeyEvent.KEYCODE_UNKNOWN || characters == null) return super.onKeyMultiple(keyCode, repeatCount, event)
-        emit(stream.commit(characters))
+        emit(modifiers.onCommit(stream.commit(characters)))
         return true
     }
 
