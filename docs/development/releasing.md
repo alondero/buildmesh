@@ -193,7 +193,7 @@ same ground:
 | `Verification / Manifest versions` | no — see the gap below | Every file that stores the app version agrees on it: `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, the `buildmesh` entry in `src-tauri/Cargo.lock`, and both version sites in `package-lock.json`. A pure read of six strings, so it runs on every event with no `npm ci`, no change-scope classification, and no upstream job. |
 | `Verification / Supply chain` | no — blocks a release, not a merge | Every third-party `uses:` is pinned to a full commit SHA (each SHA resolved against the GitHub API), `npm audit` passes the two-tier advisory policy for both production and dev dependencies, and `cargo audit` finds no vulnerability with every maintenance warning recorded with an owner, rationale and review date. Runs on every event rather than behind the change-scope fan-out, because an unpinned action or a lockfile bump touches no Rust source file — a gate behind that classification would miss exactly the diff it exists to catch. See [supply-chain.md](supply-chain.md) for the policy and for why it is not yet required. |
 | `Verification / Quality (Linux)` | yes | The aggregate frontend gate. It runs no check of its own, and it never skips: a required check that GitHub reports as *skipped* counts as satisfied, so the decision lives in `scripts/ci/quality-gate.mjs` where the reason an upstream branch is absent is visible. It passes only when the change-scope job succeeded, `Quality gates (Linux)` passed (agent-infrastructure, docs, README-drift, ESLint (+ fixture verifier), frontend build, bundle budget, process-spawn discipline — this is what stops a docs-only pull request), and the three `Quality vitest (<leg>)` legs passed. The one absence it tolerates: the vitest legs skipping themselves when the classification says no frontend changed. |
-| `Verification / Rust tests + TS bindings` | yes | The aggregate Rust gate. It passes only when the change-scope job succeeded and the compile job, every test shard, `Quality (Linux)`, and the non-shard `Rust export, doc, and integration tests` job (export, doctest, and integration targets run serially, with ts-rs regenerating `src/types/generated/` so binding drift fails the build) all passed. On pull requests, the `macOS candidate audit and Intel bundle names` job must also have succeeded; that job does not gate other events. The one check that legitimately skips: a pull request whose diff touched no Rust (a skipped required check counts as satisfied, which is why every other absence is made to fail instead). |
+| `Verification / Rust tests + TS bindings` | yes | The aggregate Rust gate. It passes only when the change-scope job succeeded and the compile job, every test shard, `Quality (Linux)`, and the non-shard `Rust export, doc, and integration tests` job (export, doctest, and integration targets run serially, with ts-rs regenerating `src/types/generated/` so binding drift fails the build) all passed. On pull requests, the `macOS candidate audit and Intel bundle names` job must also have succeeded; that job does not gate other events. The same job runs on `main` to publish the `macos-intel-audit` dependency cache; see [Caching, and the 10 GB budget](#caching-and-the-10-gb-budget). The one check that legitimately skips: a pull request whose diff touched no Rust (a skipped required check counts as satisfied, which is why every other absence is made to fail instead). |
 | `Verification / Verify-smoke (Linux)` | yes | The real browser renders the app with a mock backend (`verify-smoke` Playwright project), whenever the change-scope job reports frontend changes; a Rust-only pull request skips it. |
 | `Verification / Platform smoke (windows-latest)` | no — post-merge signal | The Tauri app compiles and links on Windows; ConPTY frame ordering and background inference behavior tests pass, including Claude install fallbacks with a stale PATH. Runs on pushes to `main`, release tags, and manual dispatches — not on pull requests. Caches its Cargo target directory; macOS deliberately does not. |
 | `Verification / Platform smoke (macos-latest)` | no — post-merge signal | The Tauri app compiles and links on macOS. Same triggers as the Windows leg, cold apart from the Cargo download cache. |
@@ -470,6 +470,28 @@ directory (the cache action documents macOS target directories as its
 corruption workaround, and that leg is 245s) and the weekly `Weekly package
 smoke` targets (a one-off check does not justify three persistent target
 caches).
+
+The Intel bundle-name job is the macOS leg that does keep dependency
+artifacts. `macos-candidate-audit-test` runs on `macos-15-intel` and uses
+rust-cache with `shared-key: macos-intel-audit`. That key is not
+`linux-rust-target`: a Darwin target directory must not restore over the
+Linux entry. rust-cache works around the macOS target-directory corruption
+that keeps the platform-smoke leg uncached, and this job stores dependency
+artifacts only. The workspace crate is rebuilt on every run.
+
+A pull request restores that entry and must not save one. GitHub keeps a
+pull-request cache private to that pull request, and this repository is
+already at the 10 GB cap, so a private copy would evict an entry another
+pull request can read. `save-if` is `github.ref == 'refs/heads/main'`. The
+job also runs when the event is not a pull request and the ref is
+`refs/heads/main` — a push to `main`, the weekly schedule, and a manual
+dispatch on `main` — because those runs are the ones allowed to publish the
+entry. A tag push does not match that ref. The first push after a lockfile
+change pays the cold build once. Debug symbols are off
+(`CARGO_PROFILE_DEV_DEBUG`, `CARGO_PROFILE_TEST_DEBUG`, and
+`CARGO_INCREMENTAL` are `0`): the job checks bundle file names, and the
+symbols dominate the link and the cache entry. The required Rust gate still
+demands a successful result from this job only on pull requests.
 
 Those names are owned by `.github/workflows/verify.yml`. A job that calls a
 reusable workflow is reported as `<calling job> / <called job>`, so the

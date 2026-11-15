@@ -182,6 +182,20 @@ test('native PR verification exercises the audit CLI and reports real Intel bund
   assert.match(gate, /the native macOS candidate audit did not pass/);
 });
 
+test('the release guide records that only main publishes the Intel bundle cache', () => {
+  const guide = readFileSync(new URL('../../docs/development/releasing.md', import.meta.url), 'utf8');
+  const heading = '### Caching, and the 10 GB budget';
+  const start = guide.indexOf(heading);
+  assert.notEqual(start, -1, 'releasing.md has no cache-budget section');
+  const section = guide.slice(start);
+  // The workflow change is behavior-sensitive. The guide has to name the
+  // entry and who may write it, or the documentation gate fails the pull request.
+  assert.match(section, /shared-key: macos-intel-audit/);
+  assert.match(section, /That key is not\s+`linux-rust-target`/);
+  assert.match(section, /A pull request restores that entry and must not save one\./);
+  assert.match(section, /github\.ref == 'refs\/heads\/main'/);
+});
+
 // The load-bearing invariant of the whole change: three jobs write one
 // latest.json, and tauri-action merges it with a delete-then-upload.
 test('only one macOS leg builds at a time, so the shared feed cannot race', () => {
