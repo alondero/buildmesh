@@ -477,7 +477,8 @@ rust-cache with `shared-key: macos-intel-audit`. That key is not
 `linux-rust-target`: a Darwin target directory must not restore over the
 Linux entry. rust-cache works around the macOS target-directory corruption
 that keeps the platform-smoke leg uncached, and this job stores dependency
-artifacts only. The workspace crate is rebuilt on every run.
+artifacts only. rust-cache does not store the workspace crate, so a source
+change still compiles it.
 
 A pull request restores that entry and must not save one. GitHub keeps a
 pull-request cache private to that pull request, and this repository is
