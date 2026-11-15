@@ -3,7 +3,6 @@ package dev.buildmesh.remote
 import android.annotation.SuppressLint
 import android.content.ActivityNotFoundException
 import android.content.Intent
-import android.view.KeyEvent
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -24,6 +23,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
@@ -43,33 +44,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
-
-/**
- * The quick keys the terminal's own row offers: the keys a soft keyboard
- * lacks, which the agent's own menus and completion are driven by.
- *
- * Each key's bytes come from [terminalKeyBytes], so the arrows follow the
- * agent's cursor-key mode exactly as a hardware keyboard's arrows do.
- *
- * The approval keys are deliberately absent: a pending request is answered from
- * the band above the terminal, which names the request it answers. A bare `y`
- * in a quick-key row cannot say which request it would approve, so it would
- * approve whichever prompt the agent happens to show next.
- */
-val terminalQuickKeys: List<Pair<String, (TerminalInputModes) -> String>> = listOf(
-    QuickKey("Esc", KeyEvent.KEYCODE_ESCAPE), QuickKey("Tab", KeyEvent.KEYCODE_TAB),
-    QuickKey("Shift+Tab", KeyEvent.KEYCODE_TAB, shift = true),
-    QuickKey("Ctrl+C", KeyEvent.KEYCODE_C, char = 'c'.code, ctrl = true), QuickKey("Enter", KeyEvent.KEYCODE_ENTER),
-    QuickKey("↑", KeyEvent.KEYCODE_DPAD_UP), QuickKey("↓", KeyEvent.KEYCODE_DPAD_DOWN),
-    QuickKey("←", KeyEvent.KEYCODE_DPAD_LEFT), QuickKey("→", KeyEvent.KEYCODE_DPAD_RIGHT),
-).map { key ->
-    key.label to { modes: TerminalInputModes ->
-        checkNotNull(terminalKeyBytes(key.keyCode, key.char, shift = key.shift, ctrl = key.ctrl, modes = modes))
-    }
-}
-
-private class QuickKey(val label: String, val keyCode: Int, val char: Int = 0,
-                       val shift: Boolean = false, val ctrl: Boolean = false)
 
 /**
  * One node's terminal.
@@ -111,6 +85,10 @@ fun TerminalPane(api: BuildmeshApi, nodeId: Long, vm: BuildmeshViewModel) {
     // a stale tail position would show the control on a fresh terminal.
     var liveTail by remember(nodeId) { mutableStateOf(true) }
     val view = remember(nodeId) { WebView(context) }
+    // Bumped when a modifier is armed or consumed, including by a key the
+    // keyboard commits, so the row redraws the chord it will send next.
+    val modifierGeneration = remember(nodeId) { mutableIntStateOf(0) }
+    val modifiers = remember(nodeId) { QuickModifierLatch { modifierGeneration.intValue++ } }
     val socket = remember(api, nodeId, view) {
         RemoteSocket(api, scope, "terminal", nodeId,
             onStatus = { status = it },
@@ -130,7 +108,7 @@ fun TerminalPane(api: BuildmeshApi, nodeId: Long, vm: BuildmeshViewModel) {
     // as that WebView; a second surface for the same view would find it
     // already parented. Sends go through the latest socket.
     val send by rememberUpdatedState<(String) -> Boolean>({ sendInput(it) })
-    val surface = remember(view) { TerminalSurface(context, view, modes = { modes }, send = { send(it) }) }
+    val surface = remember(view) { TerminalSurface(context, view, modes = { modes }, modifiers = modifiers, send = { send(it) }) }
 
     // The node's own row is the source of the request: the desktop's
     // semantic-turn banner reads the same lifecycle, so the phone shows the
@@ -224,26 +202,39 @@ fun TerminalPane(api: BuildmeshApi, nodeId: Long, vm: BuildmeshViewModel) {
         }
         SemanticTurnBand(request, reply)
         AndroidView(factory = { surface }, modifier = Modifier.fillMaxWidth().weight(1f).onSizeChanged { viewport = it })
-        // One row: the keyboard toggle and Compose first, then the keys a soft
-        // keyboard lacks. There is no second prompt box — typing goes into
-        // the agent's own input, which is where its menus and completion are.
+        // One row: the keyboard toggle and Compose, then the keys that stop an
+        // agent, then Shift and Ctrl, then Tab, the arrows and Enter. A
+        // modifier applies to the next key. There is no second prompt box —
+        // typing goes into the agent's own input, which is where its menus
+        // and completion are.
         val connected = status == "Connected"
         val keyboardOpen = WindowInsets.isImeVisible
+        // The generation is the snapshot this row subscribes to. The latch
+        // flags are plain fields, so reading them alone would leave Shift
+        // drawn as on after the keyboard consumed it.
+        val shiftOn = modifierGeneration.intValue.let { modifiers.shiftOn }
+        val ctrlOn = modifiers.ctrlOn
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(enabled = connected, onClick = { if (keyboardOpen) surface.hideKeyboard() else surface.showKeyboard() }) {
                 if (keyboardOpen) Icon(Icons.Outlined.KeyboardHide, contentDescription = "Hide keyboard")
                 else Icon(Icons.Outlined.Keyboard, contentDescription = "Type into the agent")
             }
-            TextButton(enabled = connected, onClick = { surface.hideKeyboard(); composing = true }) {
+            TextButton(enabled = connected, onClick = { modifiers.consume(); surface.hideKeyboard(); composing = true }) {
                 Icon(Icons.AutoMirrored.Outlined.Notes, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
                 Text("Compose")
             }
             VerticalDivider(Modifier.height(24.dp))
-            terminalQuickKeys.forEach { (label, bytes) ->
-                TextButton(enabled = connected, onClick = { sendInput(bytes(modes)) }) { Text(label) }
+            // Esc and Ctrl+C come before the modifiers so the keys that stop
+            // an agent stay on screen. The modifiers sit in front of Tab and
+            // the arrows, which are the keys they change.
+            val (stopKeys, editingKeys) = terminalQuickKeys.partition { it.label == "Esc" || it.interrupt }
+            stopKeys.forEach { key -> QuickKeyButton(key, connected, shiftOn, ctrlOn) { sendInput(modifiers.sequence(key, modes)) } }
+            quickModifiers.forEach { held ->
+                QuickModifierButton(held.label, on = held.on(modifiers), enabled = connected, onClick = { held.toggle(modifiers) })
             }
+            editingKeys.forEach { key -> QuickKeyButton(key, connected, shiftOn, ctrlOn) { sendInput(modifiers.sequence(key, modes)) } }
         }
     }
 
@@ -260,6 +251,27 @@ fun TerminalPane(api: BuildmeshApi, nodeId: Long, vm: BuildmeshViewModel) {
             }
         },
     )
+}
+
+@Composable
+private fun QuickKeyButton(
+    key: TerminalQuickKey, enabled: Boolean, shift: Boolean, ctrl: Boolean, onClick: () -> Unit,
+) {
+    TextButton(enabled = enabled, onClick = onClick) { Text(key.caption(shift, ctrl)) }
+}
+
+/** Shift or Ctrl. Filled while it will apply to the next key. */
+@Composable
+private fun QuickModifierButton(label: String, on: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    TextButton(
+        enabled = enabled,
+        onClick = onClick,
+        colors = if (on) ButtonDefaults.textButtonColors(
+            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+        ) else ButtonDefaults.textButtonColors(),
+        modifier = Modifier.semantics { stateDescription = if (on) "on, applies to the next key" else "off" },
+    ) { Text(label) }
 }
 
 /**

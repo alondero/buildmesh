@@ -1505,9 +1505,14 @@ Issues, Archive, Changes, Pull requests and Usage re-read on the gesture, and
 the refresh button in the app bar reloads the screen you are on. The mesh
 **Pull requests** screen switches between open and closed pull requests; closed
 ones are read-only. A failed read offers **Retry** at the top of the list, so
-recovering does not depend on scrolling. Its terminal includes keyboard input, Esc/Tab/Ctrl+C and arrow
-keys, and reconnects when the app returns to the foreground. In either phone
-client, tap a terminal URL or hyperlink to open it in your phone's browser;
+recovering does not depend on scrolling. Its terminal takes keyboard input.
+**Esc**, **Tab**, the arrows, **Enter** and **Ctrl+C** sit under it for one tap.
+**Shift** and **Ctrl** there apply to the next key and then drop: **Shift**
+then **←** or **→** moves to a Codex question, **Shift** then **Tab** cycles
+the agent's mode, and **Ctrl** then **J** starts a new line without sending. Tapping the
+same modifier again cancels it. The terminal reconnects when the app returns
+to the foreground. In either phone client, tap a terminal URL or hyperlink
+to open it in your phone's browser;
 drag to scroll without opening links.
 **Create PR** on a mesh uses that mesh's current branch; ask an
 agent to open a worktree PR from its terminal. **Settings → Forget this

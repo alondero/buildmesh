@@ -431,6 +431,22 @@ dead. The quick-key row below the terminal offers no bare `y` or `n`: a key
 without a request in view would approve whichever prompt the agent happened to
 show next.
 
+The same row offers the keys a phone keyboard does not have that a harness
+session needs from the phone, plus two one-shot modifiers. **Esc** and
+**Ctrl+C** are drawn first, then the modifiers, then **Tab**, the arrows and
+**Enter**. Those keys are one tap. **Ctrl+C** stays one tap so an interrupt
+does not take a second press. **Shift** and **Ctrl** apply to the next key
+and then drop; tapping the same one again cancels it. **Shift** then **Tab** sends Shift+Tab, which cycles
+Claude Code and Codex mode and cycles OpenCode's agent the other way.
+**Shift** then **←** or **→** sends xterm's modified arrow (`ESC [ 1 ; 2 D` /
+`C`), including while the agent is in application-cursor mode. That is the
+chord Codex shows for focusing an async question and moving between queued
+messages. **Ctrl** then a typed letter sends that control character, so
+**Ctrl** then **J** is a newline in Claude Code, Codex and OpenCode, where
+Enter submits, and **Ctrl** then **X** starts OpenCode's leader sequence. A
+keyboard that still holds a word back does not take the Ctrl latch until it
+commits a new character. Shift does not change **Enter**: Enter submits.
+
 The terminal scrolls by touch. xterm's own scroller answers the mouse wheel
 only, so the bundled WebView wires the shared touch-pan bridge described in
 [Terminals](terminals.md#mobile-terminals-scroll-by-touch-through-one-shared-bridge):
@@ -585,8 +601,9 @@ device stops the feed instead of minting tickets forever.
 `TerminalKeyInputTest` covers the key-to-bytes mapping, cursor-key mode,
 held-back words and the Compose paste.
 The terminal's quick-key row has its own suite: the approval keys are not
-duplicated there, and the approval sequences the band sends are the desktop's
-`y\r` / `n\r`.
+duplicated there, Shift then Left and Shift then Tab send the harness chords,
+Ctrl then J sends a newline, a modifier applies once, and the approval
+sequences the band sends are the desktop's `y\r` / `n\r`.
 
 ```powershell
 android\gradlew.bat -p android connectedDebugAndroidTest
@@ -600,7 +617,8 @@ rendering, visible pixels in the native window, viewport geometry, resize and
 input, including replayed queries that must not become keystrokes. Input
 starts with a tap on the terminal and drives the keyboard connection the
 surface hands a soft keyboard (not a real keyboard app), then the Compose
-sheet and the quick keys, whose arrows follow the agent's cursor-key mode. A
+sheet and the quick keys. Shift then Tab sends the mode chord, Ctrl then J
+sends a newline, and the arrows follow the agent's cursor-key mode. A
 link tap does not raise the keyboard.
 The semantic-turn band above the terminal is covered on the device too: it
 shows a permission request's own words and the desktop's `Allow (Y)` /

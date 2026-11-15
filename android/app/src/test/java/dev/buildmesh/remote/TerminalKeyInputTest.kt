@@ -113,11 +113,4 @@ class TerminalKeyInputTest {
         assertEquals("\u001b[200~line one\rline two\u001b[201~", composePaste("line one\r\nline two", bracketed))
         assertEquals("\u001b[200~one line\u001b[201~", composePaste("one line", bracketed))
     }
-
-    @Test fun quickKeysFollowTheSameModes() {
-        val up = terminalQuickKeys.first { it.first == "↑" }.second
-        assertEquals("\u001b[A", up(normal))
-        assertEquals("\u001bOA", up(appCursor))
-        assertEquals("\u0003", terminalQuickKeys.first { it.first == "Ctrl+C" }.second(appCursor))
-    }
 }
