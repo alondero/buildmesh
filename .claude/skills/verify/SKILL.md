@@ -9,8 +9,9 @@ Read `docs/agents/engineering.md` for the shared verification contract. Establis
 
 Use `npm run verify` with the active task, or `npm run verify -- --base <commit>`
 without one, for the canonical scope-selected gate and durable receipt. Read
-`docs/agents/development-harness.md` for PASS/FAIL/BLOCKED/TIMEOUT, continuity,
-current acceptance/review evidence and `finish`. Reuse unchanged passing gates;
+the relevant sections of `docs/agents/development-harness.md`: "Verify and finish"
+for gate outcomes, "Start and resume" for continuity, and "Review and repair"
+for acceptance/review evidence. Reuse unchanged passing gates;
 do not replace a failed full check with a successful subset.
 
 During independent-review repairs, follow

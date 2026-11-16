@@ -73,6 +73,34 @@ test('linking again refreshes our own links instead of failing', t => {
   assert.ok(existsSync(join(f.worktree, 'node_modules/added/package.json')));
 });
 
+test('matching checkout locks cannot authorize an outdated installed dependency', t => {
+  const f = fixture(t);
+  const lock = JSON.stringify({ lockfileVersion: 3, packages: { 'node_modules/example': { version: '2.0.0' } } });
+  f.put(join(f.main, 'package-lock.json'), lock);
+  f.put(join(f.worktree, 'package-lock.json'), lock);
+  assert.throws(() => linkWorktreeDependencies(f.worktree), /Installed dependency.*example.*1\.0\.0.*2\.0\.0.*npm ci/s);
+  assert.equal(existsSync(join(f.worktree, 'node_modules')), false);
+  assert.equal(JSON.parse(readFileSync(f.mainPackage, 'utf8')).version, '1.0.0');
+});
+
+test('installed lock validation accepts the locked version and absent optional packages', t => {
+  const f = fixture(t);
+  const lock = JSON.stringify({ lockfileVersion: 3, packages: { 'node_modules/example': { version: '1.0.0' }, 'node_modules/platform-only': { version: '1.0.0', optional: true } } });
+  f.put(join(f.main, 'package-lock.json'), lock);
+  f.put(join(f.worktree, 'package-lock.json'), lock);
+  linkWorktreeDependencies(f.worktree);
+  assert.ok(isLink(join(f.worktree, 'node_modules/example')));
+});
+
+test('installed lock validation refuses missing required dependencies before creating links', t => {
+  const f = fixture(t);
+  const lock = JSON.stringify({ lockfileVersion: 3, packages: { 'node_modules/missing': { version: '1.0.0' } } });
+  f.put(join(f.main, 'package-lock.json'), lock);
+  f.put(join(f.worktree, 'package-lock.json'), lock);
+  assert.throws(() => linkWorktreeDependencies(f.worktree), /Installed dependency.*missing.*npm ci/s);
+  assert.equal(existsSync(join(f.worktree, 'node_modules')), false);
+});
+
 test('unlinking removes every link, never touches the main packages and is repeatable', t => {
   const f = fixture(t);
   linkWorktreeDependencies(f.worktree);
@@ -215,6 +243,13 @@ test('harness link-deps and unlink-deps run non-interactively with a clear exit 
   assert.equal(unlinked.status, 0, unlinked.stderr);
   assert.equal(existsSync(join(f.worktree, 'node_modules/example')), false);
   assert.ok(existsSync(f.mainPackage));
+  const lock = JSON.stringify({ lockfileVersion: 3, packages: { 'node_modules/example': { version: '2.0.0' } } });
+  f.put(join(f.main, 'package-lock.json'), lock);
+  f.put(join(f.worktree, 'package-lock.json'), lock);
+  const stale = run('link-deps');
+  assert.equal(stale.status, 2);
+  assert.match(stale.stderr, /Installed dependency.*example.*npm ci/s);
+  assert.equal(existsSync(join(f.worktree, 'node_modules/example')), false);
   f.put(join(f.worktree, 'package.json'), '{"type":"module"}');
   const refused = run('link-deps');
   assert.equal(refused.status, 2);

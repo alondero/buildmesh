@@ -39,7 +39,7 @@ Capture the baseline from the **pre-change tree**. Two cases:
 powershell -File scripts\run-dev.ps1 -Detach -CdpPort 9223 -TestBridge
 ```
 
-Kills any previous `buildmesh-dev` (never the hub), rebuilds from the current tree, launches with CDP. Fresh launch each time = same window size = comparable screenshots.
+Replaces this worktree's previous dev instance, rebuilds from the current tree, and launches with CDP. Fresh launch each time = same window size = comparable screenshots.
 
 ### 3. Drive the feature + AFTER screenshot
 
@@ -48,9 +48,9 @@ Write a steps module (throwing fails the run — put your functional assertions 
 ```js
 // steps.mjs — context: { page, invoke }
 export default async function ({ page, invoke }) {
-  // Fixture data via the HTTP test bridge (dev profile, port 2991).
+  // Fixture data via this worktree's recorded HTTP test bridge.
   // `invoke` sends Authorization: Bearer from `.tmp/test-bridge-token`.
-  // Launch with -TestBridge or the request is connection refused, and a
+  // Launch with -TestBridge to write the instance record and bearer; a
   // request without the bearer is 401. Only the commands routed in
   // src-tauri/src/commands/test.rs are available:
   const mesh = await invoke('create_test_mesh', { name: 'Shot fixture' });
@@ -67,6 +67,7 @@ export default async function ({ page, invoke }) {
 
 ```powershell
 node scripts/ui-shot.mjs --out docs/pr-screenshots/<branch>/<slug>-after.png --steps steps.mjs --selector "<css>"
+# The invoke helper reads .tmp/dev-instance.json; --invoke-port <n> overrides it.
 ```
 
 Use the **same steps + selector** for comparable before and after states. A saved PNG proves capture only; functional assertions must establish the requested behavior. For Probe changes exercise 240px width, including loading/error states and button bounds per `docs/development/probe-ui-checklist.md`. Then **look at the PNG yourself** (Read the file) — confirm it shows what you claim before attaching it to a PR.
@@ -119,17 +120,23 @@ node scripts/ui-shot.mjs --out docs/pr-screenshots/<branch>/<slug>-after.png --m
 The mobile UI is served over plain HTTP on loopback — no CDP needed:
 
 ```powershell
-# Token via the dev-profile test bridge on 2991. The app must have been
+# Use the ports from this worktree's launch record. The app must have been
 # launched with -TestBridge, which writes .tmp/test-bridge-token.
 # Use node fetch — PowerShell's Invoke-RestMethod sends the body in a
 # second TCP segment the bridge's single-read parser never sees.
-$tok = node -e "const fs=require('fs'); const token=fs.readFileSync('.tmp/test-bridge-token','utf8'); fetch('http://127.0.0.1:2991/invoke',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+token},body:JSON.stringify({cmd:'get_root_token',args:{}})}).then(r=>r.json()).then(j=>{ if(!j.ok) throw new Error(j.error||'bridge rejected the token'); console.log(j.data.token); })"
-node scripts/ui-shot.mjs --out docs/pr-screenshots/<branch>/mobile-after.png --url "http://127.0.0.1:2992/v2?token=$tok" --viewport 390x844
+$bridgePort = node --input-type=module -e "import {bridgePort} from './scripts/test-bridge-auth.mjs'; console.log(bridgePort());"
+$instance = Get-Content -LiteralPath .tmp/dev-instance.json -Raw | ConvertFrom-Json
+$log = Join-Path $instance.profileDir 'logs/buildmesh.log'
+$bound = Select-String -LiteralPath $log -Pattern 'HTTP server listening on port (\d+)' | Select-Object -Last 1
+if (-not $bound) { throw 'No HTTP listener found in this profile log' }
+$mobilePort = [int]$bound.Matches[0].Groups[1].Value
+$tok = node -e "const fs=require('fs'); const token=fs.readFileSync('.tmp/test-bridge-token','utf8'); fetch('http://127.0.0.1:$bridgePort/invoke',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+token},body:JSON.stringify({cmd:'get_root_token',args:{}})}).then(r=>r.json()).then(j=>{ if(!j.ok) throw new Error(j.error||'bridge rejected the token'); console.log(j.data.token); })"
+node scripts/ui-shot.mjs --out docs/pr-screenshots/<branch>/mobile-after.png --url "http://127.0.0.1:$mobilePort/v2?token=$tok" --viewport 390x844
 ```
 
 ## Hard rules & pitfalls
 
-- Keep the stable `buildmesh` process and its phone/Android port 1992 untouched. The test bridge (1991 stable, 2991 dev) is off unless that process was launched with the test-bridge switch. Use 3999 for mock Vite checks on every host. The CDP path uses `buildmesh-dev` (bridge 2991, phone/Android 2992, CDP 9223) launched with `-TestBridge`; stop only the PID launched for this verification.
+- Keep the stable `buildmesh` process and its phone/Android port 1992 untouched. The test bridge (1991 stable, 2991 dev) is off unless that process was launched with the test-bridge switch. Use 3999 for mock Vite checks on every host. The CDP path uses `buildmesh-dev` launched with `-TestBridge`, the bridge port in `.tmp/dev-instance.json` and the HTTP port printed by the launcher; stop only the PID launched for this verification.
 - Playwright's webServer starts Vite on 1420. `--project=verify-smoke` uses mock IPC; chromium specs have additional runtime requirements. Read those specs before running them and never stop the stable hub to satisfy a test.
 - CDP attach fails → the app wasn't launched with `-CdpPort` (plain `/use` launches without it) or the window was closed. Re-run step 2.
 - Don't minimize the dev window while shooting — Chromium throttles hidden renderers.

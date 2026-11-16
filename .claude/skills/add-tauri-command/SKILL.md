@@ -5,6 +5,12 @@ description: Add or change a Tauri command or the mobile HTTP route that shares 
 
 # Add a Tauri command
 
+Before raw Cargo commands in this recipe, set `CARGO_TARGET_DIR` to a private
+absolute path under this worktree, such as `<worktree>/.tmp/cargo-focused`.
+Restore the previous environment after focused checks. Final verification uses
+`npm run verify` and its stamped Rust runner; see
+[worktree setup](../../../docs/agents/development-harness.md#worktree-setup).
+
 Follow this in order. The rules it protects are in `CLAUDE.md` and `docs/development/rust-conventions.md`. A command validates input, calls one service or `db::` function, and maps the error to `String`.
 
 Do not copy a file listed under `docs/development/module-map.md#seam-debt`. Those files still open `git2` repositories. `tests/agent-infra/git2-ownership.test.mjs` pins that list.

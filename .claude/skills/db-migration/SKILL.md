@@ -5,6 +5,12 @@ description: Add or change a SQLite schema migration. Use when bumping SCHEMA_VE
 
 # Change the database schema
 
+Before raw Cargo commands in this recipe, set `CARGO_TARGET_DIR` to a private
+absolute path under this worktree, such as `<worktree>/.tmp/cargo-focused`.
+Restore the previous environment after focused checks. Final verification uses
+`npm run verify` and its stamped Rust runner; see
+[worktree setup](../../../docs/agents/development-harness.md#worktree-setup).
+
 `SCHEMA_VERSION` lives in `src-tauri/src/db/migrations.rs`. `src-tauri/src/db/mod.rs` owns the connection pool and `init` only. Do not declare a second version constant.
 
 1. Bump `SCHEMA_VERSION` and add the step in `src-tauri/src/db/migrations.rs`. Pass the `&Connection` you were given into an `_inner` helper. Do not call `read_conn()` or `write_conn()` from code that already holds a connection.

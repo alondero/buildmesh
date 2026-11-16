@@ -8,7 +8,8 @@ repositories, with persistent xterm.js terminals and Windows/WSL support.
 1. Check the worktree root, branch and `git status --short`; record the base
    commit. Write under this worktree root and confirm edits with `git diff`.
 2. Read [the engineering contract](docs/agents/engineering.md) for the shared
-   workflow and conditional references. Start or resume the development harness.
+   workflow and conditional references. Start or resume the development harness
+   for implementation; read-only investigations do not need a task or receipt.
 3. Use [the architecture index](docs/knowledge-primer.md) to find the relevant
    owner document; read that section, then its owning code. The index and owner
    docs are references, not whole-file reading assignments. Domain language:

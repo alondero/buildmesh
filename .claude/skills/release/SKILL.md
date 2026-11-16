@@ -32,7 +32,7 @@ Branch from `origin/main` as `release/vX.Y.Z`.
 
 ## 2. Merge
 
-Wait for checks: `gh pr checks <n> --watch` in the background. The summary counts the skipped `Alert on failure` job as a failure; it is not one. Then `gh pr merge <n> --squash --subject "<title> (#<n>)" --body "docs: ..."`. Omit `--delete-branch`: the branch is checked out in a worktree.
+Identify the verification run for the exact pushed commit and wait for its required jobs, following [Remote CI](../verify/SKILL.md#remote-ci). Then `gh pr merge <n> --squash --subject "<title> (#<n>)" --body "docs: ..."`. Omit `--delete-branch`: the branch is checked out in a worktree.
 
 ## 3. Tag the merge commit
 
@@ -42,7 +42,7 @@ git tag vX.Y.Z <merge-sha-on-origin-main>
 git push origin vX.Y.Z
 ```
 
-The tag must be reachable from `main` or the workflow rejects it. Do not move or reuse a pushed tag. Find the run with `gh run list --workflow release.yml --limit 1` and watch it with `gh run watch <id> --exit-status` in the background. `Verification` runs first, followed by `release` (the Windows draft). After that, the two `macOS ad-hoc signed` legs run **serially** while `Android signed APK` runs in parallel. The native downloaded-candidate audit follows the macOS legs. `Verify updater feed` waits for the Mac audit and may run in parallel with Android. The macOS package legs are sequential by design: all three packaging jobs write the same `latest.json`, and merging is delete-then-upload, so a longer macOS job is the cost of not shipping a half-written feed.
+The tag must be reachable from `main` or the workflow rejects it. Do not move or reuse a pushed tag. Resolve the tagged commit with `git rev-parse "vX.Y.Z^{commit}"`; find its run with `gh run list --workflow release.yml --commit <tag-commit> --limit 1` and watch it with `gh run watch <id> --exit-status` in the background. `Verification` runs first, followed by `release` (the Windows draft). After that, the two `macOS ad-hoc signed` legs run **serially** while `Android signed APK` runs in parallel. The native downloaded-candidate audit follows the macOS legs. `Verify updater feed` waits for the Mac audit and may run in parallel with Android. The macOS package legs are sequential by design: all three packaging jobs write the same `latest.json`, and merging is delete-then-upload, so a longer macOS job is the cost of not shipping a half-written feed.
 
 ## 4. If the Android job fails
 

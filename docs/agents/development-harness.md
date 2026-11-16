@@ -48,7 +48,7 @@ carries the reviewer, summary and an explicit
 APPROVE/REQUEST_CHANGES/BLOCKED verdict, plus findings when there are any.
 An `update --spec` review field takes the same shape, and the same rule
 refuses a malformed one before anything is written. Completion requires
-APPROVE with no unresolved findings.
+APPROVE with no unresolved findings and the reviewer's explicit `reviewedTree`.
 Acceptance evidence is bound to the environment-bound fingerprint when it is
 recorded; the approval is bound to the code it was recorded for. Editing code
 requires recording both again.
@@ -69,6 +69,17 @@ the reviewer, verdict and findings in the task. A verdict in an `update --spec`
 file is recorded through the same path, so the ledger and the task record the
 same round.
 
+Before inspecting the change, the reviewer captures `currentContentTree` from
+`npm run harness -- review --show` and returns that hash with the verdict.
+An APPROVE requires `--reviewed-tree <hash>` on the review command, or
+`review.reviewedTree` in an update spec. Both writers reject a missing or
+stale approval hash before recording progress. The recorder uses the hash the
+reviewer supplied; recapturing it after an edit does not establish review.
+Legacy approvals without an explicit hash require a fresh review. Keep earlier
+reports as historical artifacts rather than backfilling approvals for current
+code. The name and hash are attestations; the CLI does not authenticate who
+performed the inspection. Independent inspection remains a workflow requirement.
+
 The approval is bound to the **code** the reviewer read, not to the environment
 the reviewer ran in. The reviewer and the implementer are separate processes and
 are not required to share a target directory, so an approval recorded elsewhere
@@ -79,7 +90,7 @@ different code tree and needs a new approval.
 `npm run harness -- review --show` reads the ledger and records no round. It
 takes no lock, so it can run while a verify holds one, and it reports a
 snapshot of the tree rather than a consistent view of it. It refuses to be
-combined with `--verdict`, `--reviewer`, `--summary`, `--finding` or
+combined with `--verdict`, `--reviewer`, `--summary`, `--reviewed-tree`, `--finding` or
 `--findings-file`, because a read that silently discards the write it was
 given loses the round without an error.
 
@@ -112,7 +123,8 @@ a complete best-effort pass; repairs can still introduce new defects.
 After REQUEST_CHANGES:
 
 1. Record the verdict and findings with `npm run harness -- review --verdict
-   <verdict> --reviewer <name> --summary <text> [--finding <text>]...`, and
+   <verdict> --reviewer <name> --summary <text> [--finding <text>]...`
+   (adding `--reviewed-tree <hash>` for APPROVE), and
    keep the task active while repairing the batch. The command writes the
    reviewer, verdict, findings and the reviewed code into the task and appends
    the round to `.harness/reviews.jsonl`. An approval that still carries
@@ -169,7 +181,8 @@ npm run harness -- unlink-deps                # remove the links link-deps made
 
 `link-deps` finds the main checkout from `git worktree list` and refuses, with
 a message to run `npm ci`, when `package.json` dependency fields or
-`package-lock.json` differ, when the source has no `node_modules`, or when the
+`package-lock.json` differ, when installed source package versions disagree with
+the lock or a required package is missing, when the source has no `node_modules`, or when the
 worktree already has a real install. Each package is linked individually under a
 private `node_modules` root; `.bin` shims are copied and bundler caches
 (`.vite`, `.vite-temp`) stay local. Running it again refreshes its own links.
