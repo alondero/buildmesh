@@ -39,7 +39,7 @@ import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { event, git, readJson, saveJson, statePath, taskAt } from './harness-state.mjs';
 
-export const REVIEW_USAGE = 'review --verdict <APPROVE|REQUEST_CHANGES|BLOCKED> --reviewer <name> --summary <text> [--finding <text>]... [--findings-file <path>] | review --show';
+export const REVIEW_USAGE = 'review --verdict <APPROVE|REQUEST_CHANGES|BLOCKED> --reviewer <name> --summary <text> [--reviewed-tree <sha256> (required for APPROVE)] [--finding <text>]... [--findings-file <path>] | review --show';
 
 const VERDICTS = ['APPROVE', 'REQUEST_CHANGES', 'BLOCKED'];
 
@@ -127,6 +127,7 @@ export function reviewContext(root, { fingerprint, changedPaths, contentTree, ru
           head: last.head,
           tree: last.tree,
           contentTree: last.contentTree ?? null,
+          reviewedTree: last.reviewedTree ?? null,
           scope: last.scope ?? [],
         }
       : null,
@@ -173,8 +174,8 @@ function readFindings(root, options) {
 // it has, and a payload that is null is a malformed payload rather than a
 // crash. `prefix` names the field in the caller's own vocabulary, so the
 // `review` command says `--verdict` and an update spec says `review.verdict`.
-export function validateReview(payload = {}, { prefix = '' } = {}) {
-  const { verdict, reviewer, summary, findings } = payload ?? {};
+export function validateReview(payload = {}, { prefix = '', currentContentTree } = {}) {
+  const { verdict, reviewer, summary, findings, reviewedTree } = payload ?? {};
   const field = key => `${prefix}${key}`;
   const normalized = String(verdict ?? '').trim().toUpperCase();
   if (!VERDICTS.includes(normalized)) throw new Error(`${field('verdict')} must be one of ${VERDICTS.join(', ')}.`);
@@ -185,7 +186,13 @@ export function validateReview(payload = {}, { prefix = '' } = {}) {
   const found = findings === undefined ? [] : findings;
   if (!Array.isArray(found) || found.some(item => typeof item !== 'string')) throw new Error(`${field('findings')} must be an array of strings.`);
   if (normalized === 'APPROVE' && found.length) throw new Error('An APPROVE cannot carry findings. Record REQUEST_CHANGES with the findings instead.');
-  return { verdict: normalized, reviewer: who, summary: note, findings: found };
+  const hashField = field(prefix === '--' ? 'reviewed-tree' : 'reviewedTree');
+  if (normalized === 'APPROVE' && !reviewedTree) throw new Error(`${hashField} is required for APPROVE. The reviewer must capture currentContentTree with review --show before inspection.`);
+  if (reviewedTree !== undefined) {
+    if (typeof reviewedTree !== 'string' || !/^[a-f0-9]{64}$/.test(reviewedTree)) throw new Error(`${hashField} must be a lowercase SHA-256 content hash.`);
+    if (reviewedTree !== currentContentTree) throw new Error('The reviewed tree does not match the current code. Request a review of the current change.');
+  }
+  return { verdict: normalized, reviewer: who, summary: note, findings: found, ...(reviewedTree !== undefined ? { reviewedTree } : {}) };
 }
 
 // Record one review round. The verdict lands in the same task field `update
@@ -198,10 +205,9 @@ export function recordReview(root, options, { fingerprint, changedPaths, content
   if (!task) throw new Error('BLOCKED: no active task. Start one with npm run harness -- start --spec <json>.');
   if (task.phase === 'complete') throw new Error('BLOCKED: the task is already complete.');
   if (!task.base) throw new Error('BLOCKED: the task has no base commit.');
-  const { verdict, reviewer, summary, findings } = validateReview({ verdict: options.verdict, reviewer: options.reviewer, summary: options.summary, findings: readFindings(root, options) }, { prefix: '--' });
-
-  const tree = fingerprint(root, task.base);
   const code = contentTree ? contentTree(root) : null;
+  const { verdict, reviewer, summary, findings, reviewedTree } = validateReview({ verdict: options.verdict, reviewer: options.reviewer, summary: options.summary, findings: readFindings(root, options), reviewedTree: options.reviewedTree }, { prefix: '--', currentContentTree: code });
+  const tree = fingerprint(root, task.base);
   const identity = runIdentity ? runIdentity(root, task.base) : null;
   const head = git(root, 'rev-parse', 'HEAD').trim();
   const scope = changedPaths ? changedPaths(root, task.base) : [];
@@ -217,6 +223,7 @@ export function recordReview(root, options, { fingerprint, changedPaths, content
     head,
     tree,
     contentTree: code,
+    reviewedTree: reviewedTree ?? null,
     identity,
     scope,
     contents: Object.fromEntries(scope.map(path => [path, contentHash(root, path)])),
@@ -228,7 +235,7 @@ export function recordReview(root, options, { fingerprint, changedPaths, content
   // completion with a verdict-shaped reason, while a verdict without a round
   // is the divergence this command exists to remove (issue #2630).
   appendFileSync(statePath(root, 'reviews.jsonl'), `${JSON.stringify(round)}\n`);
-  task.review = { reviewer, summary, verdict, findings };
+  task.review = { reviewer, summary, verdict, findings, reviewedTree: reviewedTree ?? null };
   task.reviewTree = tree;
   if (code) task.reviewContentTree = code;
   if (identity) task.reviewIdentity = identity;

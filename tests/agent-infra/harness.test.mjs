@@ -595,9 +595,9 @@ function installHarness(fixture, extra = []) {
 // staleness assertions below compare the test process with itself.
 function passingReceipt(fixture, task) {
   const gatePlan = taskPlan(fixture, task);
-  fixture.put('.harness/receipt.json', JSON.stringify({ root: fixture.cwd, taskId: task.id, base: task.base, tree: fingerprint(fixture.cwd, task.base), full: false, gatePlan, gates: gatePlan.map(gate => ({ id: gate.id, outcome: 'PASS' })), outcome: 'PASS', runIdentity: runIdentity(fixture.cwd, task.base) }));
+  fixture.put('.harness/receipt.json', JSON.stringify({ root: fixture.cwd, taskId: task.id, base: task.base, tree: fingerprint(fixture.cwd, task.base), contentTree: contentTree(fixture.cwd), full: false, gatePlan, gates: gatePlan.map(gate => ({ id: gate.id, outcome: 'PASS' })), outcome: 'PASS', runIdentity: runIdentity(fixture.cwd, task.base) }));
   const tree = fingerprint(fixture.cwd, task.base);
-  fixture.put('.harness/active-task.json', JSON.stringify({ ...task, evidence: ['Observed state after owner switch'], evidenceTree: tree, reviewTree: tree, review: { reviewer: 'independent fixture', verdict: 'APPROVE', findings: [], summary: 'Approved current change' } }));
+  fixture.put('.harness/active-task.json', JSON.stringify({ ...task, evidence: ['Observed state after owner switch'], evidenceTree: tree, reviewTree: tree, review: { reviewer: 'independent fixture', verdict: 'APPROVE', reviewedTree: contentTree(fixture.cwd), findings: [], summary: 'Approved current change' } }));
 }
 
 test('scope includes committed, staged, unstaged, untracked, deletion and Unicode paths', t => {
@@ -730,7 +730,7 @@ test('batched review repairs can proceed before full verification but cannot fin
   assert.equal(rejected.review.findings.length, 2);
   fixture.put('src/owner.ts', 'export const owner = 2;\n');
   update({ phase: 'implement', nextAction: 'Run focused owner regressions and request follow-up review' });
-  const approved = update({ phase: 'review', review: { reviewer: 'independent fixture', verdict: 'APPROVE', findings: [], summary: 'Both findings resolved; approved the complete current change' } });
+  const approved = update({ phase: 'review', review: { reviewer: 'independent fixture', verdict: 'APPROVE', reviewedTree: contentTree(fixture.cwd), findings: [], summary: 'Both findings resolved; approved the complete current change' } });
   assert.equal(approved.reviewTree, fingerprint(fixture.cwd, task.base));
   assert.equal(existsSync(join(fixture.cwd, '.harness/receipt.json')), false);
   const finished = fixture.cli('finish');
@@ -777,11 +777,47 @@ test('the review ledger keeps findings outstanding until an approval clears them
   fixture.cli('review', '--verdict', 'REQUEST_CHANGES', '--reviewer', 'second round', '--summary', 'two', '--finding', 'Owner update is missing');
   const pending = JSON.parse(fixture.cli('review', '--show').stdout);
   assert.deepEqual(pending.outstanding, ['Owner update is missing', 'Owner state is stale']);
-  fixture.cli('review', '--verdict', 'APPROVE', '--reviewer', 'third round', '--summary', 'Both repaired');
+  fixture.cli('review', '--verdict', 'APPROVE', '--reviewed-tree', contentTree(fixture.cwd), '--reviewer', 'third round', '--summary', 'Both repaired');
   const cleared = JSON.parse(fixture.cli('review', '--show').stdout);
   assert.deepEqual(cleared.outstanding, []);
   assert.equal(cleared.rounds, 3);
   assert.equal(cleared.last.verdict, 'APPROVE');
+});
+
+test('approval requires an explicit reviewed tree and rejects a delayed stale approval', t => {
+  const fixture = repo(t);
+  fixture.start();
+  const before = readFileSync(join(fixture.cwd, '.harness/active-task.json'), 'utf8');
+  const missing = fixture.cli('review', '--verdict', 'APPROVE', '--reviewer', 'reviewer', '--summary', 'Approved');
+  assert.equal(missing.status, 2);
+  assert.match(missing.stderr, /reviewed.tree.*required/i);
+  assert.equal(readFileSync(join(fixture.cwd, '.harness/active-task.json'), 'utf8'), before);
+  assert.equal(existsSync(join(fixture.cwd, '.harness/reviews.jsonl')), false);
+  const reviewedTree = JSON.parse(fixture.cli('review', '--show').stdout).currentContentTree;
+  fixture.put('src/owner.ts', 'export const owner = 2;\n');
+  const stateBefore = readFileSync(join(fixture.cwd, '.harness/active-task.json'), 'utf8');
+  const eventsBefore = readFileSync(join(fixture.cwd, '.harness/events.jsonl'), 'utf8');
+  const stale = fixture.cli('review', '--verdict', 'APPROVE', '--reviewed-tree', reviewedTree, '--reviewer', 'reviewer', '--summary', 'Earlier review');
+  assert.equal(stale.status, 2);
+  assert.match(stale.stderr, /reviewed tree.*current/i);
+  fixture.put('.task.json', JSON.stringify({ phase: 'review', evidence: ['New evidence'], review: { verdict: 'APPROVE', reviewer: 'reviewer', summary: 'Earlier review', reviewedTree } }));
+  const update = fixture.cli('update', '--spec', '.task.json');
+  assert.equal(update.status, 2);
+  assert.match(update.stderr, /reviewed tree.*current/i);
+  assert.equal(readFileSync(join(fixture.cwd, '.harness/active-task.json'), 'utf8'), stateBefore);
+  assert.equal(readFileSync(join(fixture.cwd, '.harness/events.jsonl'), 'utf8'), eventsBefore);
+  assert.equal(existsSync(join(fixture.cwd, '.harness/reviews.jsonl')), false);
+});
+
+test('legacy approval without an explicit reviewed tree cannot finish', t => {
+  const fixture = repo(t);
+  const task = fixture.start();
+  passingReceipt(fixture, task);
+  const state = JSON.parse(readFileSync(join(fixture.cwd, '.harness/active-task.json'), 'utf8'));
+  delete state.review.reviewedTree;
+  fixture.put('.harness/active-task.json', JSON.stringify(state));
+  assert.equal(completion(fixture.cwd).outcome, 'BLOCKED');
+  assert.match(completion(fixture.cwd).reason, /reviewed.tree/i);
 });
 
 test('the review ledger counts a blocked round\'s findings as outstanding', t => {
@@ -830,14 +866,14 @@ test('the review ledger keeps one task\'s rounds out of the next task', t => {
 test('the review ledger refuses an approval that carries findings and a verdict it does not know', t => {
   const fixture = repo(t);
   fixture.start();
-  const withFindings = fixture.cli('review', '--verdict', 'APPROVE', '--reviewer', 'reviewer', '--summary', 'summary', '--finding', 'cannot ship');
+  const withFindings = fixture.cli('review', '--verdict', 'APPROVE', '--reviewed-tree', contentTree(fixture.cwd), '--reviewer', 'reviewer', '--summary', 'summary', '--finding', 'cannot ship');
   assert.equal(withFindings.status, 2);
   assert.match(withFindings.stderr, /APPROVE cannot carry findings/);
   const unknown = fixture.cli('review', '--verdict', 'MAYBE', '--reviewer', 'reviewer', '--summary', 'summary');
   assert.equal(unknown.status, 2);
   assert.match(unknown.stderr, /--verdict must be one of/);
   const untasked = repo(t);
-  const orphan = untasked.cli('review', '--verdict', 'APPROVE', '--reviewer', 'reviewer', '--summary', 'summary');
+  const orphan = untasked.cli('review', '--verdict', 'APPROVE', '--reviewed-tree', contentTree(fixture.cwd), '--reviewer', 'reviewer', '--summary', 'summary');
   assert.equal(orphan.status, 2);
   assert.match(orphan.stderr, /no active task/);
 });
@@ -882,11 +918,13 @@ test('an update with an invalid review leaves the task and the events untouched'
   // present but null: the rule owns the payload, so each of these is refused
   // with the rule's message and leaves the task as it was.
   const malformed = [
-    { review: { reviewer: 'independent fixture', verdict: 'APPROVE', findings: ['an approval cannot carry these'], summary: 'Approved' }, message: /APPROVE cannot carry findings/ },
+    { review: { reviewer: 'independent fixture', verdict: 'APPROVE', summary: 'Approved' }, message: /review\.reviewedTree is required/ },
+    { review: { reviewer: 'independent fixture', verdict: 'APPROVE', reviewedTree: 'bad', summary: 'Approved' }, message: /review\.reviewedTree must be/ },
+    { review: { reviewer: 'independent fixture', verdict: 'APPROVE', reviewedTree: contentTree(fixture.cwd), findings: ['an approval cannot carry these'], summary: 'Approved' }, message: /APPROVE cannot carry findings/ },
     { review: { reviewer: 'independent fixture', verdict: 'MAYBE', findings: [], summary: 'Unknown verdict' }, message: /review\.verdict must be one of/ },
-    { review: { reviewer: '  ', verdict: 'APPROVE', findings: [], summary: 'Approved' }, message: /review\.reviewer is required/ },
-    { review: { reviewer: 'independent fixture', verdict: 'APPROVE', findings: [], summary: '  ' }, message: /review\.summary is required/ },
-    { review: { reviewer: 'independent fixture', verdict: 'APPROVE', findings: [42], summary: 'Approved' }, message: /review\.findings must be an array of strings/ },
+    { review: { reviewer: '  ', verdict: 'APPROVE', reviewedTree: contentTree(fixture.cwd), findings: [], summary: 'Approved' }, message: /review\.reviewer is required/ },
+    { review: { reviewer: 'independent fixture', verdict: 'APPROVE', reviewedTree: contentTree(fixture.cwd), findings: [], summary: '  ' }, message: /review\.summary is required/ },
+    { review: { reviewer: 'independent fixture', verdict: 'APPROVE', reviewedTree: contentTree(fixture.cwd), findings: [42], summary: 'Approved' }, message: /review\.findings must be an array of strings/ },
     { review: null, message: /review\.verdict must be one of/ },
   ];
   for (const { review, message } of malformed) {
@@ -917,7 +955,7 @@ test('an update with an invalid review leaves the task and the events untouched'
 test('review --show refuses to be combined with a verdict', t => {
   const fixture = repo(t);
   fixture.start();
-  const combined = fixture.cli('review', '--show', '--verdict', 'APPROVE', '--reviewer', 'reviewer', '--summary', 'approved');
+  const combined = fixture.cli('review', '--show', '--verdict', 'APPROVE', '--reviewed-tree', contentTree(fixture.cwd), '--reviewer', 'reviewer', '--summary', 'approved');
   assert.notEqual(combined.status, 0, 'the combination is rejected, not silently read');
   assert.match(combined.stderr, /--show only reads the ledger/);
   assert.match(combined.stderr, /--verdict/);
@@ -944,7 +982,7 @@ test('an approval recorded in another environment still covers the verified tree
   fixture.put('.harness/active-task.json', JSON.stringify({ ...task, evidence: ['Observed the owner state'], evidenceTree: tree }));
   // The reviewer runs somewhere else: a different target directory is enough
   // to move the environment-bound tree hash.
-  const recorded = fixture.run(['review', '--verdict', 'APPROVE', '--reviewer', 'independent reviewer', '--summary', 'Approved the current change'], { CARGO_TARGET_DIR: join(fixture.cwd, 'other-target') });
+  const recorded = fixture.run(['review', '--verdict', 'APPROVE', '--reviewed-tree', contentTree(fixture.cwd), '--reviewer', 'independent reviewer', '--summary', 'Approved the current change'], { CARGO_TARGET_DIR: join(fixture.cwd, 'other-target') });
   assert.equal(recorded.status, 0, recorded.stderr);
   const state = JSON.parse(readFileSync(join(fixture.cwd, '.harness/active-task.json')));
   assert.notEqual(state.reviewTree, tree, 'the two environments produce different tree hashes');
@@ -968,7 +1006,7 @@ test('an approval does not cover code that changed after it was recorded', t => 
   const tree = fingerprint(fixture.cwd, task.base);
   fixture.put('.harness/receipt.json', JSON.stringify({ root: fixture.cwd, taskId: task.id, base: task.base, tree, contentTree: contentTree(fixture.cwd), full: false, gatePlan, gates: gatePlan.map(gate => ({ id: gate.id, outcome: 'PASS' })), outcome: 'PASS', runIdentity: runIdentity(fixture.cwd, task.base) }));
   fixture.put('.harness/active-task.json', JSON.stringify({ ...task, evidence: ['Observed the owner state'], evidenceTree: tree }));
-  assert.equal(fixture.cli('review', '--verdict', 'APPROVE', '--reviewer', 'independent fixture', '--summary', 'Approved the current change').status, 0);
+  assert.equal(fixture.cli('review', '--verdict', 'APPROVE', '--reviewed-tree', contentTree(fixture.cwd), '--reviewer', 'independent fixture', '--summary', 'Approved the current change').status, 0);
   assert.equal(completion(fixture.cwd).outcome, 'PASS');
   fixture.put('src/owner.ts', 'export const owner = 3;\n');
   const gatePlanAfter = taskPlan(fixture, task);
@@ -987,7 +1025,7 @@ test('a recorded verdict keeps the completion guards intact', t => {
   assert.equal(rejected.status, 0, rejected.stderr);
   assert.equal(fixture.cli('finish').status, 2);
   assert.match(completion(fixture.cwd).reason, /APPROVE/);
-  assert.equal(fixture.cli('review', '--verdict', 'APPROVE', '--reviewer', 'independent fixture', '--summary', 'Repaired and approved').status, 0);
+  assert.equal(fixture.cli('review', '--verdict', 'APPROVE', '--reviewed-tree', contentTree(fixture.cwd), '--reviewer', 'independent fixture', '--summary', 'Repaired and approved').status, 0);
   assert.equal(completion(fixture.cwd).outcome, 'PASS');
 });
 
@@ -1008,7 +1046,7 @@ test('a recorded approval is bound to the tree it was recorded for', t => {
   recordReceipt();
   assert.equal(completion(fixture.cwd).outcome, 'BLOCKED');
   assert.match(completion(fixture.cwd).reason, /independent APPROVE/);
-  assert.equal(fixture.cli('review', '--verdict', 'APPROVE', '--reviewer', 'independent fixture', '--summary', 'Approved the current change').status, 0);
+  assert.equal(fixture.cli('review', '--verdict', 'APPROVE', '--reviewed-tree', contentTree(fixture.cwd), '--reviewer', 'independent fixture', '--summary', 'Approved the current change').status, 0);
   // The command binds the approval to the tree it was recorded for, so the
   // task completes; without that binding the approval would not count.
   assert.equal(completion(fixture.cwd).outcome, 'PASS');
@@ -1032,11 +1070,11 @@ test('review repairs require final-tree verification, acceptance and renewed ind
   // Simulate all planned gates passing; leave acceptance and reviewer state intact.
   const recordVerification = () => {
     const gatePlan = taskPlan(fixture, task);
-    fixture.put('.harness/receipt.json', JSON.stringify({ root: fixture.cwd, taskId: task.id, base: task.base, tree: fingerprint(fixture.cwd, task.base), full: false, gatePlan, gates: gatePlan.map(gate => ({ id: gate.id, outcome: 'PASS' })), outcome: 'PASS' }));
+    fixture.put('.harness/receipt.json', JSON.stringify({ root: fixture.cwd, taskId: task.id, base: task.base, tree: fingerprint(fixture.cwd, task.base), contentTree: contentTree(fixture.cwd), full: false, gatePlan, gates: gatePlan.map(gate => ({ id: gate.id, outcome: 'PASS' })), outcome: 'PASS' }));
   };
   update({ review: { reviewer: 'independent fixture', verdict: 'REQUEST_CHANGES', findings: ['Update the owner state'], summary: 'Repair required' } });
   fixture.put('src/owner.ts', 'export const owner = 2;\n');
-  update({ review: { reviewer: 'independent fixture', verdict: 'APPROVE', findings: [], summary: 'Repair inspected; approved the complete current change' } });
+  update({ review: { reviewer: 'independent fixture', verdict: 'APPROVE', reviewedTree: contentTree(fixture.cwd), findings: [], summary: 'Repair inspected; approved the complete current change' } });
   assert.equal(fixture.cli('finish').status, 2);
   assert.match(completion(fixture.cwd).reason, /Verification is missing or stale/);
 
@@ -1051,7 +1089,7 @@ test('review repairs require final-tree verification, acceptance and renewed ind
   update({ evidence: ['Observed owner state after the subsequent change'] });
   assert.equal(fixture.cli('finish').status, 2, 'fresh checks and acceptance cannot carry approval across an unreviewed edit');
   assert.match(completion(fixture.cwd).reason, /independent APPROVE/);
-  update({ review: { reviewer: 'independent fixture', verdict: 'APPROVE', findings: [], summary: 'Subsequent edit inspected; approved the complete final change' } });
+  update({ review: { reviewer: 'independent fixture', verdict: 'APPROVE', reviewedTree: contentTree(fixture.cwd), findings: [], summary: 'Subsequent edit inspected; approved the complete final change' } });
   // The completion reason names the way out, so a failure here says which
   // precondition the tree still misses rather than only the exit status.
   assert.equal(fixture.cli('finish').status, 0, completion(fixture.cwd).reason);
@@ -1177,6 +1215,7 @@ test('repair-loop verification requires deliberate opt-in before changing state 
   ]) {
     const fixture = repo(t);
     fixture.start();
+    if (progress.review?.verdict === 'APPROVE') progress.review.reviewedTree = contentTree(fixture.cwd);
     fixture.put('.task.json', JSON.stringify(progress));
     assert.equal(fixture.cli('update', '--spec', '.task.json').status, 0);
     const taskPath = join(fixture.cwd, '.harness/active-task.json');
@@ -1217,7 +1256,7 @@ test('repair opt-in is recorded for each deliberate run and remains required unt
   const stored = JSON.parse(readFileSync(join(fixture.cwd, '.harness/receipt.json')));
   assert.deepEqual(stored.repair, { optedIn: true, phase: 'verify', verdict: 'REQUEST_CHANGES' });
   assert.equal(JSON.parse(readFileSync(join(fixture.cwd, '.harness/active-task.json'))).verificationAttempts, 2);
-  fixture.cli('review', '--verdict', 'APPROVE', '--reviewer', 'independent fixture', '--summary', 'Repairs resolved');
+  fixture.cli('review', '--verdict', 'APPROVE', '--reviewed-tree', contentTree(fixture.cwd), '--reviewer', 'independent fixture', '--summary', 'Repairs resolved');
   assert.equal((await verify(fixture.cwd, { plan })).outcome, 'PASS');
 });
 

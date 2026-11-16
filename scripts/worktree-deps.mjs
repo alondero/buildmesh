@@ -38,6 +38,24 @@ function assertDependencyInputsMatch(source, target, remedy) {
   }
 }
 
+function assertInstalledDependenciesMatch(source, remedy) {
+  const lock = join(source, 'package-lock.json');
+  if (!existsSync(lock)) return;
+  const packages = JSON.parse(readFileSync(lock, 'utf8')).packages ?? {};
+  for (const [packagePath, entry] of Object.entries(packages)) {
+    if (!packagePath.startsWith('node_modules/') || !entry.version || entry.link) continue;
+    const manifest = join(source, packagePath, 'package.json');
+    let installed;
+    try {
+      installed = JSON.parse(readFileSync(manifest, 'utf8')).version;
+    } catch (error) {
+      if (error.code === 'ENOENT' && entry.optional) continue;
+      throw new Error(`Installed dependency ${packagePath} is missing or unreadable; ${remedy}`, { cause: error });
+    }
+    if (installed !== entry.version) throw new Error(`Installed dependency ${packagePath} is ${installed}, but the lock requires ${entry.version}; ${remedy}`);
+  }
+}
+
 /**
  * Links `source/node_modules` packages into `target/node_modules`, appending each
  * created link to `links` as it goes so a caller can roll back a partial failure.
@@ -46,6 +64,7 @@ export function linkDependencies(source, target, links, { remedy }) {
   const from = join(source, 'node_modules');
   if (!existsSync(from)) return;
   assertDependencyInputsMatch(source, target, remedy);
+  assertInstalledDependenciesMatch(source, remedy);
   const to = join(target, 'node_modules');
   mkdirSync(to, { recursive: true });
   const link = (packageDir, destination) => {
@@ -132,6 +151,7 @@ export function linkWorktreeDependencies(root, { from, cargoTarget = false } = {
   }
   if (!existsSync(join(source, 'node_modules'))) throw new Error(`${source} has no node_modules; run npm ci there first, or run npm ci in this worktree.`);
   assertDependencyInputsMatch(source, root, 'run npm ci in this worktree instead of linking.');
+  assertInstalledDependenciesMatch(source, 'run npm ci in this worktree instead of linking.');
 
   const modules = join(root, 'node_modules');
   const stat = lstatOrNull(modules);

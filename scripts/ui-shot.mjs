@@ -47,7 +47,7 @@
  *                        run before the screenshot (click, fill, wait, assert…)
  *   --selector <css>     screenshot only this element (default: full window/page)
  *   --invoke-port <n>    HTTP test-bridge port for the `invoke` helper
- *                        (default 2991 — the dev profile's test server)
+ *                        (default: this worktree's .tmp/dev-instance.json)
  *
  * The `invoke` helper POSTs to the development test bridge, e.g.
  *   await invoke('create_test_mesh', { name: 'Shot fixture' })
@@ -67,7 +67,7 @@
 import { chromium } from 'playwright';
 import { mkdirSync, existsSync } from 'fs';
 import { dirname, resolve, join } from 'path';
-import { bridgeHeaders } from './test-bridge-auth.mjs';
+import { bridgeHeaders, bridgePort } from './test-bridge-auth.mjs';
 import { buildInitScript, loadFixtures } from './ui-mock/tauri-mock.mjs';
 import { startDevServer, stopDevServer } from './ui-shot-server.mjs';
 import { runSteps } from './ui-shot-steps.mjs';
@@ -148,7 +148,7 @@ const serve = flag('serve');
 const viewport = arg('viewport', mock ? '1440x900' : '390x844');
 const stepsFile = arg('steps');
 const selector = arg('selector');
-const invokePort = Number(arg('invoke-port', '2991'));
+const invokePort = arg('invoke-port');
 
 if (!out) {
   console.error('Missing --out <file.png>');
@@ -156,7 +156,7 @@ if (!out) {
 }
 
 async function invoke(cmd, args = {}) {
-  const res = await fetch(`http://127.0.0.1:${invokePort}/invoke`, {
+  const res = await fetch(`http://127.0.0.1:${bridgePort(invokePort)}/invoke`, {
     method: 'POST',
     headers: bridgeHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ cmd, args }),
@@ -258,7 +258,7 @@ async function getPage() {
     console.error(
       `Could not attach to CDP on port ${cdpPort}. Is buildmesh-dev running with a CDP port?\n` +
       `Launch it with: powershell -File scripts\\run-dev.ps1 -Detach -CdpPort ${cdpPort} -TestBridge\n` +
-      `Fixture calls need Authorization: Bearer from .tmp/test-bridge-token (the dev bridge is port 2991).\n${e.message}`
+      `Fixture calls use .tmp/dev-instance.json and Authorization: Bearer from .tmp/test-bridge-token.\n${e.message}`
     );
     process.exit(1);
   });

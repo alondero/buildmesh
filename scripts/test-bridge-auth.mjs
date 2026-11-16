@@ -19,6 +19,28 @@ export const BRIDGE_ORIGINS_ENV = 'BUILDMESH_TEST_BRIDGE_ORIGINS';
 export const PROFILE_DIR_ENV = 'BUILDMESH_PROFILE_DIR';
 export const MIN_TOKEN_LENGTH = 32;
 export const DEFAULT_TOKEN_FILE = path.join(root, '.tmp', 'test-bridge-token');
+export const DEFAULT_INSTANCE_FILE = path.join(root, '.tmp', 'dev-instance.json');
+
+/** Resolve the port belonging to the launch that wrote this worktree's token. */
+export function bridgePort(explicitPort, instanceFile = DEFAULT_INSTANCE_FILE) {
+  let port = explicitPort;
+  if (port === undefined) {
+    let record;
+    try {
+      record = JSON.parse(readFileSync(instanceFile, 'utf8'));
+    } catch {
+      throw new Error(`Cannot read dev instance record ${instanceFile}. Launch this worktree with -TestBridge or supply --invoke-port.`);
+    }
+    // The main-checkout launch records null when the bundle's default applies.
+    const offset = record?.portOffset === null ? 1000 : record?.portOffset;
+    if (!Number.isInteger(offset)) throw new Error(`Invalid port offset in dev instance record ${instanceFile}. Relaunch this worktree.`);
+    port = 1991 + offset;
+  }
+  if ((typeof port !== 'number' && typeof port !== 'string') || String(port).trim() === '' || !Number.isInteger(Number(port)) || Number(port) < 1 || Number(port) > 65535) {
+    throw new Error('Test bridge port must be an integer from 1 to 65535.');
+  }
+  return Number(port);
+}
 
 function readTokenFile(tokenFile) {
   try {

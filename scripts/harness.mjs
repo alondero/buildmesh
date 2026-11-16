@@ -295,7 +295,7 @@ function update(root, spec) {
   // untouched" covers it). The payload goes to the rule whole: the rule owns
   // its shape, so a caller does not read fields off a payload that may be
   // null.
-  const recorded = review === undefined ? null : validateReview(review, { prefix: 'review.' });
+  const recorded = review === undefined ? null : validateReview(review, { prefix: 'review.', currentContentTree: contentTree(root) });
   if (spec.phase) setPhase(task, spec.phase);
   Object.assign(task, progress);
   if (spec.evidence) task.evidenceTree = fingerprint(root, task.base);
@@ -306,7 +306,7 @@ function update(root, spec) {
   // #2630; the test "a verdict recorded through update --spec appends a round
   // to the ledger" covers it): a follow-up reviewer that reads the ledger then
   // sees the verdict instead of an empty history.
-  if (recorded) recordReview(root, { verdict: recorded.verdict, reviewer: recorded.reviewer, summary: recorded.summary, finding: recorded.findings }, { fingerprint, changedPaths, contentTree, runIdentity, identityMismatch });
+  if (recorded) recordReview(root, { verdict: recorded.verdict, reviewer: recorded.reviewer, summary: recorded.summary, finding: recorded.findings, reviewedTree: recorded.reviewedTree }, { fingerprint, changedPaths, contentTree, runIdentity, identityMismatch });
   event(root, { type: 'progress', taskId: task.id, phase: task.phase, nextAction: task.nextAction });
   return taskAt(root) ?? task;
 }
@@ -691,22 +691,18 @@ export function completion(root) {
 // The approval must cover the code the receipt verified. The receipt's tree
 // hash also names the run that certified it, so an approval recorded by a
 // reviewer working in another environment would not match it; the content tree
-// is the question both sides can answer. A task whose approval predates the
-// content tree falls back to the environment-bound comparison.
+// is the question both sides can answer. Older unstated approvals need review.
 function reviewCovers(task, receipt) {
-  if (task.reviewContentTree && receipt.contentTree) return task.reviewContentTree === receipt.contentTree;
-  return task.reviewTree === receipt.tree;
+  return !!receipt.contentTree && task.review?.reviewedTree === receipt.contentTree;
 }
 // The review side of the same diagnosis staleReason gives the receipt side:
 // name what differs instead of reporting that an approval is missing.
 function reviewReason(root, task, receipt) {
-  if (task.reviewContentTree && receipt.contentTree && task.reviewContentTree !== receipt.contentTree) {
-    return 'The independent APPROVE does not cover the verified code: the tree changed after the approval was recorded. Re-record it with npm run harness -- review --verdict APPROVE --reviewer <name> --summary <text>.';
+  if (!task.review?.reviewedTree) return 'The independent APPROVE has no explicit reviewed-tree hash. Ask the reviewer to inspect the current change and supply --reviewed-tree from review --show.';
+  if (receipt.contentTree && task.review.reviewedTree !== receipt.contentTree) {
+    return 'The independent APPROVE does not cover the verified code: the tree changed after review. Ask the reviewer to inspect the current change and supply its --reviewed-tree hash.';
   }
-  const differences = identityMismatch(task.reviewIdentity, runIdentity(root, task.base));
-  return differences.length
-    ? `The independent APPROVE was recorded in a different environment (${differences.join('; ')}). Re-record it here with npm run harness -- review --verdict APPROVE --reviewer <name> --summary <text>.`
-    : 'Record one evidence entry per acceptance criterion, independent APPROVE review with no unresolved findings for this tree, and resolve blockers with harness update.';
+  return 'Verification has no content-tree hash. Run npm run verify before recording current acceptance and review evidence.';
 }
 const MAX_SUMMARY_GATES = 8;
 const oneLine = (text, limit = 300) => String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, limit);
@@ -926,6 +922,7 @@ function parse(argv) {
     else if (flag === '--max-seconds' && Number(argv[i + 1]) > 0) options.maxSeconds = Number(argv[++i]);
     else if (flag === '--finding' && argv[i + 1]) options.finding.push(argv[++i]);
     else if (flag === '--findings-file' && argv[i + 1]) options.findingsFile = argv[++i];
+    else if (flag === '--reviewed-tree' && argv[i + 1]) options.reviewedTree = argv[++i];
     else if (['--spec', '--base', '--case', '--ref', '--verdict', '--reviewer', '--summary'].includes(flag) && argv[i + 1]) options[flag.slice(2)] = argv[++i];
     else throw new Error(USAGE);
   }
@@ -956,7 +953,7 @@ async function main() {
     // rather than taking the read path and reporting success for a round it
     // did not write.
     if (options.action === 'review' && options.show) {
-      const writes = ['verdict', 'reviewer', 'summary', 'findingsFile'].filter(key => options[key] !== undefined);
+      const writes = ['verdict', 'reviewer', 'summary', 'findingsFile', 'reviewedTree'].filter(key => options[key] !== undefined);
       if (writes.length || options.finding.length) throw new Error('review --show only reads the ledger; it cannot be combined with --verdict, --reviewer, --summary, --finding or --findings-file. Record the round with npm run harness -- review --verdict <verdict> --reviewer <name> --summary <text>.');
       console.log(JSON.stringify(reviewContext(root, { fingerprint, changedPaths, contentTree, runIdentity, identityMismatch }), null, 2));
       return;

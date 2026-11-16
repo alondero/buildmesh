@@ -5,6 +5,12 @@ description: Add or change an agent harness adapter. Use when adding a Provider 
 
 # Add a harness adapter
 
+Before raw Cargo commands in this recipe, set `CARGO_TARGET_DIR` to a private
+absolute path under this worktree, such as `<worktree>/.tmp/cargo-focused`.
+Restore the previous environment after focused checks. Final verification uses
+`npm run verify` and its stamped Rust runner; see
+[worktree setup](../../../docs/agents/development-harness.md#worktree-setup).
+
 The adapter owns the spawn recipe, including `WindowsShell`: `PowerShell`, `Cmd` for a `.cmd` shim, or `Direct`. `spawn_environment::wrap` in `src-tauri/src/agent/spawn_environment.rs` reads that declaration. Do not hard-code a shell in the spawner. On macOS and Linux every provider uses `Direct`.
 
 1. Add one file under `src-tauri/src/agent/provider/adapters` implementing `AgentProvider`. The trait is `src-tauri/src/agent/provider/mod.rs`. Register the module and its static in `src-tauri/src/agent/provider/adapters/mod.rs`.

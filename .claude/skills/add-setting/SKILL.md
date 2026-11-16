@@ -5,6 +5,12 @@ description: Add or change a user setting or preference. Use when editing AppPre
 
 # Add a setting
 
+Before raw Cargo commands in this recipe, set `CARGO_TARGET_DIR` to a private
+absolute path under this worktree, such as `<worktree>/.tmp/cargo-focused`.
+Restore the previous environment after focused checks. Final verification uses
+`npm run verify` and its stamped Rust runner; see
+[worktree setup](../../../docs/agents/development-harness.md#worktree-setup).
+
 `AppPreferences` in `src-tauri/src/preferences/model.rs` is the wire struct. Import `src/types/generated/AppPreferences.ts`. Do not declare a parallel TypeScript interface.
 
 1. Add the field on `AppPreferences` with a serde default so an existing preferences file still loads. A JSON shape change goes through `src-tauri/src/preferences/migrations.rs`. Load and save stay in `src-tauri/src/preferences/storage.rs`, off the async worker pool.

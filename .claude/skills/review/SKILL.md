@@ -15,7 +15,10 @@ read-only checks. Publish review comments only when the user authorizes them.
 
 Use the task's immutable base or the supplied comparison ref. Record the
 current HEAD and working-tree state. Inspect the complete change since that
-base, including staged, unstaged, deleted and untracked files; an isolated
+base. Before inspection, run `npm run harness -- review --show` and retain its
+`currentContentTree` hash; return that exact hash with your verdict. If code
+changes during inspection, inspect the new change before capturing a new hash.
+Include staged, unstaged, deleted and untracked files; an isolated
 repair diff is insufficient for the initial review. Read the originating spec,
 observable acceptance criteria and available verification evidence. State
 missing evidence and mock/runtime limits explicitly.
@@ -64,11 +67,14 @@ BLOCKED names the missing prerequisite. APPROVE explicitly endorses the
 complete current change and has no unresolved required findings.
 
 Record the verdict with `npm run harness -- review --verdict <verdict>
---reviewer <name> --summary <text> [--finding <text>]...`. It stores the
-reviewer, verdict, findings and the reviewed code in the task, appends the
-round to the review ledger, and leaves the completion guards as they were: the
-approval covers the code it was recorded for, and an approval that still
-carries findings is refused. The binding is the code, not the machine: a
+--reviewer <name> --summary <text> [--finding <text>]...`. Add the
+reviewer's captured hash with `--reviewed-tree <hash>` for APPROVE; use the
+hash from the review, rather than recapturing it while recording a verdict.
+A mismatched or missing approval hash is refused. The name and hash are a
+reviewer attestation; the CLI does not authenticate reviewer identity.
+It stores the reviewer, verdict, findings and the reviewed code in the task
+and appends the round to the review ledger. An approval carrying findings is
+refused. The binding is the code, not the machine: a
 reviewer working in another environment still covers the tree it reviewed, and
 `npm run harness -- status` names the differing environment fields.
 
