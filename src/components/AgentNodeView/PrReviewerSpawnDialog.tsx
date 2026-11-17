@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Modal, ModalCloseButton } from '../shared/Modal';
 import { GroupedProviderMenu } from '../Providers/GroupedProviderMenu';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
@@ -33,15 +33,13 @@ interface PrReviewerSpawnDialogProps {
  * this spawns a plain agent node on the PR rather than a review-circuit
  * reviewer, and a shell on the PR branch is a legitimate thing to open.
  *
- * The provider picker is the shared Spawn Menu (ADR-0016), rendered inline the
- * way `CanvasSpawnMenu` does it — no `onClose` is forwarded, because
- * `GroupedProviderMenu`'s `useAriaMenu` binds Tab as well as Escape to it, and
- * Tab-in-menu would tear down this dialog instead of cycling focus. The parent
- * `Modal` owns Escape and backdrop close.
+ * The shared Spawn Menu (ADR-0016) leaves Tab to the surrounding dialog.
  */
 export function PrReviewerSpawnDialog({ nodeId, meshId, openPr, providers, onClose }: PrReviewerSpawnDialogProps) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const close = () => { if (!busy) onClose(); };
 
   const handlePick = async (providerId: string, _altKey: boolean, configurationId?: string, loginId?: string) => {
     if (busy) return;
@@ -79,7 +77,8 @@ export function PrReviewerSpawnDialog({ nodeId, meshId, openPr, providers, onClo
 
   return (
     <Modal
-      onClose={() => { if (!busy) onClose(); }}
+      onClose={close}
+      defaultFocusRef={searchRef}
       labelledBy="pr-reviewer-spawn-title"
       maxWidth="max-w-sm"
     >
@@ -87,7 +86,7 @@ export function PrReviewerSpawnDialog({ nodeId, meshId, openPr, providers, onClo
         <h2 id="pr-reviewer-spawn-title" className="text-sm font-semibold text-text-primary">
           Spawn reviewer agent for PR #{openPr.number}
         </h2>
-        <ModalCloseButton onClose={() => { if (!busy) onClose(); }} />
+        <ModalCloseButton onClose={close} />
       </div>
       <p className="text-2xs text-text-muted mb-3">
         Launches an agent on this PR's head commit in its own worktree (on meshes that use
@@ -100,7 +99,8 @@ export function PrReviewerSpawnDialog({ nodeId, meshId, openPr, providers, onClo
             installed. Close this and try again in a moment.
           </p>
         ) : (
-          <GroupedProviderMenu providers={providers} onSelect={handlePick} />
+          <GroupedProviderMenu providers={providers} onSelect={handlePick} searchRef={searchRef}
+            onClose={close} closeOnTab={false} />
         )}
       </div>
       {error && <p role="alert" className="text-xs text-status-error break-words mb-3">{error}</p>}

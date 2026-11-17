@@ -223,33 +223,6 @@ export function SpawnButtonCluster({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuId = useId();
 
-  // Issue #814 — focus return on Escape. `GroupedProviderMenu`'s keyboard
-  // handler also listens for Escape and calls `onClose`, so two listeners
-  // fire on Escape (both call close — idempotent). This listener's job is
-  // focus return: by focusing the trigger *synchronously* before React
-  // processes the queued state update, the trigger keeps focus across the
-  // re-render that unmounts the menu. Without this, Escape would leave
-  // focus on `body` (the menuitem that had focus just unmounted), which
-  // is the WAI-ARIA anti-pattern the MeshItem fix (#735) specifically
-  // avoids.
-  useEffect(() => {
-    if (!isOpen) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return;
-      e.preventDefault();
-      // Focus the trigger FIRST — the menu's own Escape handler also
-      // closes the menu, so by the time React re-renders to unmount it,
-      // focus is already on the surviving toggle button. Using a
-      // `requestAnimationFrame` (matching MeshItem / KebabActions) defers
-      // the focus call past the unmount so the trigger ref is still
-      // attached and the browser doesn't drop the focus call.
-      const trigger = triggerRef.current;
-      requestAnimationFrame(() => trigger?.focus());
-    };
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen]);
-
   return (
     // `data-dropdown-for` on the root (not just the menu shell) scopes the
     // shared `useClickOutside` mousedown handler to the whole cluster: a
@@ -321,14 +294,10 @@ export function SpawnButtonCluster({
           footer={menuFooter}
           leadingAction={menuLeadingAction}
           onSelect={onSelectProvider}
-          // Issue #814 — Escape closes the dropdown. The cluster re-uses
-          // `onToggleDropdown` because toggling an open cluster is
-          // semantically equivalent to closing it (the toggle target is
-          // the cluster state, not any particular spawn action). The
-          // `GroupedProviderMenu`'s own Escape handler also calls this;
-          // both paths converge on the same close action, so a double-fire
-          // is idempotent.
-          onClose={onToggleDropdown}
+          onClose={() => {
+            onToggleDropdown();
+            triggerRef.current?.focus({ preventScroll: true });
+          }}
           // Stable id used by `aria-controls` on the trigger above. Tests
           // can read this attribute off the menu root to verify the
           // disclosure wiring (ProviderDropdown doesn't currently mirror

@@ -914,9 +914,15 @@ ownership and Git watcher identity use separate helpers. See
 ### Desktop Spawn Menu ownership
 
 `GroupedProviderMenu` owns harness ordering, keyboard navigation, availability,
-Harness Login selection and saved Launch Configuration flyouts. Its default
-`spawn` mode offers logins wherever the shared menu is used. Context adapters
-own placement and the action performed after a pick:
+Harness Login selection and saved Launch Configuration flyouts. Typing in the
+search field or from a browse row filters the caller's Spawn Options by harness,
+recipe, and login labels. Results retain their harness and login context and the
+menu's order. Arrow keys, Home and End move through results, Enter picks the
+highlighted choice, and Escape clears the search before dismissing the picker.
+Unavailable matches show their reason. The empty state links to Launch
+Configurations in Settings. The default `spawn` mode offers logins wherever
+the shared menu is used. Context adapters own placement and the action performed
+after a pick:
 
 | Context | Adapter | Shared menu behavior |
 |---|---|---|

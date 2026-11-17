@@ -760,7 +760,7 @@ describe('NodeItem context menu (issue #776)', () => {
       openContextMenu();
       const trigger = screen.getByText(/Regenerate/).closest('button')!;
       expect(trigger.getAttribute('aria-expanded')).toBe('false');
-      expect(trigger.getAttribute('aria-haspopup')).toBe('menu');
+      expect(trigger.getAttribute('aria-haspopup')).toBe('dialog');
       // Picker not yet in the DOM.
       expect(document.querySelector('[data-testid="regenerate-submenu"]')).toBeNull();
     });
@@ -846,6 +846,24 @@ describe('NodeItem context menu (issue #776)', () => {
         await waitFor(() => {
           expect(document.activeElement).toBe(trigger);
         });
+      });
+
+      it('lets Tab reach search recovery before leaving the Regenerate picker', async () => {
+        renderNode(makeNode({ provider: 'anthropic' }), [makeProvider('anthropic')]);
+        openContextMenu();
+        const user = userEvent.setup();
+        await user.keyboard('{ArrowRight}no matching recipe');
+        const search = screen.getByRole('combobox', { name: 'Search launch choices' });
+        expect(document.activeElement).toBe(search);
+        await user.tab();
+        const manage = screen.getByRole('button', { name: 'Manage launch configurations' });
+        expect(document.activeElement).toBe(manage);
+        await user.tab({ shift: true });
+        expect(document.activeElement).toBe(search);
+        await user.keyboard('{Escape}');
+        expect(screen.getByTestId('regenerate-submenu')).toBeTruthy();
+        await user.keyboard('{Escape}');
+        expect(screen.queryByTestId('regenerate-submenu')).toBeNull();
       });
 
       it('ArrowDown inside the picker advances through current + alternates with wrap (issue #1502)', async () => {

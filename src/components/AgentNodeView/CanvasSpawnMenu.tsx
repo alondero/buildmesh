@@ -35,7 +35,7 @@
  * surfaces can be open independently and the panel needs its own
  * click-outside scope.
  */
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { enterMesh } from '../../lib/navigation';
 import { Modal, ModalCloseButton } from '../shared/Modal';
 import { GroupedProviderMenu } from '../Providers/GroupedProviderMenu';
@@ -65,6 +65,7 @@ export function CanvasSpawnMenu({ meshId }: CanvasSpawnMenuProps) {
   const selectProviderForMesh = useAgentNodeStore((s) => s.selectProviderForMesh);
   const providerList = useProviderList();
   const options = useUIStore(s => s.canvasSpawnMenuOptions);
+  const searchRef = useRef<HTMLInputElement>(null);
 
   // The mesh disappeared between open request and render (delete /
   // refetch race). Reset the store flag and bail — the next open
@@ -120,6 +121,7 @@ export function CanvasSpawnMenu({ meshId }: CanvasSpawnMenuProps) {
   return (
     <Modal
       onClose={close}
+      defaultFocusRef={options?.providerId ? undefined : searchRef}
       labelledBy="canvas-spawn-menu-title"
       maxWidth="max-w-sm"
       className="flex flex-col max-h-[90vh] p-4"
@@ -156,16 +158,10 @@ export function CanvasSpawnMenu({ meshId }: CanvasSpawnMenuProps) {
       <GroupedProviderMenu
         providers={providerList}
         initialProviderId={options?.providerId}
+        searchRef={searchRef}
         onSelect={handleSelect}
-        // Don't pass `onClose` here. `GroupedProviderMenu`'s
-        // `useAriaMenu` hook (issue #837) binds Escape AND Tab to
-        // `onClose` — Tab-in-menu would UNMOUNT THE WHOLE modal
-        // instead of tabbing to the close button / cycling focus
-        // inside the menu. The parent `<Modal>` already owns Escape
-        // and backdrop close (issue #808). Senior-review round 4
-        // caught the previous "disable the menu's own Escape path"
-        // comment claiming the opposite of what `onClose={close}`
-        // actually did.
+        onClose={close}
+        closeOnTab={false}
       />
       </div>
     </Modal>

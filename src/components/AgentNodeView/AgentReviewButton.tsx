@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { AgentNode } from '../../stores/agentNodeStore';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
@@ -31,6 +31,8 @@ export function AgentReviewButton({ node, providerList, label }: { node: AgentNo
   const [circuitId, setCircuitId] = useState<number | null>(null);
   const [reviewerProvider, setReviewerProvider] = useState('');
   const [reviewerLoginId, setReviewerLoginId] = useState<string | undefined>();
+  const searchRef = useRef<HTMLInputElement>(null);
+  const close = () => { if (!busy) setOpen(false); };
   const selectedLogin = useHarnessLogins(Boolean(reviewerLoginId)).find(login => login.id === reviewerLoginId);
   // The very Spawn Menu every other surface renders (ADR-0016): harness parents
   // with their saved Launch Configurations in the disclosure. Terminal is not an
@@ -157,7 +159,7 @@ export function AgentReviewButton({ node, providerList, label }: { node: AgentNo
       className={`inline-flex h-6 min-w-6 items-center justify-center gap-1 rounded-md text-accent-violet-strong hover:bg-accent-violet/15 disabled:opacity-40 ${label ? 'px-1.5 text-label font-medium' : 'p-1'}`}
     ><CircuitsIcon className="h-4 w-4 shrink-0" />{label}</button>
     {open && createPortal(
-      <Modal onClose={() => { if (!busy) setOpen(false); }} ariaLabel="Start review or circuit" maxWidth="max-w-sm">
+      <Modal onClose={close} defaultFocusRef={searchRef} ariaLabel="Start review or circuit" maxWidth="max-w-sm">
         <h2 className="text-sm font-semibold mb-2">Review or circuit for {node.name}</h2>
         {activeOwnership ? <>
           <p className="text-xs text-text-secondary mb-3">
@@ -190,11 +192,9 @@ export function AgentReviewButton({ node, providerList, label }: { node: AgentNo
             <span className="text-xs">Reviewer launch configuration</span>
             <span className="text-2xs text-text-muted" data-testid="reviewer-provider-selection">{reviewerLabel ?? 'Default'}{selectedLogin ? ` · ${selectedLogin.label}` : ''}</span>
           </div>
-          {/* The shared Spawn Menu, rendered inline the way the canvas spawn
-              dialog renders it — no `onClose`, so its Tab/Escape handling can't
-              tear down this modal (the parent Modal owns both). */}
           <div className="border border-border-subtle rounded-md bg-bg-overlay max-h-64 overflow-y-auto">
             <GroupedProviderMenu providers={reviewOptions} decorate={reviewOption} onSelect={pickReviewer}
+              searchRef={searchRef} onClose={close} closeOnTab={false}
               leadingAction={{ id: '__default', label: 'Default (app Reviewer provider or this agent)',
                 testId: 'reviewer-provider-default', onSelect: () => { setReviewerProvider(''); setReviewerLoginId(undefined); } }} />
           </div>

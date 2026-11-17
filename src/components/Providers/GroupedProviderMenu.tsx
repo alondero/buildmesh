@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import type { SpawnOption } from '../../lib/groups';
 import { ProviderIcon } from './ProviderIcon';
 import { groupByHarness } from '../../lib/groups';
@@ -6,6 +6,8 @@ import { SpawnConfigurationMenu } from './SpawnConfigurationMenu';
 import { useAriaMenu } from '../../hooks/useAriaMenu';
 import { useHarnessLogins } from '../../hooks/useHarnessLogins';
 import { HarnessLoginMenu } from './HarnessLoginMenu';
+import { SpawnChoiceSearch } from './SpawnChoiceSearch';
+import { useUIStore } from '../../stores/uiStore';
 
 export interface GroupedProviderMenuProps {
   /** Frontend view of the Spawn Menu (ADR-0016). Already in harness
@@ -30,6 +32,12 @@ export interface GroupedProviderMenuProps {
    * repurpose `onSelect` because Escape is a dismiss, not a row pick.
    */
   onClose?: () => void;
+  /** Inline dialog pickers let Tab move to the surrounding dialog controls. */
+  closeOnTab?: boolean;
+  /** Lets an enclosing dialog put its initial focus on the search field. */
+  searchRef?: RefObject<HTMLInputElement | null>;
+  /** Settings can navigate within its existing dialog. */
+  onManageConfigurations?: () => void;
   /** Spawn selects a login; saved settings pin logins through configurations;
    * resume keeps the node's frozen login and offers resumable routes. */
   mode?: 'spawn' | 'settings' | 'resume';
@@ -53,8 +61,14 @@ export interface GroupedProviderMenuProps {
 /** Harness-grouped Spawn Menu. Parent rows launch defaults; their disclosure
  * opens capability-driven saved configurations. Pointer and keyboard share
  * the same active parent row. */
-export function GroupedProviderMenu({ providers, onSelect, filter, decorate, className, onClose, mode = 'spawn', footer, leadingAction, initialProviderId }: GroupedProviderMenuProps) {
+export function GroupedProviderMenu({
+  providers, onSelect, filter, decorate, className, onClose, closeOnTab = true,
+  mode = 'spawn', footer, leadingAction, initialProviderId, searchRef, onManageConfigurations,
+}: GroupedProviderMenuProps) {
   const [submenu, setSubmenu] = useState<{ option: SpawnOption; anchor: HTMLElement; keyboard: boolean } | null>(null);
+  const [query, setQuery] = useState('');
+  const localInputRef = useRef<HTMLInputElement>(null);
+  const inputRef = searchRef ?? localInputRef;
   const editing = useRef(false);
   const configurationsEnabled = mode !== 'resume';
   const logins = useHarnessLogins(mode === 'spawn');
@@ -102,11 +116,8 @@ export function GroupedProviderMenu({ providers, onSelect, filter, decorate, cla
   // `flatItems.length` as `itemCount`, so a filter change that drops a
   // row (re-render) is picked up live via the hook's ref-mirrored
   // state. `onClose` is the parent's Escape callback — the hook
-  // forwards `onClose?.()` directly. `closeOnTab` is left at default
-  // (`true`) so the WAI-ARIA menu contract holds across every call
-  // site; pre-#837 this menu omitted Tab handling and the test for it
-  // (`grouped-provider-menu.test.tsx`) only covered Escape, but the
-  // hook's default is the canonical WAI-ARIA `menu` behaviour.
+  // forwards `onClose?.()` directly. Inline dialog pickers leave Tab to
+  // the surrounding dialog.
   //
   // Issue #1720 follow-up — single-caret menu. Rows paint ONLY off
   // `activeIndex` (no CSS `hover:` paint), so exactly one row is
@@ -122,6 +133,8 @@ export function GroupedProviderMenu({ providers, onSelect, filter, decorate, cla
     activeIndex,
     setActiveIndex,
     onClose: () => onClose?.(),
+    closeOnTab,
+    focusOnMount: searchRef === undefined,
   });
 
   // Sync the roving index to the row that holds focus. Arrow keys
@@ -141,8 +154,12 @@ export function GroupedProviderMenu({ providers, onSelect, filter, decorate, cla
     return map;
   }, [flatItems, leadingAction]);
   const submenuHarnessId = submenu?.option.harness_id;
+  const recipes = useMemo(
+    () => configurationsEnabled ? providers.filter(row => row.configuration && (!filter || filter(row))) : [],
+    [providers, filter, configurationsEnabled],
+  );
   const configurationRows = useMemo(
-    () => submenuHarnessId ? providers.filter((row) => row.configuration && row.harness_id === submenuHarnessId) : [],
+    () => submenuHarnessId ? providers.filter(row => row.configuration && row.harness_id === submenuHarnessId) : [],
     [providers, submenuHarnessId],
   );
   const initialOption = flatItems.find(option => option.id === initialProviderId);
@@ -158,8 +175,34 @@ export function GroupedProviderMenu({ providers, onSelect, filter, decorate, cla
     if (canOpenInitial) setSubmenu({ option: initialOption, anchor, keyboard: true });
   }, [initialOption, canOpenInitial]);
 
-  return (
-    <div ref={menuRef} className={className} role="menu" aria-label="Select a provider">
+  const focusBrowse = (last: boolean) => {
+    const items = menuRef.current?.querySelectorAll<HTMLElement>('[data-spawn-id]:not(:disabled)');
+    const item = items?.[last ? items.length - 1 : 0];
+    item?.focus();
+    return Boolean(item);
+  };
+  const dismissSubmenu = () => {
+    setSubmenu(null);
+    if (closeOnTab) onClose?.();
+    else submenu?.anchor.focus({ preventScroll: true });
+  };
+
+  const browseMenu = (
+    <div ref={menuRef} role="menu" aria-label="Select a provider" hidden={query.trim().length > 0}
+      onKeyDown={event => {
+        if (!menuRef.current?.contains(event.target as Node) || event.nativeEvent.isComposing) return;
+        if (event.key === 'Tab' && event.shiftKey) {
+          event.preventDefault();
+          event.stopPropagation();
+          inputRef.current?.focus();
+        } else if (event.key.length === 1 && event.key !== ' ' && !event.ctrlKey && !event.metaKey && !event.altKey) {
+          event.preventDefault();
+          event.stopPropagation();
+          inputRef.current?.focus();
+          setQuery(event.key);
+        }
+      }}
+    >
       {leadingAction && <div role="presentation" data-regenerate-section={leadingAction.current ? 'current' : undefined} className="border-b border-border-subtle">
         <button type="button" role="menuitem" tabIndex={activeIndex === 0 ? 0 : -1}
           data-spawn-id={leadingAction.id} data-spawn-harness={leadingAction.option?.harness_id}
@@ -233,12 +276,27 @@ export function GroupedProviderMenu({ providers, onSelect, filter, decorate, cla
         logins={logins.filter((login) => login.harness_id === submenu.option.harness_id)}
         decorate={decorate}
         configurationRows={configurationRows}
-        onEditingChange={(value) => { editing.current = value; }} onSelect={onSelect} onClose={() => setSubmenu(null)} onDismiss={() => { setSubmenu(null); onClose?.(); }} />}
+        onEditingChange={(value) => { editing.current = value; }} onSelect={onSelect} onClose={() => setSubmenu(null)} onDismiss={dismissSubmenu} />}
       {submenu && !choosesLogin(submenu.option) && <SpawnConfigurationMenu key={submenu.option.id} {...submenu}
         decorate={decorate}
         configurationRows={configurationRows}
-        onEditingChange={(value) => { editing.current = value; }} onSelect={onSelect} onClose={() => setSubmenu(null)} onDismiss={() => { setSubmenu(null); onClose?.(); }} />}
-      {footer !== undefined && <div role="presentation" className="border-t border-border-subtle px-3 py-1.5 text-2xs text-text-muted">{footer}</div>}
+        onEditingChange={(value) => { editing.current = value; }} onSelect={onSelect} onClose={() => setSubmenu(null)} onDismiss={dismissSubmenu} />}
+    </div>
+  );
+
+  return (
+    <div className={className}>
+      <SpawnChoiceSearch inputRef={inputRef} query={query} setQuery={setQuery} parents={flatItems}
+        recipes={recipes} logins={logins} decorate={decorate} mode={mode} onSelect={onSelect}
+        onFocus={() => setSubmenu(null)} onBrowse={focusBrowse} onClose={onClose} closeOnTab={closeOnTab}
+        onManage={() => {
+          onClose?.();
+          if (onManageConfigurations) onManageConfigurations();
+          else useUIStore.getState().openAppSettings('harnesses');
+        }}
+      />
+      {browseMenu}
+      {footer !== undefined && <div className="border-t border-border-subtle px-3 py-1.5 text-2xs text-text-muted">{footer}</div>}
     </div>
   );
 }
