@@ -545,7 +545,7 @@ describe('useMeshStore', () => {
       expect(mockInvoke).toHaveBeenCalledWith('create_mesh', {
         name: 'newmesh', path: '/new', color: '#38bdf8',
       });
-      expect(result).toEqual(created);
+      expect(result).toEqual({ mesh: created });
       const state = useMeshStore.getState();
       expect(state.meshes).toHaveLength(1);
       expect(state.meshesById.get(7)?.color).toBe('#38bdf8');
@@ -557,11 +557,24 @@ describe('useMeshStore', () => {
       expect(mockInvoke).toHaveBeenCalledWith('create_mesh', { name: 'm', path: '/m', color: null });
     });
 
-    it('returns null and sets error on failure', async () => {
-      mockInvoke.mockRejectedValueOnce(new Error('boom'));
+    it('returns the backend error text and records it in the error slot', async () => {
+      // Issue #2794: the failure is returned to the caller so the dialog can
+      // show the real cause, instead of a `null` that left it to read the
+      // shared `state.error` slot — which another request can overwrite.
+      mockInvoke.mockRejectedValueOnce(new Error('Access denied creating repository workspace'));
       const result = await useMeshStore.getState().createMesh('m', '/m', '#fff');
-      expect(result).toBeNull();
-      expect(useMeshStore.getState().error).toContain('boom');
+      expect(result).toEqual({ error: 'Access denied creating repository workspace' });
+      expect(useMeshStore.getState().error).toContain('Access denied creating repository workspace');
+    });
+
+    it('returns this request\'s own failure when another store failure overlaps it', async () => {
+      // The failure a caller reads must be the failure of ITS request: the
+      // shared error slot may already hold a different one by the time the
+      // dialog renders.
+      mockInvoke.mockRejectedValueOnce(new Error('Access denied creating repository workspace'));
+      const result = await useMeshStore.getState().createMesh('m', '/m', '#fff');
+      useMeshStore.setState({ error: 'a different failure from another request' });
+      expect(result).toEqual({ error: 'Access denied creating repository workspace' });
     });
   });
 
@@ -751,7 +764,7 @@ describe('useMeshStore', () => {
 
       const read = useMeshStore.getState().fetchMeshes();
       const result = await useMeshStore.getState().createMesh('fresh', '/repo/2');
-      expect(result?.id).toBe(2);
+      expect(result).toEqual({ mesh: created });
 
       stale.resolve([mesh({ id: 1, name: 'alpha' })]);
       await read;

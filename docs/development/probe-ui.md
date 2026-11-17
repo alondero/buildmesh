@@ -369,6 +369,28 @@ chosen swatch and shows an inline error after failure; retry closes it only
 after the backend acknowledges the write. Dismissal and colour edits are
 disabled while the save is pending.
 
+## A repository creation reports its own failure (issue #2794)
+
+`meshStore.createMesh` returns the created Mesh or the backend's error text —
+`{ mesh } | { error }` — the way `cloneMesh` does. It does not answer with
+`null` and leave the caller to read the shared `state.error` slot: that slot
+holds whatever the store last failed at, so an overlapping request can
+overwrite it, and the New mesh dialog would then report another request's
+failure as its own. The store still records the failure in `state.error` for
+the surfaces that read the slot; the dialog reads the RETURNED value.
+
+The dialog shows the backend's own message next to the operation it describes —
+the classification adds a hint and a diagnostic block and leaves the message
+as it is — and it adds the recovery the cause supports: **Retry** for a
+failure that may pass on its own, **Choose another folder…** for a folder that
+is missing or refused, and both when the cause does not match a known one
+(`src/lib/meshCreateFailure.ts` owns that classification). The picked folder
+and the chosen colour survive the failure, so a retry does not mean starting
+the form again. The failure panel takes focus when it appears, because the
+submit control that failed is disabled while the request runs and a disabled
+control does not hold the focus — without that the focus would fall out of the
+dialog onto the page behind it.
+
 ## Per-Mesh editing session (issue #2242)
 
 `meshSettingsStore` is the single owner of the editable state the two Mesh-lens
