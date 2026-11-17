@@ -18,9 +18,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { act, render, screen, fireEvent, within } from '@testing-library/react';
+import { act, render, screen, fireEvent, within, waitFor } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
-import { AgentHistoryTab } from '../../src/components/Probe/AgentHistoryTab';
+import { AgentHistoryTab, sortHistoryEntries } from '../../src/components/Probe/AgentHistoryTab';
 import { useMeshStore } from '../../src/stores/meshStore';
 import { useUIStore } from '../../src/stores/uiStore';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
@@ -28,6 +28,7 @@ import type { AgentNode } from '../../src/types/generated/AgentNode';
 import type { AgentHistoryEntry } from '../../src/types/generated/AgentHistoryEntry';
 
 const MESH = { id: 1, name: 'api', path: '/repos/api', base_ref: 'main', use_worktree: true };
+const OTHER_MESH = { id: 2, name: 'web', path: '/repos/web', base_ref: 'main', use_worktree: true };
 
 /**
  * An RFC 3339 string at the precision the backend actually stores: Rust
@@ -270,5 +271,143 @@ describe('AgentHistoryTab (#2461)', () => {
     // The exact instant stays available without cluttering the panel.
     expect(metadata!.getAttribute('title')).toBe(new Date(createdAt).toLocaleString());
     await settleReads();
+  });
+
+  describe('meaningful recency ordering (#2801)', () => {
+    /** The row's timing line: "Last changed …", "Archived …" or "Created …". */
+    function timingLine(name: string): HTMLElement {
+      return screen.getByText(name).parentElement!.querySelector('p.break-words') as HTMLElement;
+    }
+
+    /** DOM order, read the way a keyboard or pointer user would experience it. */
+    function appearsBefore(first: string, second: string): boolean {
+      const a = screen.getByText(first);
+      const b = screen.getByText(second);
+      return Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+    }
+
+    function row(id: number, created: string, changed: string | null = null): AgentHistoryEntry {
+      return entry(id, `agent-${id}`, { created_at: created }, { status_changed_at: changed });
+    }
+
+    it('ranks an older session that changed today above a newer inactive one', async () => {
+      mockBackend([
+        entry(1, 'long-lived-agent', { created_at: '2026-01-05T09:00:00Z' }, { status_changed_at: '2026-11-16T18:00:00Z' }),
+        entry(2, 'one-off-agent', { created_at: '2026-11-15T09:00:00Z' }),
+      ]);
+      render(<AgentHistoryTab />);
+      await screen.findByText('long-lived-agent');
+
+      // Creation date used to own the list, so the newer one-off session sat
+      // above the long-lived one the user had just touched.
+      expect(appearsBefore('long-lived-agent', 'one-off-agent')).toBe(true);
+      // The visible labels agree with the ordering: the older row says when it
+      // moved, the newer one falls back to when it was created.
+      expect(timingLine('long-lived-agent').textContent).toMatch(/^Archived /);
+      expect(timingLine('one-off-agent').textContent).toMatch(/^Created /);
+
+      fireEvent.change(screen.getByLabelText('History ordering'), { target: { value: 'created' } });
+      expect(appearsBefore('one-off-agent', 'long-lived-agent')).toBe(true);
+      await settleReads();
+    });
+
+    it('keeps the chosen ordering when search, repository and status filters change', async () => {
+      useMeshStore.setState({
+        meshes: [MESH, OTHER_MESH] as never,
+        meshesById: new Map([[MESH.id, MESH], [OTHER_MESH.id, OTHER_MESH]]) as never,
+      });
+      mockBackend([
+        entry(1, 'alpha-agent', { created_at: '2026-01-05T09:00:00Z' }, { status_changed_at: '2026-11-16T18:00:00Z' }),
+        entry(2, 'beta-agent', { mesh_id: OTHER_MESH.id, path: OTHER_MESH.path, created_at: '2026-11-15T09:00:00Z' }),
+        entry(3, 'gamma-chief', { created_at: '2026-11-10T09:00:00Z' }, { status_changed_at: '2026-11-16T20:00:00Z' }),
+      ]);
+      render(<AgentHistoryTab />);
+      await screen.findByText('alpha-agent');
+
+      fireEvent.change(screen.getByLabelText('History ordering'), { target: { value: 'created' } });
+      expect(appearsBefore('beta-agent', 'alpha-agent')).toBe(true);
+
+      fireEvent.change(screen.getByLabelText('Search agent history'), { target: { value: 'agent' } });
+      expect(screen.queryByText('gamma-chief')).toBeNull();
+      expect(appearsBefore('beta-agent', 'alpha-agent')).toBe(true);
+
+      fireEvent.change(screen.getByLabelText('History status'), { target: { value: 'archived' } });
+      expect(appearsBefore('beta-agent', 'alpha-agent')).toBe(true);
+
+      // A repository filter changes the set, not the selected ordering.
+      fireEvent.change(screen.getByLabelText('Search agent history'), { target: { value: '' } });
+      fireEvent.change(screen.getByLabelText('History repository'), { target: { value: String(MESH.id) } });
+      expect(screen.queryByText('beta-agent')).toBeNull();
+      expect(appearsBefore('gamma-chief', 'alpha-agent')).toBe(true);
+      await settleReads();
+    });
+
+    it('reorders on Refresh but not on live terminal activity', async () => {
+      const old = entry(1, 'long-lived-agent', { created_at: '2026-01-05T09:00:00Z' }, { status_changed_at: '2026-11-16T18:00:00Z' });
+      const inactive = entry(2, 'one-off-agent', { created_at: '2026-11-15T09:00:00Z' });
+      let rows = [old, inactive];
+      vi.mocked(invoke).mockImplementation((cmd: string) => cmd === 'list_agent_history'
+        ? Promise.resolve(rows) : Promise.resolve([]));
+      const liveRow = (status: AgentNode['status']) => node(2, 'one-off-agent', { status, created_at: inactive.created_at });
+      seedAgentNodes([liveRow('running')]);
+      render(<AgentHistoryTab />);
+      await screen.findByText('long-lived-agent');
+      expect(appearsBefore('long-lived-agent', 'one-off-agent')).toBe(true);
+
+      // Terminal output changes the live row's status repeatedly. The order is
+      // derived from durable history timing, so the row must not move and the
+      // list must not be read again.
+      act(() => seedAgentNodes([liveRow('awaiting_input')]));
+      expect(appearsBefore('long-lived-agent', 'one-off-agent')).toBe(true);
+      const historyReads = () => vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'list_agent_history');
+      expect(historyReads()).toHaveLength(1);
+
+      // Refresh acknowledges the newer change, and only then may the order move.
+      rows = [old, { ...inactive, status_changed_at: '2026-11-17T08:00:00Z' }];
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh agent history' }));
+      await waitFor(() => expect(appearsBefore('one-off-agent', 'long-lived-agent')).toBe(true));
+      expect(historyReads()).toHaveLength(2);
+    });
+
+    it('defaults to last changed with creation fallback and offers Created explicitly', () => {
+      const rows = [row(2, '2026-11-15T09:00:00Z'), row(1, '2026-01-05T09:00:00Z', '2026-11-16T18:00:00Z')];
+      expect(sortHistoryEntries(rows, 'changed').map(r => r.id)).toEqual([1, 2]);
+      expect(sortHistoryEntries(rows, 'created').map(r => r.id)).toEqual([2, 1]);
+    });
+
+    it('compares instants across UTC offsets and legacy zoneless text', () => {
+      const rows = [
+        row(1, '2026-01-01T00:00:00Z', '2026-11-16T11:00:00Z'),
+        row(2, '2026-01-01T00:00:00Z', '2026-11-16T09:30:00-05:00'), // 14:30Z
+        row(3, '2026-01-01T00:00:00Z', '2026-11-16 10:05:00'), // SQLite writes UTC
+        row(4, '2026-01-01T00:00:00Z', '2026-11-16T10:06:00Z'),
+      ];
+      // 2 (14:30Z) > 1 (11:00Z) > 4 (10:06Z) > 3 (10:05Z). Comparing the raw
+      // strings would put 2's `09:30` below the `10:`/`11:` values.
+      expect(sortHistoryEntries(rows, 'changed').map(r => r.id)).toEqual([2, 1, 4, 3]);
+    });
+
+    it('keeps null and unreadable timestamps at the bottom', () => {
+      const rows = [
+        row(1, '2020-01-01T00:00:00Z', 'not-a-timestamp'),
+        row(2, '2023-01-01T00:00:00Z'),
+        row(3, '2021-01-01T00:00:00Z', '2026-11-16T00:00:00Z'),
+        row(4, 'garbage'),
+      ];
+      // An unreadable `status_changed_at` falls back to creation; an unreadable
+      // creation time sorts last instead of being treated as "now".
+      expect(sortHistoryEntries(rows, 'changed').map(r => r.id)).toEqual([3, 2, 1, 4]);
+      expect(sortHistoryEntries(rows, 'created').map(r => r.id)).toEqual([2, 3, 1, 4]);
+    });
+
+    it('breaks ties deterministically by creation time then id', () => {
+      const changed = '2026-11-16T00:00:00Z';
+      const rows = [
+        row(1, '2026-01-01T00:00:00Z', changed),
+        row(3, '2026-02-01T00:00:00Z', changed),
+        row(2, '2026-02-01T00:00:00Z', changed),
+      ];
+      expect(sortHistoryEntries(rows, 'changed').map(r => r.id)).toEqual([3, 2, 1]);
+    });
   });
 });
