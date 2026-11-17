@@ -553,4 +553,43 @@ describe('a failed repository creation (issue #2794)', () => {
     const dialog = screen.getByRole('dialog');
     await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
   });
+
+  it('names a cause even when the backend said nothing', async () => {
+    render(<MeshCreateModal onClose={() => {}} />);
+    await chooseFolder();
+    routeInvoke({
+      create_mesh: () => {
+        // A rejection that carries no words at all.
+        throw new Error('   ');
+      },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^create mesh$/i }));
+
+    // An empty banner would name no cause; the dialog says what happened.
+    await screen.findByText('The mesh could not be created.');
+  });
+
+  it('does not report a copy that did not happen', async () => {
+    render(<MeshCreateModal onClose={() => {}} />);
+    await chooseFolder();
+    routeInvoke({
+      create_mesh: () => {
+        throw new Error(ACCESS_DENIED);
+      },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^create mesh$/i }));
+    await screen.findByText(ACCESS_DENIED);
+
+    // jsdom has no clipboard API, which is what an insecure window looks
+    // like. The button must not claim the details were copied.
+    fireEvent.click(screen.getByText('Details', { exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: /copy details/i }));
+
+    await waitFor(() =>
+      expect(
+        useToastStore.getState().toasts.some((t) => /clipboard is not available/i.test(t.message))
+      ).toBe(true)
+    );
+    expect(screen.queryByText('Copied')).toBeNull();
+  });
 });

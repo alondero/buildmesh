@@ -1,4 +1,4 @@
-import { useState, type RefObject } from 'react';
+import { useEffect, useRef, useState, type RefObject } from 'react';
 import { addToast } from '../../stores/toastStore';
 import { formatError } from '../../lib/errorUtils';
 
@@ -57,17 +57,37 @@ export function MeshCreateFailurePanel({
   panelRef,
 }: MeshCreateFailurePanelProps) {
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  // The "Copied" label is a moment, not a state: it clears itself so a later
+  // click does not report a copy that never happened.
+  const copyTimer = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+  }, []);
 
   const copyDetail = async () => {
     if (!detail) return;
+    // `navigator.clipboard` is missing in some windows (an insecure context,
+    // an older WebView). Awaiting an absent method resolves with undefined,
+    // which would report a copy that did not happen.
+    if (!navigator.clipboard?.writeText) {
+      setCopyState('failed');
+      addToast('New mesh', "Couldn't copy the details: the clipboard is not available here.", 'error');
+      return;
+    }
     try {
-      await navigator.clipboard?.writeText(detail);
+      await navigator.clipboard.writeText(detail);
       setCopyState('copied');
+      if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+      copyTimer.current = window.setTimeout(() => setCopyState('idle'), 2000);
     } catch (e) {
       setCopyState('failed');
       addToast('New mesh', `Couldn't copy the details: ${formatError(e)}`, 'error');
     }
   };
+
+  // A backend that says nothing still needs a sentence to read: an empty
+  // banner would name no cause at all.
+  const shownMessage = message.trim() ? message : 'The mesh could not be created.';
 
   return (
     <div
@@ -82,7 +102,7 @@ export function MeshCreateFailurePanel({
         className="text-xs text-status-error break-words"
         data-testid="mesh-create-failure-message"
       >
-        {message}
+        {shownMessage}
       </p>
       {hint && (
         <p className="mt-1 text-2xs text-text-secondary break-words" data-testid="mesh-create-failure-hint">
