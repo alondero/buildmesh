@@ -8,7 +8,7 @@ import { useMeshStore } from '../../stores/meshStore';
 import { focusAgentNode } from '../../lib/focusAgentNode';
 import { listAgentHistory, reopenAgentNode } from '../../lib/tauri/history';
 import { formatError } from '../../lib/errorUtils';
-import { formatListTimestamp } from '../../lib/time';
+import { formatListTimestamp, parseSqliteTimestamp } from '../../lib/time';
 import { getNodeStatusConfig, STATUS_CONFIG } from '../../lib/status';
 import { ArchivedNodesTab } from './ArchivedNodesTab';
 import { ProbeTabBody } from './ProbeTabBody';
@@ -20,9 +20,81 @@ import { LoadingState, RefreshControl } from '../shared/Spinner';
 // noise. The visible label is the same relative age the Archive list shows,
 // and the exact instant moves to the tooltip so the sub-minute precision the
 // raw string used to carry is still one hover away.
-function absoluteTimestamp(iso: string): string | undefined {
-  const then = new Date(iso);
-  return Number.isNaN(then.getTime()) ? undefined : then.toLocaleString();
+function absoluteTimestamp(at: Date | null): string | undefined {
+  return at ? at.toLocaleString() : undefined;
+}
+
+/**
+ * Parse one stored history timestamp.
+ *
+ * The column holds both RFC 3339 (status writes since migration v14) and
+ * SQLite's zone-less `datetime('now')` text (the v14 backfill). Going through
+ * `parseSqliteTimestamp` is what makes a legacy row read as UTC instead of
+ * local time, so display and ordering agree on the instant. An unreadable
+ * value is `null` rather than `Invalid Date`, which keeps it out of the
+ * ordering's top slot.
+ */
+function parseHistoryTimestamp(value: string | null): Date | null {
+  return value ? parseSqliteTimestamp(value) : null;
+}
+
+/** When the row last changed state, when that is known and readable. */
+function changedAt(entry: AgentHistoryEntry): Date | null {
+  return parseHistoryTimestamp(entry.status_changed_at);
+}
+
+/** When the worktree appeared. */
+function createdAt(entry: AgentHistoryEntry): Date | null {
+  return parseHistoryTimestamp(entry.created_at);
+}
+
+/** The durable instant Lifecycle rows are ordered by (issue #2801). */
+export type HistoryOrder = 'changed' | 'created';
+
+/**
+ * The ordering key for one row, in epoch milliseconds.
+ *
+ * The default is `Last changed` with a creation fallback. `status_changed_at`
+ * is the best durable record of when the work moved, but it is nullable (a
+ * pre-v14 row) and a legacy write can leave it unparseable; both fall back to
+ * `created_at` rather than to "now", because an unreadable timestamp must not
+ * lift a stale row to the top of the list. `Created` is the explicit
+ * alternative for spawn order. `null` sorts last.
+ */
+function orderTime(entry: AgentHistoryEntry, order: HistoryOrder): number | null {
+  const changed = order === 'changed' ? changedAt(entry) : null;
+  const at = changed ?? createdAt(entry);
+  return at ? at.getTime() : null;
+}
+
+/**
+ * Newest first, with a deterministic tie-break.
+ *
+ * Two rows can share a `status_changed_at` to the millisecond (a batch
+ * archive, or a fallback that landed on the same creation instant). Ties fall
+ * back to creation time and then to `id`, so a render and a reload agree on
+ * the order instead of letting the browser's sort decide.
+ */
+function compareHistoryEntries(a: AgentHistoryEntry, b: AgentHistoryEntry, order: HistoryOrder): number {
+  const aKey = orderTime(a, order);
+  const bKey = orderTime(b, order);
+  if (aKey !== bKey) {
+    if (aKey === null) return 1;
+    if (bKey === null) return -1;
+    return bKey - aKey;
+  }
+  const aCreated = createdAt(a)?.getTime() ?? null;
+  const bCreated = createdAt(b)?.getTime() ?? null;
+  if (aCreated !== bCreated) {
+    if (aCreated === null) return 1;
+    if (bCreated === null) return -1;
+    return bCreated - aCreated;
+  }
+  return b.id - a.id;
+}
+
+export function sortHistoryEntries(entries: AgentHistoryEntry[], order: HistoryOrder): AgentHistoryEntry[] {
+  return [...entries].sort((a, b) => compareHistoryEntries(a, b, order));
 }
 
 /**
@@ -38,16 +110,21 @@ function absoluteTimestamp(iso: string): string | undefined {
  * rather than rendered blank.
  */
 function sessionTiming(entry: AgentHistoryEntry): { label: string; exact?: string } {
-  const changed = entry.status_changed_at;
+  // The label follows the timestamp this row actually has: an unreadable
+  // `status_changed_at` is the same absence ordering treats it as, so the
+  // card says `Created …` instead of claiming a change instant it has no
+  // readable value for.
+  const changed = changedAt(entry);
   if (changed) {
     return {
-      label: `${entry.status === 'archived' ? 'Archived' : 'Last changed'} ${formatListTimestamp(changed)}`,
+      label: `${entry.status === 'archived' ? 'Archived' : 'Last changed'} ${formatListTimestamp(changed.toISOString())}`,
       exact: absoluteTimestamp(changed),
     };
   }
+  const created = createdAt(entry);
   return {
-    label: `Created ${formatListTimestamp(entry.created_at)}`,
-    exact: absoluteTimestamp(entry.created_at),
+    label: `Created ${created ? formatListTimestamp(created.toISOString()) : entry.created_at}`,
+    exact: absoluteTimestamp(created),
   };
 }
 
@@ -55,10 +132,9 @@ function sessionTiming(entry: AgentHistoryEntry): { label: string; exact?: strin
 function sessionSpan(entry: AgentHistoryEntry): { label: string; exact?: string } | undefined {
   const started = entry.session_started_at;
   if (!started) return undefined;
-  const iso = new Date(started);
-  if (Number.isNaN(iso.getTime())) return undefined;
-  const isoString = iso.toISOString();
-  return { label: `Started ${formatListTimestamp(isoString)}`, exact: absoluteTimestamp(isoString) };
+  const at = new Date(started);
+  if (Number.isNaN(at.getTime())) return undefined;
+  return { label: `Started ${formatListTimestamp(at.toISOString())}`, exact: absoluteTimestamp(at) };
 }
 
 export async function loadHistory() {
@@ -80,6 +156,7 @@ export function AgentHistoryTab() {
   const [search, setSearch] = useState('');
   const [scope, setScope] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
+  const [order, setOrder] = useState<HistoryOrder>('changed');
   const [discovered, setDiscovered] = useState(false);
   const [busy, setBusy] = useState<number | null>(null);
   const inFlight = useRef(false);
@@ -97,12 +174,17 @@ export function AgentHistoryTab() {
       merged.set(node.id, existing ? { ...existing, ...node } : { ...node, status_changed_at: null, session_started_at: null });
     }
     const query = search.trim().toLowerCase();
-    return [...merged.values()].filter(n => {
+    // Issue #2801 — ordering reads the loaded history row's durable
+    // timestamps, not the merged live status. A terminal changes a live node's
+    // status without touching those timestamps, and re-deriving the order from
+    // it would move a row out from under the pointer or keyboard focus. A
+    // reload (Refresh, or a node appearing/disappearing) re-sorts the list.
+    return sortHistoryEntries([...merged.values()].filter(n => {
       const mesh = meshes.find(m => m.id === n.mesh_id);
       return (!scope || n.mesh_id === Number(scope)) && (!statusFilter || n.status === statusFilter)
         && (!query || `${n.name} ${mesh?.name ?? ''} ${n.branch} ${n.cli_session_id ?? ''}`.toLowerCase().includes(query));
-    }).sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id - a.id);
-  }, [history, live, scope, statusFilter, search, meshes]);
+    }), order);
+  }, [history, live, scope, statusFilter, search, meshes, order]);
   const selectedMesh = meshes.find(m => String(m.id) === scope) ?? meshes[0];
   async function recover(node: AgentNode) {
     if (inFlight.current) return;
@@ -144,6 +226,12 @@ export function AgentHistoryTab() {
         <input type="search" aria-label="Search agent history" placeholder="Agent, repository, branch or session" value={search} onChange={e => setSearch(e.target.value)} className={fieldClass} />
         <select aria-label="History status" value={statusFilter} onChange={e => setStatusFilter(e.target.value)} className={fieldClass}>
           <option value="">All lifecycle states</option>{Object.entries(STATUS_CONFIG).map(([value, config]) => <option key={value} value={value}>{config.label}</option>)}
+        </select>
+        {/* Issue #2801 — the ordering control sits with the other Lifecycle
+            filters and retains its value while they change. */}
+        <select aria-label="History ordering" value={order} onChange={e => setOrder(e.target.value as HistoryOrder)} className={fieldClass}>
+          <option value="changed">Last changed</option>
+          <option value="created">Created</option>
         </select>
       </>}
     </div>

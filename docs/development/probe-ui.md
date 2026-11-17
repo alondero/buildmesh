@@ -144,7 +144,13 @@ background and text colour, so the current mode is visible rather than
 inferred, and the repository filter renders only when it has an option to
 offer. Card timestamps
 use `formatListTimestamp` (`src/lib/time.ts`) rather than the stored RFC 3339
-value, which carries Rust nanosecond precision.
+value, which carries Rust nanosecond precision. Lifecycle rows are ordered by
+`status_changed_at` with `created_at` as the fallback, and **Created** offers
+spawn order. Both timestamps are read through `parseSqliteTimestamp`, so a
+legacy zone-less value compares as UTC, an unreadable one falls back rather
+than sorting first, and ties break by creation instant then id. The order is
+derived from the loaded history rows, not live status, so terminal output does
+not move a row between pointer or keyboard actions; Refresh re-sorts.
 
 Routing defaults use `list_routing_options`, a preferences/cached-installation
 catalog that does no subprocess or WSL probing. Unverified OpenAI routes stay
