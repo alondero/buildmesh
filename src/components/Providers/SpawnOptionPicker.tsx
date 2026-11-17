@@ -82,6 +82,7 @@ export interface SpawnOptionPickerProps {
    *  projection — e.g. stamp `unavailable_reason` on a harness the caller
    *  knows can't serve the role so the row renders disabled with a reason. */
   decorate?: (option: SpawnOption) => SpawnOption;
+  onManageConfigurations?: () => void;
   disabled?: boolean;
   /** Visual density: `sm` for the Probe panel, `md` for the Settings modal. */
   size?: 'sm' | 'md';
@@ -98,6 +99,7 @@ export function SpawnOptionPicker({
   onSelect,
   filter,
   decorate,
+  onManageConfigurations,
   disabled,
   size = 'sm',
   className,
@@ -105,6 +107,7 @@ export function SpawnOptionPicker({
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
   const [position, setPosition] = useState({ left: 0, top: 0, width: 240 });
   // Stable key mirrored onto the panel's `data-dropdown-for`. The nested
   // `SpawnConfigurationMenu` (and its editor) portal outside this panel and
@@ -141,6 +144,7 @@ export function SpawnOptionPicker({
     // Escapes animated/scrolling ancestors while the DOM stays inside the
     // surrounding dialog's focus trap (same trick `SpawnConfigurationMenu` uses).
     panelRef.current?.showPopover?.();
+    searchRef.current?.focus({ preventScroll: true });
     const place = () => {
       const rect = triggerRef.current?.getBoundingClientRect();
       if (!rect) return;
@@ -223,6 +227,8 @@ export function SpawnOptionPicker({
                 leadingAction={{ id: '__inherit', label: unsetLabel, onSelect: () => pick(unsetValue) }}
                 filter={filter}
                 decorate={decorate}
+                searchRef={searchRef}
+                onManageConfigurations={onManageConfigurations}
                 onSelect={(providerId, _altKey, configurationId) => pick(configurationId ?? providerId)}
                 onClose={close}
               />

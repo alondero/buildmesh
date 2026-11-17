@@ -30,7 +30,7 @@ import { ResourceLoadStatus } from './ResourceLoadStatus';
 import { NO_OVERRIDE } from './settingsUtils';
 import { useSettingsData } from './SettingsDataContext';
 
-export function ProvidersPane() {
+export function ProvidersPane({ onManageConfigurations }: { onManageConfigurations: () => void }) {
   const {
     resources,
     prefsLoaded,
@@ -272,6 +272,7 @@ export function ProvidersPane() {
         >
           <SpawnOptionPicker
             id="default-provider"
+            onManageConfigurations={onManageConfigurations}
             size="md"
             ariaLabel="Default provider"
             providers={routingChoices}
@@ -287,6 +288,7 @@ export function ProvidersPane() {
           summary="Launch Configuration used by Companion in the Command Omnibar."
           details={<>Uses the same background inference capabilities as auto-naming. Saved model and effort settings apply. Leave unset to use the app default, then Claude Code. Unsupported configurations show why they are unavailable.</>}>
           <SpawnOptionPicker id="companion-launch" size="md" ariaLabel="AI Assistant" unsetValue={null}
+            onManageConfigurations={onManageConfigurations}
             providers={routingChoices} value={preferences?.companion?.launch_configuration ?? null}
             unsetLabel="App default (Claude Code when unset)"
             disabled={!prefsLoaded || !routingReady || companionSaving}
@@ -299,6 +301,7 @@ export function ProvidersPane() {
           summary="Background model used to classify Circuit agent reports."
           details={<>Independent of agent spawn defaults. Choose a host-native harness with background inference support; its model and effort settings apply. Configurations with extra CLI arguments cannot run background inference.</>}>
           <SpawnOptionPicker id="circuit-classifier-provider" size="md" ariaLabel="Circuit classifier provider" unsetValue={null}
+            onManageConfigurations={onManageConfigurations}
             providers={routingChoices} value={classifierProvider} unsetLabel="Claude Code (built-in default)"
             disabled={!prefsLoaded || !routingReady || classifierSaving}
             filter={(option) => option.harness_id !== 'terminal'}
@@ -320,6 +323,7 @@ export function ProvidersPane() {
         >
           <SpawnOptionPicker
             id="reviewer-provider"
+            onManageConfigurations={onManageConfigurations}
             size="md"
             ariaLabel="Reviewer provider"
             providers={routingChoices}
@@ -359,6 +363,7 @@ export function ProvidersPane() {
         >
           <SpawnOptionPicker
             id="auto-naming"
+            onManageConfigurations={onManageConfigurations}
             size="md"
             ariaLabel="Auto-naming"
             providers={routingChoices}

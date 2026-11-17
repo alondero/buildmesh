@@ -273,7 +273,10 @@ function SettingsShell({
             hidden={activeTab !== 'providers'}
             className="space-y-2"
           >
-            <ProvidersPane />
+            <ProvidersPane onManageConfigurations={() => {
+              setActiveTab('harnesses');
+              document.getElementById(`${tabIdPrefix}-tab-harnesses`)?.focus();
+            }} />
             <AccountsPane />
           </section>
 

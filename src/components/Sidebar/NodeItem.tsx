@@ -297,7 +297,7 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
       // — or on its trigger — closes it and returns focus to the
       // trigger.
       if (e.key === 'ArrowRight' && inMenu && !inSubmenu) {
-        if (active?.getAttribute('aria-haspopup') !== 'menu') return;
+        if (active?.getAttribute('aria-haspopup') !== 'dialog') return;
         e.preventDefault();
         regenSubmenu.openSubmenuViaKeyboard();
         return;
@@ -309,7 +309,7 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
         e.preventDefault();
         regenSubmenu.closeSubmenu();
         const menuEl = menuRef.current;
-        const trigger = menuEl?.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]');
+        const trigger = menuEl?.querySelector<HTMLButtonElement>('button[aria-haspopup="dialog"]');
         if (trigger) focusWithoutScroll(trigger);
         return;
       }
@@ -609,7 +609,7 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
               // short-circuits as a second guard so a programmatic
               // .click() can't bypass the disabled state.
               role="menuitem"
-              aria-haspopup="menu"
+              aria-haspopup="dialog"
               aria-expanded={regenSubmenu.submenuOpen}
               tabIndex={menuActions[activeIndex] === 'regenerate' ? 0 : -1}
               disabled={isRegenerateDisabled || !hasRegenerateTargets}
@@ -655,9 +655,8 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
                 absolutely to the right of the parent (-ml-2 overlaps
                 by 2px so a shallow horizontal cursor wobble from the
                 trigger into the picker stays inside the wrapper's hit
-                area). `role="menu"` keeps it a peer of the parent
-                menu so screen readers announce "menu: <picker
-                label>". Rows render via the shared
+                area). The dialog contains the search field and browse menu.
+                Rows render via the shared
                 `RegenerateProviderMenu` (current pinned on top for
                 in-place kick-start, then alternates grouped by
                 harness) so the sidebar and `GridNodeHeader` pickers
@@ -679,6 +678,8 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
             {regenSubmenu.submenuOpen && (
               <div
                 ref={regenSubmenu.submenuRef}
+                role="dialog"
+                aria-label="Choose a launch option to regenerate"
                 data-testid="regenerate-submenu"
                 // Issue #814 — same scoped attribute as the parent menu
                 // so `useClickOutside` treats clicks inside the

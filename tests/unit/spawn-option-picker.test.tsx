@@ -8,6 +8,7 @@
  * Plus the inherit/unset row and the current-selection label.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { StrictMode } from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
@@ -78,9 +79,28 @@ describe('SpawnOptionPicker', () => {
     render(<SpawnOptionPicker ariaLabel="Default provider" providers={PROVIDERS} value="codex"
       unsetLabel="Inherit" unsetValue={null} onSelect={onSelect} />);
     await user.click(screen.getByRole('button', { name: 'Default provider' }));
+    expect(document.activeElement).toBe(screen.getByRole('combobox', { name: 'Search launch choices' }));
+    await user.keyboard('{ArrowDown}');
     expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Inherit' }));
     await user.keyboard('{ArrowDown}{Home}{Enter}');
     expect(onSelect).toHaveBeenCalledWith(null);
+  });
+
+  it('persists the searched recipe ID and returns focus to the settings trigger', async () => {
+    const onSelect = vi.fn();
+    const user = userEvent.setup();
+    render(<StrictMode><SpawnOptionPicker ariaLabel="Default provider" value={null} unsetLabel="Inherit" unsetValue={null}
+      providers={[...PROVIDERS, { ...PROVIDERS[0], id: CONFIGURATION.id, label: CONFIGURATION.name, configuration: CONFIGURATION }]}
+      onSelect={onSelect} /></StrictMode>);
+    const trigger = screen.getByRole('button', { name: 'Default provider' });
+    await user.click(trigger);
+    expect(document.activeElement).toBe(screen.getByRole('combobox', { name: 'Search launch choices' }));
+    await user.keyboard('claude  FAST');
+    expect(screen.getByRole('option', { name: 'Fast Claude Code' })).toBeTruthy();
+    await user.keyboard('{Enter}');
+    expect(onSelect).toHaveBeenCalledExactlyOnceWith('launch/fast');
+    expect(document.activeElement).toBe(trigger);
+    expect(invoke).not.toHaveBeenCalledWith('create_agent_node', expect.anything());
   });
   it('shows the unset label when no value is selected', () => {
     render(

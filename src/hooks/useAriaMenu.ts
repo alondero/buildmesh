@@ -92,6 +92,8 @@ export interface UseAriaMenuOptions {
    * `false`, neither side-effect runs. Default `true`.
    */
   enabled?: boolean;
+  /** Let a surrounding chooser put initial focus on its search field. */
+  focusOnMount?: boolean;
   /** Selector for this menu's own items when it contains a nested menu. */
   itemSelector?: string;
   /** Skip disabled menuitems while moving focus. */
@@ -107,6 +109,7 @@ export function useAriaMenu({
   initialActiveIndex,
   closeOnTab = true,
   enabled = true,
+  focusOnMount = true,
   itemSelector = '[role="menuitem"]',
   skipDisabled = false,
 }: UseAriaMenuOptions): void {
@@ -191,7 +194,7 @@ export function useAriaMenu({
   // synchronously after the menu commits, so the very first ArrowDown
   // doesn't race a deferred focus call clobbering the user's keystroke.
   useLayoutEffect(() => {
-    if (!enabled) return;
+    if (!enabled || !focusOnMount) return;
     const root = rootRef.current;
     if (!root) return;
     // `initialActiveIndex` seeds the starting row (see the doc header);
@@ -205,9 +208,7 @@ export function useAriaMenu({
         : 0;
     const first = focusMenuItem(root, start, itemSelector, skipDisabled, 1);
     if (first !== null) setActiveIndex(first);
-    // Re-run only when `enabled` flips — the menu's open/close is the
-    // gate, and the layout effect mirrors the lifetime of the listener.
-  }, [enabled, rootRef, setActiveIndex, itemSelector, skipDisabled]);
+  }, [enabled, focusOnMount, rootRef, setActiveIndex, itemSelector, skipDisabled]);
 }
 
 /**

@@ -413,7 +413,7 @@ function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerL
       const inSubmenu = regenSubmenu.submenuContainsFocus();
       if (!inMenu && !inSubmenu) return;
       if (e.key === 'ArrowRight' && inMenu && !inSubmenu) {
-        if (active?.getAttribute('aria-haspopup') !== 'menu') return;
+        if (active?.getAttribute('aria-haspopup') !== 'dialog') return;
         e.preventDefault();
         regenSubmenu.openSubmenuViaKeyboard();
         return;
@@ -421,7 +421,7 @@ function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerL
       if (e.key === 'ArrowLeft' && (inSubmenu || (inMenu && regenSubmenu.isSubmenuOpen()))) {
         e.preventDefault();
         regenSubmenu.closeSubmenu();
-        const trigger = menu?.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]');
+        const trigger = menu?.querySelector<HTMLButtonElement>('button[aria-haspopup="dialog"]');
         if (trigger) focusWithoutScroll(trigger);
         return;
       }
@@ -492,7 +492,7 @@ function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerL
           >
             <button
               role="menuitem" data-aria-menu-item
-              aria-haspopup="menu"
+              aria-haspopup="dialog"
               aria-expanded={regenSubmenu.submenuOpen}
               disabled={regenDisabled}
               onClick={() => {
@@ -521,6 +521,8 @@ function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerL
             {regenSubmenu.submenuOpen && (
               <div
                 ref={regenSubmenu.submenuRef}
+                role="dialog"
+                aria-label="Choose a launch option to regenerate"
                 data-testid="grid-regenerate-submenu"
                 data-dropdown-for={menuId}
                 // PR #1796 — wider overlap (`-mr-2`, 8 px) absorbs a
