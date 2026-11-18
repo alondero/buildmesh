@@ -17,7 +17,7 @@
  *   - header `Cached` badge — same signal at the row title, with the absolute
  *     fetch instant on hover (`title`)
  *   - `UsagePanel`   — one provider's row on the glanceable surface
- *                      (icon + name + optional `↗` usage-page link +
+ *                      (icon + name + optional external-link usage-page button +
  *                      optional Refresh + meter body)
  *
  * What's NOT here: any edit affordance (enable toggle, credential editor,
@@ -30,6 +30,7 @@ import type { ProviderAccount, ProviderMeters } from '../../lib/tauri';
 import type { UsageWindow, BillingBalance, UsageAmount, UsageMeter } from '../../lib/tauri';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import { SafeLink } from '../shared/SafeLink';
+import { OpenExternalIcon } from '../shared/OpenExternalIcon';
 import { formatRelativeAge } from '../../lib/time';
 import { getUsageWindowPacePercent } from '../../lib/usagePace';
 
@@ -334,22 +335,21 @@ export function UsagePanel({
             {login.email ? `${login.label} · ${login.email}` : login.label}
           </span>
         )}
-        {/* Provider destination, as an icon-only external link (the `↗`
-            affordance `ProbeRow` uses): it sits in the header row so it
-            costs no vertical space, and the hover tooltip plus
-            `ariaLabel` carry the destination instead of visible text.
-            The square hit area is DESIGN.md's icon-button rule; the
-            negative vertical margin keeps it from driving the header
-            row's height, and `shrink-0` keeps it pinned while a long
-            provider name truncates. */}
+        {/* Provider destination, as an icon-only external link. It sits
+            in the header row so it costs no vertical space, and the hover
+            tooltip plus `ariaLabel` carry the destination instead of
+            visible text. The 24px hit area is DESIGN.md's icon-button
+            rule; the negative vertical margin keeps it from driving the
+            header row's height, and `shrink-0` keeps it pinned while a
+            long provider name truncates. */}
         {meter.usagePage?.url && (
           <SafeLink
             url={meter.usagePage.url}
             ariaLabel={`${meter.usagePage.label} for ${subject} on provider website`}
             title={`${meter.usagePage.label} — opens in your browser`}
-            className="inline-flex items-center justify-center h-[18px] w-[18px] -my-1 shrink-0 rounded-sm text-text-muted hover:text-accent-cyan transition-colors text-xs leading-none focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-cyan"
+            className="inline-flex items-center justify-center h-[24px] w-[24px] -my-1 shrink-0 rounded-sm text-text-secondary hover:bg-bg-card-hover hover:text-accent-cyan transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-cyan"
           >
-            ↗
+            <OpenExternalIcon className="h-3 w-3" />
           </SafeLink>
         )}
         {meter.cachedAt != null && (

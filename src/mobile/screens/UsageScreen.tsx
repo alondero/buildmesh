@@ -6,6 +6,7 @@ import type { MobileProviderUsage } from '../../types/generated/MobileProviderUs
 import type { UsageMeter } from '../../types/generated/UsageMeter';
 import type { UsageAmount } from '../../types/generated/UsageAmount';
 import { getUsageWindowPacePercent } from '../../lib/usagePace';
+import { OpenExternalIcon } from '../../components/shared/OpenExternalIcon';
 
 function Percent({ label, value, pace }: { label: string; value: number | null; pace?: number | null }) {
   return <div className="usage-window">
@@ -47,7 +48,7 @@ export function UsageCard({ row: { name, meter } }: { row: MobileProviderUsage }
   const usage = meter.usage;
   const balance = usage?.balance;
   return <section className="usage-card" aria-label={`${name} usage`}>
-    <div className="usage-value"><h2>{name}</h2>{meter.usagePage && <a href={meter.usagePage.url} target="_blank" rel="noreferrer">Provider website ↗</a>}</div>
+    <div className="usage-value"><h2>{name}</h2>{meter.usagePage && <a href={meter.usagePage.url} target="_blank" rel="noreferrer" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>Provider website<OpenExternalIcon /></a>}</div>
     {!meter.usageTracked ? <p>Usage not tracked</p>
       : !usage ? <p>Unable to load usage data</p>
       : usage.error ? <p role="alert">{usage.error}</p>

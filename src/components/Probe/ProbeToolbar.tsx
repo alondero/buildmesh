@@ -6,7 +6,7 @@
  * Before this primitive each tab hand-rolled the same
  * `px-3 py-2 border-b flex items-center justify-between` row and the
  * details drifted: padding, gaps, which side Refresh sat on, and whether
- * the row could shrink under a long "View on GitHub ↗" link all varied
+ * the row could shrink under a long "View on GitHub" link all varied
  * from tab to tab. One component pins the rhythm:
  *
  *   - left slot (`children`): the tab's primary controls — Refresh,
@@ -14,7 +14,7 @@
  *     search field can fill the row and long text truncates instead of
  *     pushing the trailing slot out of the dock.
  *   - right slot (`trailing`): secondary navigation-style actions —
- *     "View on GitHub ↗", the open/closed segmented toggle. The row wraps
+ *     "View on GitHub", the open/closed segmented toggle. The row wraps
  *     at narrow widths so secondary actions cannot cover primary controls.
  *
  * The 37px minimum height matches the pre-convergence rows so tab

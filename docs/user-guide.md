@@ -86,8 +86,9 @@ up to seven days, marked **Last known value · …** on the Usage tab — so a f
 start does not blank the meters you were watching. If nothing has been recorded
 yet, its meter stays hidden.
 
-On the **Usage** tab, the **↗** link beside the provider name opens the provider's
-usage page in your system browser — hover it to see which page it opens. The link
+On the **Usage** tab, the external-link icon beside the provider name opens the
+provider's usage page in your system browser — hover it to see which page it
+opens. The link
 also works beside a last known reading or a fetch error, so you can check the
 current figures directly. Where no direct dashboard is available, it opens the
 provider's account console, quota documentation, or subscription settings instead.

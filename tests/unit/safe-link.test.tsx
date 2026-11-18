@@ -103,10 +103,10 @@ describe('SafeLink (#463)', () => {
         url=""
         className="text-2xs font-medium text-accent-cyan hover:text-accent-cyan/80 transition-colors"
       >
-        View on GitHub ↗
+        View on GitHub
       </SafeLink>,
     );
-    const fallback = screen.getByText('View on GitHub ↗');
+    const fallback = screen.getByText('View on GitHub');
     expect(fallback.tagName).toBe('SPAN');
     // Link-styling tokens are gone — the span no longer LOOKS clickable.
     expect(fallback.className).not.toMatch(/text-accent-cyan/);
@@ -174,23 +174,43 @@ describe('SafeLink (#463)', () => {
     expect(link.getAttribute('title')).toBe('Open on GitHub');
   });
 
-  it('wires ariaLabel for icon-only variants (e.g. the ↗ icon)', () => {
-    // The icon variant of the link has no text children — only an icon
-    // glyph. Screen readers need the aria-label to announce what the
-    // link does. Mirrors the issues tab's `Open issue on GitHub` and
-    // the PR tab's `Open pull request on GitHub` labels.
+  it('wires ariaLabel for icon-only variants', () => {
     render(
       <SafeLink
         url="https://github.com/acme/demo/issues/101"
         ariaLabel="Open issue on GitHub"
-        className="text-text-muted"
+        className="text-text-secondary"
       >
-        ↗
+        <svg aria-hidden="true" />
       </SafeLink>,
     );
     const link = screen.getByLabelText('Open issue on GitHub');
     expect(link.tagName).toBe('A');
-    expect(link.textContent).toBe('↗');
+    expect(link.textContent).toBe('');
+    expect(link.querySelector('svg')).not.toBeNull();
+  });
+
+  it('appends the external icon on a real link and omits it when the URL is empty', () => {
+    const { rerender } = render(
+      <SafeLink url="https://github.com/acme/demo/issues" external>
+        View on GitHub
+      </SafeLink>,
+    );
+    const link = screen.getByRole('link', { name: 'View on GitHub' });
+    const icon = link.querySelector('svg');
+    expect(icon).not.toBeNull();
+    expect(icon?.getAttribute('aria-hidden')).toBe('true');
+    expect(icon?.getAttribute('width')).toBe('12');
+    expect(link.textContent?.replace(/\s+/g, ' ').trim()).toBe('View on GitHub');
+
+    rerender(
+      <SafeLink url="" external>
+        View on GitHub
+      </SafeLink>,
+    );
+    const fallback = screen.getByText('View on GitHub');
+    expect(fallback.tagName).toBe('SPAN');
+    expect(fallback.querySelector('svg')).toBeNull();
   });
 
   // ---- Click routing (the actual bug fix) -------------------------------

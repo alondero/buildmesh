@@ -181,14 +181,15 @@ additive `ProviderMeters.usagePage`, including disabled, failed, and remembered 
 URLs are metadata, not stored in the reading caches. The catalog omits the link
 when a reading reports `managed_externally`, and unknown providers have none.
 The Usage panel renders it through `SafeLink` to open the system browser, as
-an icon-only `↗` link in the row's header beside the provider name rather than a
-labelled link of its own, so a meter's height does not grow with the destination.
-The label travels in the `ariaLabel` and hover `title` instead of visible text.
+an icon-only external-link button in the row's header beside the provider name
+rather than a labelled link of its own, so a meter's height does not grow with
+the destination. The control is a 24px hit target. The label travels in the
+`ariaLabel` and hover `title` instead of visible text.
 
-The icon-only form suits a row that already shows the provider name, but it
-shrinks the hit target and drops the visible cue the labelled call sites carry
-(`PrPill`, the Git Issues / PRs tab headers); prefer a labelled link where the
-surrounding row does not already name the destination.
+The icon-only form suits a row that already shows the provider name. Labelled
+open actions (the pull-request pill, the Git Issues and pull-request headers,
+and the mobile View action) keep their words and append the same icon. Prefer
+a labelled link where the surrounding row does not already name the destination.
 Provider destinations and first-party evidence are recorded in
 [the usage-page research](../research/provider-usage-pages.md).
 

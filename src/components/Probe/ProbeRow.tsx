@@ -28,7 +28,8 @@
  *      on the way to GitHub.
  *   4. Empty-URL fallback. When `url === ''`, the title renders
  *      as a plain `<span>` — no `<a href="">` (the WebView would
- *      self-navigate).
+ *      self-navigate). The title is the only open control; the row
+ *      does not add a second icon link.
  *   5. Right-click + AT preserved. The `<a href>` is unchanged so
  *      right-click → "Open in browser", ⌘-click, and screen readers
  *      still work.
@@ -93,16 +94,9 @@ export interface ProbeRowProps {
   title: string;
   /**
    * External URL. The empty string (`''`) falls back to a `<span>`
-   * for the title and hides the ↗ icon — see
-   * `buildmesh-empty-url-frontend-guard`.
+   * for the title — see `buildmesh-empty-url-frontend-guard`.
    */
   url: string;
-  /**
-   * Accessible name for the ↗ icon. Tab-specific: `Open issue on
-   * GitHub` for the issues tab, `Open pull request on GitHub` for
-   * the PRs tab.
-   */
-  iconAriaLabel: string;
 
   /** Whether the body region is currently expanded. */
   isExpanded: boolean;
@@ -164,7 +158,6 @@ export function ProbeRow({
   number,
   title,
   url,
-  iconAriaLabel,
   isExpanded,
   onToggle,
   body,
@@ -207,8 +200,8 @@ export function ProbeRow({
       />
       <div className={`flex items-start gap-2 px-2.5 py-2 pl-3 ${dataAttr === 'prompt' ? 'flex-wrap' : ''}`}>
         {/* Left column — clickable to expand/collapse. The title
-            `<a>` and the ↗ icon `<a>` (both via `<SafeLink>`) live
-            here, each with stopPropagation so the row handler
+            `<a>` (via `<SafeLink>`) lives
+            here, with stopPropagation so the row handler
             doesn't fire when the user navigates to GitHub. The body
             moved OUT of this column (see below) so it can span the
             full row width. */}
@@ -260,21 +253,11 @@ export function ProbeRow({
                   into the action buttons. */}
               <SafeLink
                 url={url}
-                className={`text-label text-text-primary font-medium hover:text-accent-cyan ml-0.5 min-w-0 flex-1 transition-colors ${dataAttr === 'prompt' ? 'break-words' : 'truncate'}`}
+                className={`text-label text-text-primary font-medium hover:text-accent-cyan hover:underline ml-0.5 min-w-0 flex-1 transition-colors ${dataAttr === 'prompt' ? 'break-words' : 'truncate'}`}
                 title={url ? 'Open on GitHub' : title}
               >
                 {title}
               </SafeLink>
-              {url !== '' && (
-                <SafeLink
-                  url={url}
-                  ariaLabel={iconAriaLabel}
-                  className="text-text-muted hover:text-accent-cyan transition-colors text-micro shrink-0 leading-none"
-                  title="Open on GitHub"
-                >
-                  ↗
-                </SafeLink>
-              )}
             </div>
           </div>
           {/* Metadata chips — label badges, branch refs, state flags.

@@ -458,6 +458,12 @@ it is updated too.
   Compact desktop targets are at least 24 CSS pixels in each dimension; use
   explicit pixel bounds because the desktop root type scale is 13px.
   Resume/Restart stay visible when available; icons may remain compact.
+- **Opens in the browser:** `OpenExternalIcon` (a box with an arrow leaving
+  it) is the only mark. Beside a text label it is 12px and `aria-hidden`;
+  the words are the accessible name. An icon-only control keeps the 24px
+  hit area, tooltip, and `aria-label`. Do not suffix a link with the `↗`
+  character. A probe row's title is the open control and does not carry a
+  second icon. An empty URL keeps the words and omits the icon.
 - **Filled actions (destructive and accent):** the fill and the label are a
   pair, not a colour and a hope — see [Action fills](#action-fills).
   Destructive: `text-on-destructive bg-destructive/80`, `hover:bg-destructive`,

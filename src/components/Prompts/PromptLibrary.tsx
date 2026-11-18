@@ -158,7 +158,7 @@ export function PromptLibrary({ mesh: contextMesh, providers }: { mesh: Mesh | n
         <h3 className="mb-1 text-xs font-medium text-text-secondary">{group.title}</h3>
         <div className="space-y-2">{group.prompts.map(prompt => {
           const custom = saved?.some(item => item.id === prompt.id) ?? false;
-          return <ProbeRow key={prompt.id} dataAttr="prompt" rowKey={prompt.id} title={prompt.name} url="" iconAriaLabel=""
+          return <ProbeRow key={prompt.id} dataAttr="prompt" rowKey={prompt.id} title={prompt.name} url=""
             isExpanded={expanded[prompt.id] ?? false} onToggle={() => setExpanded(current => ({ ...current, [prompt.id]: !current[prompt.id] }))}
             body={prompt.body} bodyFormat="text" rightSlot={<div className="flex max-w-full items-center gap-1">
               <PromptSpawnButton meshId={mesh?.id ?? null} promptId={prompt.id} name={prompt.name}

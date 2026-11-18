@@ -17,6 +17,7 @@ import { SpawnSplitButton } from "../components/SpawnSplitButton";
 import { SpawnMenuSheet } from "../components/SpawnMenuSheet";
 import { useSpawnMenu } from "../useSpawnMenu";
 import { meshDefaultLabel, meshDefaultProvider, type LaunchChoice } from "../spawnMenu";
+import { OpenExternalIcon } from "../../components/shared/OpenExternalIcon";
 
 type Props = {
   mesh: Mesh;
@@ -194,7 +195,7 @@ export default function IssuesScreen({
               onClick={() => setSelectedIssue(open ? null : issue.number)}
               onKeyDown={(e) => {
                 // Only respond when the card itself is the focused element.
-                // The nested "Start agent" button and "View ↗" link handle
+                // The nested "Start agent" button and "View" link handle
                 // their own keyboard activation; without this guard, a
                 // bubbled keydown from them would collapse the card on top
                 // of their own action.
@@ -290,17 +291,33 @@ export default function IssuesScreen({
                         setMenuIssue(menuIssue?.number === issue.number ? null : issue);
                       }}
                     />
-                    <a
-                      href={issue.url}
-                      target="_blank"
-                      rel="noreferrer"
-                      onClick={(e) => e.stopPropagation()}
-                      className="btn-ghost"
-                      data-testid={`issue-view-${issue.number}`}
-                      style={{ textDecoration: "none", lineHeight: 1.2 }}
-                    >
-                      View ↗
-                    </a>
+                    {issue.url !== "" ? (
+                      <a
+                        href={issue.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        onClick={(e) => e.stopPropagation()}
+                        className="btn-ghost"
+                        data-testid={`issue-view-${issue.number}`}
+                        style={{
+                          textDecoration: "none",
+                          lineHeight: 1.2,
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 4,
+                        }}
+                      >
+                        View
+                        <OpenExternalIcon />
+                      </a>
+                    ) : (
+                      <span
+                        data-testid={`issue-view-${issue.number}`}
+                        style={{ color: "var(--text-dim)", fontSize: 13, lineHeight: 1.2 }}
+                      >
+                        View
+                      </span>
+                    )}
                   </div>
                 </div>
               )}

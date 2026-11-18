@@ -215,10 +215,13 @@ describe('UsagePanel (issue #601 read-only surface)', () => {
 
   it.each(['Usage guide', 'Open console', 'Manage plan'])('names the fallback destination as %s via its accessible name', (label) => {
     render(<UsagePanel account={account()} meter={meter({ usagePage: { url: 'https://provider.example/', label } })} />);
-    // The link body is the bare `↗` glyph — the destination travels in the
-    // accessible name and the hover tooltip, never as visible text.
+    // The link body is the external-link icon — the destination travels in
+    // the accessible name and the hover tooltip, never as visible text.
     const link = screen.getByRole('link', { name: `${label} for Anthropic / Claude on provider website` });
-    expect(link.textContent).toBe('↗');
+    expect(link.textContent).toBe('');
+    expect(link.querySelector('svg')).not.toBeNull();
+    expect(link.className).toContain('h-[24px]');
+    expect(link.className).toContain('w-[24px]');
     expect(link.getAttribute('title')).toBe(`${label} — opens in your browser`);
   });
 

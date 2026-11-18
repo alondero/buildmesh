@@ -8,7 +8,7 @@
  */
 export type GitHubIssue = { number: number, title: string, body: string, 
 /**
- * Absolute GitHub URL for the issue. The mobile "View ↗" link opens
+ * Absolute GitHub URL for the issue. The mobile "View" link opens
  * this directly. Always present — `services::github::Issue` carries
  * `#[serde(default)]` on `html_url`, so a partial response yields `""`
  * rather than failing to parse.

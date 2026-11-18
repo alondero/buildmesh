@@ -1642,39 +1642,16 @@ describe('GitPullRequestsTab', () => {
   // that routing — a future port that drops the handler would regress
   // to "the URL is in the DOM but clicking does nothing".
 
-  it('opens the PR URL via openUrl when the title link is clicked', async () => {
+  it('gives each pull request row a single title link and no arrow character', async () => {
     mockBackend();
     render(<GitPullRequestsTab />);
 
-    const titleLink = (await screen.findByText('Add widget')).closest('a')!;
-    await userEvent.click(titleLink);
-
-    // `openUrl` is called once with the PR's `url` field. The PR tab
-    // has more action buttons (Merge / Spawn / View changes) than the
-    // issues tab, so it's especially easy for a future refactor to
-    // drop the link's onClick handler — this test catches that.
-    expect(openUrlMock).toHaveBeenCalledTimes(1);
-    expect(openUrlMock).toHaveBeenCalledWith('https://github.com/acme/demo/pull/201');
-  });
-
-  it('opens the PR URL via openUrl when the â†— icon is clicked', async () => {
-    mockBackend();
-    render(<GitPullRequestsTab />);
-
-    // Wait for the list to render before querying the icons — the
-    // initial render is the "Loading pull requests…" spinner, so a
-    // sync getByLabelText would throw on a not-yet-mounted element.
-    // The â†— icon is the discoverability hint — same target, same
-    // routing. aria-label distinguishes it from the issue-tab variant.
-    // The fixture has 4 open PRs, so there are 4 icon links with the
-    // same aria-label. Click the first and assert it routes to that
-    // PR's URL.
-    const iconLinks = await screen.findAllByLabelText(/open pull request on github/i);
-    expect(iconLinks.length).toBeGreaterThan(0);
-    await userEvent.click(iconLinks[0]);
-
-    expect(openUrlMock).toHaveBeenCalledTimes(1);
-    expect(openUrlMock).toHaveBeenCalledWith('https://github.com/acme/demo/pull/201');
+    const title = await screen.findByText('Add widget');
+    const titleLink = title.closest('a')!;
+    const titleLine = titleLink.parentElement!;
+    expect(titleLine.querySelectorAll('a')).toHaveLength(1);
+    expect(titleLine.textContent).not.toContain('\u2197');
+    expect(screen.queryByLabelText(/open pull request on github/i)).toBeNull();
   });
 
   it('does not call openUrl when the row body is clicked', async () => {
