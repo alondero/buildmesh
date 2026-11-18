@@ -761,6 +761,12 @@ folder.
 **Clone from GitHub** in the New Mesh dialog runs a plain `git clone` with your
 machine's own Git authentication, and reports Git's own error in the dialog.
 
+If you closed the dialog while the clone was running, the failure is reported
+in the notification area instead: the clone entry (bottom right) reads **Clone
+failed**. Open it to read the error and **Retry** the same repository and
+destination. The entry stays until you dismiss it, so the error outlives the
+toast.
+
 - **`fatal: repository … not found`** — check the `owner/repo` spelling and that
   the repository exists and you can reach it from this machine.
 - **`fatal: could not read Username` / `Authentication failed`** — a private

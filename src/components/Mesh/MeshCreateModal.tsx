@@ -5,6 +5,7 @@ import { MeshColorPicker } from './MeshColorPicker';
 import { MeshCreateFailurePanel } from './MeshCreateFailurePanel';
 import { enterMesh } from '../../lib/navigation';
 import { useMeshStore } from '../../stores/meshStore';
+import { useCloneActivityStore } from '../../stores/cloneActivityStore';
 import { addToast } from '../../stores/toastStore';
 import { pickMeshFolder } from '../../lib/tauri';
 import { defaultMeshColor } from '../../lib/meshColors';
@@ -61,10 +62,18 @@ const PATH_PREVIEW =
  * Both share the colour picker. Name/base-ref are derived backend-side (the
  * clone flow resolves the repo's real default branch so the new mesh isn't a
  * drifted root).
+ *
+ * The clone flow does NOT own its operation. A clone outlives this dialog —
+ * the backend runs it to completion and dismissing the dialog cannot stop it
+ * (issue #2795) — so the operation lives in `cloneActivityStore` and this
+ * dialog is one viewer of it. That is why the busy state says "Hide progress"
+ * rather than "Cancel": there is no cancellation here to promise.
  */
 export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps) {
   const createMesh = useMeshStore((s) => s.createMesh);
-  const cloneMesh = useMeshStore((s) => s.cloneMesh);
+  const startClone = useCloneActivityStore((s) => s.startClone);
+  const claimOperation = useCloneActivityStore((s) => s.claimOperation);
+  const releaseOperation = useCloneActivityStore((s) => s.releaseOperation);
   // The modal owns its own default-colour derivation (rather than the
   // parent reaching into `useMeshStore.getState().meshes.length`
   // inside the JSX render) so the abstraction boundary is correct —
@@ -80,13 +89,28 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
   const [repoInput, setRepoInput] = useState('');
   const [color, setColor] = useState(initialColor);
   const [picking, setPicking] = useState(false);
-  const [busy, setBusy] = useState(false);
+  // The open-folder flow is a single quick IPC, so its busy state lives here.
+  // The clone flow's busy state comes from its operation (below), which has
+  // its own owner.
+  const [creating, setCreating] = useState(false);
   // The failure the dialog is showing, if any. It carries the message the
   // store returned for this request (issue #2794).
   const [failure, setFailure] = useState<DialogFailure | null>(null);
   // Asks the focus effect to put the focus back on the folder picker once the
   // native picker has closed.
   const [restorePickerFocus, setRestorePickerFocus] = useState(false);
+  // The clone this dialog started (or joined). The operation itself lives
+  // in the clone-activity store, so it survives this dialog being closed.
+  const [cloneOperationId, setCloneOperationId] = useState<string | null>(null);
+  // True when this submission JOINED a clone that was already running
+  // instead of starting one. The reconciliation is visible rather than
+  // silent: the user asked for a clone, and something else is already
+  // doing it (issue #2795).
+  const [joinedExisting, setJoinedExisting] = useState(false);
+  const cloneOperation = useCloneActivityStore((s) =>
+    cloneOperationId ? (s.operations.find((op) => op.id === cloneOperationId) ?? null) : null
+  );
+  const cloning = cloneOperation?.status === 'running';
   // Issue #2463: initial focus targets the folder picker, the first required
   // step of either flow. The submit button cannot take focus at mount — it is
   // disabled until the form is complete, and `.focus()` on a disabled button
@@ -111,6 +135,23 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
     stillMounted.current = true;
     return () => { stillMounted.current = false; };
   }, []);
+  // The operation this dialog is showing. Claiming it synchronously at submit
+  // time (not in an effect) matters: the outcome is reported where it is
+  // visible, and an effect would run after the clone had already settled.
+  const claimedOperationId = useRef<string | null>(null);
+  useEffect(() => {
+    return () => {
+      // The dialog is gone: nothing is showing this operation's outcome, so
+      // the store reports it (a toast) instead of leaving it unsaid.
+      if (claimedOperationId.current) {
+        releaseOperation(claimedOperationId.current);
+        claimedOperationId.current = null;
+      }
+    };
+  }, [releaseOperation]);
+  // The outcome of the operation this dialog started is acted on exactly
+  // once, even though the effect re-runs whenever the operation changes.
+  const handledOperationId = useRef<string | null>(null);
 
   // A failure is announced by the panel's `role="alert"`, and the focus is
   // moved onto it so the keyboard user stays inside the dialog and lands on
@@ -138,14 +179,21 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
   const destination =
     source === 'clone' && parent && repoName ? joinDisplayPath(parent.path, repoName) : null;
   const canSubmit = source === 'open' ? !!folder : !!repoName && !!parent;
+  // The open-folder flow is a single quick IPC; the clone flow is a long
+  // backend operation with its own owner.
+  const busy = source === 'open' ? creating : cloning;
   const primaryLabel =
     source === 'open'
-      ? busy
+      ? creating
         ? 'Creating…'
         : 'Create mesh'
-      : busy
+      : cloning
         ? 'Cloning…'
         : 'Clone mesh';
+  // While a clone runs, dismissing this dialog HIDES the progress — the
+  // clone keeps running. The button must not say "Cancel", because nothing
+  // here cancels anything (issue #2795).
+  const hidingProgress = source === 'clone' && cloning;
 
   const switchSource = (next: MeshSource) => {
     if (next === source) return;
@@ -179,12 +227,12 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
   };
 
   const handleCreate = async () => {
-    if (!folder || busy || createInFlight.current) return;
+    if (!folder || creating || createInFlight.current) return;
     // Capture the submitted target up front so the request — and the report
     // of its outcome — is pinned to exactly what the user confirmed.
     const target = folder;
     createInFlight.current = true;
-    setBusy(true);
+    setCreating(true);
     setFailure(null);
     let result: Awaited<ReturnType<typeof createMesh>>;
     try {
@@ -206,7 +254,7 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
       }
       return;
     }
-    setBusy(false);
+    setCreating(false);
     if ('mesh' in result) {
       enterMesh(result.mesh.id);
       onClose();
@@ -224,35 +272,48 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
     });
   };
 
-  const handleClone = async () => {
+  const handleClone = () => {
     if (!parent || !repoName || busy) return;
     // Capture the submitted target up front so the clone is pinned to exactly
-    // what the user confirmed.
+    // what the user confirmed — not to a later edit of this form.
     const repo = repoInput.trim();
     const parentPath = parent.path;
-    setBusy(true);
+    const target = {
+      repo,
+      parentDir: parentPath,
+      destination: joinDisplayPath(parentPath, repoName),
+      color,
+    };
     setFailure(null);
-    const result = await cloneMesh(repo, parentPath, color);
-    if (!stillMounted.current) {
-      // Dismissed mid-clone. The mesh row is already committed and the store has
-      // appended it, so report the outcome rather than updating a form the user
-      // can no longer see: a silent success would leave an unexplained mesh in
-      // the sidebar, and a silent failure would be lost entirely.
-      if ('mesh' in result) {
-        addToast('Clone', `Cloned ${repo} into ${parentPath}`, 'success');
-      } else {
-        addToast('Clone', result.error, 'error');
-      }
-      return;
+    // The store owns the operation. When the same clone is already running,
+    // this joins THAT operation instead of launching a second one.
+    const { operation, joined } = startClone(target);
+    setJoinedExisting(joined);
+    setCloneOperationId(operation.id);
+    // One claim per operation this dialog shows: release the previous one
+    // first, so a second submission cannot leave a stale claim behind.
+    if (claimedOperationId.current && claimedOperationId.current !== operation.id) {
+      releaseOperation(claimedOperationId.current);
     }
-    setBusy(false);
-    if ('mesh' in result) {
-      enterMesh(result.mesh.id);
+    claimedOperationId.current = operation.id;
+    claimOperation(operation.id);
+  };
+
+  // Act on the operation's outcome once it settles, while this dialog is
+  // still open: a success opens the new Mesh, a failure is reported here.
+  useEffect(() => {
+    if (!cloneOperation || cloneOperation.status === 'running') return;
+    if (handledOperationId.current === cloneOperation.id) return;
+    handledOperationId.current = cloneOperation.id;
+    if (cloneOperation.status === 'succeeded') {
+      if (cloneOperation.meshId !== null) enterMesh(cloneOperation.meshId);
       onClose();
     } else {
-      setFailure({ message: result.error });
+      // The clone failed. The backend's own message is shown in the failure
+      // panel, next to the operation that failed.
+      setFailure({ message: cloneOperation.error ?? 'Clone failed. See logs for details.' });
     }
-  };
+  }, [cloneOperation, onClose]);
 
   return (
     <Modal
@@ -266,7 +327,9 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
         <h2 id="mesh-create-title" className="text-sm font-semibold text-text-primary">
           New mesh
         </h2>
-        <ModalCloseButton onClose={onClose} />
+        {/* While a clone runs, this control hides the progress. It must not
+            be labelled "Close" — nothing here stops the clone (issue #2795). */}
+        <ModalCloseButton onClose={onClose} label={hidingProgress ? 'Hide progress' : 'Close'} />
       </div>
 
       {/* Source */}
@@ -362,7 +425,7 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
                 // incomplete form and on `busy`.
                 if (e.key === 'Enter') {
                   e.preventDefault();
-                  void handleClone();
+                  handleClone();
                 }
               }}
               disabled={busy}
@@ -424,18 +487,36 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
         <MeshCreateFailurePanel panelRef={failureRef} message={failure.message} />
       )}
 
+      {/* Issue #2795 — the clone has already started and this dialog cannot
+          stop it. Say so plainly: dismissing the dialog hides the progress,
+          and the operation keeps running where the user can still see it. */}
+      {hidingProgress && (
+        <>
+          {joinedExisting && (
+            <p role="status" className="mb-1 text-xs text-text-secondary">
+              A clone of this repository into this destination is already running — this joined it.
+            </p>
+          )}
+          <p role="status" className="mb-3 text-xs text-text-secondary">
+            The clone continues in the background. Closing this dialog hides the progress — it does
+            not stop the clone.
+          </p>
+        </>
+      )}
+
       <div className="flex justify-end gap-2">
-        {/* Cancel stays enabled during a clone on purpose. Dismissal is made safe
-            by the mount guard above (the completion reports via toast instead of
-            writing into an unmounted form), and trapping the user inside the
-            modal for up to the 10-minute clone timeout would be worse than
-            letting them leave an operation they already started. */}
+        {/* Before submitting, this button starts no operation and cancels
+            nothing — "Cancel" is honest there. Once a clone is running the
+            same gesture only hides the progress, so the label changes with
+            it. The button stays enabled either way: trapping the user in
+            the dialog for the length of a clone would be worse than letting
+            them leave an operation they already started. */}
         <button
           type="button"
           onClick={onClose}
           className="px-3 py-1.5 text-xs text-text-secondary hover:text-text-primary border border-border-subtle rounded-md transition-colors"
         >
-          Cancel
+          {hidingProgress ? 'Hide progress' : 'Cancel'}
         </button>
         <button
           type="button"

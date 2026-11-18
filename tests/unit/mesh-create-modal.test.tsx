@@ -1,10 +1,12 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { StrictMode } from 'react';
+import { StrictMode, useState } from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { MeshCreateModal } from '../../src/components/Mesh/MeshCreateModal';
+import { CloneProgressModal } from '../../src/components/Mesh/CloneProgressModal';
 import { useMeshStore } from '../../src/stores/meshStore';
 import { useToastStore } from '../../src/stores/toastStore';
+import { useCloneActivityStore } from '../../src/stores/cloneActivityStore';
 
 const mockInvoke = invoke as ReturnType<typeof vi.fn>;
 
@@ -28,8 +30,18 @@ function resetMeshStore() {
   });
 }
 
+/**
+ * The clone-activity store owns clone operations for the whole session, so
+ * it survives a test the way it survives a dialog. Each test starts with an
+ * empty one — otherwise a clone left running by an earlier test would join
+ * the next test's submission instead of starting its own.
+ */
+function resetCloneActivity() {
+  useCloneActivityStore.setState({ operations: [], claimedOperationCounts: {} });
+}
+
 /** Switch to clone mode, enter a repo, and pick a parent folder so the form is
- * submittable. Leaves the dialog on the clone tab. */
+ *  submittable. Leaves the dialog on the clone tab. */
 async function fillCloneForm(repo = 'alondero/buildmesh') {
   fireEvent.click(screen.getByRole('button', { name: /clone from github/i }));
   fireEvent.change(screen.getByLabelText('Repository'), { target: { value: repo } });
@@ -40,10 +52,41 @@ async function fillCloneForm(repo = 'alondero/buildmesh') {
   );
 }
 
+/** A clone IPC that stays pending until the test resolves it. */
+function pendingClone() {
+  let resolveClone: (value: unknown) => void = () => {};
+  let rejectClone: (reason: unknown) => void = () => {};
+  const promise = new Promise((resolve, reject) => {
+    resolveClone = resolve;
+    rejectClone = reject;
+  });
+  mockInvoke.mockReturnValueOnce(promise);
+  return { resolveClone, rejectClone };
+}
+
+/** The dialog mounted the way the app mounts it: closing unmounts it. */
+function MountedModal({ onClose }: { onClose?: () => void }) {
+  const [open, setOpen] = useState(true);
+  if (!open) return null;
+  return (
+    <MeshCreateModal
+      onClose={() => {
+        onClose?.();
+        setOpen(false);
+      }}
+    />
+  );
+}
+
 describe('MeshCreateModal', () => {
   beforeEach(() => {
     resetMeshStore();
+    resetCloneActivity();
     useToastStore.setState({ toasts: [] });
+    // `vi.clearAllMocks()` (the global setup) does NOT clear queued
+    // `mockReturnValueOnce` values, so a leftover from one test would answer
+    // the next test's call instead. `mockReset()` does.
+    mockInvoke.mockReset();
   });
 
   it('starts in open-folder mode', () => {
@@ -166,12 +209,7 @@ describe('MeshCreateModal', () => {
 
   it('locks the clone form controls while the clone is in flight', async () => {
     mockInvoke.mockResolvedValueOnce({ path: 'D:\\repos', name: 'repos' }); // pick
-    let resolveClone: (value: unknown) => void = () => {};
-    mockInvoke.mockReturnValueOnce(
-      new Promise((resolve) => {
-        resolveClone = resolve;
-      })
-    ); // clone_mesh_repo, held open
+    const { resolveClone } = pendingClone(); // clone_mesh_repo, held open
 
     render(<MeshCreateModal onClose={() => {}} />);
     await fillCloneForm();
@@ -195,24 +233,119 @@ describe('MeshCreateModal', () => {
     expect(
       (screen.getByRole('button', { name: /clone from github/i }) as HTMLButtonElement).disabled
     ).toBe(true);
-    // Cancel deliberately stays available: dismissal is safe (mount-guarded
-    // completion + toast) and trapping the user for the clone timeout would not be.
-    expect((screen.getByRole('button', { name: /^cancel$/i }) as HTMLButtonElement).disabled).toBe(
-      false
-    );
 
     resolveClone(CLONED_MESH);
     await waitFor(() => expect(useMeshStore.getState().meshes).toHaveLength(1));
   });
 
+  // ---- Issue #2795: hiding progress is not cancelling ------------------------
+
+  it('starts no operation when Cancel is pressed before the clone is submitted', async () => {
+    mockInvoke.mockResolvedValueOnce({ path: 'D:\\repos', name: 'repos' }); // pick
+
+    render(<MeshCreateModal onClose={() => {}} />);
+    await fillCloneForm();
+
+    fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }));
+
+    // Nothing was cloned, and no operation was recorded.
+    expect(useCloneActivityStore.getState().operations).toHaveLength(0);
+    expect(
+      mockInvoke.mock.calls.filter(([cmd]) => cmd === 'clone_mesh_repo')
+    ).toHaveLength(0);
+  });
+
+  it('renames the busy dismissal to Hide progress and never claims to cancel', async () => {
+    mockInvoke.mockResolvedValueOnce({ path: 'D:\\repos', name: 'repos' }); // pick
+    pendingClone();
+
+    render(<MeshCreateModal onClose={() => {}} />);
+    await fillCloneForm();
+    fireEvent.click(screen.getByRole('button', { name: /^clone mesh$/i }));
+    await screen.findByRole('button', { name: /cloning/i });
+
+    // The dismissal no longer says "Cancel" anywhere: the button, the header
+    // close control, and the visible explanation all say the same thing.
+    expect(screen.queryByRole('button', { name: /^cancel$/i })).toBeNull();
+    const hideButtons = screen.getAllByRole('button', { name: /hide progress/i });
+    // The footer button and the header close control.
+    expect(hideButtons.length).toBe(2);
+    expect((hideButtons[0] as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByText(/continues in the background/i)).toBeTruthy();
+    expect(screen.getByText(/does not stop the clone/i)).toBeTruthy();
+  });
+
+  it('Escape hides the progress without stopping the clone', async () => {
+    mockInvoke.mockResolvedValueOnce({ path: 'D:\\repos', name: 'repos' }); // pick
+    const { resolveClone } = pendingClone();
+    const onClose = vi.fn();
+
+    render(<MountedModal onClose={onClose} />);
+    await fillCloneForm();
+    fireEvent.click(screen.getByRole('button', { name: /^clone mesh$/i }));
+    await screen.findByRole('button', { name: /cloning/i });
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect(screen.queryByRole('dialog')).toBeNull();
+
+    // The clone is still running: dismissing the dialog did not cancel it.
+    expect(useCloneActivityStore.getState().operations[0].status).toBe('running');
+
+    resolveClone(CLONED_MESH);
+    await waitFor(() => expect(useMeshStore.getState().meshes).toHaveLength(1));
+  });
+
+  it('the header close control hides the progress without stopping the clone', async () => {
+    mockInvoke.mockResolvedValueOnce({ path: 'D:\\repos', name: 'repos' }); // pick
+    const { resolveClone } = pendingClone();
+    const onClose = vi.fn();
+
+    render(<MountedModal onClose={onClose} />);
+    await fillCloneForm();
+    fireEvent.click(screen.getByRole('button', { name: /^clone mesh$/i }));
+    await screen.findByRole('button', { name: /cloning/i });
+
+    // The header close control is the first of the two "Hide progress"
+    // controls (the header × and the footer button).
+    const headerClose = screen.getAllByRole('button', { name: /hide progress/i })[0];
+    fireEvent.click(headerClose);
+
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(useCloneActivityStore.getState().operations[0].status).toBe('running');
+
+    resolveClone(CLONED_MESH);
+    await waitFor(() => expect(useMeshStore.getState().meshes).toHaveLength(1));
+  });
+
+  it('keeps the dismissed clone in the activity store so it stays inspectable', async () => {
+    mockInvoke.mockResolvedValueOnce({ path: 'D:\\repos', name: 'repos' }); // pick
+    const { resolveClone } = pendingClone();
+
+    const { unmount } = render(<MeshCreateModal onClose={() => {}} />);
+    await fillCloneForm();
+    fireEvent.click(screen.getByRole('button', { name: /^clone mesh$/i }));
+    await screen.findByRole('button', { name: /cloning/i });
+
+    unmount();
+    resolveClone(CLONED_MESH);
+
+    await waitFor(() =>
+      expect(useCloneActivityStore.getState().operations[0].status).toBe('succeeded')
+    );
+    // The operation outlives the dialog — the submitted target is still on
+    // record, so the user can be shown where the clone went.
+    expect(useCloneActivityStore.getState().operations[0].destination).toBe(
+      'D:\\repos\\buildmesh'
+    );
+    expect(useCloneActivityStore.getState().operations[0].meshId).toBe(CLONED_MESH.id);
+  });
+
   it('reports a clone that finishes after the dialog was dismissed', async () => {
     mockInvoke.mockResolvedValueOnce({ path: 'D:\\repos', name: 'repos' });
-    let resolveClone: (value: unknown) => void = () => {};
-    mockInvoke.mockReturnValueOnce(
-      new Promise((resolve) => {
-        resolveClone = resolve;
-      })
-    );
+    const { resolveClone } = pendingClone();
 
     const { unmount } = render(<MeshCreateModal onClose={() => {}} />);
     await fillCloneForm();
@@ -233,12 +366,7 @@ describe('MeshCreateModal', () => {
 
   it('reports a clone failure that lands after the dialog was dismissed', async () => {
     mockInvoke.mockResolvedValueOnce({ path: 'D:\\repos', name: 'repos' });
-    let rejectClone: (reason: unknown) => void = () => {};
-    mockInvoke.mockReturnValueOnce(
-      new Promise((_resolve, reject) => {
-        rejectClone = reject;
-      })
-    );
+    const { rejectClone } = pendingClone();
 
     const { unmount } = render(<MeshCreateModal onClose={() => {}} />);
     await fillCloneForm('nope/nope');
@@ -253,6 +381,68 @@ describe('MeshCreateModal', () => {
       expect(toasts.some((t) => /Repository not found/.test(t.message))).toBe(true);
       expect(toasts[0].severity).toBe('error');
     });
+    // The failure stays on record after its toast — the operation is the
+    // durable half of the report.
+    expect(useCloneActivityStore.getState().operations[0].status).toBe('failed');
+  });
+
+  it('joins a running clone instead of launching a second one', async () => {
+    mockInvoke.mockResolvedValueOnce({ path: 'D:\\repos', name: 'repos' }); // pick
+    const { resolveClone } = pendingClone(); // the first clone, held open
+
+    const first = render(<MeshCreateModal onClose={() => {}} />);
+    await fillCloneForm();
+    fireEvent.click(screen.getByRole('button', { name: /^clone mesh$/i }));
+    await screen.findByRole('button', { name: /cloning/i });
+    first.unmount();
+
+    // Reopen the dialog and submit the same repository into the same
+    // destination while that clone is still running.
+    mockInvoke.mockResolvedValueOnce({ path: 'D:\\repos', name: 'repos' }); // pick
+    render(<MeshCreateModal onClose={() => {}} />);
+    await fillCloneForm();
+    fireEvent.click(screen.getByRole('button', { name: /^clone mesh$/i }));
+
+    await waitFor(() =>
+      expect(useCloneActivityStore.getState().operations[0].status).toBe('running')
+    );
+    // No second clone was launched — the submission joined the first.
+    expect(
+      mockInvoke.mock.calls.filter(([cmd]) => cmd === 'clone_mesh_repo')
+    ).toHaveLength(1);
+    expect(useCloneActivityStore.getState().operations).toHaveLength(1);
+    // The reconciliation is visible, not silent: the dialog says the
+    // submission joined a clone that was already running.
+    expect(screen.getByText(/already running/i)).toBeTruthy();
+
+    resolveClone(CLONED_MESH);
+    await waitFor(() => expect(useMeshStore.getState().meshes).toHaveLength(1));
+  });
+
+  it('does not announce the outcome twice when the progress surface also shows it', async () => {
+    mockInvoke.mockResolvedValueOnce({ path: 'D:\\repos', name: 'repos' }); // pick
+    const { resolveClone } = pendingClone();
+
+    const dialog = render(<MeshCreateModal onClose={() => {}} />);
+    await fillCloneForm();
+    fireEvent.click(screen.getByRole('button', { name: /^clone mesh$/i }));
+    await screen.findByRole('button', { name: /cloning/i });
+
+    // The progress surface opens for the same operation: two surfaces now
+    // display it, so neither of them may have its claim revoked by the
+    // other closing.
+    const operationId = useCloneActivityStore.getState().operations[0].id;
+    render(<CloneProgressModal operationId={operationId} onClose={() => {}} />);
+
+    // The dialog goes away first. The progress surface is still showing the
+    // operation, so the outcome is reported THERE — not as a second toast.
+    dialog.unmount();
+    resolveClone(CLONED_MESH);
+
+    await waitFor(() =>
+      expect(useCloneActivityStore.getState().operations[0].status).toBe('succeeded')
+    );
+    expect(useToastStore.getState().toasts).toHaveLength(0);
   });
 
   it('submits the clone form with Enter from the repository field', async () => {

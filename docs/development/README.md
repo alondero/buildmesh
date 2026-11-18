@@ -131,6 +131,14 @@ when a path named in a skill does not exist.
   `useAnchoredPosition({ constrainToViewport: true })` applies it to a
   portalled menu.
 - Run `npm run check:docs` and the product checks appropriate to the boundary.
+- A workflow whose operation outlives its surface — a clone that keeps
+  running after its dialog closes — owns that operation in a store ABOVE the
+  surface, and names its dismissal for what it does ("Hide progress"). A
+  control that says "Cancel" promises a capability the backend does not
+  have, so the user believes the work stopped and starts it again. Keep one
+  durable entry per live operation (a second clone with no entry of its own
+  is invisible), and measure an operation's duration to the moment it
+  settled rather than to the moment its surface opened.
 
 ### Changing a theme token
 

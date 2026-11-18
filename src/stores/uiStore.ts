@@ -377,6 +377,14 @@ interface UIState extends GridControls {
   createMeshOpen: boolean;
   openCreateMesh: () => void;
   closeCreateMesh: () => void;
+  // The clone operation whose progress is open, or null when the progress
+  // surface is closed (issue #2795). The operation itself lives in
+  // `cloneActivityStore` — this is only the app-level routing that says
+  // which operation the progress surface is showing, exactly as
+  // `createMeshOpen` says the create dialog is showing.
+  cloneProgressOperationId: string | null;
+  openCloneProgress: (operationId: string) => void;
+  closeCloneProgress: () => void;
   // The mesh whose spawn menu the canvas is requesting, or null
   // when closed. `null` STRICTLY means "closed" — an earlier
   // iteration had the modal fall back to the first mesh when the
@@ -630,6 +638,10 @@ export const useUIStore = create<UIState>((set, get) => {
     createMeshOpen: false,
     openCreateMesh: () => set({ createMeshOpen: true }),
     closeCreateMesh: () => set({ createMeshOpen: false }),
+
+    cloneProgressOperationId: null,
+    openCloneProgress: (operationId) => set({ cloneProgressOperationId: operationId }),
+    closeCloneProgress: () => set({ cloneProgressOperationId: null }),
 
     // Idempotent "make this tab visible" — atomic `setProbeTab(tab) +
     // probeOpen = true`. Call sites stay one-liners; the inspector's close

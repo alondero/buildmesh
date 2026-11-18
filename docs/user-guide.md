@@ -166,6 +166,16 @@ details. Press **?** outside a terminal or text field for keyboard shortcuts.
    on screen, and the full diagnostic detail is one **Details** click away,
    with a **Copy details** button for a bug report. You do not need to open
    the logs to find out what went wrong.
+   While a clone runs, the dialog's dismissal button reads **Hide progress**
+   rather than **Cancel**: Buildmesh cannot stop a clone that has already
+   started, so closing the dialog only hides its progress. A compact entry in
+   the notification area (bottom right) tracks every clone while it runs and
+   stays after it finishes. It names the repository and where the clone is
+   going, and while the clone runs it also shows how long it has been
+   running. A finished clone offers **Open mesh** in the entry itself; open
+   the entry for the full progress, and after a failure **Retry** with the
+   same repository and destination. Submitting the same clone again while it
+   is running joins the clone in progress instead of starting a second one.
 4. Use the provider control in the sidebar to choose a harness, then create an
    Agent Node. `Ctrl+T` (`Cmd+T` on macOS) opens the new-node flow.
 5. Give the node a focused task. Watch the terminal and the node status; an
