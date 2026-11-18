@@ -362,6 +362,12 @@ One scope change announces itself. Deleting the Mesh you are looking at tells
 you the canvas moved to **All Nodes**. It is a reminder only — the view still
 changes.
 
+Pinned nodes have a pushpin beside their name in the sidebar and in the card
+header or session tab. In **All Nodes** or **Mesh Grid**, you can spot them
+among the other nodes. Use **Pin node** or **Unpin node** from the sidebar
+context menu or the card's actions menu. Choose **Pinned** to filter the grid
+to pinned nodes across Meshes.
+
 ## Find agents that need attention
 
 Live Codex and MiniMax Code nodes can automatically continue after supported

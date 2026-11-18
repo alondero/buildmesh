@@ -38,6 +38,7 @@ import type { ActivityStatus } from '../../lib/nodeActivities';
 import { getCircuitNodePresentation, hasActiveCircuitOwnership, type CircuitIndicatorTone, type CircuitOutcome } from '../../lib/circuitNodePresentation';
 import { CircuitIndicatorGlyph } from '../shared/CircuitNodeIndicator';
 import { NodeStatusGlyph } from '../shared/NodeStatusGlyph';
+import { PinIcon, PinnedNodeMarker } from '../shared/PinIcon';
 import { useMuseSessionTelemetry } from '../../hooks/useMuseSessionTelemetry';
 import { ObservedSessionTelemetry } from './ObservedSessionTelemetry';
 
@@ -205,6 +206,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
           <InlineEditableText value={titleNode.name} onCommit={next => renameAgentNode(titleNode.id, next)}
             className="text-label font-semibold text-text-primary" />
         </span>
+        {titleNode.is_pinned && <PinnedNodeMarker />}
         {lostConversation && <MissingSessionIdBadge compact={compactHeader} />}
         {signalUnavailable && <SignalHealthBadge compact={compactHeader} health={node.signal_health} />}
         {stall && <StalledInputBadge compact={compactHeader} stall={stall} />}
@@ -560,10 +562,7 @@ function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerL
             onClick={(e) => { closeAndReturnFocus(); onTogglePin(e); }}
             className="w-full text-left px-3 py-1.5 text-label text-text-secondary hover:bg-bg-card-hover flex items-center gap-2"
           >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill={isPinned ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M12 17v5" fill="none" />
-              <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
-            </svg>
+            <PinIcon filled={isPinned} />
             {isPinned ? 'Unpin node' : 'Pin node'}
           </button>
           <button type="button" role="menuitem" data-aria-menu-item

@@ -8,6 +8,7 @@ import { useAriaMenu } from '../../hooks/useAriaMenu';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { useAnchoredPosition } from '../../hooks/useAnchoredPosition';
 import { ProviderIcon } from '../Providers/ProviderIcon';
+import { PinnedNodeMarker } from '../shared/PinIcon';
 import type { OverviewTabStatus } from './overviewTabStatus';
 
 interface NodeActivityTabsProps {
@@ -84,11 +85,14 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
   useEffect(() => {
     tabRefs.current[selectedIndex]?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
   }, [selectedIndex]);
-  const fullLabel = (tab: ActivityTab) => tab.overview
-    ? `Circuit run overview${overview?.status ? ` · ${overview.status.detail}` : ''}${overview?.needsYou ? ' · needs you' : ''}`
-    : tab.label === tab.member.name
-    ? `${tab.label} · ${tab.member.status.replace(/_/g, ' ')}`
-    : `${tab.label} · ${tab.member.name}${tab.utility ? '' : ` · ${tab.member.status.replace(/_/g, ' ')}`}`;
+  // The header already carries the root's pin beside its name.
+  const showPin = (tab: ActivityTab) => !tab.overview && !tab.utility && tab.member.id !== rootId && tab.member.is_pinned;
+  const fullLabel = (tab: ActivityTab) => {
+    if (tab.overview) return `Circuit run overview${overview?.status ? ` · ${overview.status.detail}` : ''}${overview?.needsYou ? ' · needs you' : ''}`;
+    const name = tab.label === tab.member.name ? tab.label : `${tab.label} · ${tab.member.name}`;
+    const status = !tab.utility || tab.label === tab.member.name ? ` · ${tab.member.status.replace(/_/g, ' ')}` : '';
+    return `${name}${status}${showPin(tab) ? ' · Pinned' : ''}`;
+  };
   const statusGlyph = (status: string) => status === 'awaiting_input' ? '!' : status === 'error' ? '×'
     : status === 'completed' || status === 'ready' ? '✓' : status === 'suspended' ? 'Ⅱ' : '●';
 
@@ -134,6 +138,7 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
               {tab.overview && overview?.status
                 ? <span className={`truncate ${overview.status.className}`}>{overview.status.label}</span>
                 : <span className="truncate">{tab.label}</span>}
+              {showPin(tab) && <PinnedNodeMarker />}
               {tab.overview
                 ? overview?.needsYou && <span aria-hidden="true" data-testid={`activity-overview-badge-${rootId}`} className="shrink-0 text-micro font-semibold text-status-warning">!</span>
                 : !tab.utility && <span aria-hidden="true" className={`shrink-0 text-micro ${getStatusConfig(tab.member.status).color}`}>{statusGlyph(tab.member.status)}</span>}
@@ -194,6 +199,7 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
           }`}>
           <span aria-hidden="true" className={tab.utility || tab.overview ? 'text-text-muted' : getStatusConfig(tab.member.status).color}>{index === selectedIndex ? '✓' : tab.utility || tab.overview ? '›' : statusGlyph(tab.member.status)}</span>
           <span className="min-w-0 flex-1"><span className="block font-medium text-text-primary">{tab.label}</span><span className="block truncate text-text-muted">{tab.overview ? overview?.status?.detail ?? 'Where the circuit run is' : tab.label === tab.member.name ? (tab.member.branch || tab.member.provider) : tab.member.name}</span></span>
+          {showPin(tab) && <PinnedNodeMarker />}
           {tab.overview ? overview?.needsYou && <span className="text-2xs text-status-warning">needs you</span>
             : !tab.utility && <span className="text-2xs text-text-muted">{tab.member.status.replace(/_/g, ' ')}</span>}
         </button>)}
