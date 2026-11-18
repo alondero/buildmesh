@@ -36,6 +36,10 @@ per acceptance criterion, independent approval for the same tree, and no open
 blockers. Missing prerequisites, deadlines and code failures remain distinct.
 
 Report the commands actually run, outcomes, test counts and evidence limits.
+For changes covered by the [production-boundary regression](engineering-reference.md#production-boundary-regression),
+attach the focused command, the assertion failure with the faulty behavior
+restored, and the final-tree pass. The independent reviewer checks that the
+failed assertion exercises the affected production path.
 Compilation and mock rendering do not prove real backend behavior. Attribute a
 failure to the baseline only after reproducing it at the recorded base under
 equivalent conditions. Keep incomplete acceptance visible at handoff.

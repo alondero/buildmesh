@@ -46,6 +46,7 @@ const DOCS_FILES = /^(?:[^/]+\.md|LICENSE|NOTICE(?:\.[^/]+)?|\.gitignore|\.gitat
 // Ordinary tooling keeps frontend/contract coverage without compiling Rust.
 // These exact paths can change Rust gate selection, execution, or build inputs:
 const RUST_TOOLING_FILES = new Set([
+  '.github/workflows/verify.yml', // Owns the shard matrix and the checks that validate it.
   'scripts/harness.mjs', // Executes gates and decides which results are accepted.
   'scripts/harness-plan.mjs', // Selects gates, commands and their input sets.
   'scripts/harness-check.mjs', // Selects the fast Rust module tests.
@@ -55,8 +56,9 @@ const RUST_TOOLING_FILES = new Set([
   'scripts/ci/changed-scope.mjs', // Selects CI's Rust graph.
   'scripts/ci/run-guarded.mjs', // Supervises CI and local Rust processes.
   'scripts/rust-test-shards.mjs', // Compiles and executes the Rust test targets.
-  'scripts/ci/rust-shards.mjs', // Supplies the unit-test filters to that runner.
-  'scripts/check-rust-shard-coverage.mjs', // Checks those filters against libtest.
+  'scripts/ci/rust-shards.mjs', // Partitions the discovered unit-test names.
+  'scripts/check-rust-shard-coverage.mjs', // Validates the plan against libtest.
+  'scripts/ci/run-rust-shard.mjs',
   'scripts/harness-test-failures.mjs', // Parses Rust failures and accepts reruns.
   'scripts/prepare-conpty.mjs', // build.rs runs it to stage the Windows runtime.
   'scripts/conpty-LICENSE.txt', // Input copied by prepare-conpty during the build.

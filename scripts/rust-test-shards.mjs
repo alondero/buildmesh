@@ -47,7 +47,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { drainBounded } from './ci/run-guarded.mjs';
-import { readShards, repoRoot } from './ci/rust-shards.mjs';
+import { exactTestBatches, listedUnitTests, partitionUnitTests, readShards, repoRoot } from './ci/rust-shards.mjs';
 import { rustFailures } from './harness-test-failures.mjs';
 
 // FNV-1a 64-bit of the manifest directory. src-tauri/build.rs hashes
@@ -190,6 +190,9 @@ export function run(label, command, args, { stream = false, env = cargoEnv, cwd 
   return new Promise((resolve) => {
     const started = Date.now();
     const child = spawn(command, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  // libtest names may contain a UTF-8 character split across pipe reads.
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
     let output = '';
     let stdout = '';
     let drainTimer = null;
@@ -304,8 +307,17 @@ async function main() {
 // the per-test database seam makes that safe (issue #2048).
 // BUILDMESH_RUST_TEST_THREADS=1 is the diagnostic single-thread override.
 const threadArgs = process.env.BUILDMESH_RUST_TEST_THREADS ? ['--test-threads', process.env.BUILDMESH_RUST_TEST_THREADS] : [];
+const listing = await run('list library tests', lib.executable, ['--list'], { env: testEnv });
+if (listing.code !== 0) throw new Error('Could not list library tests:\n' + listing.output);
+const planned = partitionUnitTests(readShards(), listedUnitTests(listing.stdout));
 const jobs = [
-  ...readShards().map(({ label, args }) => ({ label, command: lib.executable, args: [...args.split(/\s+/).filter(Boolean), ...threadArgs], env: testEnv, target: { kind: 'lib' } })),
+  ...[...planned].flatMap(([label, names]) => exactTestBatches(names).map((batch, index) => ({
+    label: index ? label + ':' + (index + 1) : label,
+    command: lib.executable,
+    args: ['--exact', ...batch, ...threadArgs],
+    env: testEnv,
+    target: { kind: 'lib' },
+  }))),
   ...executables
     .filter((target) => target !== lib)
     .map((target) => ({ label: `${target.kinds.join('+')}:${target.name}`, command: target.executable, args: threadArgs, env: testEnv, target: { kind: target.kinds.includes('test') ? 'test' : target.kinds[0], name: target.name } })),

@@ -326,13 +326,10 @@ the end, even a hard job-level cancel leaves a retrievable log. A hung test
 therefore costs one failed shard with evidence, instead of an open-ended stall
 that holds the required `Rust tests + TS bindings` gate open.
 
-Because libtest filters are substring matches, they cannot express "this
-test's first path segment is X", so the split is a list of exact filters and
-`--skip`s. A new top-level module would therefore go unrun silently unless it
-is claimed, which `npm run check:rust-shards`
-(`scripts/check-rust-shard-coverage.mjs`, also a CI step) prevents: it lists
-the unit tests from the test binary and fails if any is unclaimed or claimed
-twice. Run it after adding a module, not only in CI.
+The matrix assigns each named top-level Rust module to one shard. The
+`remaining` shard owns every other module. CI and the local runner obtain
+the actual test names from libtest and select those names exactly.
+`npm run check:rust-shards` validates the matrix against the test list.
 
 That gate is a CI step in `Rust build (compile)`, immediately after
 `cargo test --locked --no-run`, and the placement is load-bearing: listing the
