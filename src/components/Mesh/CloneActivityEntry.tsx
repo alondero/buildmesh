@@ -31,6 +31,9 @@ function CloneActivityEntryCard({ operationId }: { operationId: string }) {
   const elapsed = formatElapsed(
     (operation.finishedAt ?? now) - operation.startedAt
   );
+  // Read once into a local: the mesh id is narrowed here, so the handler
+  // below does not need a cast to say what it already knows.
+  const meshId = operation.meshId;
   const label =
     operation.status === 'running'
       ? 'Cloning'
@@ -85,10 +88,10 @@ function CloneActivityEntryCard({ operationId }: { operationId: string }) {
           </span>
         </span>
       </button>
-      {operation.status === 'succeeded' && operation.meshId !== null && (
+      {operation.status === 'succeeded' && meshId !== null && (
         <button
           type="button"
-          onClick={() => enterMesh(operation.meshId as number)}
+          onClick={() => enterMesh(meshId)}
           aria-label={`Open mesh ${operation.meshName ?? operation.repo}`}
           className="shrink-0 px-2 py-1 text-2xs font-medium text-accent-cyan hover:text-accent-cyan/80 hover:bg-bg-card-hover rounded-md transition-colors"
         >
