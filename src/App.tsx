@@ -18,6 +18,8 @@ import { WorktreeCloseDialog } from './components/WorktreeCloseDialog/WorktreeCl
 import { WindowCloseGuard } from './components/WindowCloseGuard/WindowCloseGuard';
 import { CanvasSpawnMenu } from './components/AgentNodeView/CanvasSpawnMenu';
 import { MeshCreateModal } from './components/Mesh/MeshCreateModal';
+import { CloneActivityEntry } from './components/Mesh/CloneActivityEntry';
+import { CloneProgressModal } from './components/Mesh/CloneProgressModal';
 import { ShortcutCheatsheet } from './components/ShortcutCheatsheet/ShortcutCheatsheet';
 import { CommandOmnibar } from './components/CommandOmnibar/CommandOmnibar';
 import { UpdatePrompt } from './components/UpdatePrompt/UpdatePrompt';
@@ -88,6 +90,8 @@ function App() {
   // round-trip through the Sidebar.
   const createMeshOpen = useUIStore((s) => s.createMeshOpen);
   const closeCreateMesh = useUIStore((s) => s.closeCreateMesh);
+  const cloneProgressOperationId = useUIStore((s) => s.cloneProgressOperationId);
+  const closeCloneProgress = useUIStore((s) => s.closeCloneProgress);
   const canvasSpawnMenuMeshId = useUIStore((s) => s.canvasSpawnMenuMeshId);
   const canvasSpawnMenuRequestId = useUIStore((s) => s.canvasSpawnMenuRequestId);
   // Paste absolute file paths into the hovered agent terminal on OS file drop.
@@ -443,6 +447,15 @@ function App() {
         // anti-pattern. Senior-review round 4 fixed.
         <MeshCreateModal onClose={closeCreateMesh} />
       )}
+      {/* Issue #2795 — the durable view of a clone operation. It mounts only
+          while the compact activity entry asks for it, so a clone that is
+          running in the background has a place the user can return to. */}
+      {cloneProgressOperationId !== null && (
+        <CloneProgressModal
+          operationId={cloneProgressOperationId}
+          onClose={closeCloneProgress}
+        />
+      )}
       {/* `canvasSpawnMenuMeshId !== null` is the ONLY mount trigger.
           The modal's internal fallback-to-first-mesh logic (an earlier
           iteration) was the UI lockout trap the senior review caught:
@@ -468,6 +481,10 @@ function App() {
           moving focus — the container itself stays silent to avoid double
           announcements. */}
       <div className="fixed bottom-32 right-4 flex flex-col gap-2 z-50">
+        {/* Issue #2795 — the clone activity entry sits above the toasts
+            because it does not expire: it is the durable place a background
+            clone stays visible, and the route back to its progress. */}
+        <CloneActivityEntry />
         {toasts.map((toast) => {
           const isWarning = toast.severity === 'warning';
           const isSuccess = toast.severity === 'success';

@@ -48,6 +48,27 @@ export function repoNameFromInput(input: string): string | null {
   return segments[0] && isValidRepoName(repo) ? repo : null;
 }
 
+/**
+ * The identity of the repository a clone input names, independent of how the
+ * user spelled it: `owner/repo`, `https://github.com/owner/repo` and
+ * `git@github.com:owner/repo.git` all name the same repository. Used to
+ * recognise a repeat submission of a clone that is already running, so the
+ * second request joins the first instead of cloning the same tree twice
+ * (issue #2795). Returns the lower-cased `owner/repo`, or the trimmed input
+ * when it is not a recognisable repository — an unusable key only means the
+ * two submissions are not recognised as the same, never that one is invalid.
+ */
+export function normalizeRepoInput(input: string): string {
+  const trimmed = input.trim().replace(/\/+$/, '');
+  if (!trimmed) return '';
+  const prefix = ACCEPTED_PREFIXES.find((p) => trimmed.startsWith(p));
+  const path = prefix ? trimmed.slice(prefix.length) : trimmed;
+  const segments = path.split('/').filter(Boolean);
+  if (segments.length < 2) return trimmed.toLowerCase();
+  const repo = segments[1].replace(/\.git$/, '');
+  return `${segments[0]}/${repo}`.toLowerCase();
+}
+
 /** Join a parent path and a child name using the separator already present in
  * the parent, so the preview matches the path the backend will store. */
 export function joinDisplayPath(parent: string, name: string): string {
