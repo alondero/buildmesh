@@ -354,6 +354,7 @@ pub fn run() {
             preferences::spawn_configurations::save_spawn_configuration,
             preferences::spawn_configurations::verify_launch_configuration,
             preferences::spawn_configurations::delete_spawn_configuration,
+            preferences::spawn_configurations::reorder_spawn_configurations,
             // Harness Logins: additional Codex sign-ins, each in its own home.
             commands::harness_logins::list_harness_logins,
             commands::harness_logins::add_harness_login,

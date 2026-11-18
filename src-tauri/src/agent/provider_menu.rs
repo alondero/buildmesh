@@ -903,11 +903,17 @@ pub(super) fn order_proxied_children(
         .map(|o| (o.harness_id.as_str(), o.provider_ids.as_slice()))
         .collect();
     rows.sort_by(|a, b| {
-        // Only proxied rows within the same harness bucket compete on the
-        // stored order. Native rows and rows in different buckets fall
-        // through to the stable sort, preserving the harness-level rank
-        // established by `order_providers`.
-        if !a.is_proxied || !b.is_proxied || a.harness_id != b.harness_id {
+        // Only bare proxied route rows within the same harness bucket compete
+        // on the stored proxied order. Native rows, rows in different buckets,
+        // and saved Launch Configurations (which carry their own user-ordered
+        // sequence in `prefs.spawn_configurations`) fall through to the stable
+        // sort, preserving both harness rank and Launch Configuration order.
+        if !a.is_proxied
+            || !b.is_proxied
+            || a.configuration.is_some()
+            || b.configuration.is_some()
+            || a.harness_id != b.harness_id
+        {
             return std::cmp::Ordering::Equal;
         }
         let Some(provider_ids) = index_by_harness.get(a.harness_id.as_str()) else {

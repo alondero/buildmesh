@@ -1,8 +1,28 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import {
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import type { SpawnOption } from '../../lib/groups';
 import type { SpawnConfiguration } from '../../types/generated/SpawnConfiguration';
-import { deleteSpawnConfiguration, getLaunchTargets, listProviders, listSpawnConfigurations, saveSpawnConfiguration, verifyLaunchConfiguration } from '../../lib/tauri/provider';
+import { deleteSpawnConfiguration, getLaunchTargets, listProviders, listSpawnConfigurations, reorderSpawnConfigurations, saveSpawnConfiguration, verifyLaunchConfiguration } from '../../lib/tauri/provider';
+import {
+  applyHarnessConfigurationOrder,
+  getLaunchConfigurationReorderCoordinator,
+  reorderConfigurationIds,
+} from '../../lib/launchConfigurationOrder';
 import { LaunchConfigurationEditor, cloneConfiguration } from './LaunchConfigurationEditor';
 import type { ProviderPairing } from '../../types/generated/ProviderPairing';
 import type { LaunchTarget } from '../../types/generated/LaunchTarget';
@@ -14,6 +34,100 @@ function belongsToHarness(configuration: SpawnConfiguration, harnessId: string):
 
 import { offeredUnderLogin } from '../../lib/launchSelection';
 export { offeredUnderLogin } from '../../lib/launchSelection';
+
+function SortableMenuConfigurationRow({
+  value,
+  unavailable,
+  canReorder,
+  activeMenuIndex,
+  configurationIndex,
+  editIndex,
+  cloneIndex,
+  reorderIndex,
+  menuClass,
+  rowActionClass,
+  onSelect,
+  onEdit,
+  onClone,
+}: {
+  value: SpawnConfiguration;
+  unavailable?: string;
+  canReorder: boolean;
+  activeMenuIndex: number;
+  configurationIndex: number | undefined;
+  editIndex: number | undefined;
+  cloneIndex: number | undefined;
+  reorderIndex: number | undefined;
+  menuClass: string;
+  rowActionClass: string;
+  onSelect: (altKey: boolean) => void;
+  onEdit: () => void;
+  onClone: () => void;
+}) {
+  const { setNodeRef, transform, transition, isDragging, attributes, listeners } = useSortable({
+    id: value.id,
+    disabled: !canReorder,
+  });
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  };
+
+  return (
+    <div ref={setNodeRef} style={style} role="presentation" className="flex items-stretch">
+      <button
+        type="button"
+        role="menuitem"
+        data-menu-index={configurationIndex}
+        tabIndex={activeMenuIndex === configurationIndex ? 0 : -1}
+        aria-disabled={Boolean(unavailable)}
+        title={unavailable ?? undefined}
+        className={`${menuClass} min-w-0 flex-1 break-words ${unavailable ? 'cursor-default text-text-muted' : ''}`}
+        onClick={(e) => { if (!unavailable) onSelect(e.altKey); }}
+      >
+        {value.name}{unavailable && <span className="block text-text-muted">{unavailable}</span>}
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        data-menu-index={editIndex}
+        tabIndex={activeMenuIndex === editIndex ? 0 : -1}
+        aria-label={`Edit ${value.name}`}
+        className={rowActionClass}
+        onClick={onEdit}
+      >
+        Edit
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        data-menu-index={cloneIndex}
+        tabIndex={activeMenuIndex === cloneIndex ? 0 : -1}
+        aria-label={`Clone ${value.name}`}
+        className={rowActionClass}
+        onClick={onClone}
+      >
+        Clone
+      </button>
+      {canReorder && (
+        <span
+          {...attributes}
+          {...listeners}
+          role="menuitem"
+          data-menu-index={reorderIndex}
+          tabIndex={activeMenuIndex === reorderIndex ? 0 : -1}
+          aria-roledescription="sortable"
+          aria-label={`Reorder ${value.name}`}
+          title="Drag to reorder"
+          className="order-first inline-flex min-h-[24px] min-w-[24px] shrink-0 items-center justify-center text-text-muted hover:text-text-secondary hover:bg-bg-selection cursor-grab active:cursor-grabbing text-2xs select-none touch-none focus:bg-bg-selection focus:outline-none"
+        >
+          ⋮⋮
+        </span>
+      )}
+    </div>
+  );
+}
 
 export function SpawnConfigurationMenu({ option, anchor, keyboard, configurationRows, decorate, login, onSelect, onClose, onDismiss, onEditingChange }: {
   option: SpawnOption;
@@ -36,17 +150,63 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
   const [draft, setDraft] = useState<SpawnConfiguration | null>(option.configuration ?? null);
   const [targets, setTargets] = useState<LaunchTarget[]>([]);
   const [activeMenuIndex, setActiveMenuIndex] = useState(0);
+  const [dragging, setDragging] = useState(false);
+  const [listRevision, setListRevision] = useState(0);
   const panel = useRef<HTMLDivElement>(null);
   const draftSession = useRef(0);
+  const configurationsRef = useRef(configurations);
+  configurationsRef.current = configurations;
+  const hasLoadedRef = useRef(false);
+  const needsTrailingRefreshRef = useRef(false);
   const [placement, setPlacement] = useState<{ left: number; top: number; maxHeight: number } | null>(null);
   const [unavailableById, setUnavailableById] = useState(() => new Map(configurationRows.map((row) => [row.id, row.unavailable_reason])));
   const mounted = useRef(false);
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+
+  // Shared across flyout close/reopen and with Settings' LaunchConfigurations
+  // so closing the flyout never drops queued writes or lets an older in-flight
+  // request race a newer drag after reopen.
+  const coordinator = useMemo(
+    () => getLaunchConfigurationReorderCoordinator(reorderSpawnConfigurations),
+    [],
+  );
+
+  useEffect(() => {
+    hasLoadedRef.current = false;
+    needsTrailingRefreshRef.current = false;
+  }, [option.id, option.harness_id, login?.id]);
+
+  useEffect(() => {
+    return coordinator.subscribe({
+      onHarnessFailed: (harnessId, confirmedIds, err) => {
+        if (!mounted.current || harnessId !== option.harness_id) return;
+        if (confirmedIds) {
+          const rolledBack = coordinator.applyPendingOverlay(
+            applyHarnessConfigurationOrder(configurationsRef.current, harnessId, confirmedIds),
+          );
+          configurationsRef.current = rolledBack;
+          setConfigurations(rolledBack);
+        }
+        setError(String(err));
+      },
+      onDrained: ({ anyFailed }) => {
+        if (!mounted.current) return;
+        if (needsTrailingRefreshRef.current || anyFailed) {
+          needsTrailingRefreshRef.current = false;
+          setListRevision((v) => v + 1);
+        }
+      },
+    });
+  }, [coordinator, option.harness_id]);
 
 
   useEffect(() => {
-    onEditingChange(draft !== null);
+    onEditingChange(draft !== null || dragging);
     return () => onEditingChange(false);
-  }, [draft, onEditingChange]);
+  }, [draft, dragging, onEditingChange]);
 
   useEffect(() => {
     mounted.current = true;
@@ -59,13 +219,35 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
 
   useEffect(() => {
     let current = true;
+    const readVersion = coordinator.getMutationVersion();
     listSpawnConfigurations().then((values) => {
       if (!current) return;
-      setConfigurations(values.filter((value) => belongsToHarness(value, option.harness_id) && offeredUnderLogin(value, login?.id)));
       setLoaded(true);
+      if (coordinator.isPending()) {
+        if (!hasLoadedRef.current) {
+          const overlaid = coordinator
+            .applyPendingOverlay(values)
+            .filter((value) => belongsToHarness(value, option.harness_id) && offeredUnderLogin(value, login?.id));
+          configurationsRef.current = overlaid;
+          setConfigurations(overlaid);
+          hasLoadedRef.current = true;
+        }
+        needsTrailingRefreshRef.current = true;
+        return;
+      }
+      if (coordinator.getMutationVersion() !== readVersion) {
+        needsTrailingRefreshRef.current = false;
+        setListRevision((v) => v + 1);
+        return;
+      }
+      const filtered = values.filter((value) => belongsToHarness(value, option.harness_id) && offeredUnderLogin(value, login?.id));
+      configurationsRef.current = filtered;
+      setConfigurations(filtered);
+      hasLoadedRef.current = true;
+      coordinator.syncConfirmed(values);
     }).catch((e: unknown) => { if (current) setError(String(e)); });
     return () => { current = false; };
-  }, [option.id, option.harness_id, option.configuration, login?.id]);
+  }, [option.id, option.harness_id, option.configuration, login?.id, listRevision, coordinator]);
 
   const editing = draft !== null;
   useEffect(() => {
@@ -147,12 +329,15 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
     setError(null);
   };
   const replaceConfiguration = (saved: SpawnConfiguration, harnessId?: string) => {
+    coordinator.bumpMutationVersion();
     setConfigurations((previous) => {
       const index = previous.findIndex((entry) => entry.id === saved.id);
-      if (harnessId !== option.harness_id || !offeredUnderLogin(saved, login?.id)) return previous.filter((entry) => entry.id !== saved.id);
-      if (index < 0) return [...previous, saved];
-      const next = [...previous];
-      next[index] = saved;
+      const next = harnessId !== option.harness_id || !offeredUnderLogin(saved, login?.id)
+        ? previous.filter((entry) => entry.id !== saved.id)
+        : index < 0
+          ? [...previous, saved]
+          : previous.map((entry, i) => (i === index ? saved : entry));
+      configurationsRef.current = next;
       return next;
     });
   };
@@ -194,6 +379,35 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
   const select = login
     ? (providerId: string, altKey: boolean, configurationId?: string) => onSelect(providerId, altKey, configurationId, login.id)
     : onSelect;
+  const canReorder = configurations.length >= 2;
+  const handleDragStart = () => {
+    // Signal synchronously so sibling/leading-action hover handlers cannot
+    // close or swap the submenu before React flushes the `dragging` effect.
+    onEditingChange(true);
+    setDragging(true);
+  };
+  const handleDragCancel = () => {
+    setDragging(false);
+    onEditingChange(draft !== null);
+  };
+  const handleDragEnd = (event: DragEndEvent) => {
+    setDragging(false);
+    onEditingChange(draft !== null);
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    const previous = configurationsRef.current;
+    const currentIds = previous.map((entry) => entry.id);
+    const nextIds = reorderConfigurationIds(currentIds, String(active.id), String(over.id));
+    if (nextIds === currentIds) return;
+    const byId = new Map(previous.map((entry) => [entry.id, entry]));
+    const next = nextIds
+      .map((id) => byId.get(id))
+      .filter((entry): entry is SpawnConfiguration => Boolean(entry));
+    configurationsRef.current = next;
+    setConfigurations(next);
+    setError(null);
+    coordinator.enqueue(option.harness_id, currentIds, nextIds);
+  };
   const menuClass = 'w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-selection focus:bg-bg-selection focus:outline-none';
   const mutedMenuClass = 'w-full px-3 py-1.5 text-left text-xs text-text-muted';
   const rowActionClass = 'px-2 text-xs text-text-secondary hover:bg-bg-selection focus:bg-bg-selection';
@@ -203,6 +417,7 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
       { id: `configuration:${value.id}`, kind: 'configuration' as const, value },
       { id: `edit:${value.id}`, kind: 'edit' as const, value },
       { id: `clone:${value.id}`, kind: 'clone' as const, value },
+      ...(canReorder ? [{ id: `reorder:${value.id}`, kind: 'reorder' as const, value }] : []),
     ]),
     { id: 'new', kind: 'new' as const },
   ];
@@ -225,6 +440,7 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
       className="overflow-y-auto rounded-md border border-border-default bg-bg-overlay shadow-md"
       onClick={(e) => e.stopPropagation()}
       onKeyDown={(e) => {
+        if (dragging) return;
         if (e.key === 'Tab') {
           if (draft) {
             const fields = Array.from(panel.current?.querySelectorAll<HTMLElement>('input:not(:disabled), select:not(:disabled), button:not(:disabled)') ?? []);
@@ -272,7 +488,12 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
           const deletedId = draft.id;
           await deleteSpawnConfiguration(deletedId);
           if (!mounted.current) return;
-          setConfigurations((previous) => previous.filter((entry) => entry.id !== deletedId));
+          coordinator.bumpMutationVersion();
+          setConfigurations((previous) => {
+            const next = previous.filter((entry) => entry.id !== deletedId);
+            configurationsRef.current = next;
+            return next;
+          });
           setUnavailableById((previous) => {
             const next = new Map(previous);
             next.delete(deletedId);
@@ -286,18 +507,36 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
             onClick={(e) => { if (!defaultsUnavailable) select(option.id, e.altKey); }}>Spawn with defaults</button>
           {!loaded && !error && <p role="presentation" className="px-3 py-1.5 text-xs text-text-muted">Loading configurations…</p>}
           {loaded && configurations.length === 0 && <p role="presentation" className="px-3 py-1.5 text-xs text-text-muted">No saved configurations</p>}
-          {configurations.map((value) => {
-            const unavailable = unavailableById.get(value.id) ?? decorate?.({ ...option, id: value.id, configuration: value }).unavailable_reason;
-            return <div key={value.id} role="presentation" className="flex">
-              <button type="button" role="menuitem" data-menu-index={menuIndex.get(`configuration:${value.id}`)} tabIndex={activeMenuIndex === menuIndex.get(`configuration:${value.id}`) ? 0 : -1}
-                aria-disabled={Boolean(unavailable)} title={unavailable ?? undefined}
-                className={`${menuClass} min-w-0 flex-1 break-words ${unavailable ? 'cursor-default text-text-muted' : ''}`} onClick={(e) => { if (!unavailable) select(value.spawn_option_id, e.altKey, value.id); }}>
-                {value.name}{unavailable && <span className="block text-text-muted">{unavailable}</span>}
-              </button>
-              <button type="button" role="menuitem" data-menu-index={menuIndex.get(`edit:${value.id}`)} tabIndex={activeMenuIndex === menuIndex.get(`edit:${value.id}`) ? 0 : -1} aria-label={`Edit ${value.name}`} className={rowActionClass} onClick={() => openDraft(value)}>Edit</button>
-              <button type="button" role="menuitem" data-menu-index={menuIndex.get(`clone:${value.id}`)} tabIndex={activeMenuIndex === menuIndex.get(`clone:${value.id}`) ? 0 : -1} aria-label={`Clone ${value.name}`} className={rowActionClass} onClick={() => openDraft(cloneConfiguration(value))}>Clone</button>
-            </div>;
-          })}
+          <DndContext
+            sensors={sensors}
+            onDragStart={handleDragStart}
+            onDragCancel={handleDragCancel}
+            onDragEnd={handleDragEnd}
+          >
+            <SortableContext items={configurations.map((c) => c.id)} strategy={verticalListSortingStrategy}>
+              {configurations.map((value) => {
+                const unavailable = unavailableById.get(value.id) ?? decorate?.({ ...option, id: value.id, configuration: value }).unavailable_reason;
+                return (
+                  <SortableMenuConfigurationRow
+                    key={value.id}
+                    value={value}
+                    unavailable={unavailable}
+                    canReorder={canReorder}
+                    activeMenuIndex={activeMenuIndex}
+                    configurationIndex={menuIndex.get(`configuration:${value.id}`)}
+                    editIndex={menuIndex.get(`edit:${value.id}`)}
+                    cloneIndex={menuIndex.get(`clone:${value.id}`)}
+                    reorderIndex={menuIndex.get(`reorder:${value.id}`)}
+                    menuClass={menuClass}
+                    rowActionClass={rowActionClass}
+                    onSelect={(altKey) => select(value.spawn_option_id, altKey, value.id)}
+                    onEdit={() => openDraft(value)}
+                    onClone={() => openDraft(cloneConfiguration(value))}
+                  />
+                );
+              })}
+            </SortableContext>
+          </DndContext>
           <button type="button" role="menuitem" data-menu-index={menuIndex.get('new')} tabIndex={activeMenuIndex === menuIndex.get('new') && loaded ? 0 : -1} disabled={!loaded} className={loaded ? menuClass : mutedMenuClass} onClick={() => openDraft({ id: '', name: '', spawn_option_id: option.id, model: null, effort: null, extra_args: null })}>New configuration…</button>
         </div>
       )}

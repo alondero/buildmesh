@@ -209,7 +209,11 @@ export function GroupedProviderMenu({
           data-is-current={leadingAction.current ? 'true' : undefined} data-testid={leadingAction.testId}
           disabled={Boolean(leadingAction.option?.unavailable_reason)} title={leadingAction.title}
           onClick={leadingAction.onSelect}
-          onMouseEnter={(event) => { setSubmenu(null); event.currentTarget.focus({ preventScroll: true }); }}
+          onMouseEnter={(event) => {
+            if (editing.current) return;
+            setSubmenu(null);
+            event.currentTarget.focus({ preventScroll: true });
+          }}
           onFocus={() => setActiveIndex(0)}
           className={`w-full text-left px-3 py-1.5 text-xs text-text-primary font-medium focus:outline-none flex items-center gap-2 ${activeIndex === 0 ? 'bg-bg-selection' : ''}`}
         >
@@ -288,7 +292,7 @@ export function GroupedProviderMenu({
     <div className={className}>
       <SpawnChoiceSearch inputRef={inputRef} query={query} setQuery={setQuery} parents={flatItems}
         recipes={recipes} logins={logins} decorate={decorate} mode={mode} onSelect={onSelect}
-        onFocus={() => setSubmenu(null)} onBrowse={focusBrowse} onClose={onClose} closeOnTab={closeOnTab}
+        onFocus={() => { if (!editing.current) setSubmenu(null); }} onBrowse={focusBrowse} onClose={onClose} closeOnTab={closeOnTab}
         onManage={() => {
           onClose?.();
           if (onManageConfigurations) onManageConfigurations();

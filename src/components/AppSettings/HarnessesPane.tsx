@@ -15,8 +15,9 @@
  * named resource loaders (issue #1534), so a failed refresh surfaces in a
  * banner instead of leaving a green "loaded" status over stale data.
  */
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
+import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
 import * as api from '../../lib/tauri';
 import { formatError } from '../../lib/errorUtils';
 import { HarnessOrderList } from './HarnessOrderList';
@@ -30,11 +31,11 @@ import { ResourceLoadStatus } from './ResourceLoadStatus';
 import { getHostPairingVerifications } from './settingsUtils';
 import { useSettingsData, type PairingsPayload } from './SettingsDataContext';
 import { isWindows } from '../../lib/platform';
-import { listSpawnConfigurations, getLaunchTargets, saveSpawnConfiguration, deleteSpawnConfiguration, verifyLaunchConfiguration } from '../../lib/tauri/provider';
+import { listSpawnConfigurations, getLaunchTargets, saveSpawnConfiguration, deleteSpawnConfiguration, verifyLaunchConfiguration, reorderSpawnConfigurations } from '../../lib/tauri/provider';
 import type { HarnessConfigValue } from '../../types/generated/HarnessConfigValue';
 import type { ProviderAccount, ProviderPairing, PairingVerification } from '../../lib/tauri';
 
-const launchConfigurationApi = { list: listSpawnConfigurations, targets: getLaunchTargets, save: saveSpawnConfiguration, remove: deleteSpawnConfiguration, verify: verifyLaunchConfiguration };
+const launchConfigurationApi = { list: listSpawnConfigurations, targets: getLaunchTargets, save: saveSpawnConfiguration, remove: deleteSpawnConfiguration, verify: verifyLaunchConfiguration, reorder: reorderSpawnConfigurations };
 
 /** Stable empty map for "preferences not loaded yet". A module constant, not
  *  a fresh `{}` per render, so deriving from it does not invalidate
@@ -142,6 +143,13 @@ export function HarnessesPane({
   const loadDirtyChange = launchDirtyChange;
   const [launchOpen, setLaunchOpen] = useState(false);
   const launchPanelId = useId();
+  const [launchListEpoch, setLaunchListEpoch] = useState(0);
+  const bumpLaunchListEpoch = useCallback(() => setLaunchListEpoch((v) => v + 1), []);
+  useProviderListInvalidation(bumpLaunchListEpoch);
+  const launchRefreshToken = useMemo(
+    () => ({ providers, launchListEpoch }),
+    [providers, launchListEpoch],
+  );
 
   // Re-read verifications when the backend says a pairing verification
   // changed (a verify call, or an external attach). Best-effort: a failure
@@ -421,7 +429,7 @@ export function HarnessesPane({
           {launchOpen ? 'Hide launch configurations' : 'Show launch configurations'}
         </button>
         <div id={launchPanelId} hidden={!launchOpen} className="mt-3">
-          <LaunchConfigurations api={launchConfigurationApi} onDirtyChange={loadDirtyChange} onChanged={() => { void loadRouting(); void loadProviders(); }} refreshToken={providers} />
+          <LaunchConfigurations api={launchConfigurationApi} disabled={!prefsLoaded} onDirtyChange={loadDirtyChange} onChanged={() => { void loadRouting(); void loadProviders(); }} refreshToken={launchRefreshToken} />
         </div>
       </SettingsSection>
 

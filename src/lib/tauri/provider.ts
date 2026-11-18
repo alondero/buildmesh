@@ -421,6 +421,17 @@ export const deleteSpawnConfiguration = async (id: string): Promise<void> => {
     setProviderListPromise(null);
   }
 };
+/** Reorder saved Launch Configurations within one harness. Busts cache. */
+export const reorderSpawnConfigurations = async (
+  harnessId: string,
+  configurationIds: string[],
+): Promise<void> => {
+  try {
+    await _invoke<void>('reorder_spawn_configurations', { harnessId, configurationIds });
+  } finally {
+    setProviderListPromise(null);
+  }
+};
 
 // ----- Harness Logins (additional Codex sign-ins) -------------------------
 import type { HarnessLogin } from '../../types/generated/HarnessLogin';

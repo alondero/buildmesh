@@ -1256,6 +1256,57 @@ fn compose_provider_menu_propagates_proxied_order() {
     );
 }
 
+#[test]
+fn configuration_menu_preserves_spawn_configuration_order_for_proxied_recipes() {
+    let mut prefs = crate::preferences::AppPreferences::default();
+    prefs.proxied_provider_order = vec![ProxiedProviderOrder {
+        harness_id: "claude".into(),
+        provider_ids: vec!["moonshot".into(), "minimax".into()],
+    }];
+    prefs.spawn_configurations = vec![
+        crate::preferences::spawn_configurations::SpawnConfiguration {
+            id: "launch/minimax-first".into(),
+            name: "MiniMax First".into(),
+            spawn_option_id: "claude:minimax".into(),
+            harness_id: Some("claude".into()),
+            ..Default::default()
+        },
+        crate::preferences::spawn_configurations::SpawnConfiguration {
+            id: "launch/moonshot-second".into(),
+            name: "Moonshot Second".into(),
+            spawn_option_id: "claude:moonshot".into(),
+            harness_id: Some("claude".into()),
+            ..Default::default()
+        },
+    ];
+    let base = vec![
+        row_native("claude"),
+        row_proxied("claude", "minimax"),
+        row_proxied("claude", "moonshot"),
+    ];
+    let menu = configuration_menu(base, &prefs, Platform::Windows);
+    let config_ids: Vec<&str> = menu
+        .iter()
+        .filter(|row| row.configuration.is_some())
+        .map(|row| row.id.as_str())
+        .collect();
+    assert_eq!(
+        config_ids,
+        vec!["launch/minimax-first", "launch/moonshot-second"],
+        "proxied_provider_order reorders bare route rows only and must not clobber explicit Launch Configuration order"
+    );
+    let route_ids: Vec<&str> = menu
+        .iter()
+        .filter(|row| row.is_proxied && row.configuration.is_none())
+        .map(|row| row.id.as_str())
+        .collect();
+    assert_eq!(
+        route_ids,
+        vec!["claude:moonshot", "claude:minimax"],
+        "bare proxied route rows still follow proxied_provider_order"
+    );
+}
+
 // ----- SpawnOptionId resolver (issue #575 → #1659) ------------------
 //
 // The composite id format `<harness>` (native) or `<harness>:<provider>`

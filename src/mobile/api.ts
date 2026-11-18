@@ -274,6 +274,13 @@ export const launchConfigurationApi = {
   verify: async (value: import('../types/generated/SpawnConfiguration').SpawnConfiguration, route?: import('../types/generated/ProviderPairing').ProviderPairing): Promise<import('../types/generated/PairingVerification').PairingVerification> =>
     (await apiFetch('/api/launch-configurations/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...value, route }) })).json(),
   remove: async (id: string): Promise<void> => { await apiFetch('/api/launch-configurations/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) }); },
+  reorder: async (harnessId: string, configurationIds: string[]): Promise<void> => {
+    await apiFetch('/api/launch-configurations/reorder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ harness_id: harnessId, configuration_ids: configurationIds }),
+    });
+  },
 };
 
 /**
