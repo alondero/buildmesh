@@ -201,6 +201,11 @@ describe('SafeLink (#463)', () => {
     expect(icon).not.toBeNull();
     expect(icon?.getAttribute('aria-hidden')).toBe('true');
     expect(icon?.getAttribute('width')).toBe('12');
+    // The desktop root is 13px, so Tailwind `h-3`/`w-3` is 0.75rem (9.75px)
+    // and overrides the width attribute. The labelled icon must be 12px.
+    expect(icon?.getAttribute('class')).toContain('h-[12px]');
+    expect(icon?.getAttribute('class')).toContain('w-[12px]');
+    expect(icon?.getAttribute('class')).not.toMatch(/(?:^|\s)[hw]-3(?:\s|$)/);
     expect(link.textContent?.replace(/\s+/g, ' ').trim()).toBe('View on GitHub');
 
     rerender(

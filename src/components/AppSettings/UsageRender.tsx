@@ -349,7 +349,7 @@ export function UsagePanel({
             title={`${meter.usagePage.label} — opens in your browser`}
             className="inline-flex items-center justify-center h-[24px] w-[24px] -my-1 shrink-0 rounded-sm text-text-secondary hover:bg-bg-card-hover hover:text-accent-cyan transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-cyan"
           >
-            <OpenExternalIcon className="h-3 w-3" />
+            <OpenExternalIcon className="h-[12px] w-[12px]" />
           </SafeLink>
         )}
         {meter.cachedAt != null && (

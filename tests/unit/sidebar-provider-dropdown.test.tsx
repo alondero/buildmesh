@@ -107,7 +107,10 @@ describe('ProviderDropdown', () => {
 
     it('links to the README prerequisites via openUrl (Tauri 2 routing)', async () => {
       render(<ProviderDropdown dropdownKey="mesh-1" providers={TERMINAL_ONLY} onSelect={() => {}} />);
-      await userEvent.click(screen.getByRole('link', { name: /View setup instructions/ }));
+      const link = screen.getByRole('link', { name: /View setup instructions/ });
+      expect(link.textContent).not.toContain('↗');
+      expect(link.querySelector('svg')).not.toBeNull();
+      await userEvent.click(link);
       expect(openUrlMock).toHaveBeenCalledWith(PREREQUISITES_URL);
     });
 

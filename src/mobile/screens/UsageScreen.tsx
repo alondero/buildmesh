@@ -48,7 +48,7 @@ export function UsageCard({ row: { name, meter } }: { row: MobileProviderUsage }
   const usage = meter.usage;
   const balance = usage?.balance;
   return <section className="usage-card" aria-label={`${name} usage`}>
-    <div className="usage-value"><h2>{name}</h2>{meter.usagePage && <a href={meter.usagePage.url} target="_blank" rel="noreferrer" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>Provider website<OpenExternalIcon /></a>}</div>
+    <div className="usage-value"><h2>{name}</h2>{meter.usagePage?.url ? <a href={meter.usagePage.url} target="_blank" rel="noreferrer" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>Provider website<OpenExternalIcon /></a> : meter.usagePage ? <span style={{ color: "var(--text-dim)", fontSize: 13, lineHeight: 1.2 }}>Provider website</span> : null}</div>
     {!meter.usageTracked ? <p>Usage not tracked</p>
       : !usage ? <p>Unable to load usage data</p>
       : usage.error ? <p role="alert">{usage.error}</p>

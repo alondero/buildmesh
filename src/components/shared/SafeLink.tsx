@@ -154,7 +154,7 @@ export function SafeLink({ url, children, className, ariaLabel, title, external 
     >
       {children}
       {external && (
-        <OpenExternalIcon className="ml-1 inline-block h-3 w-3 shrink-0 align-[-0.125em]" />
+        <OpenExternalIcon className="ml-1 inline-block h-[12px] w-[12px] shrink-0 align-[-0.125em]" />
       )}
     </a>
   );

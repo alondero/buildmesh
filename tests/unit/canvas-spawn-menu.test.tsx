@@ -31,23 +31,28 @@ import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore } from '../../src/stores/meshStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import type { Mesh } from '../../src/types/generated/Mesh';
-import type { SpawnOption } from '../../src/lib/groups';
 
 // Mock the shared provider cache (issue #1502) so the test doesn't
 // run an unmocked background IPC fetch. Without this, `useSyncExternalStore`
 // would publish mid-test, generating the four `act(...)` stderr warnings
 // that senior review caught.
+const { providerList } = vi.hoisted(() => ({
+  providerList: {
+    current: [{
+      id: 'claude',
+      label: 'Claude Code',
+      icon: '',
+      harness_id: 'claude',
+      provider_id: 'claude',
+      is_proxied: false,
+      group_key: 'claude',
+      resumable: true,
+    }],
+  },
+}));
+
 vi.mock('../../src/hooks/useProviderList', () => ({
-  useProviderList: () => [{
-    id: 'claude',
-    label: 'Claude Code',
-    icon: '',
-    harness_id: 'claude',
-    provider_id: 'claude',
-    is_proxied: false,
-    group_key: 'claude',
-    resumable: true,
-  } satisfies SpawnOption],
+  useProviderList: () => providerList.current,
   __resetSharedProviderListForTests: () => undefined,
 }));
 
@@ -107,7 +112,19 @@ const MESH: Mesh = {
   worktree_directory: null,
 };
 
+const CLAUDE_PROVIDER = {
+  id: 'claude',
+  label: 'Claude Code',
+  icon: '',
+  harness_id: 'claude',
+  provider_id: 'claude',
+  is_proxied: false,
+  group_key: 'claude',
+  resumable: true,
+};
+
 beforeEach(() => {
+  providerList.current = [CLAUDE_PROVIDER];
   useUIStore.setState({ canvasSpawnMenuMeshId: null, canvasSpawnMenuOptions: null });
   useMeshStore.setState({ meshes: [], meshesById: new Map(), selectedMeshId: null });
   // Restore the real (non-mocked) `selectProviderForMesh` between tests
@@ -193,5 +210,26 @@ describe('CanvasSpawnMenu mount lifecycle (issue #1536)', () => {
     await waitFor(() => {
       expect(selectSpy).toHaveBeenCalledWith(7, 'Repo Seven', '/r7', 'claude', false, undefined, undefined, undefined);
     });
+  });
+
+  it('marks setup instructions with the external icon when no agent CLI is installed', () => {
+    providerList.current = [{
+      id: 'terminal',
+      label: 'Terminal',
+      icon: 'T',
+      harness_id: 'terminal',
+      provider_id: null,
+      is_proxied: false,
+      group_key: 'terminal',
+      resumable: false,
+    }];
+    useMeshStore.setState({ meshes: [MESH], meshesById: new Map([[MESH.id, MESH]]) });
+    useUIStore.setState({ canvasSpawnMenuMeshId: MESH.id });
+
+    render(<CanvasSpawnMenu meshId={MESH.id} />);
+
+    const link = screen.getByRole('link', { name: /View setup instructions/ });
+    expect(link.textContent).not.toContain('↗');
+    expect(link.querySelector('svg')).not.toBeNull();
   });
 });

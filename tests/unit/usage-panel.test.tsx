@@ -219,7 +219,10 @@ describe('UsagePanel (issue #601 read-only surface)', () => {
     // the accessible name and the hover tooltip, never as visible text.
     const link = screen.getByRole('link', { name: `${label} for Anthropic / Claude on provider website` });
     expect(link.textContent).toBe('');
-    expect(link.querySelector('svg')).not.toBeNull();
+    const icon = link.querySelector('svg');
+    expect(icon).not.toBeNull();
+    expect(icon?.getAttribute('class')).toContain('h-[12px]');
+    expect(icon?.getAttribute('class')).toContain('w-[12px]');
     expect(link.className).toContain('h-[24px]');
     expect(link.className).toContain('w-[24px]');
     expect(link.getAttribute('title')).toBe(`${label} — opens in your browser`);
