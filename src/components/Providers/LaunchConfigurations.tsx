@@ -20,9 +20,12 @@ import type { ProviderPairing } from '../../types/generated/ProviderPairing';
 import type { PairingVerification } from '../../types/generated/PairingVerification';
 import {
   applyHarnessConfigurationOrder,
+  configurationHarnessId,
+  createLaunchConfigurationReorderQueue,
   groupConfigurationsByHarness,
   reorderConfigurationIds,
   type LaunchConfigurationGroup,
+  type LaunchConfigurationReorderQueue,
 } from '../../lib/launchConfigurationOrder';
 import { ProviderIcon } from './ProviderIcon';
 import { LaunchConfigurationEditor, cloneConfiguration } from './LaunchConfigurationEditor';
@@ -173,51 +176,107 @@ export function LaunchConfigurations({
   const [values, setValues] = useState<SpawnConfiguration[]>([]);
   const [targets, setTargets] = useState<LaunchTarget[]>([]);
   const [draft, setDraft] = useState<SpawnConfiguration | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [reorderError, setReorderError] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
   const [loading, setLoading] = useState(true);
   const valuesRef = useRef(values);
   valuesRef.current = values;
-  const reorderSeqRef = useRef(0);
+  const onChangedRef = useRef(onChanged);
+  onChangedRef.current = onChanged;
+  const needsTrailingRefreshRef = useRef(false);
+
+  const reorderQueue = useMemo<LaunchConfigurationReorderQueue>(
+    () =>
+      createLaunchConfigurationReorderQueue({
+        persist: async (harnessId, orderedIds) => {
+          if (!api.reorder) return;
+          await api.reorder(harnessId, orderedIds);
+        },
+        onHarnessFailed: (harnessId, confirmedIds, err) => {
+          if (confirmedIds) {
+            const rolledBack = applyHarnessConfigurationOrder(
+              valuesRef.current,
+              harnessId,
+              confirmedIds,
+            );
+            valuesRef.current = rolledBack;
+            setValues(rolledBack);
+          }
+          setReorderError(String(err));
+        },
+        onDrained: ({ anySucceeded, anyFailed }) => {
+          if (anySucceeded) {
+            onChangedRef.current?.();
+          }
+          if (needsTrailingRefreshRef.current || anyFailed) {
+            needsTrailingRefreshRef.current = false;
+            setRevision((v) => v + 1);
+          }
+        },
+      }),
+    [api],
+  );
+
+  useEffect(() => {
+    reorderQueue.activate();
+    needsTrailingRefreshRef.current = false;
+    return () => {
+      reorderQueue.dispose();
+    };
+  }, [reorderQueue]);
 
   useEffect(() => {
     let current = true;
+    const readVersion = reorderQueue.getMutationVersion();
     Promise.resolve().then(() => Promise.all([api.list(), api.targets()])).then(([list, options]) => {
       if (!Array.isArray(list) || !Array.isArray(options)) throw new Error('Launch Configurations could not be loaded');
-      if (current) { setValues(list); setTargets(options); setLoading(false); setError(null); }
-    }).catch((e: unknown) => { if (current) { setError(String(e)); setLoading(false); } });
+      if (!current) return;
+      setTargets(options);
+      setLoading(false);
+      setLoadError(null);
+      // Issue #2326 snapshot-authority pattern: never let a read that started
+      // before an optimistic reorder (or resolves while a reorder is pending)
+      // overwrite the displayed order; converge with one trailing read once
+      // pending mutations settle.
+      if (reorderQueue.isPending() || reorderQueue.getMutationVersion() !== readVersion) {
+        needsTrailingRefreshRef.current = true;
+        return;
+      }
+      valuesRef.current = list;
+      setValues(list);
+      reorderQueue.syncConfirmed(list);
+    }).catch((e: unknown) => { if (current) { setLoadError(String(e)); setLoading(false); } });
     return () => { current = false; };
-  }, [api, revision, refreshToken]);
+  }, [api, revision, refreshToken, reorderQueue]);
 
   const groups = useMemo(
     () => groupConfigurationsByHarness(values, targets),
     [values, targets],
   );
 
-  const handleReorder = async (harnessId: string, orderedIds: string[]) => {
+  const handleReorder = (harnessId: string, orderedIds: string[]) => {
     if (!api.reorder || disabled) return;
     const previous = valuesRef.current;
+    const previousHarnessIds = previous
+      .filter((c) => configurationHarnessId(c) === harnessId)
+      .map((c) => c.id);
     const next = applyHarnessConfigurationOrder(previous, harnessId, orderedIds);
     if (next === previous) return;
-    const seq = ++reorderSeqRef.current;
     valuesRef.current = next;
     setValues(next);
-    setError(null);
-    try {
-      await api.reorder(harnessId, orderedIds);
-      if (reorderSeqRef.current === seq) {
-        onChanged?.();
-      }
-    } catch (e: unknown) {
-      if (reorderSeqRef.current === seq) {
-        valuesRef.current = previous;
-        setValues(previous);
-      }
-      setError(String(e));
-    }
+    setReorderError(null);
+    reorderQueue.enqueue(harnessId, previousHarnessIds, orderedIds);
   };
 
-  const refresh = () => { setDraft(null); setRevision((v) => v + 1); onChanged?.(); };
+  const error = loadError ?? reorderError;
+  const refresh = () => {
+    reorderQueue.bumpMutationVersion();
+    setDraft(null);
+    setReorderError(null);
+    setRevision((v) => v + 1);
+    onChanged?.();
+  };
   if (draft) return <LaunchConfigurationEditor key={draft.id} value={draft} targets={targets} onCancel={() => setDraft(null)}
     onDirtyChange={onDirtyChange}
     onVerify={api.verify}
@@ -225,7 +284,7 @@ export function LaunchConfigurations({
     onDelete={draft.id ? async () => { await api.remove(draft.id); refresh(); } : undefined} />;
   return <div className="launch-config-form">
     {loading && <p role="status">Loading Launch Configurations…</p>}
-    {error && <p role="alert">{error} <button type="button" onClick={() => setRevision((v) => v + 1)}>Retry</button></p>}
+    {error && <p role="alert">{error} <button type="button" onClick={() => { setLoadError(null); setReorderError(null); setRevision((v) => v + 1); }}>Retry</button></p>}
     {!loading && !error && values.length === 0 && <p>No saved configurations</p>}
     {groups.map((group) => (
       <HarnessConfigurationSection

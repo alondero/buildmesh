@@ -121,3 +121,127 @@ export function groupConfigurationsByHarness(
     configurations: buckets.get(harnessId) ?? [],
   }));
 }
+
+export interface LaunchConfigurationReorderQueue {
+  /** Record the authoritative per-harness order from a committed list snapshot. */
+  syncConfirmed: (values: SpawnConfiguration[]) => void;
+  /** Advance the mutation version (e.g. after a local save/delete) so any
+   *  in-flight list read that started earlier will be discarded. */
+  bumpMutationVersion: () => void;
+  /** Current monotonic mutation version. */
+  getMutationVersion: () => number;
+  /** True while a persistence request is in flight or queued. */
+  isPending: () => boolean;
+  /** Enqueue a desired order for one harness. Serializes all writes so older
+   *  requests can never overwrite newer ones, coalesces multiple drags for the
+   *  same harness, and tracks independent per-harness rollback state. */
+  enqueue: (
+    harnessId: string,
+    confirmedFallbackIds: string[],
+    nextIds: string[],
+  ) => void;
+  /** Re-enable callbacks on mount (required under React StrictMode remounts). */
+  activate: () => void;
+  /** Stop applying callbacks after unmount or data-source replacement. */
+  dispose: () => void;
+}
+
+export function createLaunchConfigurationReorderQueue({
+  persist,
+  onHarnessFailed,
+  onDrained,
+}: {
+  persist: (harnessId: string, orderedIds: string[]) => Promise<void>;
+  onHarnessFailed: (
+    harnessId: string,
+    confirmedIds: string[] | undefined,
+    error: unknown,
+  ) => void;
+  onDrained: (summary: { anySucceeded: boolean; anyFailed: boolean }) => void;
+}): LaunchConfigurationReorderQueue {
+  const confirmedByHarness = new Map<string, string[]>();
+  const queuedByHarness = new Map<string, string[]>();
+  let inFlightHarness: string | null = null;
+  let anySucceededInBatch = false;
+  let anyFailedInBatch = false;
+  let mutationVersion = 0;
+  let disposed = false;
+
+  const drain = async () => {
+    while (!disposed && queuedByHarness.size > 0) {
+      const next = queuedByHarness.entries().next();
+      if (next.done) break;
+      const [harnessId, targetIds] = next.value;
+      queuedByHarness.delete(harnessId);
+      inFlightHarness = harnessId;
+
+      try {
+        await persist(harnessId, targetIds);
+        if (disposed) return;
+        confirmedByHarness.set(harnessId, targetIds);
+        anySucceededInBatch = true;
+      } catch (error: unknown) {
+        if (disposed) return;
+        anyFailedInBatch = true;
+        // If the user queued a newer order for this same harness while this
+        // request was in flight, let the next iteration attempt the newer
+        // order instead of flashing a premature rollback. Otherwise restore
+        // ONLY this harness to its last confirmed order.
+        if (!queuedByHarness.has(harnessId)) {
+          mutationVersion += 1;
+          onHarnessFailed(harnessId, confirmedByHarness.get(harnessId), error);
+        }
+      } finally {
+        inFlightHarness = null;
+      }
+    }
+
+    if (disposed) return;
+    const summary = {
+      anySucceeded: anySucceededInBatch,
+      anyFailed: anyFailedInBatch,
+    };
+    anySucceededInBatch = false;
+    anyFailedInBatch = false;
+    onDrained(summary);
+  };
+
+  return {
+    syncConfirmed(values: SpawnConfiguration[]) {
+      confirmedByHarness.clear();
+      for (const value of values) {
+        const harnessId = configurationHarnessId(value);
+        const list = confirmedByHarness.get(harnessId);
+        if (list) list.push(value.id);
+        else confirmedByHarness.set(harnessId, [value.id]);
+      }
+    },
+    bumpMutationVersion() {
+      mutationVersion += 1;
+    },
+    getMutationVersion() {
+      return mutationVersion;
+    },
+    isPending() {
+      return inFlightHarness !== null || queuedByHarness.size > 0;
+    },
+    enqueue(harnessId: string, confirmedFallbackIds: string[], nextIds: string[]) {
+      if (disposed) return;
+      if (!confirmedByHarness.has(harnessId)) {
+        confirmedByHarness.set(harnessId, confirmedFallbackIds);
+      }
+      mutationVersion += 1;
+      queuedByHarness.set(harnessId, nextIds);
+      if (inFlightHarness === null) {
+        void drain();
+      }
+    },
+    activate() {
+      disposed = false;
+    },
+    dispose() {
+      disposed = true;
+      queuedByHarness.clear();
+    },
+  };
+}

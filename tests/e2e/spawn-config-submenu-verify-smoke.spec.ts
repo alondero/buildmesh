@@ -162,3 +162,137 @@ test.describe('spawn configuration submenu placement', () => {
     expect(grown.y + grown.height).toBeGreaterThan(rowBox.y + rowBox.height - 24);
   });
 });
+
+test.describe('launch configuration pointer drag-and-drop', () => {
+  test.use({ viewport: { width: 1400, height: 800 } });
+
+  test('reorders via real pointer drag in SpawnOptionPicker submenu (crossing leadingAction) and in Settings', async ({ page }) => {
+    const threeConfigs = [
+      { ...savedConfiguration, id: 'launch/sol-fast', name: 'Sol Fast' },
+      { ...savedConfiguration, id: 'launch/sol-deep', name: 'Sol Deep' },
+      { ...savedConfiguration, id: 'launch/sol-review', name: 'Sol Review' },
+    ];
+    const dragFixtures = {
+      ...defaultFixtures,
+      list_providers: [providerRows[providerRows.length - 1]],
+      list_routing_options: [providerRows[providerRows.length - 1]],
+      list_spawn_configurations: threeConfigs,
+      get_launch_targets: fixtures.get_launch_targets,
+      get_app_preferences: {
+        default_provider: null,
+        reviewer_provider: null,
+        naming_provider: null,
+        harness_defaults: {},
+        provider_pairings: [],
+        spawn_configurations: threeConfigs,
+      },
+      get_provider_accounts: [],
+      get_keyed_first_class_catalog: [],
+      get_provider_accounts_with_preferences_keys: [],
+      get_provider_pairings: [],
+      get_pairing_verifications: [],
+      compatible_providers_by_harness: {},
+      list_harness_logins: [],
+      get_network_status: { lan_exposure_enabled: false, tls_active: false, exposed_interfaces: [] },
+      get_coordinator_status: { enabled: false, has_token: false },
+    };
+
+    await page.addInitScript({ content: buildInitScript(dragFixtures) });
+    await page.goto('/');
+    await page.evaluate((initialConfigs) => {
+      const w = window as unknown as {
+        __BUILDMESH_MOCK__: {
+          on: (cmd: string, fn: (args?: unknown) => unknown) => void;
+          emit: (event: string, payload?: unknown) => number;
+        };
+        __reorderLog: Array<{ harnessId: string; configurationIds: string[] }>;
+      };
+      let current = [...initialConfigs];
+      w.__reorderLog = [];
+      w.__BUILDMESH_MOCK__.on('list_spawn_configurations', () => current);
+      w.__BUILDMESH_MOCK__.on('reorder_spawn_configurations', (rawArgs) => {
+        const args = rawArgs as { harnessId: string; configurationIds: string[] };
+        w.__reorderLog.push(args);
+        const byId = new Map(current.map((c) => [c.id, c]));
+        const next = args.configurationIds
+          .map((id) => byId.get(id))
+          .filter((c): c is (typeof initialConfigs)[number] => Boolean(c));
+        const remaining = current.filter((c) => !args.configurationIds.includes(c.id));
+        current = [...next, ...remaining];
+        w.__BUILDMESH_MOCK__.emit('provider-list-changed', null);
+        return null;
+      });
+    }, threeConfigs);
+
+    // Open App Settings -> Providers -> Default provider (SpawnOptionPicker has a leadingAction).
+    const openSettings = page.getByRole('button', { name: 'Open settings' });
+    if (await openSettings.isVisible()) {
+      await openSettings.click();
+    } else {
+      await page.getByRole('button', { name: 'More tools' }).click();
+      await page.getByTestId('titlebar-overflow-settings').click();
+    }
+    await page.getByRole('tab', { name: 'Providers' }).click();
+    await page.getByRole('button', { name: 'Default provider', exact: true }).click();
+
+    const pickerMenu = page.getByTestId('spawn-option-picker-menu');
+    await expect(pickerMenu).toBeVisible();
+    const leadingAction = pickerMenu.locator('[data-spawn-id="__inherit"]');
+    await expect(leadingAction).toBeVisible();
+
+    await pickerMenu.locator(`[data-spawn-id="${HARNESS_ID}"]`).hover();
+    const submenu = page.getByTestId('spawn-configurations');
+    await expect(submenu).toBeVisible();
+
+    const firstHandle = submenu.getByRole('menuitem', { name: 'Reorder Sol Fast', exact: true });
+    const lastRow = submenu.getByRole('menuitem', { name: 'Sol Review', exact: true });
+    const handleBox = (await firstHandle.boundingBox())!;
+    const leadingBox = (await leadingAction.boundingBox())!;
+    const lastBox = (await lastRow.boundingBox())!;
+
+    // Pointer drag: press on handle, move past 4px threshold, sweep across leadingAction
+    // (must NOT close/unmount the submenu), then drop on Sol Review.
+    await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2 + 10, { steps: 3 });
+    await page.mouse.move(leadingBox.x + leadingBox.width / 2, leadingBox.y + leadingBox.height / 2, { steps: 5 });
+    await expect(submenu).toBeVisible();
+    await page.mouse.move(lastBox.x + lastBox.width / 2, lastBox.y + lastBox.height / 2 + 4, { steps: 8 });
+    await page.mouse.up();
+
+    await expect(submenu).toBeVisible();
+    await expect.poll(async () => page.evaluate(() => (window as unknown as { __reorderLog?: Array<{ harnessId: string; configurationIds: string[] }> }).__reorderLog ?? [])).toEqual([
+      { harnessId: HARNESS_ID, configurationIds: ['launch/sol-deep', 'launch/sol-review', 'launch/sol-fast'] },
+    ]);
+
+    // Dismiss picker, then verify real pointer drag in Settings -> Launch Configurations.
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('Escape');
+    await page.getByRole('tab', { name: 'Launch Configurations' }).click();
+    await page.getByRole('button', { name: 'Show launch configurations' }).click();
+
+    const group = page.getByTestId(`launch-config-group-${HARNESS_ID}`);
+    await expect(group).toBeVisible();
+    await expect(group.locator('li p')).toHaveText([
+      'Sol Deep · User-owned',
+      'Sol Review · User-owned',
+      'Sol Fast · User-owned',
+    ]);
+    const settingsHandle = group.getByRole('button', { name: 'Reorder Sol Deep under Codex' });
+    const settingsTarget = group.getByTestId('launch-config-row-launch/sol-fast');
+    const shBox = (await settingsHandle.boundingBox())!;
+    const stBox = (await settingsTarget.boundingBox())!;
+
+    await page.mouse.move(shBox.x + shBox.width / 2, shBox.y + shBox.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(shBox.x + shBox.width / 2, stBox.y + stBox.height / 2 + 4, { steps: 10 });
+    await page.mouse.up();
+
+    await expect.poll(async () => page.evaluate(() => (window as unknown as { __reorderLog?: Array<{ harnessId: string; configurationIds: string[] }> }).__reorderLog?.length ?? 0)).toBe(2);
+    const secondCall = await page.evaluate(() => (window as unknown as { __reorderLog?: Array<{ harnessId: string; configurationIds: string[] }> }).__reorderLog?.[1]);
+    expect(secondCall).toEqual({
+      harnessId: HARNESS_ID,
+      configurationIds: ['launch/sol-review', 'launch/sol-fast', 'launch/sol-deep'],
+    });
+  });
+});
