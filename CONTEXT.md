@@ -96,6 +96,10 @@ _Avoid_: Project, repo, folder
 The canvas's four-valued scope switch (`single` | `mesh` | `pinned` | `all`) — what set of Agent Nodes the grid renders, and how. `single` solos the active node and is excluded from the "grid" variants; the other three are grid modes. **Mesh Grid** is scoped to the sidebar-selected Mesh and never guesses one: with no Mesh selected it is an explicit empty state, and entering it asks for a Mesh rather than picking one. Mesh selection is sticky — re-clicking the selected Mesh keeps that scope, and returns to it from a cross-Mesh mode, instead of clearing the selection. **All Nodes** carries a one-way invariant: `viewMode === 'all'` requires `selectedMeshId === null`, and it is the only route out of Mesh scope. The reverse is not required — a null mesh selection is also valid in `pinned` and `single` modes.
 _Avoid_: layout mode, scope mode, canvas mode (the term is View Mode); "grid" alone (ambiguous with the underlying split-pane renderer).
 
+**Navigation snapshot**:
+The saved "where was I" position — the View Mode, the grid mode Single was entered from, the selected Mesh and the active Agent Node — kept as one versioned record so a relaunch restores the scope the user left instead of an empty canvas. It records where the user was LOOKING, never what should be running: restoring it launches, resumes and duplicates nothing. A subject that no longer exists is dropped and announced, never swapped for another one, and the canvas lands in a scope that is valid and useful.
+_Avoid_: session state, workspace state, recent session (those name process lifecycle, not navigation).
+
 **Agent Node**:
 An interactive panel running a single agent execution process within its Node Working Directory.
 _Avoid_: Session, pane, terminal node

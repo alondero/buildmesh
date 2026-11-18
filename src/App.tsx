@@ -23,7 +23,11 @@ import { CommandOmnibar } from './components/CommandOmnibar/CommandOmnibar';
 import { UpdatePrompt } from './components/UpdatePrompt/UpdatePrompt';
 import { BootErrorPanel } from './components/BootErrorPanel/BootErrorPanel';
 import { formatError } from './lib/errorUtils';
-import { runBoot } from './lib/bootSequence';
+import {
+  captureNavigationState,
+  installNavigationSnapshotPersistence,
+  runBootWithRestore,
+} from './lib/navigationContinuity';
 import { useMeshStore } from './stores/meshStore';
 import { useAgentNodeStore } from './stores/agentNodeStore';
 import { useExitPromptStore } from './stores/exitPromptStore';
@@ -189,12 +193,14 @@ function App() {
 
   // Issue #1250 — extract init into a callback so the BootErrorPanel's
   // Retry button can re-run it without unmounting the whole App.
-  // Issue #1524 — the verdict comes from `runBoot`, which owns the
-  // failure contract: it treats a rejected loader AND a stored store
+  // Issue #1524 — the verdict comes from the boot coordinator, which owns
+  // the failure contract: it treats a rejected loader AND a stored store
   // error as a failure, so a Mesh or Agent Node snapshot that never
   // loaded can't be mistaken for an empty workspace. `isReady` is set
   // only on a fully clean run. `initBusy` gates the Retry button so a
   // panicking backend can't be hit with overlapping inits.
+  // Issue #2793 — the boot also restores the saved navigation position
+  // (`runBootWithRestore`), once the snapshots are authoritative.
   const init = useCallback(async () => {
     setInitError(null);
     setInitBusy(true);
@@ -203,10 +209,23 @@ function App() {
     // nor flip the guard off; the store keeps its fail-closed `true`
     // default and the guard decides synchronously from it.
     void useExitPromptStore.getState().initConfirmBeforeQuit();
+    // Issue #2793 — the navigation position this boot started from. The
+    // restore compares it with the live position once the snapshots have
+    // loaded: a user who navigated while the boot was still running has
+    // made a newer decision than the saved record, and the restore steps
+    // aside rather than overwriting it.
+    const navigationBaseline = captureNavigationState();
     try {
       // No data dependency between the loaders — they run concurrently so
       // first paint isn't gated on three serial calls.
-      const outcome = await runBoot({
+      //
+      // Issue #2793 — the boot and the navigation restore are one step:
+      // `runBootWithRestore` restores the saved Mesh, Agent Node and View
+      // Mode once every loader has settled, so the saved ids are resolved
+      // against the authoritative snapshots. A slow or out-of-order load
+      // cannot be read as "the subject is gone", and a boot that failed
+      // restores nothing.
+      const outcome = await runBootWithRestore({
         attachListeners: initAttentionListeners,
         // `refreshMeshes` (not `fetchMeshes`): the boot loader must reject
         // so a Mesh failure is caught by the rejection channel too, not
@@ -217,7 +236,7 @@ function App() {
           meshes: useMeshStore.getState().error,
           agentNodes: useAgentNodeStore.getState().error,
         }),
-      });
+      }, navigationBaseline);
       if (!outcome.ok) {
         setInitError(outcome.errors.join('\n'));
         return;
@@ -250,6 +269,12 @@ function App() {
   }, [initAttentionListeners, refreshMeshes, fetchAgentNodes]);
 
   useEffect(() => {
+    // Issue #2793 — record the live navigation position so the next launch
+    // can restore it. Installed before the boot starts; the writer itself
+    // stays closed until the restore has run, so a boot that has not
+    // restored yet cannot overwrite the saved subjects with its own empty
+    // defaults.
+    installNavigationSnapshotPersistence();
     init();
   }, [init]);
 

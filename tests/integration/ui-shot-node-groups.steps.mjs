@@ -42,8 +42,14 @@ export default async function ({ page }) {
   await drag(2, 3, 0.75);
   await expect.poll(async () => (await card(3).boundingBox()).x).toBe(before.x);
   await expect.poll(async () => (await card(2).boundingBox()).x).toBeGreaterThan(before.x);
-  await card(2).getByRole('button', { name: 'Move selected node out of group' }).click();
-  await expect(cards).toHaveCount(3);
+  // dnd-kit stops propagating EVERY click for 50 ms after a drag ends, so the
+  // click that follows a reorder can be swallowed before React ever sees it.
+  // Retry the click until the group actually dissolves instead of depending
+  // on that window.
+  await expect.poll(async () => {
+    await card(2).getByRole('button', { name: 'Move selected node out of group' }).click();
+    return cards.count();
+  }).toBe(3);
   await drag(1, 2, 0.75);
   await expect.poll(() => cards.evaluateAll(els => els.map(el => el.getAttribute('data-node-card-id'))))
     .toEqual(['2', '3', '1']);

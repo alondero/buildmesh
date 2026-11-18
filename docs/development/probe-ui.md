@@ -21,7 +21,7 @@ React surfaces read that answer through `useScope` (`src/hooks/useScope.ts`). Th
 - **all** — Every loaded node, across every mesh. All Nodes carries a one-way invariant: `viewMode === 'all'` requires `selectedMeshId === null`. `setViewMode` enforces this transition directly so callers remain side-effect-free.
 Search and the provider/status filters narrow the chosen Mesh, Pinned, or All Nodes scope. The title bar keeps that scope visible and offers search and reset. Single preserves the grid scope and filters it was entered from. Ctrl/Cmd+F returns from Single to that grid and focuses search; Ctrl/Cmd+Alt+G cycles Mesh, Pinned, and All Nodes.
 
-On first launch after this change, saved Filtered mode becomes All Nodes and retains its active filters, preserving cross-Mesh results. Filters saved while another mode was active were dormant and are cleared during migration; sorting is retained. Subsequent searches persist across reloads. Mesh selection itself is not persisted; after reload Mesh Grid asks for a Mesh rather than widening the scope.
+On first launch after this change, saved Filtered mode becomes All Nodes and retains its active filters, preserving cross-Mesh results. Filters saved while another mode was active were dormant and are cleared during migration; sorting is retained. Subsequent searches persist across reloads. The Mesh selection and the active Agent Node are persisted WITH the View Mode as one versioned navigation snapshot (#2793), so a relaunch restores the scope the user left; Mesh Grid still asks for a Mesh when there is nothing to restore, and never widens the scope on its own.
 
 The four-segment control is the bespoke `ViewModeSwitcher` in the title bar (below 1700px a single labelled `ViewSelector` names the View Mode and scope and holds both pickers, #2421; that tier is a JS tier, so it scales with the interface text size — 2550px at 150%); the adjacent scope indicator names that scope (the Mesh, or an honest cross-Mesh label carrying an Agent Node count) and doubles as the Mesh picker, so choosing a Mesh is one write that moves the canvas and the Mesh-owned Probe destinations together (#2074, #2077). The count in that label is the NARROWED count — how many Agent Nodes the current filters leave visible — and the scope's own size appears only as the denominator on the Filters control beside it, which counts "3/12"; the bar's "All meshes · 3 nodes" says "3 are visible". Deleting the Mesh the canvas was showing announces the move (#2076).
 
@@ -45,6 +45,61 @@ just became selected — by the row itself (`MeshItem`), which owns the
 `NodeItem` uses for its own active bit (#1748). A collapse the user made by
 hand therefore survives later re-renders and only a newly opened Mesh or agent
 expands the row again.
+
+## Navigation continuity across a relaunch (issue #2793)
+
+The View Mode was persisted without its subject: the mode came back and the
+Mesh it scoped to and the Agent Node it focused did not. A returning user
+landed on "Mesh Grid / no mesh selected" — an empty canvas beside agents that
+were still in the sidebar. The saved position is now ONE versioned record, and
+the rules around it live here.
+
+`src/lib/navigationSnapshot.ts` owns the stored record
+(`buildmesh.navigation-snapshot`, version 1): the View Mode, the grid mode
+Single was entered from, the selected Mesh id and the active Agent Node id,
+plus the two names. The names are labels for the recovery notice only — a
+deleted Mesh is no longer in the loaded list, so without the saved name the
+notice could only say "Mesh #12". Nothing resolves a Mesh or a node by name. A
+record that does not parse, or that another version wrote, is ignored: the app
+starts from its own defaults and rewrites the record.
+
+`src/lib/navigationContinuity.ts` owns everything around it.
+`planNavigationRestore` is pure — it resolves the record against the
+authoritative Mesh and Agent Node snapshots and returns the position to
+restore plus what was lost. `restoreNavigation` applies that plan through the
+EXISTING navigation intents (`enterMesh` / `focusNode` / `setViewMode`), so a
+restored scope cannot disagree with a scope the user reached by clicking.
+
+The rules the plan keeps:
+
+- **Restore only against authoritative snapshots.** The restore runs after the
+  boot loaders have loaded the Mesh and Agent Node snapshots, so a saved id is
+  resolved against what the backend has, never against a half-loaded list.
+- **Live navigation wins.** The restore compares the live position with the
+  position the boot started from. A user who navigated while the boot was
+  still loading has made a newer decision than the saved record, and the
+  restore steps aside.
+- **Never guess a subject.** A deleted Mesh is dropped, never replaced with
+  another repository; a deleted or archived Agent Node is dropped, never
+  replaced with the first node that happens to be there.
+- **Land somewhere useful.** A Mesh Grid whose Mesh is gone lands in All
+  Nodes — a Mesh Grid with no Mesh selected is the empty workspace this issue
+  is about. Single whose node is gone lands in the grid Single was entered
+  from. The loss is announced through the scope notice, which names what is
+  gone and points at the scope label in the title bar as the way to choose
+  again.
+- **The All Nodes invariant still holds.** A restored All Nodes carries no Mesh
+  selection.
+
+The restore moves the canvas and nothing else: it never launches, resumes or
+duplicates a process. The grid-mode invariant (ticket #986) still owns the
+focus in a grid mode, so the restore only restores a node the restored scope
+would show anyway.
+
+`installNavigationSnapshotPersistence` records the live position as the user
+moves. The writer stays CLOSED until the boot restore has run: a boot that has
+not restored yet holds an empty position, and recording it would overwrite the
+saved subjects with the boot's own defaults before they were ever restored.
 
 ## Probe adapters and scoped reads
 
