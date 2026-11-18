@@ -21,11 +21,11 @@ import type { PairingVerification } from '../../types/generated/PairingVerificat
 import {
   applyHarnessConfigurationOrder,
   configurationHarnessId,
-  createLaunchConfigurationReorderQueue,
+  getLaunchConfigurationReorderCoordinator,
   groupConfigurationsByHarness,
   reorderConfigurationIds,
   type LaunchConfigurationGroup,
-  type LaunchConfigurationReorderQueue,
+  type LaunchConfigurationReorderCoordinator,
 } from '../../lib/launchConfigurationOrder';
 import { ProviderIcon } from './ProviderIcon';
 import { LaunchConfigurationEditor, cloneConfiguration } from './LaunchConfigurationEditor';
@@ -184,71 +184,83 @@ export function LaunchConfigurations({
   valuesRef.current = values;
   const onChangedRef = useRef(onChanged);
   onChangedRef.current = onChanged;
+  const hasLoadedRef = useRef(false);
   const needsTrailingRefreshRef = useRef(false);
 
-  const reorderQueue = useMemo<LaunchConfigurationReorderQueue>(
-    () =>
-      createLaunchConfigurationReorderQueue({
-        persist: async (harnessId, orderedIds) => {
-          if (!api.reorder) return;
-          await api.reorder(harnessId, orderedIds);
-        },
-        onHarnessFailed: (harnessId, confirmedIds, err) => {
-          if (confirmedIds) {
-            const rolledBack = applyHarnessConfigurationOrder(
-              valuesRef.current,
-              harnessId,
-              confirmedIds,
-            );
-            valuesRef.current = rolledBack;
-            setValues(rolledBack);
-          }
-          setReorderError(String(err));
-        },
-        onDrained: ({ anySucceeded, anyFailed }) => {
-          if (anySucceeded) {
-            onChangedRef.current?.();
-          }
-          if (needsTrailingRefreshRef.current || anyFailed) {
-            needsTrailingRefreshRef.current = false;
-            setRevision((v) => v + 1);
-          }
-        },
-      }),
-    [api],
+  const coordinator = useMemo<LaunchConfigurationReorderCoordinator | null>(
+    () => (api.reorder ? getLaunchConfigurationReorderCoordinator(api.reorder) : null),
+    [api.reorder],
   );
 
   useEffect(() => {
-    reorderQueue.activate();
+    hasLoadedRef.current = false;
     needsTrailingRefreshRef.current = false;
-    return () => {
-      reorderQueue.dispose();
-    };
-  }, [reorderQueue]);
+  }, [api]);
+
+  useEffect(() => {
+    if (!coordinator) return;
+    return coordinator.subscribe({
+      onHarnessFailed: (harnessId, confirmedIds, err) => {
+        if (confirmedIds) {
+          const rolledBack = applyHarnessConfigurationOrder(
+            valuesRef.current,
+            harnessId,
+            confirmedIds,
+          );
+          valuesRef.current = rolledBack;
+          setValues(rolledBack);
+        }
+        setReorderError(String(err));
+      },
+      onDrained: ({ anySucceeded, anyFailed }) => {
+        if (anySucceeded) {
+          onChangedRef.current?.();
+        }
+        if (needsTrailingRefreshRef.current || anyFailed) {
+          needsTrailingRefreshRef.current = false;
+          setRevision((v) => v + 1);
+        }
+      },
+    });
+  }, [coordinator]);
 
   useEffect(() => {
     let current = true;
-    const readVersion = reorderQueue.getMutationVersion();
+    const readVersion = coordinator?.getMutationVersion() ?? 0;
     Promise.resolve().then(() => Promise.all([api.list(), api.targets()])).then(([list, options]) => {
       if (!Array.isArray(list) || !Array.isArray(options)) throw new Error('Launch Configurations could not be loaded');
       if (!current) return;
       setTargets(options);
       setLoading(false);
       setLoadError(null);
-      // Issue #2326 snapshot-authority pattern: never let a read that started
-      // before an optimistic reorder (or resolves while a reorder is pending)
-      // overwrite the displayed order; converge with one trailing read once
-      // pending mutations settle.
-      if (reorderQueue.isPending() || reorderQueue.getMutationVersion() !== readVersion) {
+      // Issue #2326 snapshot-authority pattern:
+      // 1. If a reorder is still in flight or queued, overlay pending orders on
+      //    first load (so reopening while pending shows accepted drags) or drop
+      //    subsequent stale reads, and let `onDrained` run one trailing read.
+      // 2. If the queue already drained while this stale read was in flight,
+      //    drop the stale snapshot and schedule the trailing read immediately.
+      if (coordinator?.isPending()) {
+        if (!hasLoadedRef.current) {
+          const overlaid = coordinator.applyPendingOverlay(list);
+          valuesRef.current = overlaid;
+          setValues(overlaid);
+          hasLoadedRef.current = true;
+        }
         needsTrailingRefreshRef.current = true;
+        return;
+      }
+      if (coordinator && coordinator.getMutationVersion() !== readVersion) {
+        needsTrailingRefreshRef.current = false;
+        setRevision((v) => v + 1);
         return;
       }
       valuesRef.current = list;
       setValues(list);
-      reorderQueue.syncConfirmed(list);
+      hasLoadedRef.current = true;
+      coordinator?.syncConfirmed(list);
     }).catch((e: unknown) => { if (current) { setLoadError(String(e)); setLoading(false); } });
     return () => { current = false; };
-  }, [api, revision, refreshToken, reorderQueue]);
+  }, [api, revision, refreshToken, coordinator]);
 
   const groups = useMemo(
     () => groupConfigurationsByHarness(values, targets),
@@ -256,7 +268,7 @@ export function LaunchConfigurations({
   );
 
   const handleReorder = (harnessId: string, orderedIds: string[]) => {
-    if (!api.reorder || disabled) return;
+    if (!coordinator || disabled) return;
     const previous = valuesRef.current;
     const previousHarnessIds = previous
       .filter((c) => configurationHarnessId(c) === harnessId)
@@ -266,12 +278,12 @@ export function LaunchConfigurations({
     valuesRef.current = next;
     setValues(next);
     setReorderError(null);
-    reorderQueue.enqueue(harnessId, previousHarnessIds, orderedIds);
+    coordinator.enqueue(harnessId, previousHarnessIds, orderedIds);
   };
 
   const error = loadError ?? reorderError;
   const refresh = () => {
-    reorderQueue.bumpMutationVersion();
+    coordinator?.bumpMutationVersion();
     setDraft(null);
     setReorderError(null);
     setRevision((v) => v + 1);

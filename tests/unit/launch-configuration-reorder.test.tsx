@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LaunchConfigurations } from '../../src/components/Providers/LaunchConfigurations';
 import { GroupedProviderMenu } from '../../src/components/Providers/GroupedProviderMenu';
 import {
+  __resetLaunchConfigurationReorderCoordinatorsForTests,
   applyHarnessConfigurationOrder,
   groupConfigurationsByHarness,
   reorderConfigurationIds,
@@ -140,6 +141,7 @@ afterEach(cleanup);
 
 beforeEach(() => {
   vi.resetAllMocks();
+  __resetLaunchConfigurationReorderCoordinatorsForTests();
   vi.mocked(api.listProviders).mockResolvedValue([agyOption, opencodeOption]);
   vi.mocked(api.getLaunchTargets).mockResolvedValue([agyTarget, opencodeTarget]);
   vi.mocked(api.reorderSpawnConfigurations).mockResolvedValue(undefined);
@@ -465,6 +467,118 @@ describe('LaunchConfigurations grouped drag-and-drop', () => {
       'AGY Review · User-owned',
     ]);
   });
+
+  it('keeps queued writes alive across unmount and serializes new drags after reopen while pending', async () => {
+    let backendConfigs = [
+      makeConfig('agy-1', 'AGY Fast', 'agy'),
+      makeConfig('agy-2', 'AGY Deep', 'agy'),
+      makeConfig('agy-3', 'AGY Review', 'agy'),
+    ];
+    const firstWrite = deferred<void>();
+    const secondWrite = deferred<void>();
+    const calls: string[][] = [];
+    const reorder = vi.fn((harnessId: string, ids: string[]) => {
+      calls.push(ids);
+      const gate = calls.length === 1 ? firstWrite : secondWrite;
+      return gate.promise.then(() => {
+        backendConfigs = applyHarnessConfigurationOrder(backendConfigs, harnessId, ids);
+      });
+    });
+    const sharedApi = {
+      list: vi.fn(async () => backendConfigs),
+      targets: async () => [agyTarget],
+      save: vi.fn(),
+      remove: vi.fn(),
+      reorder,
+    };
+
+    const view = render(<LaunchConfigurations api={sharedApi} />);
+    const agyGroup = await screen.findByTestId('launch-config-group-agy');
+    stubRowRects(Array.from(agyGroup.querySelectorAll<HTMLElement>('li')));
+
+    // Start Drag 1 -> [AGY Deep, AGY Fast, AGY Review], still in flight when Settings closes.
+    await keyboardDragDown(within(agyGroup).getByRole('button', { name: 'Reorder AGY Fast under Antigravity' }));
+    expect(calls).toEqual([['agy-2', 'agy-1', 'agy-3']]);
+
+    view.unmount();
+
+    // Reopen Settings while Drag 1 is STILL in flight: must show overlaid pending order immediately.
+    render(<LaunchConfigurations api={sharedApi} />);
+    const reopenedGroup = await screen.findByTestId('launch-config-group-agy');
+    expect(Array.from(reopenedGroup.querySelectorAll('li p')).map((p) => p.textContent)).toEqual([
+      'AGY Deep · User-owned',
+      'AGY Fast · User-owned',
+      'AGY Review · User-owned',
+    ]);
+
+    // Drag 2 in reopened surface must queue behind Drag 1 rather than racing it.
+    stubRowRects(Array.from(reopenedGroup.querySelectorAll<HTMLElement>('li')));
+    await keyboardDragDown(within(reopenedGroup).getByRole('button', { name: 'Reorder AGY Fast under Antigravity' }));
+    expect(calls).toHaveLength(1);
+
+    await act(async () => { firstWrite.resolve(undefined); });
+    await waitFor(() => {
+      expect(calls).toEqual([
+        ['agy-2', 'agy-1', 'agy-3'],
+        ['agy-2', 'agy-3', 'agy-1'],
+      ]);
+    });
+    await act(async () => { secondWrite.resolve(undefined); });
+    await waitFor(() => {
+      expect(backendConfigs.map((c) => c.id)).toEqual(['agy-2', 'agy-3', 'agy-1']);
+    });
+  });
+
+  it('schedules an immediate trailing read when a stale list resolves AFTER the reorder queue already drained', async () => {
+    const initial = [
+      makeConfig('agy-1', 'AGY Fast', 'agy'),
+      makeConfig('agy-2', 'AGY Deep', 'agy'),
+    ];
+    const authoritative = [
+      initial[1],
+      initial[0],
+      makeConfig('agy-3', 'AGY New', 'agy'),
+    ];
+    const staleRead = deferred<SpawnConfiguration[]>();
+    let listCalls = 0;
+    const list = vi.fn(() => {
+      listCalls += 1;
+      if (listCalls === 1) return Promise.resolve(initial);
+      if (listCalls === 2) return staleRead.promise;
+      return Promise.resolve(authoritative);
+    });
+    const reorder = vi.fn().mockResolvedValue(undefined);
+    const mockApi = {
+      list,
+      targets: async () => [agyTarget],
+      save: vi.fn(),
+      remove: vi.fn(),
+      reorder,
+    };
+
+    const { rerender } = render(<LaunchConfigurations api={mockApi} refreshToken={1} />);
+    const agyGroup = await screen.findByTestId('launch-config-group-agy');
+    expect(listCalls).toBe(1);
+
+    // Start a refresh that will settle slowly.
+    rerender(<LaunchConfigurations api={mockApi} refreshToken={2} />);
+    await waitFor(() => expect(listCalls).toBe(2));
+
+    // User drags and the reorder completes & drains BEFORE staleRead returns.
+    stubRowRects(Array.from(agyGroup.querySelectorAll<HTMLElement>('li')));
+    await keyboardDragDown(within(agyGroup).getByRole('button', { name: 'Reorder AGY Fast under Antigravity' }));
+    await waitFor(() => expect(reorder).toHaveBeenCalledTimes(1));
+
+    // Now the stale read returns with old [agy-1, agy-2]: it must be dropped AND
+    // immediately trigger read #3 to pick up authoritative [agy-2, agy-1, agy-3].
+    await act(async () => { staleRead.resolve(initial); });
+    await waitFor(() => expect(listCalls).toBe(3));
+    expect(Array.from(agyGroup.querySelectorAll('li p')).map((p) => p.textContent)).toEqual([
+      'AGY Deep · User-owned',
+      'AGY Fast · User-owned',
+      'AGY New · User-owned',
+    ]);
+  });
 });
 
 describe('SpawnConfigurationMenu inline drag-and-drop', () => {
@@ -616,5 +730,111 @@ describe('SpawnConfigurationMenu inline drag-and-drop', () => {
       .getAllByRole('menuitem')
       .filter((el) => ['AGY Fast', 'AGY Deep'].includes(el.textContent ?? ''));
     expect(configButtons.map((b) => b.textContent)).toEqual(['AGY Fast', 'AGY Deep']);
+  });
+
+  it('preserves queued drags across flyout close and serializes new drags after reopen while first write is pending', async () => {
+    let backendConfigs = [
+      makeConfig('agy-1', 'AGY Fast', 'agy'),
+      makeConfig('agy-2', 'AGY Deep', 'agy'),
+      makeConfig('agy-3', 'AGY Review', 'agy'),
+    ];
+    vi.mocked(api.listSpawnConfigurations).mockImplementation(async () => backendConfigs);
+    const firstWrite = deferred<void>();
+    const secondWrite = deferred<void>();
+    const thirdWrite = deferred<void>();
+    const calls: string[][] = [];
+    vi.mocked(api.reorderSpawnConfigurations).mockImplementation((harnessId, ids) => {
+      calls.push(ids);
+      const gate = calls.length === 1 ? firstWrite : calls.length === 2 ? secondWrite : thirdWrite;
+      return gate.promise.then(() => {
+        backendConfigs = applyHarnessConfigurationOrder(backendConfigs, harnessId, ids);
+      });
+    });
+
+    const view = render(<GroupedProviderMenu providers={[agyOption]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Antigravity configurations', exact: true }));
+    const panel = await screen.findByTestId('spawn-configurations');
+
+    // Drag 1 (in flight) + Drag 2 (queued), then immediately close/unmount the flyout.
+    const getHandles = (container: HTMLElement) => within(container).getAllByRole('menuitem', { name: /^Reorder / });
+    stubRowRects(getHandles(panel).map((h) => h.parentElement as HTMLElement));
+    await keyboardDragDown(within(panel).getByRole('menuitem', { name: 'Reorder AGY Fast' }));
+    stubRowRects(getHandles(panel).map((h) => h.parentElement as HTMLElement));
+    await keyboardDragDown(within(panel).getByRole('menuitem', { name: 'Reorder AGY Fast' }));
+    expect(calls).toEqual([['agy-2', 'agy-1', 'agy-3']]);
+
+    view.unmount();
+
+    // Reopen flyout while Drag 1 is STILL pending: must display queued Drag 2 order immediately.
+    render(<GroupedProviderMenu providers={[agyOption]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Antigravity configurations', exact: true }));
+    const reopened = await screen.findByTestId('spawn-configurations');
+    await waitFor(() => {
+      const buttons = within(reopened)
+        .getAllByRole('menuitem')
+        .filter((el) => ['AGY Fast', 'AGY Deep', 'AGY Review'].includes(el.textContent ?? ''));
+      expect(buttons.map((b) => b.textContent)).toEqual(['AGY Deep', 'AGY Review', 'AGY Fast']);
+    });
+
+    // Drag 3 in reopened flyout coalesces into the SAME coordinator (still waiting on Drag 1).
+    stubRowRects(getHandles(reopened).map((h) => h.parentElement as HTMLElement));
+    await keyboardDragDown(within(reopened).getByRole('menuitem', { name: 'Reorder AGY Deep' }));
+    expect(calls).toHaveLength(1);
+
+    // Resolving Drag 1 flushes the latest coalesced order ([agy-3, agy-2, agy-1]), never lost on close.
+    await act(async () => { firstWrite.resolve(undefined); });
+    await waitFor(() => {
+      expect(calls).toEqual([
+        ['agy-2', 'agy-1', 'agy-3'],
+        ['agy-3', 'agy-2', 'agy-1'],
+      ]);
+    });
+    await act(async () => { secondWrite.resolve(undefined); });
+    await waitFor(() => {
+      expect(backendConfigs.map((c) => c.id)).toEqual(['agy-3', 'agy-2', 'agy-1']);
+    });
+  });
+
+  it('schedules an immediate trailing read in SpawnConfigurationMenu when a stale list resolves after reorder drained', async () => {
+    const initial = [
+      makeConfig('agy-1', 'AGY Fast', 'agy'),
+      makeConfig('agy-2', 'AGY Deep', 'agy'),
+    ];
+    const authoritative = [
+      initial[1],
+      initial[0],
+      makeConfig('agy-3', 'AGY New', 'agy'),
+    ];
+    const slowInitial = deferred<SpawnConfiguration[]>();
+    let menuCalls = 0;
+    vi.mocked(api.listSpawnConfigurations).mockImplementation(() => {
+      menuCalls += 1;
+      if (menuCalls === 1) return slowInitial.promise;
+      return Promise.resolve(authoritative);
+    });
+    vi.mocked(api.reorderSpawnConfigurations).mockResolvedValue(undefined);
+
+    render(<GroupedProviderMenu providers={[agyOption]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Antigravity configurations', exact: true }));
+    const freshPanel = await screen.findByTestId('spawn-configurations');
+    await waitFor(() => expect(menuCalls).toBe(1));
+
+    // A reorder starts and drains BEFORE slowInitial resolves (mutationVersion advances while menuCalls === 1 is in flight).
+    const { getLaunchConfigurationReorderCoordinator } = await import('../../src/lib/launchConfigurationOrder');
+    const coordinator = getLaunchConfigurationReorderCoordinator(api.reorderSpawnConfigurations);
+    coordinator.enqueue('agy', ['agy-1', 'agy-2'], ['agy-2', 'agy-1']);
+    await waitFor(() => expect(api.reorderSpawnConfigurations).toHaveBeenCalledWith('agy', ['agy-2', 'agy-1']));
+    await waitFor(() => expect(coordinator.isPending()).toBe(false));
+
+    // Now the stale read resolves AFTER the queue already drained: it must be dropped AND
+    // immediately trigger read #2 so authoritative [AGY Deep, AGY Fast, AGY New] renders.
+    await act(async () => { slowInitial.resolve(initial); });
+    await waitFor(() => expect(menuCalls).toBe(2));
+    await waitFor(() => {
+      const buttons = within(freshPanel)
+        .getAllByRole('menuitem')
+        .filter((el) => ['AGY Fast', 'AGY Deep', 'AGY New'].includes(el.textContent ?? ''));
+      expect(buttons.map((b) => b.textContent)).toEqual(['AGY Deep', 'AGY Fast', 'AGY New']);
+    });
   });
 });

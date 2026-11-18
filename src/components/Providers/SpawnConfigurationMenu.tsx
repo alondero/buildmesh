@@ -20,7 +20,7 @@ import type { SpawnConfiguration } from '../../types/generated/SpawnConfiguratio
 import { deleteSpawnConfiguration, getLaunchTargets, listProviders, listSpawnConfigurations, reorderSpawnConfigurations, saveSpawnConfiguration, verifyLaunchConfiguration } from '../../lib/tauri/provider';
 import {
   applyHarnessConfigurationOrder,
-  createLaunchConfigurationReorderQueue,
+  getLaunchConfigurationReorderCoordinator,
   reorderConfigurationIds,
 } from '../../lib/launchConfigurationOrder';
 import { LaunchConfigurationEditor, cloneConfiguration } from './LaunchConfigurationEditor';
@@ -156,6 +156,7 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
   const draftSession = useRef(0);
   const configurationsRef = useRef(configurations);
   configurationsRef.current = configurations;
+  const hasLoadedRef = useRef(false);
   const needsTrailingRefreshRef = useRef(false);
   const [placement, setPlacement] = useState<{ left: number; top: number; maxHeight: number } | null>(null);
   const [unavailableById, setUnavailableById] = useState(() => new Map(configurationRows.map((row) => [row.id, row.unavailable_reason])));
@@ -165,13 +166,23 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
-  const harnessScope = `${option.harness_id}:${login?.id ?? ''}`;
-  const reorderQueue = useMemo(() => {
-    void harnessScope;
-    return createLaunchConfigurationReorderQueue({
-      persist: reorderSpawnConfigurations,
+  // Shared across flyout close/reopen and with Settings' LaunchConfigurations
+  // so closing the flyout never drops queued writes or lets an older in-flight
+  // request race a newer drag after reopen.
+  const coordinator = useMemo(
+    () => getLaunchConfigurationReorderCoordinator(reorderSpawnConfigurations),
+    [],
+  );
+
+  useEffect(() => {
+    hasLoadedRef.current = false;
+    needsTrailingRefreshRef.current = false;
+  }, [option.id, option.harness_id, login?.id]);
+
+  useEffect(() => {
+    return coordinator.subscribe({
       onHarnessFailed: (harnessId, confirmedIds, err) => {
-        if (!mounted.current) return;
+        if (!mounted.current || harnessId !== option.harness_id) return;
         if (confirmedIds) {
           const rolledBack = applyHarnessConfigurationOrder(
             configurationsRef.current,
@@ -191,15 +202,7 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
         }
       },
     });
-  }, [harnessScope]);
-
-  useEffect(() => {
-    reorderQueue.activate();
-    needsTrailingRefreshRef.current = false;
-    return () => {
-      reorderQueue.dispose();
-    };
-  }, [reorderQueue]);
+  }, [coordinator, option.harness_id]);
 
 
   useEffect(() => {
@@ -218,21 +221,35 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
 
   useEffect(() => {
     let current = true;
-    const readVersion = reorderQueue.getMutationVersion();
+    const readVersion = coordinator.getMutationVersion();
     listSpawnConfigurations().then((values) => {
       if (!current) return;
       setLoaded(true);
-      if (reorderQueue.isPending() || reorderQueue.getMutationVersion() !== readVersion) {
+      if (coordinator.isPending()) {
+        if (!hasLoadedRef.current) {
+          const overlaid = coordinator
+            .applyPendingOverlay(values)
+            .filter((value) => belongsToHarness(value, option.harness_id) && offeredUnderLogin(value, login?.id));
+          configurationsRef.current = overlaid;
+          setConfigurations(overlaid);
+          hasLoadedRef.current = true;
+        }
         needsTrailingRefreshRef.current = true;
+        return;
+      }
+      if (coordinator.getMutationVersion() !== readVersion) {
+        needsTrailingRefreshRef.current = false;
+        setListRevision((v) => v + 1);
         return;
       }
       const filtered = values.filter((value) => belongsToHarness(value, option.harness_id) && offeredUnderLogin(value, login?.id));
       configurationsRef.current = filtered;
       setConfigurations(filtered);
-      reorderQueue.syncConfirmed(filtered);
+      hasLoadedRef.current = true;
+      coordinator.syncConfirmed(values);
     }).catch((e: unknown) => { if (current) setError(String(e)); });
     return () => { current = false; };
-  }, [option.id, option.harness_id, option.configuration, login?.id, listRevision, reorderQueue]);
+  }, [option.id, option.harness_id, option.configuration, login?.id, listRevision, coordinator]);
 
   const editing = draft !== null;
   useEffect(() => {
@@ -314,7 +331,7 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
     setError(null);
   };
   const replaceConfiguration = (saved: SpawnConfiguration, harnessId?: string) => {
-    reorderQueue.bumpMutationVersion();
+    coordinator.bumpMutationVersion();
     setConfigurations((previous) => {
       const index = previous.findIndex((entry) => entry.id === saved.id);
       const next = harnessId !== option.harness_id || !offeredUnderLogin(saved, login?.id)
@@ -323,7 +340,6 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
           ? [...previous, saved]
           : previous.map((entry, i) => (i === index ? saved : entry));
       configurationsRef.current = next;
-      if (!reorderQueue.isPending()) reorderQueue.syncConfirmed(next);
       return next;
     });
   };
@@ -392,7 +408,7 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
     configurationsRef.current = next;
     setConfigurations(next);
     setError(null);
-    reorderQueue.enqueue(option.harness_id, currentIds, nextIds);
+    coordinator.enqueue(option.harness_id, currentIds, nextIds);
   };
   const menuClass = 'w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-selection focus:bg-bg-selection focus:outline-none';
   const mutedMenuClass = 'w-full px-3 py-1.5 text-left text-xs text-text-muted';
@@ -474,11 +490,10 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
           const deletedId = draft.id;
           await deleteSpawnConfiguration(deletedId);
           if (!mounted.current) return;
-          reorderQueue.bumpMutationVersion();
+          coordinator.bumpMutationVersion();
           setConfigurations((previous) => {
             const next = previous.filter((entry) => entry.id !== deletedId);
             configurationsRef.current = next;
-            if (!reorderQueue.isPending()) reorderQueue.syncConfirmed(next);
             return next;
           });
           setUnavailableById((previous) => {
