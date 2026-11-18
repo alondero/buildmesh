@@ -525,7 +525,7 @@ export type { ArchivedAgentNode };
 // the struct to carry url/state/labels (guaranteed present — the upstream
 // `services::github::Issue` deserialiser uses `#[serde(default)]`), so the
 // generated type now includes them and IssuesScreen renders the labels and the
-// "View ↗" link directly. No hand-maintained interface, no drift.
+// "View" link directly. No hand-maintained interface, no drift.
 import type { GitHubIssue } from "../types/generated/GitHubIssue";
 export type { GitHubIssue };
 

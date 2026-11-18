@@ -11,6 +11,7 @@ import { dropdownId } from '../../lib/dropdownId';
 import type { OpenPr } from '../../types/generated/OpenPr';
 import type { SpawnOption } from '../../lib/groups';
 import { PrReviewerSpawnDialog } from './PrReviewerSpawnDialog';
+import { OpenExternalIcon } from '../shared/OpenExternalIcon';
 
 interface PrPillProps {
   nodeId: number;
@@ -245,7 +246,10 @@ export function PrPill({ nodeId, meshId, gitPath, openPr, providers, compact = f
             title={merging ? 'Merge in progress' : openPr.url}
             className="w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors aria-disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:hover:bg-transparent aria-disabled:hover:text-text-primary"
           >
-            Open on GitHub ↗
+            <span className="inline-flex items-center gap-1">
+              Open on GitHub
+              <OpenExternalIcon />
+            </span>
           </button>
           {merging ? (
             <button

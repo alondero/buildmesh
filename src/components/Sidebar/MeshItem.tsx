@@ -27,6 +27,7 @@ import type { NodeActivityCluster } from '../../lib/nodeActivities';
 import { NodeCreationForm } from './NodeCreationForm';
 import { MeshRecolorModal } from '../Mesh/MeshRecolorModal';
 import type { SpawnOption } from '../../lib/groups';
+import { OpenExternalIcon } from '../shared/OpenExternalIcon';
 
 /// Build the tooltip text for the sidebar drift `!` badge. Lists the
 /// reasons in priority order — hostage first (it blocks a restore), then
@@ -817,12 +818,11 @@ function MeshItemView({
           {/* "View on GitHub" — only rendered when the mesh has a
               github.com origin (conditional render so non-GitHub meshes
               keep their 6-item menu and the keyboard-nav count in
-              `itemCount` stays accurate). The arrow-out-of-a-box icon
-              matches the `↗` glyph used in the rest of the codebase
-              (SafeLink, GridNodeHeader's open-PR chip). The click goes
-              through `openUrl()` per the knowledge primer's anti-pattern
-              note (Tauri 2 silently drops `target="_blank"` without an
-              explicit capability we don't grant). */}
+              `itemCount` stays accurate). The icon is the shared
+              external-link mark. The click goes through `openUrl()` per
+              the knowledge primer's anti-pattern note (Tauri 2 silently
+              drops `target="_blank"` without an explicit capability we
+              don't grant). */}
           {githubUrl && (
             <button
               role="menuitem"
@@ -833,11 +833,7 @@ function MeshItemView({
               }}
               className="w-full text-left px-3 py-1.5 text-label text-text-secondary hover:bg-bg-card-hover flex items-center gap-2"
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
-                <polyline points="15 3 21 3 21 9"/>
-                <line x1="10" y1="14" x2="21" y2="3"/>
-              </svg>
+              <OpenExternalIcon className="h-[14px] w-[14px] shrink-0" />
               View on GitHub
             </button>
           )}

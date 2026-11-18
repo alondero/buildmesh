@@ -59,12 +59,13 @@ test('provider usage link fits a 240px dock and opens externally from a cached o
   expect(linkBounds!.y).toBeLessThan(nameBounds!.y + nameBounds!.height);
   expect(linkBounds!.y + linkBounds!.height).toBeGreaterThan(nameBounds!.y);
   // Icon-only: the destination travels in the tooltip, not as visible text.
-  await expect(link).toHaveText('↗');
+  await expect(link.locator('svg')).toHaveCount(1);
+  await expect(link).toHaveText('');
   await expect(link).toHaveAttribute('title', 'View usage — opens in your browser');
-  // DESIGN.md's icon-button rule — a square hit area, not a bare glyph.
+  // DESIGN.md's icon-button rule — a 24px square hit area.
   // The negative vertical margin keeps that square from growing the row.
-  expect(linkBounds!.width).toBeGreaterThanOrEqual(18);
-  expect(linkBounds!.height).toBeGreaterThanOrEqual(18);
+  expect(linkBounds!.width).toBeGreaterThanOrEqual(24);
+  expect(linkBounds!.height).toBeGreaterThanOrEqual(24);
 
   const externalOpen = page.waitForEvent('console', message => message.text() === `usage-page-open ${usagePage.url}`);
   await page.evaluate(() => {

@@ -65,6 +65,7 @@
 
 import { type ReactNode } from 'react';
 import { openUrl } from '@tauri-apps/plugin-opener';
+import { OpenExternalIcon } from './OpenExternalIcon';
 
 export interface SafeLinkProps {
   /**
@@ -75,8 +76,14 @@ export interface SafeLinkProps {
    * not passing nonsense values like `'#'` or `'javascript:void(0)'`.
    */
   url: string;
-  /** Link body. Text for the title variant, an icon glyph for the ↗ variant. */
+  /** Link body. Text for a labelled link, or an icon for an icon-only link. */
   children: ReactNode;
+  /**
+   * Append the external-link icon after the label when this renders a
+   * real anchor. Omitted on the empty-URL span, which is inert text and
+   * must not keep a control mark.
+   */
+  external?: boolean;
   /**
    * Tailwind classes. Applied to the `<a>` as-is. In the empty-URL
    * `<span>` fallback, layout tokens are kept and link-styling tokens
@@ -111,7 +118,7 @@ function stripLinkStyling(className: string | undefined): string {
     .join(' ');
 }
 
-export function SafeLink({ url, children, className, ariaLabel, title }: SafeLinkProps) {
+export function SafeLink({ url, children, className, ariaLabel, title, external = false }: SafeLinkProps) {
   if (url === '') {
     // File header documents why the className is stripped; the
     // children are preserved so ProbeRow's empty-url titles still
@@ -146,6 +153,9 @@ export function SafeLink({ url, children, className, ariaLabel, title }: SafeLin
       }}
     >
       {children}
+      {external && (
+        <OpenExternalIcon className="ml-1 inline-block h-[12px] w-[12px] shrink-0 align-[-0.125em]" />
+      )}
     </a>
   );
 }

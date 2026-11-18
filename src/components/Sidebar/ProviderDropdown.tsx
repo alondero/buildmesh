@@ -113,10 +113,11 @@ export function ProviderDropdown({ dropdownKey, providers, onSelect, onClose, me
           </p>
           <SafeLink
             url={PREREQUISITES_URL}
+            external
             className="mt-1.5 inline-block text-micro text-text-secondary hover:text-text-primary hover:underline"
             title="Open the setup instructions on GitHub"
           >
-            View setup instructions&nbsp;&#8599;
+            View setup instructions
           </SafeLink>
         </div>
       )}

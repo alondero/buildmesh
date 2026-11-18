@@ -148,7 +148,7 @@ describe("IssuesScreen", () => {
     expect(screen.getByTestId("issue-body-101")).toBeTruthy();
   });
 
-  it("renders the 'View ↗' link for every issue, pointing at issue.url", async () => {
+  it("renders the 'View' link for every issue, pointing at issue.url", async () => {
     // Issue #358: the link used to be hidden because the Rust struct didn't
     // serialise `url`. Now that the backend ships it, the link must be
     // unconditionally visible and point at the right URL.
@@ -178,6 +178,31 @@ describe("IssuesScreen", () => {
     expect(link.getAttribute("target")).toBe("_blank");
     expect(link.getAttribute("rel")).toBe("noreferrer");
     expect(link.textContent).toMatch(/View/);
+    expect(link.textContent).not.toContain("↗");
+    expect(link.querySelector("svg")).not.toBeNull();
+  });
+
+  it("keeps the View words and omits the external icon when the URL is empty", async () => {
+    mockListIssues([{ ...BACKEND_ISSUES[0], url: "" }]);
+
+    render(
+      <IssuesScreen
+        mesh={mesh}
+        visitId={1}
+        onBack={noop}
+        onSpawned={noop}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("issue-101")).toBeTruthy();
+    });
+    await userEvent.click(screen.getByTestId("issue-101"));
+
+    const link = screen.getByTestId("issue-view-101");
+    expect(link.tagName).toBe("SPAN");
+    expect(link.textContent?.replace(/\s+/g, " ").trim()).toBe("View");
+    expect(link.querySelector("svg")).toBeNull();
   });
 
   it("filters the list by title and shows the 'no matches' state", async () => {

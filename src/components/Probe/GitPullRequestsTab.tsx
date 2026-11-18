@@ -72,10 +72,10 @@ import { useProbeResource, type ProbeLoadContext } from '../../lib/probeResource
  * `GitIssuesTab` pattern. Body is clamped to 2 lines; clicking it flips
  * to a scrollable container (`max-h-48`, `whitespace-pre-wrap`,
  * `break-words`). Title is an `<a target="_blank" rel="noopener
- * noreferrer">` to `pr.url` with a `↗` discoverability hint, and the
+ * noreferrer">` to `pr.url` — the title is the only open control — and the
  * empty-URL guard (defensive — `PullRequest.html_url` has no
  * `#[serde(default)]`, unlike the issue struct) renders the title as
- * a `<span>` and omits the icon. The expanded Set resets on every
+ * a `<span>`. The expanded Set resets on every
  * load (mesh OR open/closed filter — PR numbers are not stable across
  * either boundary).
  */
@@ -714,11 +714,12 @@ export function GitPullRequestsTab() {
                 meshes. */}
             <SafeLink
               url={pullsListUrl}
+              external
               ariaLabel="Open this repo's pull requests list on GitHub"
               title="Open this repo's pull requests list on GitHub"
               className="text-2xs font-medium text-text-secondary hover:text-text-primary transition-colors"
             >
-              View on GitHub ↗
+              View on GitHub
             </SafeLink>
             {/* Open / Closed segmented toggle */}
             <div className="flex shrink-0 rounded-md overflow-hidden border border-border-subtle">
@@ -792,7 +793,6 @@ export function GitPullRequestsTab() {
                   number={pr.number}
                   title={pr.title}
                   url={pr.url}
-                  iconAriaLabel="Open pull request on GitHub"
                   isExpanded={isExpanded}
                   onToggle={() => expanded.toggle(pr.number)}
                   body={pr.body}

@@ -29,7 +29,7 @@ pub struct Issue {
     #[serde(default, deserialize_with = "super::deserialize_opt_string")]
     pub body: String,
     /// Absolute GitHub URL for the issue (`html_url` in the API response).
-    /// The mobile "View ↗" link opens this directly; the desktop modal
+    /// The mobile "View" link opens this directly; the desktop modal
     /// currently ignores it. `#[serde(default)]` so a partial response
     /// (older / cached) still parses — the value is then `""`.
     #[serde(default)]

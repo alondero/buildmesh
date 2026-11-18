@@ -55,7 +55,7 @@ import { useProbeResource, type ProbeLoadContext } from '../../lib/probeResource
 
 import { formatError } from '../../lib/errorUtils';
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
-// `openUrl` is intentionally imported here even though the title + ↗
+// `openUrl` is intentionally imported here even though the title
 // links now route through `<SafeLink>`. The blocked-by button (further
 // down in this file) is a `<button>`, not an `<a>`, so SafeLink
 // doesn't apply — the button calls `openUrl(firstBlockerUrl)` directly
@@ -349,11 +349,12 @@ export function GitIssuesTab() {
         trailing={
           <SafeLink
             url={issuesListUrl}
+            external
             ariaLabel="Open this repo's issues list on GitHub"
             title="Open this repo's issues list on GitHub"
             className="text-2xs font-medium text-text-secondary hover:text-text-primary transition-colors"
           >
-            View on GitHub ↗
+            View on GitHub
           </SafeLink>
         }
       >
@@ -403,7 +404,6 @@ export function GitIssuesTab() {
                   number={issue.number}
                   title={issue.title}
                   url={issue.url}
-                  iconAriaLabel="Open issue on GitHub"
                   isExpanded={isExpanded}
                   onToggle={() => expanded.toggle(issue.number)}
                   body={issue.body}

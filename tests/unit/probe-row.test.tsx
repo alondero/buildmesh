@@ -17,7 +17,8 @@
  *      preserved.
  *   3. Clicking the link does NOT toggle expand — the link's
  *      `e.stopPropagation()` keeps the row handler out of the way.
- *   4. Empty URL: title renders as plain text, no `<a>`, no ↗ icon.
+ *   4. Empty URL: title renders as plain text, no `<a>`. The title is
+ *      the only open control.
  *   5. Empty body: the clamped/expanded body region is not rendered
  *      at all (no empty `<p class="line-clamp-2"></p>`).
  *
@@ -57,7 +58,6 @@ describe('ProbeRow (#463)', () => {
         number={101}
         title="Fix the wobble"
         url="https://github.com/acme/demo/issues/101"
-        iconAriaLabel="Open issue on GitHub"
         isExpanded={false}
         onToggle={noop}
         body="The widget wobbles under load."
@@ -74,10 +74,7 @@ describe('ProbeRow (#463)', () => {
     expect(rel).toContain('noreferrer');
   });
 
-  it('renders the ↗ icon with the tab-specific aria label', () => {
-    // The icon is the discoverability hint next to the title — same
-    // target, same routing, but with a tab-specific accessible name
-    // ("Open issue on GitHub" vs "Open pull request on GitHub").
+  it('uses the title as the only open control and underlines it on hover', () => {
     render(
       <ProbeRow
         dataAttr="pr"
@@ -85,20 +82,22 @@ describe('ProbeRow (#463)', () => {
         number={201}
         title="Add widget"
         url="https://github.com/acme/demo/pull/201"
-        iconAriaLabel="Open pull request on GitHub"
         isExpanded={false}
         onToggle={noop}
       />,
     );
 
-    const iconLink = screen.getByLabelText('Open pull request on GitHub');
-    expect(iconLink.tagName).toBe('A');
-    expect(iconLink.textContent).toBe('↗');
+    const links = screen.getAllByRole('link');
+    expect(links).toHaveLength(1);
+    expect(links[0].textContent).toBe('Add widget');
+    expect(links[0].className).toMatch(/hover:underline/);
+    expect(links[0].className).toMatch(/hover:text-accent-cyan/);
+    expect(links[0].querySelector('svg')).toBeNull();
   });
 
   // ---- Empty-URL fallback (delegates to SafeLink) ----------------------
 
-  it('renders the title as plain text (no <a>, no ↗) when url is empty', () => {
+  it('renders the title as plain text (no <a>) when url is empty', () => {
     render(
       <ProbeRow
         dataAttr="issue"
@@ -106,7 +105,6 @@ describe('ProbeRow (#463)', () => {
         number={200}
         title="Mystery issue"
         url=""
-        iconAriaLabel="Open issue on GitHub"
         isExpanded={false}
         onToggle={noop}
       />,
@@ -114,8 +112,8 @@ describe('ProbeRow (#463)', () => {
 
     const title = screen.getByText('Mystery issue');
     expect(title.closest('a')).toBeNull();
-    // The ↗ icon is hidden too — both anchors are gated on url.
-    expect(screen.queryByLabelText('Open issue on GitHub')).toBeNull();
+    expect(title.className).not.toMatch(/hover:underline/);
+    expect(screen.queryByRole('link')).toBeNull();
   });
 
   // ---- Expand toggle (the load-bearing interaction) --------------------
@@ -129,7 +127,6 @@ describe('ProbeRow (#463)', () => {
         number={101}
         title="Fix the wobble"
         url="https://github.com/acme/demo/issues/101"
-        iconAriaLabel="Open issue on GitHub"
         isExpanded={false}
         onToggle={onToggle}
         body="The widget wobbles under load."
@@ -153,7 +150,6 @@ describe('ProbeRow (#463)', () => {
         number={101}
         title="Fix the wobble"
         url="https://github.com/acme/demo/issues/101"
-        iconAriaLabel="Open issue on GitHub"
         isExpanded={false}
         onToggle={onToggle}
         body="The widget wobbles under load."
@@ -168,30 +164,6 @@ describe('ProbeRow (#463)', () => {
     expect(openUrlMock).toHaveBeenCalledTimes(1);
   });
 
-  it('does NOT call onToggle when the ↗ icon is clicked', () => {
-    // Same contract as the title link — the icon is just a smaller
-    // affordance for the same target.
-    const onToggle = vi.fn();
-    render(
-      <ProbeRow
-        dataAttr="pr"
-        rowKey={201}
-        number={201}
-        title="Add widget"
-        url="https://github.com/acme/demo/pull/201"
-        iconAriaLabel="Open pull request on GitHub"
-        isExpanded={false}
-        onToggle={onToggle}
-      />,
-    );
-
-    const iconLink = screen.getByLabelText('Open pull request on GitHub');
-    fireEvent.click(iconLink);
-
-    expect(onToggle).not.toHaveBeenCalled();
-    expect(openUrlMock).toHaveBeenCalledTimes(1);
-  });
-
   it('renders the body as a clamped paragraph when collapsed', () => {
     const { container } = render(
       <ProbeRow
@@ -200,7 +172,6 @@ describe('ProbeRow (#463)', () => {
         number={101}
         title="Fix the wobble"
         url=""
-        iconAriaLabel="Open issue on GitHub"
         isExpanded={false}
         onToggle={noop}
         body="The widget wobbles under load."
@@ -225,7 +196,6 @@ describe('ProbeRow (#463)', () => {
         number={201}
         title="Add widget"
         url=""
-        iconAriaLabel="Open pull request on GitHub"
         isExpanded={true}
         onToggle={noop}
         body="Adds the widget."
@@ -257,7 +227,6 @@ describe('ProbeRow (#463)', () => {
         number={102}
         title="Add a /v2 endpoint"
         url=""
-        iconAriaLabel="Open issue on GitHub"
         isExpanded={false}
         onToggle={noop}
         body={null}
@@ -281,7 +250,6 @@ describe('ProbeRow (#463)', () => {
         number={103}
         title="No body"
         url="https://github.com/acme/demo/issues/103"
-        iconAriaLabel="Open issue on GitHub"
         isExpanded={false}
         onToggle={onToggle}
         body=""
@@ -316,7 +284,6 @@ describe('ProbeRow (#463)', () => {
         number={101}
         title="Fix the wobble"
         url=""
-        iconAriaLabel="Open issue on GitHub"
         isExpanded={false}
         onToggle={noop}
         body="The widget wobbles."
@@ -335,7 +302,6 @@ describe('ProbeRow (#463)', () => {
         number={101}
         title="Fix the wobble"
         url=""
-        iconAriaLabel="Open issue on GitHub"
         isExpanded={true}
         onToggle={noop}
         body="The widget wobbles."
@@ -365,7 +331,6 @@ describe('ProbeRow (#463)', () => {
         number={101}
         title="Fix the wobble"
         url=""
-        iconAriaLabel="Open issue on GitHub"
         isExpanded={false}
         onToggle={onToggle}
         rightSlot={<button>Spawn</button>}
@@ -399,7 +364,6 @@ describe('ProbeRow (#463)', () => {
         number={101}
         title="Fix the wobble"
         url=""
-        iconAriaLabel="Open issue on GitHub"
         isExpanded={true}
         onToggle={onToggle}
         body="The widget wobbles under load."
@@ -423,7 +387,6 @@ describe('ProbeRow (#463)', () => {
         number={201}
         title="Add widget"
         url=""
-        iconAriaLabel="Open pull request on GitHub"
         isExpanded={false}
         onToggle={noop}
         belowSlot={<p data-pr-error>Merge failed: conflicts</p>}
@@ -454,7 +417,6 @@ describe('ProbeRow (#463)', () => {
         number={101}
         title="Fix the wobble"
         url=""
-        iconAriaLabel="Open issue on GitHub"
         isExpanded={true}
         onToggle={noop}
         body="**Steps:** run `npm test`"
@@ -479,7 +441,6 @@ describe('ProbeRow (#463)', () => {
         number={101}
         title="Fix the wobble"
         url=""
-        iconAriaLabel="Open issue on GitHub"
         isExpanded={false}
         onToggle={noop}
         body="**Steps:** run `npm test`"
@@ -504,7 +465,6 @@ describe('ProbeRow (#463)', () => {
         number={101}
         title="Fix the wobble"
         url=""
-        iconAriaLabel="Open issue on GitHub"
         isExpanded={true}
         onToggle={onToggle}
         body="See [the spec](https://example.com/spec) for details."

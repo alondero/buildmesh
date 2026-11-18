@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { openUrl } from '@tauri-apps/plugin-opener';
+import { OpenExternalIcon } from '../shared/OpenExternalIcon';
 import * as api from '../../lib/tauri';
 import type { OpenCodeWorkspace } from '../../types/generated/OpenCodeWorkspace';
 import {
@@ -170,7 +171,8 @@ export function AwaitingActivationView({
             );
           }}
         >
-          Reopen verification page ↗
+          Reopen verification page
+          <OpenExternalIcon className="ml-1 inline-block align-[-0.125em]" />
         </a>
         <button
           type="button"

@@ -459,7 +459,7 @@ describe('GitIssuesTab (#378)', () => {
     // html_url, so a partial GitHub response can reach the frontend as
     // an empty string. A bare <a href=""> would self-navigate the
     // WebView; the component should fall back to a plain <span> for
-    // the title and skip the ↗ icon entirely.
+    // the title. The title is the only open control.
     mockBackend({
       issues: [
         {
@@ -478,8 +478,9 @@ describe('GitIssuesTab (#378)', () => {
     const title = await screen.findByText('Mystery issue');
     // The title must NOT be wrapped in an <a>.
     expect(title.closest('a')).toBeNull();
-    // The ↗ icon is gone too (both anchors are gated on issue.url).
-    expect(screen.queryByLabelText('Open issue on GitHub')).toBeNull();
+    const row = title.closest('[data-issue-row]')!;
+    expect(row.querySelector('a')).toBeNull();
+    expect(row.textContent).not.toContain('↗');
   });
 
   it('does not toggle expand when the title link is clicked', async () => {
@@ -528,23 +529,16 @@ describe('GitIssuesTab (#378)', () => {
     expect(openUrlMock).toHaveBeenCalled();
   });
 
-  it('opens the issue URL via openUrl when the ↗ icon is clicked', async () => {
+  it('gives each issue row a single title link and no arrow character', async () => {
     mockBackend();
     render(<GitIssuesTab />);
 
-    // Wait for the list to render before querying the icons — the
-    // initial render is the "Loading issues…" spinner, so a sync
-    // getByLabelText would throw on a not-yet-mounted element.
-    // The ↗ icon is the discoverability hint next to the title — same
-    // target, same routing. The fixture has 2 issues, so there are
-    // 2 icon links with the same aria-label. Click the first and
-    // assert it routes to that issue's URL.
-    const iconLinks = await screen.findAllByLabelText('Open issue on GitHub');
-    expect(iconLinks.length).toBeGreaterThan(0);
-    await userEvent.click(iconLinks[0]);
-
-    expect(openUrlMock).toHaveBeenCalledTimes(1);
-    expect(openUrlMock).toHaveBeenCalledWith('https://github.com/acme/demo/issues/101');
+    const title = await screen.findByText('Fix the wobble');
+    const titleLink = title.closest('a')!;
+    // The author pill is a separate link. The title line itself has one.
+    const titleLine = titleLink.parentElement!;
+    expect(titleLine.querySelectorAll('a')).toHaveLength(1);
+    expect(titleLine.textContent).not.toContain('↗');
   });
 
   it('does not call openUrl when the row body is clicked', async () => {
@@ -830,6 +824,9 @@ describe('GitIssuesTab (#378)', () => {
     expect(link.tagName).toBe('A');
     expect(link.getAttribute('href')).toBe('https://github.com/acme/demo/issues');
     expect(link.getAttribute('target')).toBe('_blank');
+    expect(link.querySelector('svg')).not.toBeNull();
+    expect(link.textContent).toContain('View on GitHub');
+    expect(link.textContent).not.toContain('↗');
   });
 
   it('clicking the "View on GitHub" header link opens the issues list URL', async () => {
@@ -857,7 +854,7 @@ describe('GitIssuesTab (#378)', () => {
   it('renders an inert label (no link, no link-style cursor) when the mesh has no GitHub origin', async () => {
     // `get_github_url_for_mesh` returns `null` for non-GitHub meshes
     // (GitLab origin, no origin, etc.). SafeLink falls back to a
-    // <span> for the "View on GitHub ↗" affordance — but a previous
+    // <span> for the "View on GitHub" affordance — but a previous
     // implementation applied the caller's link-styling classes
     // verbatim, so the empty case LOOKED like a clickable link (cyan
     // + hover) right next to working controls, and clicking did
@@ -886,6 +883,7 @@ describe('GitIssuesTab (#378)', () => {
     expect(fallback.className).not.toMatch(/text-accent-cyan/);
     expect(fallback.className).not.toMatch(/cursor-pointer/);
     expect(fallback.className).toMatch(/cursor-default/);
+    expect(fallback.querySelector('svg')).toBeNull();
   });
 
 });

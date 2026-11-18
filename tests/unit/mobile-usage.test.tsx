@@ -14,6 +14,20 @@ beforeEach(() => { vi.mocked(getUsage).mockReset(); vi.mocked(isAuthError).mockR
 afterEach(cleanup);
 
 describe('mobile usage', () => {
+  it('opens a provider website with the external icon and keeps a blank URL as plain text', () => {
+    const page = { url: 'https://claude.ai/settings/usage', label: 'View usage' };
+    const { rerender } = render(<UsageCard row={{ ...row, meter: { ...row.meter, usagePage: page } }} />);
+    const link = screen.getByRole('link', { name: 'Provider website' });
+    expect(link.tagName).toBe('A');
+    expect(link.getAttribute('href')).toBe(page.url);
+    expect(link.querySelector('svg')).not.toBeNull();
+
+    rerender(<UsageCard row={{ ...row, meter: { ...row.meter, usagePage: { url: '', label: 'View usage' } } }} />);
+    expect(screen.queryByRole('link')).toBeNull();
+    const fallback = screen.getByText('Provider website');
+    expect(fallback.tagName).toBe('SPAN');
+    expect(fallback.querySelector('svg')).toBeNull();
+  });
   it('renders zero quota, wallet, explicit state, reset and last-known stamp', () => {
     render(<UsageCard row={row} />);
     expect(screen.getByText('0.0%')).toBeTruthy();
