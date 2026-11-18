@@ -5,9 +5,11 @@ import { GroupedProviderMenu } from '../../src/components/Providers/GroupedProvi
 import {
   __resetLaunchConfigurationReorderCoordinatorsForTests,
   applyHarnessConfigurationOrder,
+  createLaunchConfigurationReorderCoordinator,
   groupConfigurationsByHarness,
   reorderConfigurationIds,
 } from '../../src/lib/launchConfigurationOrder';
+import { SpawnConfigurationMenu } from '../../src/components/Providers/SpawnConfigurationMenu';
 import type { SpawnOption } from '../../src/lib/groups';
 import type { LaunchTarget } from '../../src/types/generated/LaunchTarget';
 import type { SpawnConfiguration } from '../../src/types/generated/SpawnConfiguration';
@@ -836,5 +838,172 @@ describe('SpawnConfigurationMenu inline drag-and-drop', () => {
         .filter((el) => ['AGY Fast', 'AGY Deep', 'AGY New'].includes(el.textContent ?? ''));
       expect(buttons.map((b) => b.textContent)).toEqual(['AGY Deep', 'AGY Fast', 'AGY New']);
     });
+  });
+
+  it('preserves and composes overlapping subset reorders across distinct Codex login filters without dropping either', async () => {
+    const codexOption: SpawnOption = {
+      ...agyOption,
+      id: 'codex',
+      label: 'Codex',
+      harness_id: 'codex',
+      group_key: 'codex',
+      capabilities: { ...agyOption.capabilities!, harness_id: 'codex' },
+    };
+    const codexTarget: LaunchTarget = {
+      ...agyTarget,
+      id: 'codex',
+      harness_id: 'codex',
+      harness_name: 'Codex',
+    };
+    let backendConfigs: SpawnConfiguration[] = [
+      { ...makeConfig('work-1', 'Work 1', 'codex'), login_id: 'work' },
+      { ...makeConfig('work-2', 'Work 2', 'codex'), login_id: 'work' },
+      { ...makeConfig('personal-1', 'Personal 1', 'codex'), login_id: 'personal' },
+      { ...makeConfig('personal-2', 'Personal 2', 'codex'), login_id: 'personal' },
+    ];
+    vi.mocked(api.listSpawnConfigurations).mockImplementation(async () => backendConfigs);
+    const firstWrite = deferred<void>();
+    const secondWrite = deferred<void>();
+    const thirdWrite = deferred<void>();
+    const calls: Array<{ harnessId: string; ids: string[] }> = [];
+    vi.mocked(api.reorderSpawnConfigurations).mockImplementation((harnessId, ids) => {
+      calls.push({ harnessId, ids });
+      const gate = calls.length === 1 ? firstWrite : calls.length === 2 ? secondWrite : thirdWrite;
+      return gate.promise.then(() => {
+        backendConfigs = applyHarnessConfigurationOrder(backendConfigs, harnessId, ids);
+      });
+    });
+
+    const anchor = document.createElement('button');
+    document.body.appendChild(anchor);
+
+    try {
+      // 1. Reorder under Codex login "work" (write #1 is now in flight).
+      const workView = render(
+        <SpawnConfigurationMenu
+          option={codexOption}
+          anchor={anchor}
+          keyboard={false}
+          configurationRows={[]}
+          login={{ id: 'work', label: 'Work' }}
+          onSelect={vi.fn()}
+          onClose={vi.fn()}
+          onDismiss={vi.fn()}
+          onEditingChange={vi.fn()}
+        />,
+      );
+      const workPanel = await screen.findByTestId('spawn-configurations');
+      await within(workPanel).findByRole('menuitem', { name: 'Reorder Work 1' });
+      stubRowRects(within(workPanel).getAllByRole('menuitem', { name: /^Reorder / }).map((h) => h.parentElement as HTMLElement));
+      await keyboardDragDown(within(workPanel).getByRole('menuitem', { name: 'Reorder Work 1' }));
+      expect(calls).toEqual([{ harnessId: 'codex', ids: ['work-2', 'work-1'] }]);
+      workView.unmount();
+
+      // 2. While write #1 is STILL in flight, switch to login "personal" and reorder its subset.
+      const personalView = render(
+        <SpawnConfigurationMenu
+          option={codexOption}
+          anchor={anchor}
+          keyboard={false}
+          configurationRows={[]}
+          login={{ id: 'personal', label: 'Personal' }}
+          onSelect={vi.fn()}
+          onClose={vi.fn()}
+          onDismiss={vi.fn()}
+          onEditingChange={vi.fn()}
+        />,
+      );
+      const personalPanel = await screen.findByTestId('spawn-configurations');
+      await within(personalPanel).findByRole('menuitem', { name: 'Reorder Personal 1' });
+      stubRowRects(within(personalPanel).getAllByRole('menuitem', { name: /^Reorder / }).map((h) => h.parentElement as HTMLElement));
+      await keyboardDragDown(within(personalPanel).getByRole('menuitem', { name: 'Reorder Personal 1' }));
+      expect(calls).toHaveLength(1);
+      personalView.unmount();
+
+      // 3. Reopen Settings (full Codex list) while write #1 is STILL in flight:
+      //    composed overlay must reflect BOTH the in-flight work drag AND the queued personal drag.
+      render(
+        <LaunchConfigurations
+          api={{
+            list: async () => backendConfigs,
+            targets: async () => [codexTarget],
+            save: vi.fn(),
+            remove: vi.fn(),
+            reorder: api.reorderSpawnConfigurations,
+          }}
+        />,
+      );
+      const codexGroup = await screen.findByTestId('launch-config-group-codex');
+      expect(Array.from(codexGroup.querySelectorAll('li p')).map((p) => p.textContent)).toEqual([
+        'Work 2 · User-owned',
+        'Work 1 · User-owned',
+        'Personal 2 · User-owned',
+        'Personal 1 · User-owned',
+      ]);
+
+      // 4. Completing write #1 flushes write #2 for login "personal"; neither subset is dropped.
+      await act(async () => { firstWrite.resolve(undefined); });
+      await waitFor(() => {
+        expect(calls).toEqual([
+          { harnessId: 'codex', ids: ['work-2', 'work-1'] },
+          { harnessId: 'codex', ids: ['personal-2', 'personal-1'] },
+        ]);
+      });
+      await act(async () => { secondWrite.resolve(undefined); });
+      await waitFor(() => {
+        expect(backendConfigs.map((c) => c.id)).toEqual(['work-2', 'work-1', 'personal-2', 'personal-1']);
+      });
+    } finally {
+      anchor.remove();
+    }
+  });
+
+  it('rolls back a failed login subset without dropping or reverting a queued sibling login subset', async () => {
+    const initial: SpawnConfiguration[] = [
+      { ...makeConfig('work-1', 'Work 1', 'codex'), login_id: 'work' },
+      { ...makeConfig('work-2', 'Work 2', 'codex'), login_id: 'work' },
+      { ...makeConfig('personal-1', 'Personal 1', 'codex'), login_id: 'personal' },
+      { ...makeConfig('personal-2', 'Personal 2', 'codex'), login_id: 'personal' },
+    ];
+    const workGate = deferred<void>();
+    const personalGate = deferred<void>();
+    const calls: string[][] = [];
+    const coordinator = createLaunchConfigurationReorderCoordinator((_harnessId, ids) => {
+      calls.push(ids);
+      return calls.length === 1 ? workGate.promise : personalGate.promise;
+    });
+    coordinator.syncConfirmed(initial);
+
+    let uiState = initial;
+    let failedError: unknown = null;
+    coordinator.subscribe({
+      onHarnessFailed: (harnessId, confirmedIds, err) => {
+        failedError = err;
+        if (confirmedIds) {
+          uiState = coordinator.applyPendingOverlay(
+            applyHarnessConfigurationOrder(uiState, harnessId, confirmedIds),
+          );
+        }
+      },
+    });
+
+    // Enqueue work subset (in flight), then personal subset (queued).
+    uiState = applyHarnessConfigurationOrder(uiState, 'codex', ['work-2', 'work-1']);
+    coordinator.enqueue('codex', ['work-1', 'work-2'], ['work-2', 'work-1']);
+    uiState = applyHarnessConfigurationOrder(uiState, 'codex', ['personal-2', 'personal-1']);
+    coordinator.enqueue('codex', ['personal-1', 'personal-2'], ['personal-2', 'personal-1']);
+
+    // Work fails: must roll back ONLY work while preserving personal's optimistic order,
+    // and then flush personal's queued write.
+    await act(async () => { workGate.reject(new Error('work write failed')); });
+    await waitFor(() => expect(failedError).toBeInstanceOf(Error));
+    expect(uiState.map((c) => c.id)).toEqual(['work-1', 'work-2', 'personal-2', 'personal-1']);
+    expect(calls).toEqual([
+      ['work-2', 'work-1'],
+      ['personal-2', 'personal-1'],
+    ]);
+
+    await act(async () => { personalGate.resolve(undefined); });
+    await waitFor(() => expect(coordinator.isPending()).toBe(false));
   });
 });

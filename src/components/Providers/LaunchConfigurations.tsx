@@ -202,10 +202,8 @@ export function LaunchConfigurations({
     return coordinator.subscribe({
       onHarnessFailed: (harnessId, confirmedIds, err) => {
         if (confirmedIds) {
-          const rolledBack = applyHarnessConfigurationOrder(
-            valuesRef.current,
-            harnessId,
-            confirmedIds,
+          const rolledBack = coordinator.applyPendingOverlay(
+            applyHarnessConfigurationOrder(valuesRef.current, harnessId, confirmedIds),
           );
           valuesRef.current = rolledBack;
           setValues(rolledBack);

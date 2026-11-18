@@ -203,46 +203,59 @@ export function createLaunchConfigurationReorderCoordinator(
 ): LaunchConfigurationReorderCoordinator {
   const subscribers = new Set<LaunchConfigurationReorderSubscriber>();
   const confirmedByHarness = new Map<string, string[]>();
-  const queuedByHarness = new Map<string, string[]>();
-  let inFlightHarness: string | null = null;
-  let inFlightIds: string[] | null = null;
+  const pendingQueue: Array<{ harnessId: string; targetIds: string[] }> = [];
+  let inFlight: { harnessId: string; targetIds: string[] } | null = null;
+  let draining = false;
   let anySucceededInBatch = false;
   let anyFailedInBatch = false;
   let mutationVersion = 0;
 
-  const drain = async () => {
-    while (queuedByHarness.size > 0) {
-      const next = queuedByHarness.entries().next();
-      if (next.done) break;
-      const [harnessId, targetIds] = next.value;
-      queuedByHarness.delete(harnessId);
-      inFlightHarness = harnessId;
-      inFlightIds = targetIds;
+  const isSuperset = (superset: string[], subset: string[]): boolean => {
+    const allowed = new Set(superset);
+    return subset.every((id) => allowed.has(id));
+  };
 
-      try {
-        await persist(harnessId, targetIds);
-        confirmedByHarness.set(
-          harnessId,
-          mergeConfirmedIds(confirmedByHarness.get(harnessId), targetIds),
-        );
-        anySucceededInBatch = true;
-      } catch (error: unknown) {
-        anyFailedInBatch = true;
-        // If a newer order for this same harness was queued while this request
-        // was in flight, let the next iteration attempt the newer order instead
-        // of flashing a premature rollback. Otherwise restore ONLY this harness
-        // to its last confirmed order across every mounted subscriber.
-        if (!queuedByHarness.has(harnessId)) {
-          mutationVersion += 1;
-          const confirmed = confirmedByHarness.get(harnessId);
-          for (const subscriber of Array.from(subscribers)) {
-            subscriber.onHarnessFailed?.(harnessId, confirmed, error);
+  const drain = async () => {
+    if (draining) return;
+    draining = true;
+    try {
+      while (pendingQueue.length > 0) {
+        const next = pendingQueue.shift();
+        if (!next) break;
+        const { harnessId, targetIds } = next;
+        inFlight = next;
+
+        try {
+          await persist(harnessId, targetIds);
+          inFlight = null;
+          confirmedByHarness.set(
+            harnessId,
+            mergeConfirmedIds(confirmedByHarness.get(harnessId), targetIds),
+          );
+          anySucceededInBatch = true;
+        } catch (error: unknown) {
+          // Clear `inFlight` before notifying subscribers so `applyPendingOverlay`
+          // during rollback does not re-apply the operation that just failed.
+          inFlight = null;
+          anyFailedInBatch = true;
+          // Only skip rollback if a remaining queued operation for this harness
+          // covers every id in the failed operation (a true superseding reorder,
+          // not a reorder of a different login-filtered subset).
+          const superseded = pendingQueue.some(
+            (op) => op.harnessId === harnessId && isSuperset(op.targetIds, targetIds),
+          );
+          if (!superseded) {
+            mutationVersion += 1;
+            const confirmed = confirmedByHarness.get(harnessId);
+            for (const subscriber of Array.from(subscribers)) {
+              subscriber.onHarnessFailed?.(harnessId, confirmed, error);
+            }
           }
         }
-      } finally {
-        inFlightHarness = null;
-        inFlightIds = null;
       }
+    } finally {
+      inFlight = null;
+      draining = false;
     }
 
     const summary = {
@@ -279,25 +292,45 @@ export function createLaunchConfigurationReorderCoordinator(
       return mutationVersion;
     },
     isPending() {
-      return inFlightHarness !== null || queuedByHarness.size > 0;
+      return inFlight !== null || pendingQueue.length > 0;
     },
     applyPendingOverlay(values: SpawnConfiguration[]) {
       let result = values;
-      if (inFlightHarness !== null && inFlightIds !== null && !queuedByHarness.has(inFlightHarness)) {
-        result = applyHarnessConfigurationOrder(result, inFlightHarness, inFlightIds);
+      if (inFlight !== null) {
+        result = applyHarnessConfigurationOrder(result, inFlight.harnessId, inFlight.targetIds);
       }
-      for (const [harnessId, targetIds] of queuedByHarness.entries()) {
-        result = applyHarnessConfigurationOrder(result, harnessId, targetIds);
+      for (const op of pendingQueue) {
+        result = applyHarnessConfigurationOrder(result, op.harnessId, op.targetIds);
       }
       return result;
     },
     enqueue(harnessId: string, confirmedFallbackIds: string[], nextIds: string[]) {
-      if (!confirmedByHarness.has(harnessId)) {
+      const existingConfirmed = confirmedByHarness.get(harnessId);
+      if (!existingConfirmed) {
         confirmedByHarness.set(harnessId, [...confirmedFallbackIds]);
+      } else {
+        for (const id of confirmedFallbackIds) {
+          if (!existingConfirmed.includes(id)) existingConfirmed.push(id);
+        }
       }
       mutationVersion += 1;
-      queuedByHarness.set(harnessId, [...nextIds]);
-      if (inFlightHarness === null) {
+
+      // Coalesce ONLY trailing queued operations for this harness whose id set
+      // is fully covered by `nextIds`. Stop at the first same-harness op with
+      // ids outside `nextIds` (e.g. a different Codex login subset) so earlier
+      // subset reorders are preserved and applied in order.
+      for (let i = pendingQueue.length - 1; i >= 0; i -= 1) {
+        const op = pendingQueue[i];
+        if (op.harnessId !== harnessId) continue;
+        if (isSuperset(nextIds, op.targetIds)) {
+          pendingQueue.splice(i, 1);
+        } else {
+          break;
+        }
+      }
+      pendingQueue.push({ harnessId, targetIds: [...nextIds] });
+
+      if (!draining) {
         void drain();
       }
     },

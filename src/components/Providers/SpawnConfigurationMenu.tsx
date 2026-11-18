@@ -184,10 +184,8 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
       onHarnessFailed: (harnessId, confirmedIds, err) => {
         if (!mounted.current || harnessId !== option.harness_id) return;
         if (confirmedIds) {
-          const rolledBack = applyHarnessConfigurationOrder(
-            configurationsRef.current,
-            harnessId,
-            confirmedIds,
+          const rolledBack = coordinator.applyPendingOverlay(
+            applyHarnessConfigurationOrder(configurationsRef.current, harnessId, confirmedIds),
           );
           configurationsRef.current = rolledBack;
           setConfigurations(rolledBack);
