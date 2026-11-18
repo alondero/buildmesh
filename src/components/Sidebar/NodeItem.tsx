@@ -21,6 +21,7 @@ import { addToast } from '../../stores/toastStore';
 import { formatError } from '../../lib/errorUtils';
 import { getCircuitNodePresentation, hasActiveCircuitOwnership } from '../../lib/circuitNodePresentation';
 import { NodeStatusGlyph } from '../shared/NodeStatusGlyph';
+import { PinIcon, PinnedNodeMarker } from '../shared/PinIcon';
 import { NodeGlanceHoverCard } from '../shared/NodeGlanceCard';
 import { useNodeGlance } from '../../hooks/useNodeGlance';
 import { getNodeGlance } from '../../lib/tauri/agentNode';
@@ -477,6 +478,7 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
         onCommit={(next) => renameAgentNode(node.id, next)}
         className="min-w-0 flex-1 truncate text-text-primary font-sans text-left text-label"
       />
+      {node.is_pinned && <PinnedNodeMarker onMeshTint />}
       {lostConversation && <MissingSessionIdBadge />}
       {showRestart && (
         <button
@@ -738,7 +740,8 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
             role="menuitem"
             aria-pressed={node.is_pinned}
             tabIndex={menuActions[activeIndex] === 'pin' ? 0 : -1}
-            onClick={() => {
+            onClick={(event) => {
+              event.stopPropagation();
               closeContextMenu();
               toggleNodePinned(node.id).catch((err) => {
                 addToast('Pin toggle failed', formatError(err), 'error');
@@ -748,10 +751,7 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
             data-testid="pin-toggle"
             className="w-full text-left px-3 py-1.5 text-label text-text-secondary hover:bg-bg-card-hover flex items-center gap-2"
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill={node.is_pinned ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M12 17v5" fill="none" />
-              <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
-            </svg>
+            <PinIcon size={14} filled={node.is_pinned} />
             {node.is_pinned ? 'Unpin node' : 'Pin node'}
           </button>
         </div>,
