@@ -6,7 +6,7 @@ import type { SpawnConfiguration } from '../../src/types/generated/SpawnConfigur
 import * as api from '../../src/lib/tauri/provider';
 
 vi.mock('../../src/lib/tauri/provider', () => ({
-  listProviders: vi.fn(), listSpawnConfigurations: vi.fn(), verifyLaunchConfiguration: vi.fn(), getLaunchTargets: vi.fn(), saveSpawnConfiguration: vi.fn(), deleteSpawnConfiguration: vi.fn(),
+  listProviders: vi.fn(), listSpawnConfigurations: vi.fn(), verifyLaunchConfiguration: vi.fn(), getLaunchTargets: vi.fn(), saveSpawnConfiguration: vi.fn(), deleteSpawnConfiguration: vi.fn(), reorderSpawnConfigurations: vi.fn(),
 }));
 
 const target = { id: 'codex', harness_id: 'codex', harness_name: 'Codex', provider_name: 'OpenAI',

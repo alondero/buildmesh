@@ -216,3 +216,142 @@ fn menu_selection_freezes_a_login_for_defaults_and_recipes_and_rejects_stale_pic
     assert!(resolve_menu_selection(&prefs, "claude", None, Some("work")).is_err());
     assert!(resolve_menu_selection(&prefs, "codex", Some("launch/deleted"), Some("work")).is_err());
 }
+
+fn named_config(id: &str, name: &str, spawn_option_id: &str) -> SpawnConfiguration {
+    SpawnConfiguration {
+        id: id.into(),
+        name: name.into(),
+        spawn_option_id: spawn_option_id.into(),
+        harness_id: Some(spawn_option_id.split(':').next().unwrap_or("").into()),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn reorder_in_preferences_reorders_within_harness_and_preserves_other_slots() {
+    let mut prefs = AppPreferences::default();
+    prefs.spawn_configurations = vec![
+        named_config("launch/agy-1", "AGY Fast", "agy"),
+        named_config("launch/oc-1", "OC Alpha", "opencode"),
+        named_config("launch/agy-2", "AGY Deep", "agy"),
+        named_config("launch/agy-3", "AGY Review", "agy"),
+        named_config("launch/oc-2", "OC Beta", "opencode"),
+    ];
+
+    let changed = reorder_in_preferences(
+        &mut prefs,
+        "agy",
+        &[
+            "launch/agy-3".into(),
+            "launch/agy-1".into(),
+            "launch/agy-2".into(),
+        ],
+    );
+    assert!(changed);
+    let ids: Vec<&str> = prefs
+        .spawn_configurations
+        .iter()
+        .map(|c| c.id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec![
+            "launch/agy-3",
+            "launch/oc-1",
+            "launch/agy-1",
+            "launch/agy-2",
+            "launch/oc-2",
+        ],
+        "only the target harness's slots move; other harnesses keep their exact indices"
+    );
+
+    // Repeating the same order is a no-op.
+    assert!(!reorder_in_preferences(
+        &mut prefs,
+        "agy",
+        &[
+            "launch/agy-3".into(),
+            "launch/agy-1".into(),
+            "launch/agy-2".into(),
+        ],
+    ));
+}
+
+#[test]
+fn reorder_in_preferences_preserves_unmentioned_configs_and_ignores_invalid_ids() {
+    let mut prefs = AppPreferences::default();
+    prefs.spawn_configurations = vec![
+        named_config("launch/codex-a", "A", "codex"),
+        named_config("launch/codex-hidden", "Hidden", "codex"),
+        named_config("launch/codex-b", "B", "codex"),
+        named_config("launch/claude-1", "Claude", "claude"),
+    ];
+
+    // Subset reorder (e.g. login-filtered Codex menu) plus duplicate, unknown,
+    // and cross-harness ids.
+    let changed = reorder_in_preferences(
+        &mut prefs,
+        "codex",
+        &[
+            "launch/claude-1".into(),
+            "launch/unknown".into(),
+            "launch/codex-b".into(),
+            "launch/codex-a".into(),
+            "launch/codex-b".into(),
+        ],
+    );
+    assert!(changed);
+    let ids: Vec<&str> = prefs
+        .spawn_configurations
+        .iter()
+        .map(|c| c.id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec![
+            "launch/codex-b",
+            "launch/codex-hidden",
+            "launch/codex-a",
+            "launch/claude-1",
+        ],
+        "unmentioned configuration stays pinned in its slot; invalid/cross-harness/duplicate ids are ignored"
+    );
+}
+
+#[test]
+fn reorder_for_harness_from_persists_to_store_and_rejects_empty_harness() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = super::super::store::PreferencesStore::new(dir.path().to_path_buf());
+    store
+        .update(|prefs| {
+            prefs.spawn_configurations = vec![
+                named_config("launch/oc-1", "One", "opencode"),
+                named_config("launch/oc-2", "Two", "opencode"),
+                named_config("launch/oc-3", "Three", "opencode"),
+            ];
+        })
+        .unwrap();
+
+    assert!(reorder_for_harness_from(&store, "   ", vec!["launch/oc-2".into()]).is_err());
+
+    let changed = reorder_for_harness_from(
+        &store,
+        "opencode",
+        vec![
+            "launch/oc-3".into(),
+            "launch/oc-1".into(),
+            "launch/oc-2".into(),
+        ],
+    )
+    .unwrap();
+    assert!(changed);
+
+    let persisted: Vec<String> = store
+        .load()
+        .unwrap()
+        .spawn_configurations
+        .into_iter()
+        .map(|c| c.id)
+        .collect();
+    assert_eq!(persisted, vec!["launch/oc-3", "launch/oc-1", "launch/oc-2"]);
+}

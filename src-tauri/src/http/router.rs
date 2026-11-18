@@ -258,6 +258,7 @@ enum Handler {
     LaunchConfigurationSave,
     LaunchConfigurationVerify,
     LaunchConfigurationDelete,
+    LaunchConfigurationReorder,
     ApiMeshes,
 }
 
@@ -313,6 +314,13 @@ const ROUTES: &[Route] = &[
         scope: RouteScope::Admin,
         body: BodyPolicy::Cap(8 * 1024),
         handler: Handler::LaunchConfigurationDelete,
+    },
+    Route {
+        method: "POST",
+        m: RouteMatch::Exact("/api/launch-configurations/reorder"),
+        scope: RouteScope::Admin,
+        body: BodyPolicy::Cap(16 * 1024),
+        handler: Handler::LaunchConfigurationReorder,
     },
     Route {
         method: "GET",
@@ -952,6 +960,9 @@ async fn run_handler(handler: Handler, req: &ParsedRequest) -> DispatchResult {
         }
         Handler::LaunchConfigurationDelete => {
             Http(routes::launch_configurations::delete(req).await)
+        }
+        Handler::LaunchConfigurationReorder => {
+            Http(routes::launch_configurations::reorder(req).await)
         }
         Handler::ApiMeshes => Http(routes::meshes::list(req).await),
     }

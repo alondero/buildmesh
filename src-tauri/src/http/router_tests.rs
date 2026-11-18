@@ -102,6 +102,7 @@ GET /api/launch-targets -> Admin
 POST /api/launch-configurations/save -> Admin
 POST /api/launch-configurations/verify -> Admin
 POST /api/launch-configurations/delete -> Admin
+POST /api/launch-configurations/reorder -> Admin
 GET /launch-configurations -> CoordinatorRead
 POST /nodes/create -> CoordinatorWrite
 GET /admin/devices -> Admin

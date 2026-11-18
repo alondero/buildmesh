@@ -80,6 +80,31 @@ pub async fn delete(req: &ParsedRequest) -> Response {
     )
 }
 
+pub async fn reorder(req: &ParsedRequest) -> Response {
+    #[derive(serde::Deserialize)]
+    struct Reorder {
+        harness_id: String,
+        configuration_ids: Vec<String>,
+    }
+    let value = match serde_json::from_slice::<Reorder>(&req.body) {
+        Ok(value) => value,
+        Err(error) => return Response::json_error("400 Bad Request", &error.to_string()),
+    };
+    respond(
+        crate::commands::run_blocking("reorder_launch_configurations", move || {
+            let changed = spawn_configurations::reorder_for_harness(
+                &value.harness_id,
+                value.configuration_ids,
+            )?;
+            if changed {
+                notify();
+            }
+            Ok("{}".into())
+        })
+        .await,
+    )
+}
+
 fn notify() {
     use tauri::Emitter;
     if let Some(app) = crate::http::app_handle() {

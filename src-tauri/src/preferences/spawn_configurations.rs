@@ -457,6 +457,129 @@ pub fn delete_spawn_configuration(app: tauri::AppHandle, id: String) -> Result<(
     Ok(())
 }
 
+/// Resolve the owning harness profile id of a saved configuration without
+/// allocating. Falls back to the prefix of `spawn_option_id` for legacy rows
+/// that predate `harness_id`.
+fn configuration_harness_id(config: &SpawnConfiguration) -> &str {
+    config
+        .harness_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| config.spawn_option_id.split(':').next().unwrap_or(""))
+}
+
+/// Reorder saved Launch Configurations belonging to `harness_id` in place.
+///
+/// Only the slots currently occupied by the valid, deduplicated ids in
+/// `configuration_ids` are refilled in the requested order. Configurations
+/// belonging to other harnesses — and any configurations of `harness_id` not
+/// listed in `configuration_ids` (for example, recipes hidden behind another
+/// Codex login filter or added concurrently) — stay pinned at their existing
+/// indices. Unknown ids, duplicates (first occurrence wins), and ids from
+/// other harnesses are ignored.
+///
+/// Returns `true` when the stored order actually changed.
+pub fn reorder_in_preferences(
+    prefs: &mut AppPreferences,
+    harness_id: &str,
+    configuration_ids: &[String],
+) -> bool {
+    let harness_id = harness_id.trim();
+    if harness_id.is_empty() {
+        return false;
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut ordered_ids: Vec<&str> = Vec::new();
+    for raw in configuration_ids {
+        let id = raw.as_str();
+        if !seen.insert(id) {
+            continue;
+        }
+        if prefs
+            .spawn_configurations
+            .iter()
+            .any(|c| c.id == id && configuration_harness_id(c) == harness_id)
+        {
+            ordered_ids.push(id);
+        }
+    }
+    if ordered_ids.len() < 2 {
+        return false;
+    }
+    let active_set: std::collections::HashSet<&str> = ordered_ids.iter().copied().collect();
+    let slot_indices: Vec<usize> = prefs
+        .spawn_configurations
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, c)| active_set.contains(c.id.as_str()).then_some(idx))
+        .collect();
+    let current_order: Vec<&str> = slot_indices
+        .iter()
+        .map(|&idx| prefs.spawn_configurations[idx].id.as_str())
+        .collect();
+    if current_order == ordered_ids {
+        return false;
+    }
+    let mut by_id: std::collections::HashMap<String, SpawnConfiguration> = slot_indices
+        .iter()
+        .map(|&idx| {
+            let item = prefs.spawn_configurations[idx].clone();
+            (item.id.clone(), item)
+        })
+        .collect();
+    for (slot_idx, id) in slot_indices.into_iter().zip(ordered_ids) {
+        if let Some(item) = by_id.remove(id) {
+            prefs.spawn_configurations[slot_idx] = item;
+        }
+    }
+    true
+}
+
+/// Persist a new Launch Configuration order for one harness via the ambient store.
+pub fn reorder_for_harness(
+    harness_id: &str,
+    configuration_ids: Vec<String>,
+) -> Result<bool, String> {
+    match super::store::ambient_store() {
+        Ok(store) => reorder_for_harness_from(&store, harness_id, configuration_ids),
+        Err(error) => Err(error),
+    }
+}
+
+/// Explicit-store path — the caller owns the store (issue #1482).
+pub fn reorder_for_harness_from(
+    store: &super::store::PreferencesStore,
+    harness_id: &str,
+    configuration_ids: Vec<String>,
+) -> Result<bool, String> {
+    let harness_id = harness_id.trim();
+    if harness_id.is_empty() {
+        return Err("Harness id is required".into());
+    }
+    let mut changed = false;
+    store.try_update(|prefs| {
+        changed = reorder_in_preferences(prefs, harness_id, &configuration_ids);
+        Ok(())
+    })?;
+    Ok(changed)
+}
+
+#[tauri::command]
+pub async fn reorder_spawn_configurations(
+    app: tauri::AppHandle,
+    harness_id: String,
+    configuration_ids: Vec<String>,
+) -> Result<(), String> {
+    let changed = crate::commands::run_blocking("reorder_spawn_configurations", move || {
+        reorder_for_harness(&harness_id, configuration_ids)
+    })
+    .await?;
+    if changed {
+        let _ = app.emit("provider-list-changed", ());
+    }
+    Ok(())
+}
+
 pub fn delete_value(id: &str) -> Result<(), String> {
     match super::store::ambient_store() {
         Ok(store) => delete_value_from(&store, id),

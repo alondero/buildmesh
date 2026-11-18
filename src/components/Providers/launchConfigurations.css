@@ -3,7 +3,16 @@
    desktop `@theme` token is absent. The 16px input floor below is a touch
    minimum, not body text, so it stays fixed. */
 .launch-config-form { min-width: 0; padding: 12px; color: var(--color-text-primary, var(--text)); }
-.launch-config-item { margin-bottom: var(--spacing-3, 12px); }
+.launch-config-group { margin-bottom: var(--spacing-4, 16px); border: 1px solid var(--color-border-subtle, var(--border)); border-radius: var(--radius-lg, 8px); padding: 12px; }
+.launch-config-group-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.launch-config-group-title { margin: 0; font-size: calc(13px * var(--ui-text-scale, 1)); font-weight: 600; color: var(--color-text-primary, var(--text)); }
+.launch-config-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.launch-config-item { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border: 1px solid var(--color-border-subtle, var(--border)); border-radius: var(--radius-md, 6px); background: var(--color-bg-card, var(--surface)); }
+.launch-config-drag-handle { display: inline-flex; align-items: center; justify-content: center; min-width: 24px; min-height: 24px; flex-shrink: 0; color: var(--color-text-muted, var(--text-secondary)); cursor: grab; user-select: none; touch-action: none; border-radius: 4px; font-size: 11px; }
+.launch-config-drag-handle:hover { color: var(--color-text-secondary, var(--text)); background: var(--color-bg-card-hover, transparent); }
+.launch-config-drag-handle:active { cursor: grabbing; }
+.launch-config-drag-handle:focus-visible { outline: 1.5px solid var(--color-accent-cyan, var(--accent-cyan)); outline-offset: 1px; }
+.launch-config-form .launch-config-item-name { flex: 1; min-width: 0; margin: 0; overflow-wrap: anywhere; }
 .launch-config-form p { font-size: calc(12px * var(--ui-text-scale, 1)); margin: 0 0 12px; }
 .launch-config-form fieldset { border: 0; margin: 0; padding: 0; min-width: 0; display: grid; gap: 12px; }
 .launch-config-status { display: flex; align-items: center; gap: 6px; min-height: 28px; margin: 0 0 12px; font-size: calc(12px * var(--ui-text-scale, 1)); }
@@ -27,4 +36,5 @@ div:has(> .launch-delete-dialog) { position: fixed; inset: 0; z-index: 1100; dis
 @media (max-width: 600px) {
   .launch-config-form input, .launch-config-form select { min-height: 44px; font-size: 16px; box-sizing: border-box; }
   .launch-config-form button { min-height: 44px; min-width: 44px; }
+  .launch-config-drag-handle { min-height: 44px; min-width: 44px; }
 }

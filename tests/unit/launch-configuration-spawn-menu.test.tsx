@@ -17,6 +17,7 @@ vi.mock('../../src/lib/tauri/provider', () => ({
   verifyLaunchConfiguration: vi.fn(), getLaunchTargets: vi.fn().mockResolvedValue([]),
   saveSpawnConfiguration: vi.fn(),
   deleteSpawnConfiguration: vi.fn(),
+  reorderSpawnConfigurations: vi.fn(),
   listProviders: vi.fn(),
 }));
 
