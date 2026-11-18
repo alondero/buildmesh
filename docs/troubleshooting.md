@@ -677,6 +677,27 @@ fast-forward would overwrite.
 
 Do not reset or delete a worktree as a first response to a sync warning.
 
+## A Mesh cannot be created from a folder
+
+The **New mesh** dialog shows the reason the Mesh could not be created next to
+the folder you picked, and offers the way forward:
+
+- **Choose another folder…** — the folder is missing, is not a directory, or
+  Buildmesh is not allowed to use it. Pick the repository root itself (the
+  folder that holds `.git`), not a parent or a subfolder of it.
+- **Retry** — the failure looked temporary (a locked database, a timeout).
+  Retry when the cause has passed; repeated retries of the same request
+  report the same error.
+- Both are offered when the reason does not match a known cause.
+
+Your folder and colour stay on screen, so a retry does not mean picking the
+folder again. **Details** expands the operation, the folder and the backend's
+own message, and **Copy details** puts that text on the clipboard — use it for
+a report instead of pasting a whole log.
+
+If the message names an access problem, fix the folder's permissions (or run
+Buildmesh where it can read the folder) before choosing it again.
+
 ## "Pre-spawn pool cannot fill" in the Repository probe
 
 The pre-spawn pool cuts a spare worktree so the next agent starts without

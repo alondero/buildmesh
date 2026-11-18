@@ -2,12 +2,14 @@ import { formatError } from '../../lib/errorUtils';
 import { useEffect, useRef, useState } from 'react';
 import { Modal, ModalCloseButton } from '../shared/Modal';
 import { MeshColorPicker } from './MeshColorPicker';
+import { MeshCreateFailurePanel } from './MeshCreateFailurePanel';
 import { enterMesh } from '../../lib/navigation';
 import { useMeshStore } from '../../stores/meshStore';
 import { addToast } from '../../stores/toastStore';
 import { pickMeshFolder } from '../../lib/tauri';
 import { defaultMeshColor } from '../../lib/meshColors';
 import { joinDisplayPath, repoNameFromInput } from '../../lib/githubRepo';
+import { classifyMeshCreateFailure } from '../../lib/meshCreateFailure';
 import type { PickedFolder } from '../../types/generated/PickedFolder';
 
 interface MeshCreateModalProps {
@@ -25,6 +27,22 @@ interface MeshCreateModalProps {
 
 /** Where a new mesh's repository comes from. */
 type MeshSource = 'open' | 'clone';
+
+/**
+ * An inline failure the dialog can show.
+ *
+ * `message` carries the backend's own text (issue #2794). `hint` and `detail`
+ * are additions: the hint names the next step, the detail block carries the
+ * diagnostics for a copyable report. The classification that produces them is
+ * in `src/lib/meshCreateFailure.ts`; it leaves the message as it is.
+ */
+interface DialogFailure {
+  message: string;
+  hint?: string;
+  detail?: string;
+  /** The recovery actions this cause supports. */
+  recoveries?: Array<'retry' | 'change-folder'>;
+}
 
 const SECTION_LABEL = 'text-2xs uppercase tracking-wide text-text-muted mb-1.5';
 const PICKER_BUTTON =
@@ -63,12 +81,27 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
   const [color, setColor] = useState(initialColor);
   const [picking, setPicking] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // The failure the dialog is showing, if any. It carries the message the
+  // store returned for this request (issue #2794).
+  const [failure, setFailure] = useState<DialogFailure | null>(null);
+  // Asks the focus effect to put the focus back on the folder picker once the
+  // native picker has closed.
+  const [restorePickerFocus, setRestorePickerFocus] = useState(false);
   // Issue #2463: initial focus targets the folder picker, the first required
   // step of either flow. The submit button cannot take focus at mount — it is
   // disabled until the form is complete, and `.focus()` on a disabled button
   // is a no-op that leaves focus on the trigger behind the dialog.
   const folderButtonRef = useRef<HTMLButtonElement>(null);
+  // A creation request in flight. `busy` is React state, so two clicks in the
+  // same tick would both read the pre-update value and start a second
+  // request; the ref is synchronous, so the second one is refused. A
+  // duplicated creation would register the same folder twice (issue #2794).
+  const createInFlight = useRef(false);
+  // The failure panel. It takes focus when a failure appears, because the
+  // submit control that failed is disabled while the request runs and a
+  // disabled control does not hold the focus — without this the focus would
+  // fall out of the dialog onto the page behind it (issue #2794).
+  const failureRef = useRef<HTMLDivElement>(null);
   // A clone outlives the dialog when it is dismissed: the backend runs it to
   // completion on the blocking pool. Tracking mount state lets the awaited
   // completion *report* its outcome instead of driving a form the user can no
@@ -78,6 +111,28 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
     stillMounted.current = true;
     return () => { stillMounted.current = false; };
   }, []);
+
+  // A failure is announced by the panel's `role="alert"`, and the focus is
+  // moved onto it so the keyboard user stays inside the dialog and lands on
+  // the message with the recovery actions right below it.
+  useEffect(() => {
+    if (failure) failureRef.current?.focus();
+  }, [failure]);
+
+  // The native folder picker takes the window's focus while it is open, and
+  // the failure panel that offered it is gone by the time it closes. This flag
+  // asks the effect below to put the focus back on a control inside the
+  // dialog, so the keyboard user is not dropped on the page behind it. The
+  // effect — not a timer — does the work, because the picker button is
+  // disabled until React re-renders and `.focus()` on a disabled control is a
+  // no-op.
+  useEffect(() => {
+    if (!restorePickerFocus || picking) return;
+    setRestorePickerFocus(false);
+    // A failure raised by the picker itself keeps the focus: its panel took
+    // it, and it says what went wrong.
+    if (!failureRef.current) folderButtonRef.current?.focus();
+  }, [restorePickerFocus, picking]);
 
   const repoName = repoNameFromInput(repoInput);
   const destination =
@@ -95,14 +150,14 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
   const switchSource = (next: MeshSource) => {
     if (next === source) return;
     setSource(next);
-    // Drop any error from the other source so a stale message can't sit above
-    // a form it no longer describes.
-    setError(null);
+    // Drop any failure from the other source so a stale message can't sit
+    // above a form it does not describe.
+    setFailure(null);
   };
 
   const handleChooseFolder = async () => {
     setPicking(true);
-    setError(null);
+    setFailure(null);
     try {
       const picked = await pickMeshFolder();
       // null means the user cancelled the OS dialog — leave the prior
@@ -112,25 +167,61 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
         else setFolder(picked);
       }
     } catch (e) {
-      setError(formatError(e));
+      setFailure({ message: formatError(e) });
     } finally {
       setPicking(false);
+      // The failure panel may have held the focus, and it is gone by now (the
+      // picker was the recovery it offered). The effect above puts the focus
+      // back on a control inside the dialog, so the keyboard user is not
+      // dropped on the page behind it.
+      setRestorePickerFocus(true);
     }
   };
 
   const handleCreate = async () => {
-    if (!folder || busy) return;
+    if (!folder || busy || createInFlight.current) return;
+    // Capture the submitted target up front so the request — and the report
+    // of its outcome — is pinned to exactly what the user confirmed.
+    const target = folder;
+    createInFlight.current = true;
     setBusy(true);
-    setError(null);
-    const mesh = await createMesh(folder.name, folder.path, color);
-    if (!stillMounted.current) return;
-    setBusy(false);
-    if (mesh) {
-      enterMesh(mesh.id);
-      onClose();
-    } else {
-      setError('Failed to create mesh. See logs for details.');
+    setFailure(null);
+    let result: Awaited<ReturnType<typeof createMesh>>;
+    try {
+      result = await createMesh(target.name, target.path, color);
+    } finally {
+      // The guard is released even if the request throws, so a failure can
+      // never leave the form permanently unable to submit.
+      createInFlight.current = false;
     }
+    if (!stillMounted.current) {
+      // Dismissed mid-request. The mesh may already exist, so the outcome is
+      // reported rather than dropped — the clone flow does the same, because a
+      // silent success would leave an unexplained mesh in the sidebar and a
+      // silent failure would be lost entirely (issue #2794).
+      if ('mesh' in result) {
+        addToast('New mesh', `Opened ${target.name}`, 'success');
+      } else {
+        addToast('New mesh', `Couldn't create the mesh: ${result.error}`, 'error');
+      }
+      return;
+    }
+    setBusy(false);
+    if ('mesh' in result) {
+      enterMesh(result.mesh.id);
+      onClose();
+      return;
+    }
+    // The draft survives the failure: the folder and the colour stay on
+    // screen, the controls are live again, and the real cause is shown
+    // beside the operation with the recovery it supports.
+    const classified = classifyMeshCreateFailure(result.error, target.path);
+    setFailure({
+      message: classified.message,
+      hint: classified.hint,
+      detail: classified.detail,
+      recoveries: classified.recoveries,
+    });
   };
 
   const handleClone = async () => {
@@ -140,7 +231,7 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
     const repo = repoInput.trim();
     const parentPath = parent.path;
     setBusy(true);
-    setError(null);
+    setFailure(null);
     const result = await cloneMesh(repo, parentPath, color);
     if (!stillMounted.current) {
       // Dismissed mid-clone. The mesh row is already committed and the store has
@@ -159,7 +250,7 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
       enterMesh(result.mesh.id);
       onClose();
     } else {
-      setError(result.error);
+      setFailure({ message: result.error });
     }
   };
 
@@ -213,25 +304,46 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
       </div>
 
       {source === 'open' ? (
-        /* Location */
-        <div className="mb-4">
-          <div className={SECTION_LABEL}>Location</div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              ref={folderButtonRef}
-              onClick={handleChooseFolder}
-              disabled={picking || busy}
-              className={PICKER_BUTTON}
-            >
-              {picking ? 'Choosing…' : folder ? 'Change folder…' : 'Choose folder…'}
-            </button>
-            {folder && (
-              <span className="text-xs font-medium text-text-primary truncate">{folder.name}</span>
-            )}
+        <>
+          {/* Location */}
+          <div className="mb-4">
+            <div className={SECTION_LABEL}>Location</div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                ref={folderButtonRef}
+                onClick={handleChooseFolder}
+                disabled={picking || busy}
+                className={PICKER_BUTTON}
+              >
+                {picking ? 'Choosing…' : folder ? 'Change folder…' : 'Choose folder…'}
+              </button>
+              {folder && (
+                <span className="text-xs font-medium text-text-primary truncate">{folder.name}</span>
+              )}
+            </div>
+            {folder && <p className={PATH_PREVIEW}>{folder.path}</p>}
           </div>
-          {folder && <p className={PATH_PREVIEW}>{folder.path}</p>}
-        </div>
+
+          {/* The failure sits beside the operation it describes, with the
+              recovery it supports. The picked folder and the colour stay on
+              screen above it, so the draft survives and the user can act on
+              the cause without re-entering anything. */}
+          {failure && (
+            <MeshCreateFailurePanel
+              panelRef={failureRef}
+              message={failure.message}
+              hint={failure.hint}
+              detail={failure.detail}
+              onRetry={failure.recoveries?.includes('retry') ? () => void handleCreate() : undefined}
+              onChangeFolder={
+                failure.recoveries?.includes('change-folder')
+                  ? () => void handleChooseFolder()
+                  : undefined
+              }
+            />
+          )}
+        </>
       ) : (
         <>
           {/* Repository */}
@@ -306,7 +418,11 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
         <MeshColorPicker value={color} onChange={setColor} labelId="mesh-create-color-label" />
       </div>
 
-      {error && <p className="mb-3 text-xs text-status-error break-words">{error}</p>}
+      {/* The clone flow already reports the backend's own message inline; it
+          keeps its place above the action buttons. */}
+      {source === 'clone' && failure && (
+        <MeshCreateFailurePanel panelRef={failureRef} message={failure.message} />
+      )}
 
       <div className="flex justify-end gap-2">
         {/* Cancel stays enabled during a clone on purpose. Dismissal is made safe

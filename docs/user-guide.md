@@ -158,7 +158,14 @@ details. Press **?** outside a terminal or text field for keyboard shortcuts.
    with **Use worktree** off, because there is no repository to cut worktrees from.
    The New mesh dialog opens with keyboard focus on **Choose folder…**, the step
    it cannot continue without, so you can pick a folder and submit without
-   reaching for the mouse.
+   reaching for the mouse. If creating the Mesh fails, the dialog shows the
+   reason next to the folder you picked and offers the way forward: **Retry**
+   for a failure that may pass on its own, **Choose another folder…** for a
+   folder that is missing or that Buildmesh is not allowed to use, and both
+   when the reason does not match a known cause. Your folder and colour stay
+   on screen, and the full diagnostic detail is one **Details** click away,
+   with a **Copy details** button for a bug report. You do not need to open
+   the logs to find out what went wrong.
 4. Use the provider control in the sidebar to choose a harness, then create an
    Agent Node. `Ctrl+T` (`Cmd+T` on macOS) opens the new-node flow.
 5. Give the node a focused task. Watch the terminal and the node status; an

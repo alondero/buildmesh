@@ -81,7 +81,17 @@ interface MeshState {
    */
   refreshMeshes: () => Promise<void>;
   addMesh: () => Promise<void>;
-  createMesh: (name: string, path: string, color?: string | null) => Promise<Mesh | null>;
+  // Register an existing repository folder as a mesh. Returns the created mesh
+  // or the backend's error text: a failed creation is user-actionable (the
+  // folder is missing, access was denied, the request failed temporarily), so
+  // the caller needs the real message. The previous `Mesh | null` fallback
+  // buried it in the shared `state.error` slot, which another request can
+  // overwrite, and left the dialog showing generic copy (issue #2794).
+  createMesh: (
+    name: string,
+    path: string,
+    color?: string | null
+  ) => Promise<{ mesh: Mesh } | { error: string }>;
   // Clone a GitHub repo into `<parentDir>/<repo>` and register it as a mesh.
   // Returns the created mesh or the backend's error text: clone failures are
   // user-actionable (repo not found, auth, destination already exists), so the
@@ -284,10 +294,15 @@ export const useMeshStore = create<MeshState>((set, get) => {
         meshes: [...state.meshes, mesh],
         meshesById: new Map([...state.meshesById, [mesh.id, mesh]]),
       }));
-      return mesh;
+      return { mesh };
     } catch (e) {
-      set({ error: formatError(e) });
-      return null;
+      // The failure is returned to the caller AND recorded in `state.error`,
+      // which stays the store's general-purpose error slot. The caller must
+      // read the returned value, not the slot: another request can overwrite
+      // it before the dialog renders (issue #2794).
+      const error = formatError(e);
+      set({ error });
+      return { error };
     }
   },
 

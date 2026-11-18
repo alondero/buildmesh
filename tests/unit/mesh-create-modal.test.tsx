@@ -292,3 +292,304 @@ describe('MeshCreateModal', () => {
     expect(screen.queryByText(/Repository not found/)).toBeNull();
   });
 });
+
+/**
+ * Issue #2794 — a failed repository creation must show the backend's own
+ * message and an inline recovery action.
+ *
+ * Before the fix the store recorded the failure in a shared error slot and
+ * returned `null`, and the dialog replaced the operation-specific failure
+ * with "Failed to create mesh. See logs for details." A new user could not
+ * tell whether to choose another folder, fix access, or try again.
+ */
+describe('a failed repository creation (issue #2794)', () => {
+  const ACCESS_DENIED = 'Access denied creating repository workspace';
+
+  beforeEach(() => {
+    resetMeshStore();
+    useToastStore.setState({ toasts: [] });
+    // Drop any IPC response left queued by an earlier test.
+    mockInvoke.mockReset();
+    mockInvoke.mockImplementation(async () => ({}));
+  });
+
+  /**
+   * Route IPC by command name.
+   *
+   * The ordered `mockResolvedValueOnce` queue is not usable here: a rejected
+   * command also makes the IPC chokepoint call `log_frontend`
+   * (`src/lib/tauri/_invoke.ts`), which would consume the next queued
+   * response and answer the wrong request. Routing by name keeps each
+   * command's outcome independent of the others.
+   */
+  function routeInvoke(handlers: Record<string, () => unknown>) {
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      const handler = handlers[cmd];
+      return handler ? handler() : {};
+    });
+  }
+
+  /** Pick a folder through the mocked native picker. */
+  async function chooseFolder(path = '/repos/app', name = 'app') {
+    mockInvoke.mockImplementation(async (cmd: string) =>
+      cmd === 'pick_mesh_folder' ? { path, name } : {}
+    );
+    fireEvent.click(screen.getByRole('button', { name: /choose folder|change folder/i }));
+    await screen.findByText(path, { exact: true });
+  }
+
+  it('shows the backend failure instead of the generic logs message', async () => {
+    render(<MeshCreateModal onClose={() => {}} />);
+    await chooseFolder();
+    routeInvoke({
+      create_mesh: () => {
+        throw new Error(ACCESS_DENIED);
+      },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^create mesh$/i }));
+
+    // The distinctive rejection reaches the dialog…
+    await screen.findByText(ACCESS_DENIED);
+    // …and the generic copy does not replace it.
+    expect(screen.queryByText(/see logs for details/i)).toBeNull();
+    expect(screen.queryByText(/failed to create mesh/i)).toBeNull();
+  });
+
+  it('offers another folder for an access failure', async () => {
+    render(<MeshCreateModal onClose={() => {}} />);
+    await chooseFolder();
+    routeInvoke({
+      create_mesh: () => {
+        throw new Error(ACCESS_DENIED);
+      },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^create mesh$/i }));
+    await screen.findByText(ACCESS_DENIED);
+
+    expect(screen.getByTestId('mesh-create-change-folder')).toBeTruthy();
+    expect(screen.queryByTestId('mesh-create-retry')).toBeNull();
+  });
+
+  it('offers another folder for a missing folder', async () => {
+    render(<MeshCreateModal onClose={() => {}} />);
+    await chooseFolder();
+    routeInvoke({
+      create_mesh: () => {
+        throw new Error('The system cannot find the path specified.');
+      },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^create mesh$/i }));
+    await screen.findByText('The system cannot find the path specified.');
+
+    expect(screen.getByTestId('mesh-create-change-folder')).toBeTruthy();
+    expect(screen.queryByTestId('mesh-create-retry')).toBeNull();
+  });
+
+  it('offers a retry for a transient failure', async () => {
+    render(<MeshCreateModal onClose={() => {}} />);
+    await chooseFolder();
+    routeInvoke({
+      create_mesh: () => {
+        throw new Error('database is locked');
+      },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^create mesh$/i }));
+    await screen.findByText('database is locked');
+
+    expect(screen.getByTestId('mesh-create-retry')).toBeTruthy();
+    expect(screen.queryByTestId('mesh-create-change-folder')).toBeNull();
+  });
+
+  it('keeps the real message and both safe choices for an unclassified failure', async () => {
+    render(<MeshCreateModal onClose={() => {}} />);
+    await chooseFolder();
+    routeInvoke({
+      create_mesh: () => {
+        throw new Error('the backend said something unexpected');
+      },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^create mesh$/i }));
+    await screen.findByText('the backend said something unexpected');
+
+    expect(screen.getByTestId('mesh-create-retry')).toBeTruthy();
+    expect(screen.getByTestId('mesh-create-change-folder')).toBeTruthy();
+  });
+
+  it('keeps the picked folder and the live controls, and retries into a single mesh', async () => {
+    const onClose = vi.fn();
+
+    render(<MeshCreateModal onClose={onClose} />);
+    await chooseFolder();
+    let attempt = 0;
+    routeInvoke({
+      create_mesh: () => {
+        attempt += 1;
+        if (attempt === 1) throw new Error('database is locked');
+        return CLONED_MESH;
+      },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^create mesh$/i }));
+    await screen.findByText('database is locked');
+
+    // The draft survives the failure: the folder is still the selected one…
+    expect(screen.getByText('/repos/app')).toBeTruthy();
+    // …and the controls are live again.
+    const submit = screen.getByRole('button', { name: /^create mesh$/i }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(false);
+
+    fireEvent.click(screen.getByTestId('mesh-create-retry'));
+
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+    // One retry, one mesh: the failed attempt registered no mesh.
+    expect(useMeshStore.getState().meshes).toHaveLength(1);
+    expect(useMeshStore.getState().selectedMeshId).toBe(CLONED_MESH.id);
+  });
+
+  it('shows its own request result when another store failure overlaps it', async () => {
+    render(<MeshCreateModal onClose={() => {}} />);
+    await chooseFolder();
+    routeInvoke({
+      create_mesh: () => {
+        throw new Error(ACCESS_DENIED);
+      },
+      add_mesh: () => {
+        throw new Error('another request failed');
+      },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^create mesh$/i }));
+    await screen.findByText(ACCESS_DENIED);
+
+    // A different request fails afterwards and takes over the shared error
+    // slot. The dialog must still report ITS OWN request's result.
+    await useMeshStore.getState().addMesh();
+    expect(useMeshStore.getState().error).toContain('another request failed');
+    expect(screen.getByText(ACCESS_DENIED)).toBeTruthy();
+    expect(screen.queryByText('another request failed')).toBeNull();
+  });
+
+  it('announces the failure accessibly and keeps focus in the dialog', async () => {
+    render(<MeshCreateModal onClose={() => {}} />);
+    await chooseFolder();
+    routeInvoke({
+      create_mesh: () => {
+        throw new Error(ACCESS_DENIED);
+      },
+    });
+
+    const submit = screen.getByRole('button', { name: /^create mesh$/i }) as HTMLButtonElement;
+    submit.focus();
+    fireEvent.click(submit);
+
+    // The failure is announced as it appears, without a focus move.
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain(ACCESS_DENIED);
+
+    // Focus never leaves the dialog.
+    const dialog = screen.getByRole('dialog');
+    expect(dialog.contains(document.activeElement)).toBe(true);
+  });
+
+  it('does not start a second creation while one is in flight', async () => {
+    let resolveCreate: (value: unknown) => void = () => {};
+
+    render(<MeshCreateModal onClose={() => {}} />);
+    await chooseFolder();
+    routeInvoke({
+      create_mesh: () =>
+        new Promise((resolve) => {
+          resolveCreate = resolve;
+        }),
+    });
+
+    const submit = screen.getByRole('button', { name: /^create mesh$/i }) as HTMLButtonElement;
+    fireEvent.click(submit);
+    fireEvent.click(submit);
+
+    // One request, whatever the click rate: the in-flight guard refuses the
+    // second submission, so the folder is never registered twice.
+    await screen.findByRole('button', { name: /creating/i });
+    expect(mockInvoke.mock.calls.filter((call) => call[0] === 'create_mesh')).toHaveLength(1);
+
+    resolveCreate(CLONED_MESH);
+    await waitFor(() => expect(useMeshStore.getState().meshes).toHaveLength(1));
+  });
+
+  it('keeps the diagnostics available in an expandable, copyable area', async () => {
+    render(<MeshCreateModal onClose={() => {}} />);
+    await chooseFolder();
+    routeInvoke({
+      create_mesh: () => {
+        throw new Error(ACCESS_DENIED);
+      },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^create mesh$/i }));
+    await screen.findByText(ACCESS_DENIED);
+
+    const detail = screen.getByTestId('mesh-create-failure-detail');
+    expect(detail.textContent).toContain('Folder: /repos/app');
+    expect(detail.textContent).toContain(`Cause: ${ACCESS_DENIED}`);
+  });
+
+  it('keeps the focus inside the dialog after choosing another folder', async () => {
+    render(<MeshCreateModal onClose={() => {}} />);
+    await chooseFolder();
+    routeInvoke({
+      create_mesh: () => {
+        throw new Error(ACCESS_DENIED);
+      },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^create mesh$/i }));
+    await screen.findByText(ACCESS_DENIED);
+
+    // The recovery reopens the native picker and takes a different folder.
+    mockInvoke.mockImplementation(async (cmd: string) =>
+      cmd === 'pick_mesh_folder' ? { path: '/repos/other', name: 'other' } : {}
+    );
+    fireEvent.click(screen.getByTestId('mesh-create-change-folder'));
+    await screen.findByText('/repos/other', { exact: true });
+
+    // The failure panel held the focus and is gone; the focus must not be
+    // dropped on the page behind the dialog.
+    const dialog = screen.getByRole('dialog');
+    await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
+  });
+
+  it('names a cause even when the backend said nothing', async () => {
+    render(<MeshCreateModal onClose={() => {}} />);
+    await chooseFolder();
+    routeInvoke({
+      create_mesh: () => {
+        // A rejection that carries no words at all.
+        throw new Error('   ');
+      },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^create mesh$/i }));
+
+    // An empty banner would name no cause; the dialog says what happened.
+    await screen.findByText('The mesh could not be created.');
+  });
+
+  it('does not report a copy that did not happen', async () => {
+    render(<MeshCreateModal onClose={() => {}} />);
+    await chooseFolder();
+    routeInvoke({
+      create_mesh: () => {
+        throw new Error(ACCESS_DENIED);
+      },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^create mesh$/i }));
+    await screen.findByText(ACCESS_DENIED);
+
+    // jsdom has no clipboard API, which is what an insecure window looks
+    // like. The button must not claim the details were copied.
+    fireEvent.click(screen.getByText('Details', { exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: /copy details/i }));
+
+    await waitFor(() =>
+      expect(
+        useToastStore.getState().toasts.some((t) => /clipboard is not available/i.test(t.message))
+      ).toBe(true)
+    );
+    expect(screen.queryByText('Copied')).toBeNull();
+  });
+});
