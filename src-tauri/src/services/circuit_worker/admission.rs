@@ -1,6 +1,90 @@
 //! Run admission and capacity observation. Durable admission reservations
 //! and live-agent Tick counts intentionally use different occupancy snapshots.
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+use once_cell::sync::Lazy;
+
 use super::{capacity, db, CircuitEvent, CircuitGraph, RunState};
+
+/// The admission hold a run is in, as the log sees it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct HeldAdmission {
+    /// The mesh whose capacity is full.
+    pub mesh_id: i64,
+    /// Admitted runs counted on that mesh.
+    pub active_runs: i64,
+    /// The mesh's run capacity.
+    pub capacity: i32,
+}
+
+/// The hold each run was last logged in.
+///
+/// A run held for capacity is re-evaluated on every pass, so logging the
+/// hold on every pass wrote the same line again and again: on the hub the
+/// worker spun at ~90 passes a second and wrote 66 MB of that one line in
+/// 37 minutes (issue #2831). The line belongs to a *state change* — the run
+/// was first held, or the reason it is held changed — so it is written
+/// then and not on every pass that finds the same hold.
+static HELD_RUNS: Lazy<Mutex<HashMap<i64, HeldAdmission>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+fn lock_held_runs() -> std::sync::MutexGuard<'static, HashMap<i64, HeldAdmission>> {
+    match HELD_RUNS.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// Should this hold be logged?
+///
+/// A hold is logged when it is new for the run or when it changed. The
+/// unchanged hold of a run that is still waiting is not logged again.
+pub(super) fn should_log_hold(previous: Option<&HeldAdmission>, current: &HeldAdmission) -> bool {
+    previous != Some(current)
+}
+
+/// Log a run's admission hold, if the hold is new or has changed.
+///
+/// Returns whether the line was written, so the rule is observable: the
+/// unchanged hold of a run that is still waiting is not written again.
+pub(super) fn log_hold(run_id: i64, hold: HeldAdmission) -> bool {
+    let mut held = lock_held_runs();
+    let previous = held.get(&run_id).copied();
+    if !should_log_hold(previous.as_ref(), &hold) {
+        return false;
+    }
+    held.insert(run_id, hold);
+    drop(held);
+    tracing::info!(
+        "circuits: mesh {} held — {} active run(s) >= {} capacity, run {} stays pending",
+        hold.mesh_id,
+        hold.active_runs,
+        hold.capacity,
+        run_id,
+    );
+    true
+}
+
+/// Forget the hold of a run that is no longer waiting for capacity.
+///
+/// Without this a run that was held once would keep its entry for ever,
+/// and the run's next hold would look unchanged.
+pub(super) fn forget_hold(run_id: i64) {
+    lock_held_runs().remove(&run_id);
+}
+
+/// Forget the holds of runs that are no longer pending.
+///
+/// The map only needs the runs that are waiting: a run that left the queue
+/// must not keep its entry, or its next hold would look unchanged.
+pub(super) fn sweep_holds(runs: &[db::ActiveCircuitRun]) {
+    let mut held = lock_held_runs();
+    held.retain(|run_id, _| {
+        runs.iter()
+            .any(|run| run.run.id == *run_id && run.run.state == "pending")
+    });
+}
 
 /// Issue #1467 admission gate. Returns `true` if a fresh `pending` run
 /// on this mesh should fire its `Triggered` event this pass.
@@ -45,13 +129,18 @@ pub(super) fn may_admit_run(active: &db::ActiveCircuitRun, mesh: &crate::models:
         Some(active_runs)
     });
     if let Some(active_runs) = observed_count.filter(|_| !admitted) {
-        tracing::info!(
-            "circuits: mesh {} held — {} active run(s) >= {} capacity, run {} stays pending",
-            active.run.mesh_id,
-            active_runs,
-            mesh.circuit_run_capacity,
+        log_hold(
             active.run.id,
+            HeldAdmission {
+                mesh_id: active.run.mesh_id,
+                active_runs,
+                capacity: mesh.circuit_run_capacity,
+            },
         );
+    } else {
+        // The run holds a slot now, or it is not waiting any more: the next
+        // hold it meets is a change and is logged again.
+        forget_hold(active.run.id);
     }
     admitted
 }

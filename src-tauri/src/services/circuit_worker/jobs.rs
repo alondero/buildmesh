@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::turn_classify::ClassifiedTurn;
+use super::wake::{WakeChannel, WakeKind};
 use super::{db, CircuitNodeKind, RunState, RunView, StepStatus, StepView};
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -29,16 +30,30 @@ struct State<T> {
     limit: usize,
     admission_deferrals: u64,
 }
-struct Pool<T>(Arc<Mutex<State<T>>>);
+/// The pool's bounded external work.
+///
+/// `wake` is where a finished job tells the worker that its result is
+/// ready. The pool serves one consumer — the worker's pass — so a finished
+/// job is the worker's own work: the next scheduled pass collects the
+/// result. Waking the worker for it would make the worker re-dispatch the
+/// very job that had just finished, and the loop would never reach its
+/// tick (issue #2831).
+struct Pool<T> {
+    state: Arc<Mutex<State<T>>>,
+    wake: Arc<dyn WakeChannel>,
+}
 
 impl<T: Send + 'static> Pool<T> {
-    fn new(limit: usize) -> Self {
-        Self(Arc::new(Mutex::new(State {
-            entries: HashMap::new(),
-            queue: VecDeque::new(),
-            limit,
-            admission_deferrals: 0,
-        })))
+    fn new(limit: usize, wake: Arc<dyn WakeChannel>) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(State {
+                entries: HashMap::new(),
+                queue: VecDeque::new(),
+                limit,
+                admission_deferrals: 0,
+            })),
+            wake,
+        }
     }
 
     fn poll(
@@ -47,7 +62,7 @@ impl<T: Send + 'static> Pool<T> {
         resource: Option<String>,
         task: impl FnOnce(Arc<AtomicBool>) -> T + Send + 'static,
     ) -> Option<T> {
-        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = state.entries.get_mut(&key) {
             if entry.cancelled.load(Ordering::Acquire) {
                 return None;
@@ -83,12 +98,12 @@ impl<T: Send + 'static> Pool<T> {
         );
         state.queue.push_back(key);
         drop(state);
-        Self::dispatch(self.0.clone());
+        Self::dispatch(self.state.clone(), self.wake.clone());
         None
     }
 
     fn retain(&self, keep: impl Fn(&Key) -> bool) {
-        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.entries.retain(|key, entry| {
             if keep(key) {
                 return true;
@@ -100,10 +115,10 @@ impl<T: Send + 'static> Pool<T> {
         let retained: std::collections::HashSet<_> = state.entries.keys().cloned().collect();
         state.queue.retain(|key| retained.contains(key));
         drop(state);
-        Self::dispatch(self.0.clone());
+        Self::dispatch(self.state.clone(), self.wake.clone());
     }
 
-    fn dispatch(shared: Arc<Mutex<State<T>>>) {
+    fn dispatch(shared: Arc<Mutex<State<T>>>, wake: Arc<dyn WakeChannel>) {
         loop {
             let mut state = shared.lock().unwrap_or_else(|e| e.into_inner());
             if state.entries.values().filter(|entry| entry.running).count() >= state.limit {
@@ -129,12 +144,18 @@ impl<T: Send + 'static> Pool<T> {
             drop(state);
             let worker = shared.clone();
             let worker_key = key.clone();
+            let job_wake = wake.clone();
             let spawn = std::thread::Builder::new()
                 .name("circuit-job".into())
                 .spawn(move || {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         (!cancelled.load(Ordering::Acquire)).then(|| task(cancelled.clone()))
                     }));
+                    // The worker's own pass asked for this job, and its next
+                    // scheduled pass collects the result. Recording the work
+                    // is enough: waking the worker for it would make it
+                    // re-dispatch the very job that had just finished, so the
+                    // loop would never reach its tick (issue #2831).
                     let mut state = worker.lock().unwrap_or_else(|e| e.into_inner());
                     match result {
                         Ok(Some(result)) if !cancelled.load(Ordering::Acquire) => {
@@ -148,8 +169,16 @@ impl<T: Send + 'static> Pool<T> {
                         }
                     }
                     drop(state);
-                    super::wake_circuit_worker();
-                    Self::dispatch(worker);
+                    // The report goes out after the result is published, so a
+                    // reader that saw the report can rely on the result being
+                    // there. It does not wake the worker — it is a record the
+                    // next pass reads.
+                    super::wake::notify_at(
+                        &*job_wake,
+                        WakeKind::SelfWork,
+                        std::panic::Location::caller(),
+                    );
+                    Self::dispatch(worker, job_wake);
                 });
             if let Err(error) = spawn {
                 shared
@@ -168,7 +197,47 @@ enum ResultValue {
     Verification(Option<bool>),
     Watchdog(Vec<super::turn_classify::QuietClassifierFailure>),
 }
-static JOBS: once_cell::sync::Lazy<Pool<ResultValue>> = once_cell::sync::Lazy::new(|| Pool::new(4));
+static JOBS: once_cell::sync::Lazy<Pool<ResultValue>> =
+    once_cell::sync::Lazy::new(|| Pool::new(4, super::wake::WAKE.clone()));
+
+/// A pool over a channel of the caller's choosing.
+///
+/// The pacing suite drives the production pool over a channel of its own,
+/// so the measurement cannot be disturbed by another suite's wake.
+#[cfg(test)]
+// allow-test-in-production: the pacing suite drives the production job pool over a private wake channel.
+pub(super) struct TestPool {
+    pool: Pool<ResultValue>,
+}
+
+#[cfg(test)]
+// allow-test-in-production: the pacing suite drives the production job pool over a private wake channel.
+impl TestPool {
+    pub(super) fn new(wake: Arc<dyn WakeChannel>) -> Self {
+        TestPool {
+            pool: Pool::new(4, wake),
+        }
+    }
+
+    /// Poll once, exactly as the worker's pass does.
+    ///
+    /// Returns whether a result was ready. The first poll dispatches the
+    /// job; the poll after the job finishes collects its result.
+    pub(super) fn poll(&self) -> bool {
+        let key = Key {
+            run: -1,
+            step: "pacing-probe".into(),
+            attempt: 0,
+            verification: false,
+            argument: String::new(),
+        };
+        matches!(
+            self.pool
+                .poll(key, None, |_| ResultValue::Watchdog(Vec::new())),
+            Some(ResultValue::Watchdog(_))
+        )
+    }
+}
 
 #[derive(PartialEq, Eq)]
 struct AgentFence {
@@ -498,6 +567,15 @@ mod tests {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
+    /// A pool over a private wake channel.
+    ///
+    /// The production pool reports a finished job as the worker's own work,
+    /// so a test's jobs must not touch the production wake channel: the
+    /// pacing suite measures the worker's park against a channel of its own.
+    fn test_pool(limit: usize) -> Pool<usize> {
+        Pool::new(limit, Arc::new(super::super::wake::WorkerWake::new()))
+    }
+
     fn test_key(run: i64) -> Key {
         Key {
             run,
@@ -609,7 +687,7 @@ mod tests {
 
     #[test]
     fn pending_external_job_does_not_block_unrelated_observation() {
-        let pool = Pool::new(2);
+        let pool = test_pool(2);
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         assert_eq!(
@@ -623,14 +701,14 @@ mod tests {
         started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(pool.poll(test_key(2), None, |_| 22), None);
         assert_eq!(completed(&pool, test_key(2)), 22);
-        assert!(pool.0.lock().unwrap().entries[&test_key(1)].running);
+        assert!(pool.state.lock().unwrap().entries[&test_key(1)].running);
         release_tx.send(()).unwrap();
         assert_eq!(completed(&pool, test_key(1)), 11);
     }
 
     #[test]
     fn concurrency_bound_and_cancelled_attempt_results_are_enforced() {
-        let pool = Pool::new(1);
+        let pool = test_pool(1);
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         pool.poll(test_key(1), None, move |_| {
@@ -650,7 +728,7 @@ mod tests {
         pool.retain(|key| key.attempt == 2);
         // Cancellation must not release capacity before the old external call exits.
         assert_eq!(
-            pool.0
+            pool.state
                 .lock()
                 .unwrap()
                 .entries
@@ -663,12 +741,17 @@ mod tests {
         release_tx.send(()).unwrap();
         new_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(completed(&pool, next_attempt), 22);
-        assert!(!pool.0.lock().unwrap().entries.contains_key(&test_key(1)));
+        assert!(!pool
+            .state
+            .lock()
+            .unwrap()
+            .entries
+            .contains_key(&test_key(1)));
     }
 
     #[test]
     fn verification_resource_is_serialized_while_other_directories_progress() {
-        let pool = Pool::new(4);
+        let pool = test_pool(4);
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         pool.poll(test_key(1), Some("directory-a".into()), move |_| {
@@ -696,7 +779,7 @@ mod tests {
 
     #[test]
     fn cancelling_queued_work_prevents_execution() {
-        let pool = Pool::new(1);
+        let pool = test_pool(1);
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         pool.poll(test_key(1), None, move |_| {
@@ -715,12 +798,17 @@ mod tests {
         release_tx.send(()).unwrap();
         assert_eq!(completed(&pool, test_key(1)), 11);
         assert!(!executed.load(Ordering::Acquire));
-        assert!(!pool.0.lock().unwrap().entries.contains_key(&test_key(2)));
+        assert!(!pool
+            .state
+            .lock()
+            .unwrap()
+            .entries
+            .contains_key(&test_key(2)));
     }
 
     #[test]
     fn full_queue_counts_refused_admission_but_not_pending_and_allows_retry() {
-        let pool = Pool::new(1);
+        let pool = test_pool(1);
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         pool.poll(test_key(0), None, move |_| {
@@ -745,7 +833,7 @@ mod tests {
             ))
             .is_none());
         {
-            let state = pool.0.lock().unwrap();
+            let state = pool.state.lock().unwrap();
             assert_eq!(state.admission_deferrals, 1);
             assert_eq!(state.queue.len(), 128);
             assert!(!state.entries.contains_key(&test_key(129)));
@@ -754,12 +842,12 @@ mod tests {
         assert!(pool.poll(test_key(129), None, |_| 129).is_none());
         release_tx.send(()).unwrap();
         assert_eq!(completed(&pool, test_key(129)), 129);
-        assert_eq!(pool.0.lock().unwrap().admission_deferrals, 1);
+        assert_eq!(pool.state.lock().unwrap().admission_deferrals, 1);
     }
 
     #[test]
     fn thirty_sessions_each_progress_with_four_external_slots() {
-        let pool = Pool::new(4);
+        let pool = test_pool(4);
         let (started_tx, started_rx) = mpsc::channel();
         let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let maximum = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -790,7 +878,7 @@ mod tests {
         for _ in 0..4 {
             observed.push(started_rx.recv_timeout(Duration::from_secs(5)).unwrap());
         }
-        assert_eq!(pool.0.lock().unwrap().queue.len(), 26);
+        assert_eq!(pool.state.lock().unwrap().queue.len(), 26);
         assert!(matches!(
             started_rx.try_recv(),
             Err(mpsc::TryRecvError::Empty)

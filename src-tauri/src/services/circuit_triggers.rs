@@ -454,8 +454,9 @@ fn mint_unseen_runs(
     }
     if !fetched.is_empty() {
         // Fresh runs start within milliseconds instead of waiting out the
-        // fast tick.
-        super::circuit_worker::wake_circuit_worker();
+        // fast tick. A minted run is a durable change the next pass must
+        // act on, so it is never downgraded to self-work.
+        super::circuit_worker::wake_circuit_worker_durable();
     }
 }
 
@@ -640,7 +641,7 @@ fn mint_interval_run(circuit: &AutopilotCircuit, interval_seconds: i64) -> bool 
                 interval_seconds,
                 run_id
             );
-            super::circuit_worker::wake_circuit_worker();
+            super::circuit_worker::wake_circuit_worker_durable();
             true
         }
         Err(e) => {

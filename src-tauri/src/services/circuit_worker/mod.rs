@@ -72,6 +72,7 @@ mod restart;
 mod result_handoff;
 mod spawn;
 mod turn_classify;
+mod wake;
 mod zombie_sweep;
 use admission::{may_admit_run, required_agent_slots};
 use dispatch::execute_effects;
@@ -96,15 +97,6 @@ const TICK_INTERVAL: Duration = Duration::from_secs(2);
 /// Startup delay so boot-time DB migration finishes before the first
 /// pass for active Circuit runs.
 const STARTUP_DELAY: Duration = Duration::from_secs(5);
-
-/// Wake flag. `wake_circuit_worker` sets it under this mutex and notifies.
-/// The bool stays set when `notify_all` lands while the worker is inside
-/// a pass: a condvar notify is not sticky, and the interval pass re-reads
-/// its schedule when it sees a wake. The worker clears the flag when
-/// parking, so that wake still runs the next pass without waiting out the
-/// tick. PTY output sets the flag at most once per node per 250 ms
-/// (`circuit::evaluator`). Collaborator approvals set it too.
-static WAKE: Lazy<(Mutex<bool>, Condvar)> = Lazy::new(|| (Mutex::new(false), Condvar::new()));
 
 /// Stage-2 circuit spawns are asynchronous, while cancellation and circuit
 /// deletion are synchronous commands. This barrier closes the small window in
@@ -412,45 +404,66 @@ pub(crate) fn wake_circuit_worker_calls() -> u64 {
 /// The flag is set under the same mutex the worker waits on, so a notify
 /// that lands while the five passes are running is still pending when the
 /// worker parks.
+///
+/// A wake raised by the worker's own pass is recorded as self-work instead:
+/// the next scheduled pass observes it, and re-passing at once would only
+/// re-dispatch the work that had just finished (issue #2831). A site whose
+/// change the next pass must act on *at once* uses
+/// [`wake_circuit_worker_durable`] instead.
+#[track_caller]
 pub fn wake_circuit_worker() {
     #[cfg(test)]
     // allow-test-in-production: enable tests count this wake on the calling thread
     WAKE_CALLS.with(|count| count.set(count.get() + 1));
-    let (lock, cvar) = &*WAKE;
-    {
-        // Hold the lock across the notify so a worker about to wait either
-        // sees the flag before waiting, or is already waiting and the notify
-        // wakes it.
-        let mut pending = lock_circuit_worker_static(lock);
-        *pending = true;
-        cvar.notify_all();
-    }
+    wake_circuit_worker_on(&*wake::WAKE, wake::WakeKind::External);
     #[cfg(test)]
     // allow-test-in-production: output-wake tests count a wake only when this function runs.
     crate::circuit::evaluator::note_worker_wake();
 }
 
-/// Park until `timeout`, or return immediately when a wake is already set.
-/// The flag is cleared before return. `(woke, timed_out)`.
-fn park_until_circuit_wake(wake: &(Mutex<bool>, Condvar), timeout: Duration) -> (bool, bool) {
-    let (lock, cvar) = wake;
-    let pending = match lock.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => {
-            tracing::warn!(
-                "circuit worker mutex was poisoned by a prior panic — recovering (issue #1224)"
-            );
-            poisoned.into_inner()
-        }
-    };
-    let (mut pending, timeout_result) =
-        match cvar.wait_timeout_while(pending, timeout, |ready| !*ready) {
-            Ok(pair) => pair,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-    let woke = *pending;
-    *pending = false;
-    (woke, timeout_result.timed_out())
+/// Wake the circuit worker over `channel`.
+///
+/// This is the production wake path: [`wake_circuit_worker`] raises an
+/// external wake on the production channel, and the pacing suite raises one
+/// on a channel of its own so another suite's wake cannot disturb the
+/// measurement (issue #2831).
+///
+/// A wake raised inside the worker's own pass is that pass's own work — the
+/// next scheduled pass observes it — so it is recorded as self-work and does
+/// not shorten the tick. A durable change asks for
+/// [`wake_circuit_worker_durable`] instead, which never downgrades.
+#[track_caller]
+fn wake_circuit_worker_on(channel: &dyn wake::WakeChannel, kind: wake::WakeKind) {
+    wake::notify_at(
+        channel,
+        wake::effective_kind(kind),
+        std::panic::Location::caller(),
+    );
+}
+
+/// Wake the circuit worker for a durable change the next pass must act on
+/// at once.
+///
+/// A run that reached a terminal state frees a capacity slot, and the
+/// pending run behind it must be admitted without waiting out the tick.
+/// This wake is never downgraded to self-work, unlike
+/// [`wake_circuit_worker`].
+#[track_caller]
+pub fn wake_circuit_worker_durable() {
+    #[cfg(test)]
+    // allow-test-in-production: enable tests count this wake on the calling thread
+    WAKE_CALLS.with(|count| count.set(count.get() + 1));
+    wake::notify_at(
+        &*wake::WAKE,
+        wake::WakeKind::External,
+        std::panic::Location::caller(),
+    );
+}
+
+/// Park until `timeout`, or return immediately when an external wake is
+/// already set. The flag is cleared before return. `(woke, timed_out)`.
+fn park_until_circuit_wake(wake: &impl wake::WakeChannel, timeout: Duration) -> (bool, bool) {
+    wake.park(timeout)
 }
 
 /// Consume a wake latched by [`wake_circuit_worker`].
@@ -458,9 +471,7 @@ fn park_until_circuit_wake(wake: &(Mutex<bool>, Condvar), timeout: Duration) -> 
 /// The worker calls this once per loop. A notify that arrived while the
 /// thread was not waiting stays true until this take.
 pub(crate) fn take_pending_wake() -> bool {
-    let (lock, _cvar) = &*WAKE;
-    let mut pending = lock_circuit_worker_static(lock);
-    std::mem::replace(&mut *pending, false)
+    wake::WakeChannel::take_external(&*wake::WAKE)
 }
 
 /// Start the dedicated Circuit worker thread. Called once from Tauri
@@ -497,51 +508,154 @@ pub fn start_circuit_worker(app: AppHandle) {
             // Later iterations re-read when parking observed a wake, including
             // one that arrived during a pass and whose notify had no waiter.
             let mut condvar_woke = true;
+            let mut pace = PassPace::default();
             loop {
                 let pending = take_pending_wake();
                 super::circuit_triggers::note_interval_wake(condvar_woke || pending);
-                // Each per-pass body is its own catch_unwind scope so
-                // a panic in the interval-pass doesn't skip the
-                // lost-turn watchdog (and vice-versa). `run_worker_pass`
-                // logs the panic with the worker name and returns
-                // false; we discard the return — recovery is the
-                // important behaviour, not the signal.
-                run_worker_pass("circuits:interval", || {
-                    super::circuit_triggers::run_interval_pass();
+                // Every wake raised inside this window is the pass's own
+                // work, so it is recorded as self-work and does not shorten
+                // the tick (issue #2831). Without that, a pass that always
+                // produced a wake kept the loop running back-to-back.
+                worker_passes(|| {
+                    // Each per-pass body is its own catch_unwind scope so
+                    // a panic in the interval-pass doesn't skip the
+                    // lost-turn watchdog (and vice-versa). `run_worker_pass`
+                    // logs the panic with the worker name and returns
+                    // false; we discard the return — recovery is the
+                    // important behaviour, not the signal.
+                    run_worker_pass("circuits:interval", || {
+                        super::circuit_triggers::run_interval_pass();
+                    });
+                    run_worker_pass("circuits:github-poll", || {
+                        super::circuit_triggers::maybe_poll_github();
+                    });
+                    // A panic in the drive pass must not hand the watchdog the
+                    // previous tick's snapshot. The vec starts empty, and the
+                    // assignment completes only when the pass returns.
+                    let mut observed = Vec::new();
+                    run_worker_pass("circuits:drive", || {
+                        observed = run_pass(&app);
+                    });
+                    let watchdog_observed = std::mem::take(&mut observed);
+                    run_worker_pass("circuits:watchdog", || {
+                        apply_quiet_classifier_failures(
+                            &app,
+                            jobs::watchdog(app.clone(), watchdog_observed),
+                        );
+                    });
+                    // Issue #1793: reap piloted nodes stuck `running` with no
+                    // session identity or readable report. Self-throttled, so this
+                    // is a cheap no-op on almost every tick.
+                    run_worker_pass("circuits:zombie-sweep", || {
+                        zombie_sweep::zombie_sweep_pass(&app);
+                    });
                 });
-                run_worker_pass("circuits:github-poll", || {
-                    super::circuit_triggers::maybe_poll_github();
-                });
-                // A panic in the drive pass must not hand the watchdog the
-                // previous tick's snapshot. The vec starts empty, and the
-                // assignment completes only when the pass returns.
-                let mut observed = Vec::new();
-                run_worker_pass("circuits:drive", || {
-                    observed = run_pass(&app);
-                });
-                let watchdog_observed = std::mem::take(&mut observed);
-                run_worker_pass("circuits:watchdog", || {
-                    apply_quiet_classifier_failures(
-                        &app,
-                        jobs::watchdog(app.clone(), watchdog_observed),
-                    );
-                });
-                // Issue #1793: reap piloted nodes stuck `running` with no
-                // session identity or readable report. Self-throttled, so this
-                // is a cheap no-op on almost every tick.
-                run_worker_pass("circuits:zombie-sweep", || {
-                    zombie_sweep::zombie_sweep_pass(&app);
-                });
-                // A wake during the passes above is still set. Parking returns
-                // at once so the next iteration does not sit out the 2s tick.
-                // PTY output wakes at most once per node per 250 ms, so an
-                // early return does not spin one pass per read. `woke` is
-                // what the interval schedule re-reads on.
-                let (woke, _timed_out) = park_until_circuit_wake(&WAKE, TICK_INTERVAL);
+                pace.record();
+                // An external wake during the passes above is still set.
+                // Parking returns at once so the next iteration does not sit
+                // out the 2s tick. PTY output wakes at most once per node per
+                // 250 ms, so an early return does not spin one pass per read.
+                // `woke` is what the interval schedule re-reads on.
+                let (woke, _timed_out) = park_until_circuit_wake(&*wake::WAKE, TICK_INTERVAL);
                 condvar_woke = woke;
             }
         })
         .expect("circuit-worker thread spawn failed");
+}
+
+/// Run the worker's passes as the worker's own pass.
+///
+/// Every wake raised inside the window is the pass's own work: the next
+/// scheduled pass observes it, so the worker keeps its tick instead of
+/// re-passing at once (issue #2831). Without the window, a pass that always
+/// produced a wake kept the loop running back-to-back — one core busy, the
+/// SQLite pool checked out thousands of times a second, and the admission
+/// log written hundreds of times a second.
+///
+/// **Production-only on purpose.** The pacing suite must not call this
+/// function: the compiler's dead-code warning is the guard that catches a
+/// caller that stops using this wrapper (which would silently restore the
+/// spin), and a test that called it would keep that warning quiet. The
+/// suite drives [`wake::in_worker_pass`] and the production wake path
+/// instead, and the window's contract is pinned there.
+fn worker_passes<R>(body: impl FnOnce() -> R) -> R {
+    wake::in_worker_pass(body)
+}
+
+/// The worker's pass pacing, and the runaway check behind it.
+///
+/// The worker runs one pass per tick, plus one for each external event it
+/// must react to. A pass rate far above that means a wake the worker raised
+/// itself is re-arming its park: the loop never rests, the worker holds a
+/// core busy, and every pass checks the SQLite pool out again. The check
+/// names the wake sites that raised the most wakes, so the next occurrence
+/// of this pathology says which site kept the loop hot instead of only its
+/// symptoms (issue #2831).
+#[derive(Default)]
+struct PassPace {
+    /// Passes counted in the current window.
+    passes: u64,
+    /// Self-work the worker produced in the current window.
+    self_work: u64,
+    /// When the current window opened.
+    opened: Option<Instant>,
+}
+
+/// How long a pacing window lasts.
+const PACE_WINDOW: Duration = Duration::from_secs(30);
+
+/// How many passes per tick a healthy worker runs. The worker runs one pass
+/// per tick; an external event adds one more.
+const PACE_HEADROOM: u64 = 4;
+
+/// Is this window the runaway the detector is looking for?
+///
+/// Both halves are required. A high pass rate alone is not the pathology: PTY
+/// output is capped at one wake per node per 250 ms, and a busy agent can
+/// produce several of those in a window. The pathology is *self*-work
+/// re-arming the park, so the warning needs more passes than the tick allows
+/// **and** more of them than the worker can account for from outside.
+fn is_runaway_window(counted: u64, self_work: u64, ceiling: u64) -> bool {
+    counted > ceiling && self_work > ceiling
+}
+
+impl PassPace {
+    /// Count one pass and report a runaway window.
+    fn record(&mut self) {
+        wake::record_pass();
+        self.self_work += wake::WakeChannel::take_self_work(&*wake::WAKE);
+        let now = Instant::now();
+        let opened = *self.opened.get_or_insert(now);
+        self.passes += 1;
+        if now.saturating_duration_since(opened) < PACE_WINDOW {
+            return;
+        }
+        let counted = self.passes;
+        let self_work = self.self_work;
+        let expected = (PACE_WINDOW.as_secs() / TICK_INTERVAL.as_secs()).max(1);
+        self.passes = 0;
+        self.self_work = 0;
+        self.opened = Some(now);
+        let ceiling = expected.saturating_mul(PACE_HEADROOM);
+        if !is_runaway_window(counted, self_work, ceiling) {
+            return;
+        }
+        let breakdown = wake::top_wake_sources(5)
+            .iter()
+            .map(|(site, count)| format!("{site}={count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        // A report, not a conclusion: the counts say the worker ran far more
+        // passes than its tick allows, and that most of them were its own
+        // work. Which site kept the loop hot is what the breakdown is for.
+        tracing::warn!(
+            "circuits: worker ran {counted} passes in {}s (expected about {expected}, \
+             {self_work} of them self-work) — check whether a wake the worker raised itself \
+             is re-arming its park (issue #2831). Total passes: {}. Top wake sources: {breakdown}",
+            PACE_WINDOW.as_secs(),
+            wake::passes(),
+        );
+    }
 }
 
 /// Drive this run even if its circuit is a draft. Background pollers
@@ -584,6 +698,9 @@ fn run_pass(app: &AppHandle) -> Vec<ObservedRun> {
     // zero heap on the hot 2-second tick.
     sweep_stale_approvals(&runs);
     jobs::retain_runs(&runs);
+    // The admission "held" line belongs to a state change, so the holds of
+    // runs that left the queue are forgotten (issue #2831).
+    admission::sweep_holds(&runs);
 
     // Issue #1467: cache the mesh row per unique mesh id so a mesh with
     // N pending runs but only 1 row read is the common case in the
@@ -710,7 +827,7 @@ fn run_pass(app: &AppHandle) -> Vec<ObservedRun> {
                                 state: "cancelled".into(),
                             },
                         );
-                        wake_circuit_worker();
+                        wake_circuit_worker_durable();
                     }
                     continue;
                 }
@@ -820,7 +937,7 @@ fn drive_run(
                     state: "failed".into(),
                 },
             );
-            wake_circuit_worker();
+            wake_circuit_worker_durable();
             return Ok(());
         }
     };
@@ -843,7 +960,7 @@ fn drive_run(
                     state: "failed".into(),
                 },
             );
-            wake_circuit_worker();
+            wake_circuit_worker_durable();
             return Ok(());
         }
     };

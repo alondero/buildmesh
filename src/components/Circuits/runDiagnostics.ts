@@ -15,7 +15,7 @@
  * component.
  */
 
-import { isTerminalRunState, ledgerTimestampMs, parseGraph } from './circuitGraphModel';
+import { formatDurationMs, isTerminalRunState, ledgerTimestampMs, parseGraph } from './circuitGraphModel';
 import type { StepLike } from './circuitGraphModel';
 import {
   indexNodes,
@@ -163,14 +163,20 @@ export function canContinueReview(detail: CircuitRunDetail): boolean {
  * it to keep explaining why the run wants attention, while the bulk action's
  * count uses [`runNeedsOutstandingAttention`] so an acknowledged run is no
  * longer outstanding.
+ *
+ * A run that has not moved for [`RUN_STUCK_AFTER_MS`] needs attention too
+ * (issue #2831). The worker spins no longer, so a run that stopped moving is
+ * the user's problem to notice and cancel — nothing else will report it.
  */
 export function runNeedsAttention(
   detail: CircuitRunDetail,
   reviewCircuit: ReviewCircuitMetadata | null = null,
   context = parseRunContext(detail.run.context_json),
+  now: Date = new Date(),
 ): boolean {
   return detail.run.state === 'failed' || detail.run.state === 'paused' || reviewResult(detail, reviewCircuit, context)?.needsAttention === true ||
-    detail.steps.some((step) => step.status === 'blocked' || step.status === 'unverified');
+    detail.steps.some((step) => step.status === 'blocked' || step.status === 'unverified') ||
+    isRunStuck(detail.run, now);
 }
 
 /**
@@ -185,8 +191,9 @@ export function runNeedsOutstandingAttention(
   detail: CircuitRunDetail,
   reviewCircuit: ReviewCircuitMetadata | null = null,
   context = parseRunContext(detail.run.context_json),
+  now: Date = new Date(),
 ): boolean {
-  return detail.run.attention_dismissed_at === null && runNeedsAttention(detail, reviewCircuit, context);
+  return detail.run.attention_dismissed_at === null && runNeedsAttention(detail, reviewCircuit, context, now);
 }
 
 /**
@@ -273,13 +280,20 @@ export function annotateCircuitRows(rows: CircuitWithRuns[]): CircuitProbeRow[] 
 /** Build the stable, view-specific row model used by the Probe.
  * History sorts attention-first within each circuit so failed /
  * needs-review rows surface above quiet completions; the component may
- * additionally filter by search text / attention-only. */
+ * additionally filter by search text / attention-only.
+ *
+ * `options.now` pins the clock the snapshot is judged against. It exists so a
+ * test can state "this run has not moved for six hours" without the wall
+ * clock deciding the answer (issue #2831). */
 export function buildCircuitProbeRows(
   rows: Array<CircuitWithRuns | CircuitProbeRow>,
   view: CircuitProbeView,
-  options: { attentionOnly?: boolean; search?: string } = {}
+  options: { attentionOnly?: boolean; search?: string; now?: Date } = {}
 ): CircuitProbeRow[] {
   const needle = (options.search ?? '').trim().toLowerCase();
+  // One clock reading for the whole build, so every run in the snapshot is
+  // judged against the same moment (issue #2831).
+  const now = options.now ?? new Date();
   return rows
     .map((row) => {
       const facts = 'reviewCircuit' in row
@@ -301,7 +315,7 @@ export function buildCircuitProbeRows(
           : [];
       if (view === 'history') {
         if (options.attentionOnly) {
-visibleRuns = visibleRuns.filter((run) => runNeedsOutstandingAttention(run, reviewFor(run), contextFor(run)));
+visibleRuns = visibleRuns.filter((run) => runNeedsOutstandingAttention(run, reviewFor(run), contextFor(run), now));
         }
         if (needle !== '') {
           visibleRuns = visibleRuns.filter((run) =>
@@ -316,15 +330,21 @@ visibleRuns = visibleRuns.filter((run) => runNeedsOutstandingAttention(run, revi
         // runs sort with the ordinary tail: they still carry their diagnostic,
         // but they no longer crowd the actionable items to the top.
         visibleRuns.sort((a, b) =>
-Number(runNeedsOutstandingAttention(b, reviewFor(b), contextFor(b))) - Number(runNeedsOutstandingAttention(a, reviewFor(a), contextFor(a))) ||
+Number(runNeedsOutstandingAttention(b, reviewFor(b), contextFor(b), now)) - Number(runNeedsOutstandingAttention(a, reviewFor(a), contextFor(a), now)) ||
           compareRunsNewestFirst(a, b));
       } else {
-        visibleRuns.sort(compareRunsNewestFirst);
+        // Attention-first here too, for the same reason History sorts that
+        // way: a run that stopped moving (issue #2831) would otherwise sit
+        // below every run that started after it, which is exactly the run
+        // the user needs to see.
+        visibleRuns.sort((a, b) =>
+Number(runNeedsOutstandingAttention(b, reviewFor(b), contextFor(b), now)) - Number(runNeedsOutstandingAttention(a, reviewFor(a), contextFor(a), now)) ||
+          compareRunsNewestFirst(a, b));
       }
       return {
         ...row,
         visibleRuns,
-hasAttention: visibleRuns.some((run) => runNeedsOutstandingAttention(run, reviewFor(run), contextFor(run))),
+hasAttention: visibleRuns.some((run) => runNeedsOutstandingAttention(run, reviewFor(run), contextFor(run), now)),
         reviewCircuit,
         contextByRunId,
         searchContextByRunId,
@@ -357,10 +377,14 @@ export interface CircuitActivityStats {
   queuedCount: number;
 }
 
-/** Summarize the monitoring header without rebuilding arrays in the component. */
+/** Summarize the monitoring header without rebuilding arrays in the component.
+ *
+ * `now` pins the clock the snapshot is judged against, for the same reason as
+ * `buildCircuitProbeRows`'s `options.now` (issue #2831). */
 export function circuitActivityStats(
   rows: Array<CircuitWithRuns | CircuitProbeRow>,
-  queuedCount: number
+  queuedCount: number,
+  now: Date = new Date()
 ): CircuitActivityStats {
   let activeCount = 0;
   let attentionCount = 0;
@@ -379,14 +403,14 @@ export function circuitActivityStats(
       const context = contextByRunId.get(detail.run.id) ?? {};
       if (runBelongsToActivity(detail)) {
         activeCount += 1;
-if (runNeedsOutstandingAttention(detail, reviewCircuitForRun(detail, reviewCircuit), context)) {
+if (runNeedsOutstandingAttention(detail, reviewCircuitForRun(detail, reviewCircuit), context, now)) {
           activeAttentionCount += 1;
           attentionCount += 1;
         }
       }
       if (runBelongsToHistory(detail)) {
         historyCount += 1;
-if (runNeedsOutstandingAttention(detail, reviewCircuitForRun(detail, reviewCircuit), context)) {
+if (runNeedsOutstandingAttention(detail, reviewCircuitForRun(detail, reviewCircuit), context, now)) {
           historyAttentionCount += 1;
           attentionCount += 1;
         }
@@ -563,6 +587,61 @@ export function isRunStale(
 ): boolean {
   const stale = runStaleMs(run, now);
   return stale !== null && stale >= thresholdMs;
+}
+
+/**
+ * How long a running run may go without moving before it reads as stuck
+ * (issue #2831).
+ *
+ * The stale window above answers "is the worker still turning this run
+ * over?" — a minute of quiet is a blip, not a problem. This one answers a
+ * different question: "has this run made no progress for long enough that
+ * it is probably never going to?". Six hours is long enough that a slow
+ * agent step is not mistaken for a dead run, and short enough that a run
+ * which will never move does not sit unnoticed for a day.
+ *
+ * Only `running` counts. A paused run asks for attention for its own
+ * reason, and a pending run holds no slot — it is the queue's business,
+ * and the queue already says why it is waiting.
+ */
+export const RUN_STUCK_AFTER_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * True when a running run has not moved for longer than the stuck window.
+ *
+ * `updated_at` moves on every run transition, so it is the run's progress
+ * clock: a run that is still working reads recent, and a run whose worker
+ * lost the thread reads old.
+ *
+ * The false-positive case is a single agent turn that runs longer than the
+ * window without a commit — `updated_at` does not move while one step is
+ * being worked on. The threshold is hours for that reason: an agent that
+ * takes six hours to answer is unusual but not unheard of, and a run in
+ * that state is worth a look anyway. The reading is advisory — nothing is
+ * cancelled and no run state changes — so a false alarm costs a glance,
+ * not a run.
+ */
+export function isRunStuck(
+  run: { state: string; updated_at: string },
+  now: Date = new Date(),
+  thresholdMs: number = RUN_STUCK_AFTER_MS
+): boolean {
+  if (run.state !== 'running') return false;
+  const quiet = runStaleMs(run, now);
+  return quiet !== null && quiet >= thresholdMs;
+}
+
+/**
+ * Why a run reads as stuck, in the card's own words. Null when the run is
+ * not stuck, so a caller renders the reason only when there is one.
+ */
+export function runStuckReason(
+  run: { state: string; updated_at: string },
+  now: Date = new Date()
+): string | null {
+  if (!isRunStuck(run, now)) return null;
+  const quiet = runStaleMs(run, now) ?? 0;
+  return `No progress for ${formatDurationMs(quiet)} — the run has not moved since it was last updated. Cancel it, or open its agent node to see what it is waiting for.`;
 }
 
 /**

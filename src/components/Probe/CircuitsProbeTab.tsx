@@ -100,6 +100,7 @@ import {
   type CircuitProbeView,
 } from '../Circuits/runDiagnostics';
 import { useProbeContext } from '../../hooks/useProbeContext';
+import { useMinuteClock } from '../../hooks/useMinuteClock';
 import { useUIStore } from '../../stores/uiStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
@@ -441,9 +442,19 @@ export function CircuitsProbeTab() {
   const allRuns = useMemo(() => rows.flatMap(({ runs }) => runs), [rows]);
   const annotatedRows = useMemo(() => annotateCircuitRows(rows), [rows]);
   const meshActiveRuns = useMemo(() => countActiveRuns(allRuns), [allRuns]);
+  // The stuck reading is a function of wall-clock time, not of the payload:
+  // a run that stops moving sends no event when it crosses the threshold,
+  // so the snapshot is re-judged against a clock of its own (issue #2831).
+  // Only a live run can become stuck, so a tab that shows finished work
+  // keeps no timer at all (issue #1751).
+  const hasLiveRun = useMemo(
+    () => rows.some(({ runs }) => runs.some((run) => run.run.state === 'running')),
+    [rows]
+  );
+  const now = useMinuteClock(hasLiveRun);
   const viewRows = useMemo(
-    () => buildCircuitProbeRows(annotatedRows, view, { attentionOnly: historyAttentionOnly, search: historySearch }),
-    [annotatedRows, view, historyAttentionOnly, historySearch]
+    () => buildCircuitProbeRows(annotatedRows, view, { attentionOnly: historyAttentionOnly, search: historySearch, now }),
+    [annotatedRows, view, historyAttentionOnly, historySearch, now]
   );
   // The rows the list body actually renders. Manage lists all circuits; the
   // run-bearing views list only rows with runs to show. The list body and its
@@ -460,8 +471,8 @@ export function CircuitsProbeTab() {
       : { label: 'No finished runs yet', hint: 'Completed and failed runs will appear here.' };
   }, [rows]);
   const activityStats = useMemo(
-    () => circuitActivityStats(annotatedRows, queue.length),
-    [annotatedRows, queue.length]
+    () => circuitActivityStats(annotatedRows, queue.length, now),
+    [annotatedRows, queue.length, now]
   );
   /**
    * The Activity view's one summary (issue #2740).

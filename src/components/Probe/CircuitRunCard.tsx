@@ -58,6 +58,7 @@ import {
   runStateLabel,
   runStaleMs,
   runStepProgress,
+  runStuckReason,
   stepStatusLabel,
   type CircuitCapacity,
   type ReviewCircuitMetadata,
@@ -233,6 +234,11 @@ export function CircuitRunCard({
   const { run, steps } = detail;
   const roundLimit = detail.review_round_limit ?? null;
   const review = reviewResult(detail, reviewCircuit, context);
+  // A run that has not moved for hours is not "running" in any useful sense
+  // (issue #2831). It says so on its card rather than keeping a pulse that
+  // means nothing.
+  const stuckReason = runStuckReason(run, now ?? new Date());
+  const stuck = stuckReason !== null;
   const activity = runActivity(run, steps, capacity, review);
   const progress = runStepProgress(steps);
   const blockedSteps = steps.filter((s) => s.status === 'blocked');
@@ -297,13 +303,17 @@ export function CircuitRunCard({
           >
             {subject.label ?? `Run #${run.id}`}
           </span>
+          {/* A stuck run cannot collide with a review label: a review label
+              needs a terminal run, and a stuck run is `running`. */}
           <span
-            className={`text-xs ${statusTextClass(review?.needsAttention ? 'failed' : run.state)} ${
-              run.state === 'running' ? 'animate-pulse' : ''
+            className={`text-xs ${statusTextClass(review?.needsAttention || stuck ? 'failed' : run.state)} ${
+              run.state === 'running' && !stuck ? 'animate-pulse' : ''
             }`}
             data-testid={`run-state-${run.id}`}
           >
-            {isRunShipped(review, steps) ? 'Shipped' : review?.label ?? runStateLabel(run.state)}
+            {stuck
+              ? 'Stalled'
+              : isRunShipped(review, steps) ? 'Shipped' : review?.label ?? runStateLabel(run.state)}
           </span>
           {reviewCircuit && context['retry.attempt'] && context['retry.max_retries'] && (
             <span className="text-2xs text-text-muted" data-testid={`run-review-rounds-${run.id}`}>
@@ -340,6 +350,15 @@ export function CircuitRunCard({
             </span>
           )}
         </span>
+        )}
+        {stuck && (
+          <span
+            className={`mt-0.5 block text-2xs break-words ${statusTextClass('failed')}`}
+            data-testid={`run-stuck-${run.id}`}
+            title="The run has not moved for hours. Nothing will move it on its own — cancel it, or open its agent node to see what it is waiting for."
+          >
+            {stuckReason}
+          </span>
         )}
         {activity.detail !== null && !showNextSteps && (expanded || run.state !== 'paused') && (
           <span

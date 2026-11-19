@@ -21,6 +21,7 @@ import {
   circuitActivitySummary,
   isActiveRunState,
   isRunStale,
+  isRunStuck,
   pendingAdmissionDetail,
   queuedReason,
   runActivity,
@@ -34,6 +35,7 @@ import {
   reviewCircuitForRun,
   runStateLabel,
   runStepProgress,
+  runStuckReason,
   stepStatusLabel,
   type CircuitCapacity,
 } from '../../src/components/Circuits/runDiagnostics';
@@ -46,6 +48,13 @@ import type { CircuitWithRuns } from '../../src/types/generated/CircuitWithRuns'
  * the copy is testable without mounting the panel.
  */
 describe('run diagnostics', () => {
+  /**
+   * The clock the fixture ledger is read against. Pinning it keeps "this run
+   * has not moved for six hours" a statement about the fixture instead of a
+   * statement about when the suite happened to run (issue #2831).
+   */
+  const SNAPSHOT_NOW = new Date('2026-08-22T10:10:00Z');
+
   it('labels unresolved evidence separately from approval and failure', () => {
     expect(stepStatusLabel('unverified')).toBe('Unverified Checkpoint');
     expect(stepStatusLabel('blocked')).toBe('Needs approval');
@@ -270,27 +279,27 @@ describe('run diagnostics', () => {
       expect(runBelongsToHistory(cancelled)).toBe(true);
       expect(runNeedsAttention(failed)).toBe(true);
       const runs = [pending, failed, completed, cancelled, offsetCompleted, running, paused];
-      expect(buildCircuitProbeRows([row(...runs)], 'activity')[0].visibleRuns.map((run) => run.run.id))
+      expect(buildCircuitProbeRows([row(...runs)], 'activity', { now: SNAPSHOT_NOW })[0].visibleRuns.map((run) => run.run.id))
         .toEqual([7, 6]);
       // History is attention-first (failed) then newest terminal.
-      expect(buildCircuitProbeRows([row(...runs)], 'history')[0].visibleRuns.map((run) => run.run.id))
+      expect(buildCircuitProbeRows([row(...runs)], 'history', { now: SNAPSHOT_NOW })[0].visibleRuns.map((run) => run.run.id))
         .toEqual([2, 5, 4, 3]);
     });
 
     it('summarizes active, attention, and queued work without component heuristics', () => {
       const running = detail(1, 'running');
       const failed = detail(2, 'failed');
-      const stats = circuitActivityStats([row(running, failed)], 4);
+      const stats = circuitActivityStats([row(running, failed)], 4, SNAPSHOT_NOW);
       expect(stats).toEqual({ activityCount: 1, activeCount: 1, attentionCount: 1, historyAttentionCount: 1, activeAttentionCount: 0, historyCount: 1, queuedCount: 4 });
     });
 
     it('splits attention counts so the History filter label never lies', () => {
       const paused = detail(7, 'paused');
       const failed = detail(2, 'failed');
-      const historyOnly = circuitActivityStats([row(failed)], 0);
+      const historyOnly = circuitActivityStats([row(failed)], 0, SNAPSHOT_NOW);
       expect(historyOnly.historyAttentionCount).toBe(1);
       expect(historyOnly.activeAttentionCount).toBe(0);
-      const liveOnly = circuitActivityStats([row(paused)], 0);
+      const liveOnly = circuitActivityStats([row(paused)], 0, SNAPSHOT_NOW);
       expect(liveOnly.activeAttentionCount).toBe(1);
       expect(liveOnly.historyAttentionCount).toBe(0);
       expect(liveOnly.historyCount).toBe(0);
@@ -377,6 +386,49 @@ describe('run diagnostics', () => {
       expect(isRunStale({ state: 'running', updated_at: '2026-08-22 10:00:00' }, now)).toBe(true);
       expect(isRunStale({ state: 'running', updated_at: '2026-08-22 10:09:30' }, now)).toBe(false);
       expect(isRunStale({ state: 'failed', updated_at: '2026-08-22 10:00:00' }, now)).toBe(false);
+    });
+
+    /**
+     * A run that stopped moving (issue #2831).
+     *
+     * The worker no longer spins, so a run that stopped making progress is
+     * nobody's news but the user's. These pin the rule that makes it visible:
+     * a running run quiet for six hours needs attention, and nothing else
+     * does — a paused run asks for attention for its own reason, and a
+     * pending run belongs to the queue.
+     */
+    describe('stuck run', () => {
+      const sixHoursAgo = '2026-08-22 04:10:00';
+      const anHourAgo = '2026-08-22 09:10:00';
+
+      it('flags a running run that has not moved for six hours, and nothing else', () => {
+        expect(isRunStuck({ state: 'running', updated_at: sixHoursAgo }, SNAPSHOT_NOW)).toBe(true);
+        expect(isRunStuck({ state: 'running', updated_at: anHourAgo }, SNAPSHOT_NOW)).toBe(false);
+        expect(isRunStuck({ state: 'paused', updated_at: sixHoursAgo }, SNAPSHOT_NOW)).toBe(false);
+        expect(isRunStuck({ state: 'pending', updated_at: sixHoursAgo }, SNAPSHOT_NOW)).toBe(false);
+        expect(isRunStuck({ state: 'completed', updated_at: sixHoursAgo }, SNAPSHOT_NOW)).toBe(false);
+      });
+
+      it('names the quiet stretch as the reason, and stays silent otherwise', () => {
+        expect(runStuckReason({ state: 'running', updated_at: sixHoursAgo }, SNAPSHOT_NOW)).toContain('6h 0m');
+        expect(runStuckReason({ state: 'running', updated_at: anHourAgo }, SNAPSHOT_NOW)).toBeNull();
+      });
+
+      it('counts a stuck run as needing attention', () => {
+        const stuck = detail(9, 'running', sixHoursAgo);
+        expect(runNeedsAttention(stuck, null, {}, SNAPSHOT_NOW)).toBe(true);
+        expect(runNeedsOutstandingAttention(stuck, null, {}, SNAPSHOT_NOW)).toBe(true);
+        const healthy = detail(10, 'running', anHourAgo);
+        expect(runNeedsAttention(healthy, null, {}, SNAPSHOT_NOW)).toBe(false);
+      });
+
+      it('sorts a stuck run above a newer run of the same circuit', () => {
+        const stuck = detail(9, 'running', sixHoursAgo);
+        const fresh = detail(10, 'running', anHourAgo);
+        const ordered = buildCircuitProbeRows([row(stuck, fresh)], 'activity', { now: SNAPSHOT_NOW })[0].visibleRuns
+          .map((r) => r.run.id);
+        expect(ordered).toEqual([9, 10]);
+      });
     });
   });
 
