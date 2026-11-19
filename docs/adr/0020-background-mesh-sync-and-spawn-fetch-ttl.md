@@ -118,3 +118,49 @@ advances the base ref. The per-Mesh fetch/sync lock moved the same way
 
 See ADR 0007's amendment and `docs/development/module-map.md` for the one-way
 dependency rule this move serves.
+
+## Amendment (2026-11-19): a permanently failing fetch pauses the Mesh
+
+Before this amendment, the background sync applied the same three-minute
+attempt cadence to a transient failure and to a failure that only a
+configuration change can fix. A Mesh whose `base_ref` names a branch the
+remote does not have fails on each attempt with `fatal: couldn't find remote
+ref refs/heads/main`, so the cadence produced a wasted `git` process tree per
+attempt — 1,303 such failures across the retained hub logs.
+
+The decision, in two parts:
+
+1. **Classify the failure.** `git::fetch_failure::classify_fetch_failure`
+   reads git's own stderr and sorts a failure into *permanent* (the remote
+   lacks the branch, the remote is gone, the credentials are refused) or
+   *transient* (timeout, network, local lock contention). An unrecognised
+   failure stays transient, so the policy does not stop a Mesh's sync on the
+   strength of a message it did not understand. The markers are deliberately
+   narrow: a phrase like "not found" is matched only in git's own
+   `repository '…' not found` shape, because an HTTP error body that
+   mentions it says little about whether the remote is still there.
+2. **Pause the permanent one.** A permanent failure records itself against
+   the Mesh and pauses its background sync for at least an hour
+   (`git::fetch_failure::PERMANENT_BASE_INTERVAL`), doubling per further
+   failure and capped at 24 hours. The record is keyed on the Mesh's
+   identity and its *configured* `base_ref`: changing that setting resumes
+   the sync at once, and a successful fetch of the Mesh clears the record,
+   so a repaired remote is picked up rather than waited out. The pause is
+   checked before the attempt clock and before the repository probe, so a
+   paused Mesh costs a map lookup per tick.
+
+Transient failures keep the existing three-minute retry — that is what makes
+an offline laptop recover on its own.
+
+The reason is surfaced **once** on the Mesh, through the existing
+`mesh-sync-warning` channel (a toast plus the sidebar row's failure icon),
+naming the branch the remote lacks and offering the remote's actual default
+branch — read from the local `refs/remotes/<remote>/HEAD` symbolic ref
+first, and from `git ls-remote --symref` only when that is missing.
+Buildmesh does **not** rewrite the Mesh's `base_ref`: that is the user's
+decision, and issue #2832 puts it out of scope.
+
+The DIAG line splits the two failure kinds —
+`bg_sync=att:N/adv:N/fail_perm:N/fail_trans:N/last_ms:N` — so a climbing
+`fail_perm` reads as a misconfigured Mesh while a climbing `fail_trans`
+reads as the network.

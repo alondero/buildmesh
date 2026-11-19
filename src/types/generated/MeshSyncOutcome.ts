@@ -5,4 +5,4 @@
  * `#[serde(rename_all = "snake_case")]` keeps the wire variants in the
  * shape the pre-#161 inline TS union expected.
  */
-export type MeshSyncOutcome = "diverged" | "fetch_failed" | "repo_unusable" | "pr_head_unfetchable" | "pr_fork_unfetchable" | "pr_sha_drift";
+export type MeshSyncOutcome = "diverged" | "fetch_failed" | "repo_unusable" | "pr_head_unfetchable" | "pr_fork_unfetchable" | "pr_sha_drift" | "permanent_fetch_failure";

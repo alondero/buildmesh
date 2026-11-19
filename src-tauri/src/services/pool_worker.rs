@@ -43,6 +43,9 @@ use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use tauri::Emitter;
+
+use crate::git::fetch_failure::FetchFailureClass;
 
 /// Minimum silence (no terminal output / keypresses on a given mesh) before
 /// the background worker is allowed to run a refill pass for THAT mesh
@@ -78,19 +81,41 @@ pub(crate) fn should_background_sync(time_since_attempt: Duration) -> bool {
     time_since_attempt >= BACKGROUND_SYNC_INTERVAL
 }
 
+/// Issue #2832: record a failed background sync in the counter that matches
+/// its failure class.
+///
+/// The DIAG line reports the two kinds separately (`fail_perm` and
+/// `fail_trans`), so WHICH counter a failure lands in is part of the
+/// contract rather than a detail of the log line. Routing the choice
+/// through one function keeps it in one place and lets the sibling test
+/// suite assert it without running the worker.
+pub(crate) fn record_bg_sync_failure(class: FetchFailureClass, elapsed: Duration) {
+    match class {
+        FetchFailureClass::Permanent => {
+            crate::diagnostics::record_bg_sync_permanent_failure(elapsed);
+        }
+        FetchFailureClass::Transient => {
+            crate::diagnostics::record_bg_sync_transient_failure(elapsed);
+        }
+    }
+}
+
 /// Issue #2348: decide whether this tick runs the background sync for
 /// `mesh_path` — and keep the attempt clock honest when it does not.
 ///
-/// Three outcomes, and the third is the one that is easy to get wrong:
-///  1. the attempt clock has not reached [`BACKGROUND_SYNC_INTERVAL`] → skip,
+/// Four outcomes, and the last two are the ones that are easy to get wrong:
+///  1. the Mesh is **paused** by a permanent failure (issue #2832) → skip,
+///     before the attempt clock is read, before the repository probe and
+///     before the fetch;
+///  2. the attempt clock has not reached [`BACKGROUND_SYNC_INTERVAL`] → skip,
 ///     touching nothing (including no repository probe);
-///  2. due and the folder can be fetched → run the fetch, which stamps the
+///  3. due and the folder can be fetched → run the fetch, which stamps the
 ///     attempt itself inside `locked_fetch_origin_blocking`;
-///  3. due but the folder cannot be opened as a git working repository
+///  4. due but the folder does not open as a git working repository
 ///     (`warm_pool::mesh_repo_unusable`) → skip the fetch **and stamp the
 ///     attempt**.
 ///
-/// That stamp in case 3 is load-bearing. `time_since_attempt` reads
+/// That stamp in case 4 is load-bearing. `time_since_attempt` reads
 /// `Duration::MAX` for a mesh with no recorded attempt, and the only thing that
 /// ever wrote one was the fetch we just skipped — so without the stamp a mesh
 /// that can never be fetched re-probes the filesystem on *every* tick (2 s
@@ -100,15 +125,26 @@ pub(crate) fn should_background_sync(time_since_attempt: Duration) -> bool {
 /// so the spawn path's freshness gate is untouched: a mesh that cannot be
 /// fetched keeps fetching on spawn.
 ///
-/// `attempt_is_due`, `repo_usable` and `stamp` are injected so all three
-/// outcomes are unit-testable without sleeping, a `tauri::AppHandle` or a real
-/// repository — the sequencing above is the whole behaviour.
+/// The pause in case 1 comes FIRST because it is the cheapest check and the
+/// most valuable one: a Mesh whose `base_ref` names a branch the remote does
+/// not have would otherwise run a failing `git fetch` on the three-minute
+/// sync cadence for the rest of the app's life. While it is paused the
+/// worker does not probe the repository, and the pause lifts as soon as the
+/// Mesh's configuration changes.
+///
+/// `paused`, `attempt_is_due`, `repo_usable` and `stamp` are injected so all
+/// four outcomes are unit-testable without sleeping, a `tauri::AppHandle` or a
+/// real repository — the sequencing above is the whole behaviour.
 fn background_sync_allowed(
     mesh_path: &str,
+    paused: impl FnOnce(&str) -> bool,
     attempt_is_due: impl FnOnce(&str) -> bool,
     repo_usable: impl FnOnce() -> bool,
     stamp: impl FnOnce(&str),
 ) -> bool {
+    if paused(mesh_path) {
+        return false;
+    }
     if !attempt_is_due(mesh_path) {
         return false;
     }
@@ -402,8 +438,25 @@ pub fn start_background_worker(app: tauri::AppHandle) {
                     // every tick for every mesh (pre-existing), and without the
                     // stamp an unpoolable Mesh pays the probe on top of that,
                     // every tick, on the single worker thread.
+                    //
+                    // Issue #2832: a fetch that only a configuration change
+                    // can fix must not be retried on the fixed three-minute
+                    // schedule. The gate's first check is the
+                    // permanent-failure registry: it is a
+                    // cheap map lookup, and while the Mesh is paused the
+                    // worker must not even probe the repository. The
+                    // fingerprint is the Mesh's identity and its *configured*
+                    // base ref, so changing that setting resumes the sync at
+                    // once — the recorded failure then describes a situation
+                    // that may have changed.
                     if background_sync_allowed(
                         &mesh.path,
+                        |path| {
+                            !crate::git::fetch_failure::allows_attempt(
+                                path,
+                                &permanent_failure_fingerprint(mesh.id, &mesh.base_ref),
+                            )
+                        },
                         |path| {
                             should_background_sync(
                                 crate::git::fetch_freshness::time_since_attempt(path),
@@ -437,15 +490,79 @@ pub fn start_background_worker(app: tauri::AppHandle) {
                                 }
                             }
                             Err(e) => {
-                                crate::diagnostics::record_bg_sync_failure(sync_started.elapsed());
-                                // INFO, not WARN: an offline laptop hits this
-                                // every interval and it's fully self-healing.
-                                tracing::info!(
-                                    "pool_worker: background sync for mesh {} failed (retry in {}s): {:?}",
-                                    mesh.id,
-                                    BACKGROUND_SYNC_INTERVAL.as_secs(),
-                                    e
-                                );
+                                let elapsed = sync_started.elapsed();
+                                // Issue #2832: not all failures deserve the
+                                // fixed schedule. A failure that only a
+                                // configuration change can fix (the remote has
+                                // no such branch, the remote is gone, the
+                                // credentials are refused) pauses this Mesh's
+                                // sync; a network failure keeps the existing
+                                // retry.
+                                let class = crate::git::fetch_failure::classify_fetch_error(&e);
+                                // The DIAG line counts the two kinds
+                                // separately, so the counter is chosen by
+                                // the class and nowhere else.
+                                record_bg_sync_failure(class, elapsed);
+                                match class {
+                                    crate::git::fetch_failure::FetchFailureClass::Permanent => {
+                                        let reason =
+                                            crate::git::fetch_failure::fetch_failure_reason(&e);
+                                        let report =
+                                            crate::git::fetch_failure::record_permanent_failure(
+                                                &mesh.path,
+                                                &permanent_failure_fingerprint(
+                                                    mesh.id,
+                                                    &mesh.base_ref,
+                                                ),
+                                                Instant::now(),
+                                            );
+                                        if report.first {
+                                            tracing::warn!(
+                                                "pool_worker: background sync for mesh {} failed permanently: \
+                                                 {}; retrying in {}s",
+                                                mesh.id,
+                                                reason,
+                                                report.interval.as_secs()
+                                            );
+                                            // Surface it ONCE on the mesh: the
+                                            // first permanent failure is the
+                                            // one the user has not been told
+                                            // about. The later ones are the
+                                            // same message on a longer timer.
+                                            surface_permanent_sync_failure(
+                                                &app,
+                                                &mesh.path,
+                                                &base_ref,
+                                                &reason,
+                                            );
+                                        } else if report.interval_changed {
+                                            // The retry interval grew: report
+                                            // the escalation once and then go
+                                            // quiet, so a Mesh that stays broken
+                                            // produces a handful of lines rather
+                                            // than one per attempt.
+                                            tracing::info!(
+                                                "pool_worker: background sync for mesh {} still failing \
+                                                 (attempt {}): {}; retrying in {}s",
+                                                mesh.id,
+                                                report.failures,
+                                                reason,
+                                                report.interval.as_secs()
+                                            );
+                                        }
+                                    }
+                                    crate::git::fetch_failure::FetchFailureClass::Transient => {
+                                        // INFO, not WARN: an offline laptop hits
+                                        // this on each interval and recovers by
+                                        // itself.
+                                        tracing::info!(
+                                            "pool_worker: background sync for mesh {} failed (retry in {}s): {:?}",
+                                            mesh.id,
+                                            BACKGROUND_SYNC_INTERVAL.as_secs(),
+                                            e
+                                        );
+                                    }
+                                }
                             }
                         }
                     }
@@ -478,6 +595,82 @@ pub fn start_background_worker(app: tauri::AppHandle) {
             }
         })
         .expect("failed to spawn warm-pool-worker thread");
+}
+
+/// Surface a permanent background-sync failure on the Mesh it is about
+/// (issue #2832).
+///
+/// The `mesh-sync-warning` event is the app's existing "this Mesh's sync is
+/// broken" channel: `App.tsx` raises the toast and the sidebar's mesh row
+/// lights its failure icon for the Mesh whose path the warning carries. The
+/// backend does not rewrite the Mesh's `base_ref` — the message states what
+/// is wrong and offers the branch the remote actually has, and the user
+/// decides (issue #2832's "out of scope" list).
+///
+/// The remote's default branch is read from the local symbolic ref first and
+/// from `git ls-remote` only when that is missing, so the common case costs
+/// no network round-trip.
+fn surface_permanent_sync_failure(
+    app: &tauri::AppHandle,
+    mesh_path: &str,
+    base_ref: &str,
+    reason: &str,
+) {
+    use crate::agent::spawn::{MeshSyncOutcome, MeshSyncWarningPayload};
+
+    let remote = crate::git::sync::parse_remote_for_base_ref(base_ref);
+    // Only the failure's OWN message may say which branch is missing. Falling
+    // back to the base ref's branch would tell the user "origin has no branch
+    // 'main'" for an authentication failure — a claim the failure did not
+    // make.
+    let missing_branch = crate::git::fetch_failure::missing_remote_branch(reason);
+    let default_branch = remote.as_deref().and_then(|remote_name| {
+        crate::git::fetch_failure::detect_remote_default_branch(
+            &crate::env::to_host_path(mesh_path),
+            remote_name,
+        )
+    });
+    let message = crate::git::fetch_failure::describe_permanent_failure(
+        mesh_path,
+        remote.as_deref(),
+        missing_branch.as_deref(),
+        default_branch.as_deref(),
+        reason,
+    );
+    tracing::warn!("pool_worker: {}", message);
+    let _ = app.emit(
+        "mesh-sync-warning",
+        MeshSyncWarningPayload {
+            // The warning is about a Mesh, not about a Node — no Node
+            // caused it. `0` is the "no node" sentinel; the frontend matches
+            // the Mesh by `mesh_path`.
+            node_id: 0,
+            mesh_path: mesh_path.to_string(),
+            outcome: MeshSyncOutcome::PermanentFetchFailure,
+            new_commits: None,
+            pr_number: None,
+            head_ref: None,
+            expected_sha: None,
+            actual_sha: None,
+            fallback_base_ref: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            message,
+        },
+    );
+}
+
+/// The fingerprint the permanent-failure record is keyed on: the Mesh's
+/// identity and its configured `base_ref`.
+///
+/// The `base_ref` is the setting the user changes to fix a permanent
+/// failure, so a change to it must resume the sync at once. The id is in
+/// the fingerprint too: a Mesh deleted and re-created at the same path is a
+/// different Mesh, and without the id the new row would inherit the old
+/// pause — and, because a pause suppresses the "first failure" report, the
+/// user would not be told why its sync is stopped.
+fn permanent_failure_fingerprint(mesh_id: i64, base_ref: &str) -> String {
+    format!("{mesh_id}|{base_ref}")
 }
 
 /// Adaptive-tick decision, pure for unit testing. Given the current tick

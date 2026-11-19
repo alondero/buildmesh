@@ -11,6 +11,7 @@
 pub mod ai_context_runtime;
 pub mod branches;
 pub mod diff;
+pub mod fetch_failure;
 pub mod fetch_freshness;
 pub mod health;
 pub mod index;

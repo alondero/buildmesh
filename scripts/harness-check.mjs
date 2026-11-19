@@ -150,6 +150,7 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/git/branches_tests.rs': 'git::branches::tests',
   'src-tauri/src/git/diff_tests.rs': 'git::diff::tests',
   'src-tauri/src/git/fetch_origin_tests.rs': 'git::sync::fetch_origin_tests',
+  'src-tauri/src/git/fetch_failure_tests.rs': 'git::fetch_failure::tests',
   'src-tauri/src/git/fetch_freshness_tests.rs': 'git::fetch_freshness::tests',
   'src-tauri/src/git/index_tests.rs': 'git::index::tests',
   'src-tauri/src/git/mesh_health_tests.rs': 'git::health::mesh_health_tests',

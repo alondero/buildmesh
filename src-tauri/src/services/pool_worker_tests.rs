@@ -329,6 +329,7 @@ fn background_sync_skips_a_mesh_that_is_inside_its_interval() {
     let calls = SyncGateCalls::default();
     let allowed = background_sync_allowed(
         "/probe/mesh/stale",
+        |_| false, // not paused by a permanent failure
         |_| false, // attempt clock has not reached BACKGROUND_SYNC_INTERVAL
         || {
             calls.probes.set(calls.probes.get() + 1);
@@ -353,6 +354,85 @@ fn background_sync_skips_a_mesh_that_is_inside_its_interval() {
     );
 }
 
+/// Issue #2832: a Mesh paused by a permanent failure must be skipped
+/// BEFORE anything else happens — no attempt-clock read, no repository
+/// probe, no fetch. A Mesh whose `base_ref` names a branch the remote does
+/// not have would otherwise run a failing `git fetch` on the three-minute
+/// for the rest of the app's life.
+#[test]
+fn a_mesh_paused_by_a_permanent_failure_is_skipped_entirely() {
+    let calls = SyncGateCalls::default();
+    let allowed = background_sync_allowed(
+        "/probe/mesh/paused",
+        |_| true, // paused by a permanent failure
+        |_| {
+            calls.probes.set(calls.probes.get() + 1);
+            true
+        },
+        || {
+            calls.probes.set(calls.probes.get() + 1);
+            true
+        },
+        |path| {
+            calls.stamps.set(calls.stamps.get() + 1);
+            calls.stamped_paths.borrow_mut().push(path.to_string());
+        },
+    );
+    assert!(
+        !allowed,
+        "a mesh paused by a permanent failure must not enter the fetch block"
+    );
+    assert_eq!(
+        calls.probes.get(),
+        0,
+        "a paused mesh must not probe the repository — that is the cost the \
+         pause exists to avoid"
+    );
+    assert_eq!(
+        calls.stamps.get(),
+        0,
+        "a paused mesh must not stamp: the permanent-failure registry owns \
+         its clock, and the attempt stamp would only hide the next due check"
+    );
+}
+
+/// Issue #2832: the DIAG line counts the two failure kinds separately —
+/// `fail_perm` for a failure only a configuration change can fix, `fail_trans`
+/// for one the next attempt may fix. Which counter a failure lands in is
+/// therefore part of the contract, not a detail of the log line, and this
+/// asserts the routing the worker performs.
+#[test]
+fn each_failure_kind_counts_toward_its_own_diag_counter() {
+    use std::sync::atomic::Ordering;
+
+    let permanent_before = crate::diagnostics::BG_SYNC_PERMANENT_FAILURES.load(Ordering::Relaxed);
+    let transient_before = crate::diagnostics::BG_SYNC_TRANSIENT_FAILURES.load(Ordering::Relaxed);
+
+    record_bg_sync_failure(FetchFailureClass::Permanent, Duration::from_millis(7));
+    assert_eq!(
+        crate::diagnostics::BG_SYNC_PERMANENT_FAILURES.load(Ordering::Relaxed),
+        permanent_before + 1,
+        "a permanent failure is a misconfigured mesh, not a network blip"
+    );
+    assert_eq!(
+        crate::diagnostics::BG_SYNC_TRANSIENT_FAILURES.load(Ordering::Relaxed),
+        transient_before,
+        "a permanent failure must not be counted as transient"
+    );
+
+    record_bg_sync_failure(FetchFailureClass::Transient, Duration::from_millis(7));
+    assert_eq!(
+        crate::diagnostics::BG_SYNC_TRANSIENT_FAILURES.load(Ordering::Relaxed),
+        transient_before + 1,
+        "a transient failure is the network, not a misconfigured mesh"
+    );
+    assert_eq!(
+        crate::diagnostics::BG_SYNC_PERMANENT_FAILURES.load(Ordering::Relaxed),
+        permanent_before + 1,
+        "a transient failure must not be counted as permanent"
+    );
+}
+
 /// The regression the reviewer found: a due mesh whose folder cannot be
 /// opened as a repository is suppressed AND stamped. Without the stamp the
 /// attempt clock never advances, `should_background_sync` stays true, and
@@ -362,7 +442,8 @@ fn unusable_mesh_is_stamped_so_the_probe_waits_for_the_next_interval() {
     let calls = SyncGateCalls::default();
     let allowed = background_sync_allowed(
         "/probe/mesh/unusable",
-        |_| true, // interval elapsed
+        |_| false, // not paused by a permanent failure
+        |_| true,  // interval elapsed
         || {
             calls.probes.set(calls.probes.get() + 1);
             false // cannot be opened as a git working repository
@@ -402,6 +483,7 @@ fn usable_due_mesh_runs_the_fetch_without_a_double_stamp() {
     let calls = SyncGateCalls::default();
     let allowed = background_sync_allowed(
         "/probe/mesh/usable",
+        |_| false, // not paused by a permanent failure
         |_| true,
         || {
             calls.probes.set(calls.probes.get() + 1);
