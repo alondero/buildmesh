@@ -44,7 +44,6 @@ test('ordinary scripts and GitHub configuration skip the Rust graph', () => {
     'scripts/generate-android-circuit-wire.mjs',
     'scripts/ci/new-tool.mjs',
     'scripts/harness-plan.mjs.backup',
-    '.github/workflows/verify.yml',
     '.github/actions/install-linux-build-deps/action.yml',
     '.github/dependabot.yml',
     './scripts/idle-animation-probe.mjs',
@@ -67,6 +66,7 @@ test('scripts controlling Rust verification or supplying Rust build inputs run b
     'scripts/ci/run-guarded.mjs',
     'scripts/rust-test-shards.mjs',
     'scripts/ci/rust-shards.mjs',
+    'scripts/ci/run-rust-shard.mjs',
     'scripts/check-rust-shard-coverage.mjs',
     'scripts/harness-test-failures.mjs',
     'scripts/prepare-conpty.mjs',
@@ -76,6 +76,10 @@ test('scripts controlling Rust verification or supplying Rust build inputs run b
     assert.equal(categorisePath(path), 'both', path);
     assert.deepEqual(classifyPaths([path]), { rust: true, frontend: true }, path);
   }
+});
+
+test('a verification workflow edit runs the Rust graph that validates the shard matrix', () => {
+  assert.deepEqual(classifyPaths(['.github/workflows/verify.yml']), { rust: true, frontend: true });
 });
 
 test('unknown paths conservatively run both graphs', () => {
@@ -118,8 +122,8 @@ test('classifies a paths file into GitHub Actions outputs', () => {
       env: { ...process.env, GITHUB_OUTPUT: output },
     });
     assert.equal(res.status, 0, res.stderr);
-    assert.equal(readFileSync(output, 'utf8'), 'rust=false\nfrontend=true\n');
-    assert.match(res.stdout, /rust=false frontend=true/);
+    assert.equal(readFileSync(output, 'utf8'), 'rust=true\nfrontend=true\n');
+    assert.match(res.stdout, /rust=true frontend=true/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

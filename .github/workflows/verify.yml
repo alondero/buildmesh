@@ -663,10 +663,8 @@ jobs:
         run: cargo test --locked --no-run
         working-directory: src-tauri
 
-      # The filters in the `rust-tests` matrix below are exact only for today's
-      # test list, and libtest cannot express "first path segment is X", so a new
-      # top-level module would silently go unrun. This gate lists the unit tests
-      # from the test binary and fails if any is unclaimed or doubly claimed.
+      # Validate exact top-level ownership against the compiled test list.
+      # The wildcard shard claims names outside the explicitly owned modules.
       #
       # It runs HERE, immediately after `--no-run`, and that placement is the
       # whole point: the listing needs the compiled binary, so it must not be the
@@ -803,44 +801,19 @@ jobs:
       matrix:
         shard:
           - label: db
-            args: "db::"
+            modules: "db"
           - label: services
-            args: "services::"
+            modules: "services"
           - label: agent
-            args: "agent:: --skip commands::agent:: --skip models::agent::"
+            modules: "agent"
           - label: commands-http
-            args: "commands:: http::"
+            modules: "commands http"
           - label: circuit-coordinator
-            args: "circuit:: coordinator:: --skip db::circuit:: --skip commands::circuit:: --skip models::circuit:: --skip commands::coordinator:: --skip http::routes::"
-          # `http::routes::git::` is that same nested-path problem once more:
-          # this shard's `git::` filter is a substring of the HTTP git route
-          # module, so the two ts-rs export tests there (issue #2318) would be
-          # claimed by this shard and by `commands-http`, and the coverage gate
-          # would fail. `http::` (commands-http) keeps them.
+            modules: "circuit coordinator"
           - label: git-env-preferences
-            args: "git:: env:: preferences:: --skip commands::git:: --skip commands::preferences:: --skip models::git:: --skip http::routes::git::"
-          # Everything whose first path segment no other shard owns, so a new
-          # module lands in one place instead of going untested. The
-          # `--skip agent::sandbox::` is the same nested-path problem the other
-          # shards solve: `sandbox::` would otherwise also claim it.
-          # `--skip commands::diagnostics::` is that same problem again: this
-          # shard's `diagnostics::` filter is a substring of the `commands::`
-          # command module added in #1525, so without the skip both this shard
-          # and `commands-http` would claim those tests and the coverage gate
-          # would fail. `commands::` (commands-http) keeps them.
-          #
-          # `blocking::` and `read_outcome::` are the modules added by #2330.
-          # They claim nothing else: libtest filters are substring matches, and
-          # neither name appears in any other module's test path.
-          #
-          # `diff::` is the diff engine's own module (#2527), and it is the
-          # nested-path problem once more: `diff::` is a substring of
-          # `git::diff::`, which the `git-env-preferences` shard owns, so
-          # without the skip both shards would claim those tests. `--skip
-          # commands::diff::` is the same guard for the command module's own
-          # path — `commands-http` owns that one.
+            modules: "git env preferences"
           - label: remaining
-            args: "artifact_owner:: attention_autoclear:: blocking:: close_cancel_tests:: companion:: diagnostics:: diff:: instance_guard:: models:: node_turn:: process_util:: pty:: read_outcome:: review_contract:: sandbox:: secret_scrubber:: session_capture:: session_naming:: startup:: windowing:: worktree_blockers:: --skip agent::sandbox:: --skip commands::diagnostics:: --skip commands::diff:: --skip git::diff::"
+            modules: "*"
 
     steps:
       - name: Checkout
@@ -903,7 +876,7 @@ jobs:
             --kill-grace-seconds 60 \
             --log "cargo-${{ matrix.shard.label }}.log" \
             --label "The ${{ matrix.shard.label }} shard" \
-            -- cargo test --locked --lib -- ${{ matrix.shard.args }}
+            -- node "$GITHUB_WORKSPACE/scripts/ci/run-rust-shard.mjs" ${{ matrix.shard.label }}
         working-directory: src-tauri
 
       - name: Upload the shard log

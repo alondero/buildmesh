@@ -247,17 +247,20 @@ test('editing the advisory self-review script does not select product verificati
   assert.ok(ids.includes('agent-tests'), 'the agent-infra tests still run');
 });
 
-test('ordinary tooling changes skip Rust gates while Rust verification scripts retain them', () => {
+test('ordinary tooling changes skip Rust gates and Rust verification inputs retain them', () => {
   const rustIds = ['rust-format', 'rust-clippy', 'rust-tests', 'binding-drift'];
-  const ordinary = ['scripts/idle-animation-probe.mjs', 'scripts/ui-mock/hub-fixtures.mjs', 'scripts/generate-android-circuit-wire.mjs', '.github/workflows/verify.yml'];
+  const ordinary = ['scripts/idle-animation-probe.mjs', 'scripts/ui-mock/hub-fixtures.mjs', 'scripts/generate-android-circuit-wire.mjs', '.github/dependabot.yml'];
   for (const paths of [...ordinary.map(path => [path]), ordinary, [...ordinary, 'src/owner.ts']]) {
     const ids = planGates(paths).map(gate => gate.id);
     for (const id of rustIds) assert.ok(!ids.includes(id), `${paths}: ${id}`);
     assert.ok(ids.includes('agent-tests'));
     assert.ok(ids.includes('frontend-tests'));
   }
-  // These paths used to be swallowed by the local infrastructure-only override.
-  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-check.mjs', 'scripts/harness-lanes.mjs', 'scripts/agent-tests.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) {
+  for (const path of [
+    '.github/workflows/verify.yml',
+    'scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-check.mjs', 'scripts/harness-lanes.mjs',
+    'scripts/agent-tests.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs',
+  ]) {
     const ids = planGates([path]).map(gate => gate.id);
     for (const id of rustIds) assert.ok(ids.includes(id), `${path}: ${id}`);
   }
@@ -448,9 +451,11 @@ test('the Rust shard runner records targets and reruns library and integration f
   // fixture needs that script too: a module it cannot resolve would crash the
   // gate this test is asserting the outcome of.
   for (const path of ['scripts/rust-test-shards.mjs', 'scripts/harness-test-failures.mjs', 'scripts/ci/rust-shards.mjs', 'scripts/ci/run-guarded.mjs']) fixture.put(path, readFileSync(join(root, path)));
-  fixture.put('.github/workflows/verify.yml', 'jobs:\n  rust-tests:\n    strategy:\n      matrix:\n        shard:\n          - label: fixture\n            args: ""\n    steps:\n');
+  fixture.put('.github/workflows/verify.yml', 'jobs:\n  rust-tests:\n    strategy:\n      matrix:\n        shard:\n          - label: fixture\n            modules: "*"\n    steps:\n');
   fixture.put('src-tauri/Cargo.toml', '[package]\nname="harness-fixture"\nversion="0.1.0"\nedition="2021"\n');
-  const tests = '#[test] fn transient() { assert!(std::env::args().any(|arg| arg == "--exact")); }\n#[test] fn sibling() {}\n';
+  // Shards also select tests by exact name. The isolation rerun supplies its
+  // single-thread setting as one argument, which distinguishes that rerun.
+  const tests = '#[test] fn transient() { assert!(std::env::args().any(|arg| arg == "--test-threads=1")); }\n#[test] fn sibling() {}\n';
   fixture.put('src-tauri/src/lib.rs', tests);
   fixture.put('src-tauri/tests/contract.rs', tests);
   fixture.put('src-tauri/Cargo.lock', 'version = 4\n[[package]]\nname = "harness-fixture"\nversion = "0.1.0"\n');

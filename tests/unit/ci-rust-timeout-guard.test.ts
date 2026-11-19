@@ -239,11 +239,23 @@ const nonShard = runScript('Run Rust export, documentation, and integration test
 // can act. Five lost `services` runners in October 2026 each held their run
 // 45-60 minutes under the old 40-minute cap.
 const guards = [
-  { job: 'rust-tests', script: shard, stepMinutes: 10, maxJobMinutes: 30 },
-  { job: 'rust-nonshard', script: nonShard, stepMinutes: 45, maxJobMinutes: 75 },
+  {
+    job: 'rust-tests',
+    script: shard,
+    stepMinutes: 10,
+    maxJobMinutes: 30,
+    guardedCommand: 'node "$GITHUB_WORKSPACE/scripts/ci/run-rust-shard.mjs" ${{ matrix.shard.label }}',
+  },
+  {
+    job: 'rust-nonshard',
+    script: nonShard,
+    stepMinutes: 45,
+    maxJobMinutes: 75,
+    guardedCommand: "bash -euo pipefail -c '",
+  },
 ];
 
-describe.each(guards)('$job timeout guard', ({ script, stepMinutes }) => {
+describe.each(guards)('$job timeout guard', ({ script, stepMinutes, guardedCommand }) => {
   it('does not pipe the guarded test command', () => {
     // The pipe is the bug: a descendant holding the write end keeps `tee`
     // waiting after the guard has already killed the test, so the guard ends
@@ -272,8 +284,7 @@ describe.each(guards)('$job timeout guard', ({ script, stepMinutes }) => {
     ).toHaveLength(1);
     expect(shell).toMatch(new RegExp(`--minutes ${stepMinutes}\\b`));
     expect(shell).toMatch(/--kill-grace-seconds \d+/);
-    // The guarded command itself, after the `--` separator.
-    expect(shell).toMatch(/-- (cargo|bash)\b/);
+    expect(shell.match(/^ +-- (.+)$/m)?.[1]).toBe(guardedCommand);
     expect(shell).not.toMatch(/\|\|\s*true/);
   });
 

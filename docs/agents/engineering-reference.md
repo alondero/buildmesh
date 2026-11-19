@@ -13,7 +13,20 @@ apply the design and evidence sections to the complete change.
 | Worker / lifecycle / resource ownership | Keep decisions independent of SQLite, PTY, clocks, and network; inject observations at the existing seam. Test cancellation, restart/replay, stale completion, and cleanup failure where relevant. Assert durable state and effects together. Defensive fencing must be best-effort: never drop lifecycle events (turn completion, idle, exit) solely because an optional correlation token is absent; only drop on explicit mismatch. Examples: circuit `stepper` and `services/circuit_worker` tests. |
 | UI layout and gestures | Verify actual narrow layout (Probe: 240px), error/loading/empty states, and keyboard/touch behavior. Keyboard navigation models must match rendered geometry: when a grid collapses to a 1D column at narrow widths, horizontal arrows must be inert and vertical arrows must walk linearly. Tab strips must render in stable insertion order (MRU is eviction-only). Never apply CSS `filter` (`hover:brightness-*`) on containers hosting `position: fixed` overlays. Alert placement and accessibility-role changes are UI changes. Test rendered geometry in a browser; jsdom class assertions cannot establish fit or scrolling. Read `docs/development/probe-ui-checklist.md`. |
 
-Use the smallest existing seam that hides the external dependency. Avoid exporting internals only to test them, reproducing production algorithms inside tests, empty tests, and mocks that merely echo the expectation. For a bug, demonstrate the regression fails before the fix when practical; otherwise explain why the test distinguishes the faulty behavior. Avoid paper-tiger tests: do not use early-returns (`if (!condition) return;`) that silently skip assertions in CI environments, tautological assertions (`assert_eq!(f(x), f(x))`), arbitrary magic bounds (`assert!(n < 1024)`), or testing basic DB/framework guarantees instead of business logic. Use promises/events/fake clocks for ordering rather than arbitrary sleeps. A no-console-warning assertion alone does not prove unmount safety.
+Use the smallest existing seam that hides the external dependency. Avoid exporting internals only to test them, reproducing production algorithms inside tests, empty tests, and mocks that merely echo the expectation. Avoid paper-tiger tests: do not use early-returns (`if (!condition) return;`) that silently skip assertions in CI environments, tautological assertions (`assert_eq!(f(x), f(x))`), arbitrary magic bounds (`assert!(n < 1024)`), or testing basic DB/framework guarantees instead of business logic. Use promises/events/fake clocks for ordering rather than arbitrary sleeps. A no-console-warning assertion alone does not prove unmount safety.
+
+### Production-boundary regression
+
+For a bug fix, new correctness guard, or new regression test for an existing
+guard, run the focused test through the production entry point it protects.
+Keep the test in an [isolated copy](development-harness.md#isolated-review-checks)
+and restore only the faulty behavior. Run the same test there and record the
+specific assertion that fails. Record the passing result on the final tree.
+Both runs must compile, discover the test, and reach the assertion.
+
+If an isolated reversion cannot compile, inject the same faulty condition at
+an existing seam and record the expected assertion failure there. When the
+necessary runtime is unavailable, record the criterion as blocked.
 
 ## Choose checks by scope
 

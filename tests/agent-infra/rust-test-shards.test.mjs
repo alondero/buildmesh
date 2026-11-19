@@ -96,6 +96,17 @@ test('a normal shard run keeps its output and a failing exit code', async () => 
   assert.match(result.output, /test result: FAILED\. 0 passed; 1 failed/);
 });
 
+test('the shard runner keeps a UTF-8 test name split across pipe reads', async () => {
+  const child = [
+    'process.stdout.write(Buffer.from([100, 98, 58, 58, 195]), () => {',
+    '  setTimeout(() => process.stdout.write(Buffer.from([169, 58, 32, 116, 101, 115, 116, 10])), 100);',
+    '});',
+  ].join('\n');
+  const result = await run('list-test-names', process.execPath, ['-e', child]);
+  assert.equal(result.code, 0, result.output);
+  assert.equal(result.stdout, 'db::é: test\n');
+});
+
 test('a process that cannot be started reports the spawn failure instead of hanging', async () => {
   const result = await run('missing-shard', join(tmpdir(), 'buildmesh-no-such-binary-2374'), [], {
     drainCapMs: DRAIN_CAP_MS,
