@@ -137,8 +137,13 @@ pub(super) fn emit_provider_warning(
 ///
 /// Generated to `src/types/generated/MeshSyncWarningPayload.ts`; the TS half
 /// is imported by `src/App.tsx`. Kept as a flat struct with `Option<...>`
-/// fields rather than a tagged-enum so a single TS type covers all six
+/// fields rather than a tagged-enum so a single TS type covers all the
 /// outcomes — the frontend only reads `message` regardless.
+///
+/// `node_id` is the Agent Node the warning is about. A warning that is about
+/// a *Mesh* rather than a Node — the background sync's permanent failure
+/// (issue #2832), which no Node caused — carries `0`, the "no node" sentinel.
+/// The frontend matches the Mesh by `mesh_path`, not by `node_id`.
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export, export_to = "MeshSyncWarningPayload.ts")]
 pub struct MeshSyncWarningPayload {
@@ -172,4 +177,9 @@ pub enum MeshSyncOutcome {
     PrHeadUnfetchable,
     PrForkUnfetchable,
     PrShaDrift,
+    /// The sync failed permanently (issue #2832): the remote lacks the
+    /// branch the Mesh asked for, the remote is gone, or the credentials are
+    /// refused. The Mesh's background sync is paused until its configuration
+    /// changes.
+    PermanentFetchFailure,
 }

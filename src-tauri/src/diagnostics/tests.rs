@@ -21,7 +21,8 @@ fn sample_fixture() -> Sample {
         elapsed_secs: 5.0,
         bg_sync_attempts: 12,
         bg_sync_advanced: 2,
-        bg_sync_failures: 0,
+        bg_sync_permanent_failures: 1,
+        bg_sync_transient_failures: 3,
         bg_sync_last_ms: 430,
         git_timeouts: 0,
         db_pool: Some(crate::db::ReaderPoolStats {
@@ -73,7 +74,12 @@ fn format_line_renders_expected_fields() {
         line.contains("git_changed=142(+20/4.0ps)"),
         "git_changed total/delta/rate: {line}"
     );
-    assert!(line.contains("bg_sync=att:12/adv:2/fail:0/last_ms:430"));
+    // Issue #2832: permanent and transient background-sync failures are
+    // counted SEPARATELY. A permanent one (a Mesh whose `base_ref` names a
+    // branch the remote does not have) is not self-healing on the retry
+    // schedule — the worker pauses that Mesh's sync — so a climbing
+    // `fail_perm` is a misconfiguration, while `fail_trans` is the network.
+    assert!(line.contains("bg_sync=att:12/adv:2/fail_perm:1/fail_trans:3/last_ms:430"));
     assert!(line.contains("git_timeouts=0"));
     // Issue #1533: the reader pool's saturation is on the line, so a pool
     // exhaustion that used to kill the app is diagnosable after the fact.

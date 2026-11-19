@@ -82,9 +82,17 @@ pub static GIT_CHANGED_EMITS: AtomicU64 = AtomicU64::new(0);
 pub static BG_SYNC_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
 /// Background syncs that advanced the base ref (triggering a warm-pool reset).
 pub static BG_SYNC_ADVANCED: AtomicU64 = AtomicU64::new(0);
-/// Background syncs that failed (offline / auth / timeout). Self-healing, but
-/// a climbing count while the machine grinds points at the network path.
-pub static BG_SYNC_FAILURES: AtomicU64 = AtomicU64::new(0);
+/// Background syncs that failed **permanently** (issue #2832) — the remote
+/// lacks the branch the Mesh asked for, the remote is gone, or the
+/// credentials are refused. These are NOT self-healing on the retry schedule:
+/// the pool worker pauses the Mesh's sync for at least an hour, so a climbing
+/// count here is the signature of a Mesh whose `base_ref` names a branch the
+/// remote does not have.
+pub static BG_SYNC_PERMANENT_FAILURES: AtomicU64 = AtomicU64::new(0);
+/// Background syncs that failed **transiently** (offline / timeout / network).
+/// Self-healing — the next attempt on the normal schedule may well succeed —
+/// but a climbing count while the machine grinds points at the network path.
+pub static BG_SYNC_TRANSIENT_FAILURES: AtomicU64 = AtomicU64::new(0);
 /// Wall-clock of the most recent background sync fetch, in milliseconds
 /// (gauge, not monotonic — overwritten each sync).
 pub static BG_SYNC_LAST_MS: AtomicU64 = AtomicU64::new(0);
@@ -101,8 +109,9 @@ pub fn record_git_changed_emit() {
 }
 
 /// Common to every background-sync outcome: it was an attempt, and it took
-/// `elapsed`. Split out so `record_bg_sync` / `record_bg_sync_failure` differ
-/// only in the outcome counter they bump.
+/// `elapsed`. Split out so `record_bg_sync` / `record_bg_sync_permanent_failure`
+/// / `record_bg_sync_transient_failure` differ only in the outcome counter
+/// they bump.
 #[inline]
 fn stamp_bg_sync_attempt(elapsed: Duration) {
     BG_SYNC_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
@@ -118,11 +127,22 @@ pub fn record_bg_sync(advanced: bool, elapsed: Duration) {
     }
 }
 
-/// Record a background-sync failure (the fetch errored — offline/auth/timeout).
+/// Record a background-sync failure classified as permanent (issue #2832):
+/// the remote lacks the branch, the remote is gone, or the credentials are
+/// refused. Counted separately from the transient failures so the DIAG line
+/// separates "the network is flaky" from "this Mesh is configured wrong".
 #[inline]
-pub fn record_bg_sync_failure(elapsed: Duration) {
+pub fn record_bg_sync_permanent_failure(elapsed: Duration) {
     stamp_bg_sync_attempt(elapsed);
-    BG_SYNC_FAILURES.fetch_add(1, Ordering::Relaxed);
+    BG_SYNC_PERMANENT_FAILURES.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a background-sync failure that the next attempt may fix (offline,
+/// timeout, network). Kept on the normal retry schedule.
+#[inline]
+pub fn record_bg_sync_transient_failure(elapsed: Duration) {
+    stamp_bg_sync_attempt(elapsed);
+    BG_SYNC_TRANSIENT_FAILURES.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Record a git-subprocess timeout (deadline hit in `run_command_with_timeout`).
@@ -197,7 +217,12 @@ pub struct Sample {
     pub elapsed_secs: f64,
     pub bg_sync_attempts: u64,
     pub bg_sync_advanced: u64,
-    pub bg_sync_failures: u64,
+    /// Background-sync failures classified as permanent (issue #2832): the remote
+    /// lacks the branch the Mesh asked for, the remote is gone, or the
+    /// credentials are refused.
+    pub bg_sync_permanent_failures: u64,
+    /// Background-sync failures the next attempt may fix (offline / timeout).
+    pub bg_sync_transient_failures: u64,
     pub bg_sync_last_ms: u64,
     pub git_timeouts: u64,
     /// The SQLite reader pool's saturation (issue #1533).
@@ -240,7 +265,7 @@ pub fn format_line(s: &Sample) -> String {
     format!(
         "DIAG uptime_s={} rss_mb={} priv_mb={} handles={} threads={} child_procs={} \
          watchers={} pty={} pty_qmsg={} pty_qbytes={} git_changed={}(+{}/{:.1}ps) \
-         bg_sync=att:{}/adv:{}/fail:{}/last_ms:{} git_timeouts={} db_pool={}",
+         bg_sync=att:{}/adv:{}/fail_perm:{}/fail_trans:{}/last_ms:{} git_timeouts={} db_pool={}",
         s.uptime_secs,
         s.vitals.working_set_bytes / (1024 * 1024),
         s.vitals.private_bytes / (1024 * 1024),
@@ -256,7 +281,8 @@ pub fn format_line(s: &Sample) -> String {
         rate,
         s.bg_sync_attempts,
         s.bg_sync_advanced,
-        s.bg_sync_failures,
+        s.bg_sync_permanent_failures,
+        s.bg_sync_transient_failures,
         s.bg_sync_last_ms,
         s.git_timeouts,
         db_pool,
@@ -352,7 +378,8 @@ fn run_sampler(log_dir: std::path::PathBuf, interval: Duration) {
             elapsed_secs,
             bg_sync_attempts: BG_SYNC_ATTEMPTS.load(Ordering::Relaxed),
             bg_sync_advanced: BG_SYNC_ADVANCED.load(Ordering::Relaxed),
-            bg_sync_failures: BG_SYNC_FAILURES.load(Ordering::Relaxed),
+            bg_sync_permanent_failures: BG_SYNC_PERMANENT_FAILURES.load(Ordering::Relaxed),
+            bg_sync_transient_failures: BG_SYNC_TRANSIENT_FAILURES.load(Ordering::Relaxed),
             bg_sync_last_ms: BG_SYNC_LAST_MS.load(Ordering::Relaxed),
             git_timeouts: GIT_SUBPROCESS_TIMEOUTS.load(Ordering::Relaxed),
             db_pool: crate::db::reader_pool_stats(),

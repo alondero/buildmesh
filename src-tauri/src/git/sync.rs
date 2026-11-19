@@ -718,7 +718,9 @@ pub(crate) const SPAWN_SYNC_LOCK_TIMEOUT: Duration = Duration::from_secs(45);
 /// Callers that need to disambiguate should use the full
 /// `refs/heads/feature/auth` form for the local case or
 /// `refs/remotes/<remote>/feature/auth` for the remote case.
-fn parse_remote_for_base_ref(base_ref: &str) -> Option<String> {
+/// `pub(crate)` so the background mesh sync (issue #2832) can name the remote
+/// and the branch a permanent failure is about without re-deriving them.
+pub(crate) fn parse_remote_for_base_ref(base_ref: &str) -> Option<String> {
     let trimmed = base_ref.trim();
     if trimmed.is_empty()
         || trimmed.eq_ignore_ascii_case("HEAD")
@@ -1192,6 +1194,12 @@ fn stamp_fetch_freshness(mesh_path: &str, fetched_ok: &bool) {
     crate::git::fetch_freshness::note_attempt(mesh_path);
     if *fetched_ok {
         crate::git::fetch_freshness::note_success(mesh_path);
+        // Issue #2832: a fetch that reached the remote proves that a
+        // recorded permanent failure may not describe this Mesh any more —
+        // the remote now has the branch, or the credentials work. The pause is
+        // over, so the next background sync runs on the normal schedule
+        // instead of waiting out a backoff that does not apply.
+        crate::git::fetch_failure::record_success(mesh_path);
     }
 }
 
