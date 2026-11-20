@@ -97,6 +97,7 @@ describe('agent workflow title-bar control', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
     await userEvent.click(screen.getByRole('button', { name: 'Codex logins' }));
     await userEvent.click(screen.getByRole('menuitem', { name: 'Work' }));
+    expect(screen.queryByTestId('harness-logins')).toBeNull();
     expect(screen.getByTestId('reviewer-provider-selection').textContent).toContain('Codex · Work');
     await userEvent.click(screen.getByRole('button', { name: 'Start review' }));
     await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'codex', 'work'));
@@ -229,6 +230,9 @@ describe('agent workflow title-bar control', () => {
       .toEqual(['__default', 'claude', 'codex']);
     await userEvent.click(screen.getByRole('button', { name: 'Claude Code configurations' }));
     await userEvent.click(await screen.findByRole('menuitem', { name: 'MiniMax' }));
+    // Picking from the flyout dismisses it, like every other menu surface;
+    // the inline picker itself stays so the choice can be revised.
+    expect(screen.queryByTestId('spawn-configurations')).toBeNull();
     // The configuration id is what reaches the backend, where it becomes the
     // launch *selection*: `launch_configurations::resolve` applies the recipe's
     // model and effort ahead of the harness's Mesh/application cascade (pinned

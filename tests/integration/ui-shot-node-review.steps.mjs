@@ -23,7 +23,7 @@ export default async function ({ page, mock }) {
   await expect(dialog.getByText('Reviewer launch configuration')).toBeVisible();
   await dialog.getByRole('button', { name: 'Claude configurations' }).click();
   await page.getByRole('menuitem', { name: 'Parser review configuration', exact: true }).click();
-  await page.getByRole('menu', { name: 'Claude configurations', exact: true }).press('Escape');
+  await expect(page.getByRole('menu', { name: 'Claude configurations', exact: true })).toHaveCount(0);
   await expect(dialog.getByTestId('reviewer-provider-selection')).toHaveText('Parser review configuration');
   await dialog.getByLabel('Maximum review rounds').fill('0');
   await expect(dialog.getByRole('button', { name: 'Start review', exact: true })).toBeDisabled();

@@ -119,7 +119,14 @@ describe('the Codex login submenu', () => {
 
     await userEvent.click(within(configurations).getByRole('menuitem', { name: 'Work only' }));
     expect(onSelect).toHaveBeenCalledWith('codex', false, 'launch/work-only', 'work');
-    await userEvent.click(within(configurations).getByRole('menuitem', { name: 'Spawn with defaults' }));
+    // The pick dismisses the whole flyout chain; reopen it from the harness
+    // row for the defaults row.
+    expect(screen.queryByRole('menu', { name: 'Codex Work configurations' })).toBeNull();
+    expect(screen.queryByRole('menu', { name: 'Codex logins' })).toBeNull();
+    const logins = await openLogins();
+    await userEvent.click(within(logins).getByRole('button', { name: 'Work configurations' }));
+    const reopened = await screen.findByRole('menu', { name: 'Codex Work configurations' });
+    await userEvent.click(within(reopened).getByRole('menuitem', { name: 'Spawn with defaults' }));
     expect(onSelect).toHaveBeenLastCalledWith('codex', false, undefined, 'work');
   });
 
