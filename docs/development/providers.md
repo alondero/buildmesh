@@ -920,7 +920,9 @@ search field or from a browse row filters the caller's Spawn Options by harness,
 recipe, and login labels. Results retain their harness and login context and the
 menu's order. Arrow keys, Home and End move through results, Enter picks the
 highlighted choice, and Escape clears the search before dismissing the picker.
-Unavailable matches show their reason. The empty state links to Launch
+A pick dismisses the flyout it came from, including a login level above it, and
+returns focus to its harness row; an inline picker stays so the choice can be
+revised. Unavailable matches show their reason. The empty state links to Launch
 Configurations in Settings. The default `spawn` mode offers logins wherever
 the shared menu is used. Context adapters own placement and the action performed
 after a pick:

@@ -186,6 +186,16 @@ export function GroupedProviderMenu({
     if (closeOnTab) onClose?.();
     else submenu?.anchor.focus({ preventScroll: true });
   };
+  // A pick is a commitment, so the flyout it came from goes away. The browse
+  // list itself stays: it is the picker on inline surfaces, and dropdown
+  // consumers close it through `onClose`. Focus returns to the harness row so
+  // it does not fall to the document when the flyout unmounts.
+  const pick = (...args: Parameters<GroupedProviderMenuProps['onSelect']>) => {
+    const anchor = submenu?.anchor;
+    setSubmenu(null);
+    anchor?.focus({ preventScroll: true });
+    onSelect(...args);
+  };
 
   const browseMenu = (
     <div ref={menuRef} role="menu" aria-label="Select a provider" hidden={query.trim().length > 0}
@@ -241,7 +251,7 @@ export function GroupedProviderMenu({
                 aria-expanded={configurable(option) ? submenu?.option.id === option.id : undefined}
                 aria-disabled={Boolean(option.unavailable_reason)}
                 title={option.unavailable_reason ?? option.verification_warning ?? undefined}
-                onClick={(e) => { e.stopPropagation(); if (!option.unavailable_reason) onSelect(option.id, e.altKey); }}
+                onClick={(e) => { e.stopPropagation(); if (!option.unavailable_reason) pick(option.id, e.altKey); }}
                 onMouseEnter={(e) => { if (!editing.current) e.currentTarget.focus({ preventScroll: true }); }}
                 onFocus={() => syncCaretToFocus(option.id)}
                 onKeyDown={(e) => {
@@ -280,18 +290,18 @@ export function GroupedProviderMenu({
         logins={logins.filter((login) => login.harness_id === submenu.option.harness_id)}
         decorate={decorate}
         configurationRows={configurationRows}
-        onEditingChange={(value) => { editing.current = value; }} onSelect={onSelect} onClose={() => setSubmenu(null)} onDismiss={dismissSubmenu} />}
+        onEditingChange={(value) => { editing.current = value; }} onSelect={pick} onClose={() => setSubmenu(null)} onDismiss={dismissSubmenu} />}
       {submenu && !choosesLogin(submenu.option) && <SpawnConfigurationMenu key={submenu.option.id} {...submenu}
         decorate={decorate}
         configurationRows={configurationRows}
-        onEditingChange={(value) => { editing.current = value; }} onSelect={onSelect} onClose={() => setSubmenu(null)} onDismiss={dismissSubmenu} />}
+        onEditingChange={(value) => { editing.current = value; }} onSelect={pick} onClose={() => setSubmenu(null)} onDismiss={dismissSubmenu} />}
     </div>
   );
 
   return (
     <div className={className}>
       <SpawnChoiceSearch inputRef={inputRef} query={query} setQuery={setQuery} parents={flatItems}
-        recipes={recipes} logins={logins} decorate={decorate} mode={mode} onSelect={onSelect}
+        recipes={recipes} logins={logins} decorate={decorate} mode={mode} onSelect={pick}
         onFocus={() => { if (!editing.current) setSubmenu(null); }} onBrowse={focusBrowse} onClose={onClose} closeOnTab={closeOnTab}
         onManage={() => {
           onClose?.();
