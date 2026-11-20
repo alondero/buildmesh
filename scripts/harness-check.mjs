@@ -193,6 +193,9 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/services/circuit_worker/native_hooks_tests.rs': 'services::circuit_worker::native_hooks::tests',
   'src-tauri/src/services/circuit_worker/native_pull_tests.rs': 'services::circuit_worker::native_pull::tests',
   'src-tauri/src/services/circuit_worker/result_handoff_tests.rs': 'services::circuit_worker::result_handoff::tests',
+  // The typed wake channel's own suite (issue #2831). `wake.rs` declares it,
+  // so the tests run under the module that declares them.
+  'src-tauri/src/services/circuit_worker/wake_tests.rs': 'services::circuit_worker::wake::tests',
   'src-tauri/src/services/legacy_retirement/retirement_crash_tests.rs': 'services::legacy_retirement::retirement_crash_tests',
   'src-tauri/src/services/pool_worker_tests.rs': 'services::pool_worker::tests',
   'src-tauri/src/services/transcript_reader/report_snapshot_tests.rs': 'services::transcript_reader::report_snapshot::tests',

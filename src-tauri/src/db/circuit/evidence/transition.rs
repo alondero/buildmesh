@@ -64,7 +64,10 @@ pub fn commit_transition(
     drop(db);
     if result.is_ok() && state.is_some_and(crate::circuit::vocabulary::RunState::is_terminal_db_str)
     {
-        crate::services::circuit_worker::wake_circuit_worker();
+        // A terminal state frees a capacity slot, and the pending run behind
+        // it must be admitted without waiting out the worker's tick. This is
+        // a durable change, so it is never downgraded to self-work.
+        crate::services::circuit_worker::wake_circuit_worker_durable();
     }
     result
 }

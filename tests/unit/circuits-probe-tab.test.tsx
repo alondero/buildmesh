@@ -125,8 +125,21 @@ const RUN_DONE: CircuitRunDetail = {
   ],
 };
 
+/**
+ * A ledger timestamp `minutes` in the past, in SQLite's UTC form.
+ *
+ * A live run that has not moved for six hours reads as stalled (issue
+ * #2831), so a fixture pinned to a fixed past date would describe a stuck
+ * run rather than the live one each test means to show. Anchoring the
+ * timestamp to the wall clock keeps "in progress" true whenever the suite
+ * runs.
+ */
+function minutesAgo(minutes: number): string {
+  return new Date(Date.now() - minutes * 60_000).toISOString().slice(0, 19).replace('T', ' ');
+}
+
 const RUN_RUNNING: CircuitRunDetail = {
-  run: { ...RUN_DONE.run, id: 12, state: 'running' },
+  run: { ...RUN_DONE.run, id: 12, state: 'running', updated_at: minutesAgo(2), created_at: minutesAgo(9) },
   steps: [],
 };
 
@@ -342,7 +355,7 @@ describe('CircuitsProbeTab', () => {
     expect(invoke).toHaveBeenCalledWith('continue_circuit_review', { runId: 11, additionalRounds });
     expect(screen.getByTestId('run-continue-review-11').hasAttribute('disabled')).toBe(true);
     expect(screen.getByLabelText('Additional review rounds').hasAttribute('disabled')).toBe(true);
-    mockBackend({ circuits, runs: [{ review_continuation: reviewContinuation({ available: false, refusal_reason: 'run_not_failed', lineage: { review_origin: 'local_preset', extended: true, recovery: { kind: 'none' } } }), run: { ...failed.run, state: 'running', context_json: '{"source.review_preset":"1","review.extended":"1","retry.attempt":"4","retry.max_retries":"4"}' }, steps: [] }] });
+    mockBackend({ circuits, runs: [{ review_continuation: reviewContinuation({ available: false, refusal_reason: 'run_not_failed', lineage: { review_origin: 'local_preset', extended: true, recovery: { kind: 'none' } } }), run: { ...failed.run, state: 'running', updated_at: minutesAgo(2), context_json: '{"source.review_preset":"1","review.extended":"1","retry.attempt":"4","retry.max_retries":"4"}' }, steps: [] }] });
     await act(async () => { finish(11); });
     await waitFor(() => expect(screen.getByTestId('circuits-view-activity').getAttribute('aria-selected')).toBe('true'));
     expect(screen.getByTestId('run-card-11').getAttribute('data-run-focused')).toBe('true');
@@ -495,10 +508,10 @@ describe('CircuitsProbeTab', () => {
   });
 
   it('does not present reordered activity cards as stable numbered slots', async () => {
-    const running = { ...RUN_RUNNING, run: { ...RUN_RUNNING.run, updated_at: '2026-08-22 10:01:00' } };
+    const running = { ...RUN_RUNNING, run: { ...RUN_RUNNING.run, updated_at: minutesAgo(3) } };
     const paused = {
       ...RUN_RUNNING,
-      run: { ...RUN_RUNNING.run, id: 13, circuit_id: 8, state: 'paused', updated_at: '2026-08-22 10:02:00' },
+      run: { ...RUN_RUNNING.run, id: 13, circuit_id: 8, state: 'paused', updated_at: minutesAgo(2) },
     };
     mockBackend({ circuits: [CIRCUIT, { ...CIRCUIT, id: 8, name: 'review' }], runs: [running, paused] });
     openProbeDestination('circuits');
@@ -563,6 +576,52 @@ describe('CircuitsProbeTab', () => {
     expect(invoke).toHaveBeenCalledWith('list_circuit_probe', { meshId: 42, limit: 10 });
   });
 
+  it('says a long-stuck run is stalled instead of running (issue #2831)', async () => {
+    // The worker no longer spins, so a run that stopped moving is nobody's
+    // news but the user's: the card says so, names the quiet stretch, and
+    // the run counts as needing attention.
+    const stuck: CircuitRunDetail = {
+      ...RUN_RUNNING,
+      run: { ...RUN_RUNNING.run, id: 26, updated_at: minutesAgo(7 * 60) },
+    };
+    mockBackend({ runs: [stuck] });
+    openProbeDestination('circuits');
+
+    expect((await screen.findByTestId('run-state-26')).textContent).toBe('Stalled');
+    expect((await screen.findByTestId('run-stuck-26')).textContent).toContain('7h 0m');
+    // It is a standing problem, so the tab's status line reports it.
+    expect(screen.getByTestId('circuits-status').textContent).toContain('need attention');
+  });
+
+  it('flips a run to Stalled when it crosses the quiet window while the tab sits idle (issue #2831)', async () => {
+    // Nothing sends an event when a run crosses the six-hour line, so the
+    // tab has to notice on its own clock.
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-08-22T10:00:00Z'));
+      const almostStuck: CircuitRunDetail = {
+        ...RUN_RUNNING,
+        // Quiet for 5h 58m — under the window.
+        run: { ...RUN_RUNNING.run, id: 27, updated_at: '2026-08-22 04:02:00' },
+      };
+      mockBackend({ runs: [almostStuck] });
+      openProbeDestination('circuits');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      expect(screen.getByTestId('run-state-27').textContent).toBe('Running');
+
+      // Two minutes later the run has crossed the window.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(120_000);
+      });
+      expect(screen.getByTestId('run-state-27').textContent).toBe('Stalled');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('surfaces the mesh-level run-admission detail on every queue row (#1475)', async () => {
     // The Probe's queue lists pending runs that the worker's
     // `may_admit_run` has parked against the mesh's circuit-run cap
@@ -576,7 +635,7 @@ describe('CircuitsProbeTab', () => {
     // admission count is 0 and the wording falls into the hedged
     // "spare capacity" branch — wrong surface area for this AC.
     mockBackend({
-      runs: [RUN_DONE, RUN_RUNNING, { run: { ...RUN_DONE.run, id: 13, state: 'running' }, steps: [] }],
+      runs: [RUN_DONE, RUN_RUNNING, { run: { ...RUN_DONE.run, id: 13, state: 'running', updated_at: minutesAgo(2) }, steps: [] }],
       queue: [
         {
           run: { ...RUN_DONE.run, id: 21, state: 'pending', trigger_identity: 'issue:21:run' },
@@ -1342,7 +1401,7 @@ describe('CircuitsProbeTab', () => {
 
   it('shows the blocked badge with an Approve button for parked gates', async () => {
     const RUN_BLOCKED: CircuitRunDetail = {
-      run: { ...RUN_DONE.run, id: 15, state: 'running' },
+      run: { ...RUN_DONE.run, id: 15, state: 'running', updated_at: minutesAgo(2) },
       steps: [
         {
           id: 3,
@@ -1451,7 +1510,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
 
   it('renders a long step chain as a vertical timeline, every node readable', async () => {
     const RUN_LONG: CircuitRunDetail = {
-      run: { ...RUN_DONE.run, id: 20, state: 'running' },
+      run: { ...RUN_DONE.run, id: 20, state: 'running', updated_at: minutesAgo(2) },
       steps: LONG_CHAIN_NODES.map((node_id, i) =>
         step({
           node_id,
@@ -1488,7 +1547,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
 
   it('explains a queued step instead of showing raw pending_slot', async () => {
     const RUN_QUEUED: CircuitRunDetail = {
-      run: { ...RUN_DONE.run, id: 21, state: 'running' },
+      run: { ...RUN_DONE.run, id: 21, state: 'running', updated_at: minutesAgo(2) },
       steps: [
         step({ node_id: 'trigger', status: 'completed', outcome: 'completed' }),
         step({ node_id: 'reviewer', status: 'pending_slot' }),
@@ -1498,7 +1557,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     // ADR 0042 retired the per-circuit step budget, so only the agent lease
     // can hold the reviewer back.
     const RUN_HOGGING: CircuitRunDetail = {
-      run: { ...RUN_DONE.run, id: 22, state: 'running' },
+      run: { ...RUN_DONE.run, id: 22, state: 'running', updated_at: minutesAgo(2) },
       steps: [step({ node_id: 'implementer', status: 'running' })],
     };
     mockBackend({ runs: [RUN_QUEUED, RUN_HOGGING] });
@@ -1517,7 +1576,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
 
   it('names the reviewer gate a run is parked on and keeps Approve working', async () => {
     const RUN_BLOCKED: CircuitRunDetail = {
-      run: { ...RUN_DONE.run, id: 24, state: 'running' },
+      run: { ...RUN_DONE.run, id: 24, state: 'running', updated_at: minutesAgo(2) },
       steps: [
         step({ node_id: 'implementer', status: 'completed', outcome: 'completed' }),
         step({ node_id: 'review_gate', status: 'blocked' }),
@@ -1605,7 +1664,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
 
   it('surfaces outcome, pass and duration per step', async () => {
     const RUN_RETRIED: CircuitRunDetail = {
-      run: { ...RUN_DONE.run, id: 26, state: 'running' },
+      run: { ...RUN_DONE.run, id: 26, state: 'running', updated_at: minutesAgo(2) },
       steps: [
         step({
           node_id: 'review_classifier',
@@ -1813,7 +1872,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     it('names the run after its implementation node, never the reviewer or the run id', async () => {
       seedAgentNodes([agent(900, 'ai-loading-spinner'), agent(901, 'ebony-unhelpful-cudgel')]);
       const RUN: CircuitRunDetail = {
-        run: { ...RUN_DONE.run, id: 41, state: 'running', trigger_identity: 'issue:2041:buildmesh:run' },
+        run: { ...RUN_DONE.run, id: 41, state: 'running', updated_at: minutesAgo(2), trigger_identity: 'issue:2041:buildmesh:run' },
         steps: [
           step({ node_id: 'implementer', status: 'completed', outcome: 'completed', agent_node_id: 900,
             started_at: '2026-08-22 10:05:00', completed_at: '2026-08-22 10:30:00' }),
@@ -2006,7 +2065,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     mockBackend({
       runs: [{
         ...RUN_DONE,
-        run: { ...RUN_DONE.run, id: 29, state: 'running', source_agent_node_id: 900 },
+        run: { ...RUN_DONE.run, id: 29, state: 'running', updated_at: minutesAgo(2), source_agent_node_id: 900 },
         steps: [],
       }],
     });
@@ -2098,7 +2157,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     mockBackend({
       runs: [{
         ...RUN_DONE,
-        run: { ...RUN_DONE.run, id: 31, state: 'running', source_agent_node_id: 404 },
+        run: { ...RUN_DONE.run, id: 31, state: 'running', updated_at: minutesAgo(2), source_agent_node_id: 404 },
         steps: [],
       }],
     });

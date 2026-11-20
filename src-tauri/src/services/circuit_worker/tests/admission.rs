@@ -154,3 +154,55 @@ fn may_admit_run_pending_saturated_mesh_defers() {
         "after terminal — third pending must admit (FIFO promotion)",
     );
 }
+
+// -- admission hold logging (issue #2831) ---------------------------------
+//
+// The worker re-evaluates every pending run on every pass, so logging the
+// hold on every pass wrote the same line again and again: on the hub the
+// worker spun at ~90 passes a second and wrote 66 MB of that one sentence in
+// 37 minutes. The line belongs to a state change — the run was first held,
+// or the reason it is held changed — so it is written then and not on every
+// pass that finds the same hold.
+
+#[test]
+fn the_held_line_is_written_once_per_run_per_hold_state() {
+    let run_id = 9_101;
+    let hold = super::admission::HeldAdmission {
+        mesh_id: 42,
+        active_runs: 2,
+        capacity: 2,
+    };
+    assert!(
+        super::admission::log_hold(run_id, hold),
+        "the first hold of a run must be written"
+    );
+    assert!(
+        !super::admission::log_hold(run_id, hold),
+        "the same hold on the next pass must not be written again"
+    );
+    let fuller = super::admission::HeldAdmission {
+        mesh_id: 42,
+        active_runs: 3,
+        capacity: 2,
+    };
+    assert!(
+        super::admission::log_hold(run_id, fuller),
+        "a changed hold must be written"
+    );
+    let wider = super::admission::HeldAdmission {
+        mesh_id: 42,
+        active_runs: 3,
+        capacity: 3,
+    };
+    assert!(
+        super::admission::log_hold(run_id, wider),
+        "a changed capacity must be written"
+    );
+    // A run that stops waiting has its hold forgotten, so the next hold of
+    // that run is a change again.
+    super::admission::forget_hold(run_id);
+    assert!(
+        super::admission::log_hold(run_id, wider),
+        "a hold after the run left the queue must be written again"
+    );
+}

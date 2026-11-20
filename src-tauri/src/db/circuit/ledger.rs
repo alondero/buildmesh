@@ -2101,7 +2101,10 @@ pub fn commit_circuit_advance(
     tx.commit()?;
     drop(db);
     if result.terminal_woke {
-        crate::services::circuit_worker::wake_circuit_worker();
+        // A terminal state frees a capacity slot, and the pending run behind
+        // it must be admitted without waiting out the worker's tick. This is
+        // a durable change, so it is never downgraded to self-work.
+        crate::services::circuit_worker::wake_circuit_worker_durable();
     }
     Ok(())
 }

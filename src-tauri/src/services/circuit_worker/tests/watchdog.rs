@@ -340,18 +340,19 @@ fn approvals_recovers_from_poison() {
 
 #[test]
 fn wake_condvar_recovers_from_poison() {
-    // WAKE holds a `Mutex<bool>` paired with a `Condvar`. The bool
-    // latches a wake that arrives while the worker is not waiting, and
-    // the worker reads it when it parks. Poisoning the mutex freezes
-    // the worker thread on the next park. The recovery shape is the
-    // same as for APPROVALS; this test pins that path.
-    let (lock, _cvar) = &*WAKE;
-    poison_circuit_worker_static(lock);
+    // The wake channel holds the external-wake flag under a `Mutex` paired
+    // with a `Condvar`. The flag latches a wake that arrives while the
+    // worker is not waiting, and the worker reads it when it parks.
+    // Poisoning the mutex freezes the worker thread on the next park. The
+    // recovery shape is the same as for APPROVALS; this test pins that
+    // path.
+    let wake = &*wake::WAKE;
+    poison_circuit_worker_static(&wake.state);
     // After the panic, the OLD `.lock().unwrap()` form would now
     // return `Err(Poisoned)`. The recovery helper must hand back
     // a usable guard that can be passed to `wait_timeout` (the
     // real production call site — issue #1207 milestone 2).
-    let guard = lock_circuit_worker_static(lock);
+    let guard = lock_circuit_worker_static(&wake.state);
     // We deliberately do NOT call `wait_timeout` here — that would
     // block the test on the real condvar. Proving the helper
     // returns a guard is enough to assert the recovery path is
@@ -376,19 +377,22 @@ fn a_wake_while_the_worker_is_not_waiting_stays_pending() {
 
 #[test]
 fn a_wake_raised_during_a_pass_is_pending_when_the_worker_parks() {
-    let wake = (Mutex::new(true), Condvar::new());
+    let wake = WorkerWake::new();
+    wake.notify(WakeKind::External);
     let (woke, timed_out) = park_until_circuit_wake(&wake, Duration::from_secs(30));
     assert!(woke, "a wake raised before the wait is still pending");
     assert!(!timed_out, "that wake must not sit out the tick");
-    assert!(!*wake.0.lock().expect("park releases the flag"));
+    assert!(
+        !wake.take_external(),
+        "the park must release the flag it read"
+    );
 }
 
 #[test]
 fn wake_circuit_worker_arms_the_flag_the_park_reads() {
     wake_circuit_worker();
-    let (lock, _) = &*WAKE;
     assert!(
-        *lock_circuit_worker_static(lock),
+        take_pending_wake(),
         "wake_circuit_worker must set the flag the worker reads when it parks"
     );
 }
