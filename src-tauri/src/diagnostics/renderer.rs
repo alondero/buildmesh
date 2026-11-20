@@ -131,10 +131,7 @@ pub fn write_renderer_line(line: &str) -> RendererLineOutcome {
 /// Split from [`write_renderer_line`] so the decision can be exercised
 /// against a scratch file, instead of against the process-wide sink whose
 /// state depends on when the app started.
-fn route_renderer_line(
-    writer: Option<&mut RotatingWriter>,
-    line: &str,
-) -> RendererLineOutcome {
+fn route_renderer_line(writer: Option<&mut RotatingWriter>, line: &str) -> RendererLineOutcome {
     let Some(writer) = writer else {
         return RendererLineOutcome::Unavailable;
     };
