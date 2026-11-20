@@ -16,12 +16,11 @@
 ## Project Structure
 - `src/` — React frontend (Zustand stores, xterm.js TerminalManager)
 - `src-tauri/src/` — Rust backend (commands/, db/, diff/, env/, git/, models/). Module ownership and seams live in the [Rust module map](development/module-map.md). `env/host_path.rs` is the only module allowed to build `\\wsl$\` paths.
-- `tests/unit/` — Vitest unit tests
-- `tests/integration/` — Vitest integration tests
+- `tests/unit/`, `tests/integration/` — Vitest unit and integration tests
 - `tests/e2e/` — Playwright: webServer boots Vite on 1420; `verify-smoke` uses mock IPC, while chromium specs have additional real-runtime requirements. See `docs/agents/engineering.md` before launching.
 - `scripts/ui-shot.mjs` — ad-hoc UI verification + screenshots: Playwright attaches over CDP to the real dev-profile window (`scripts\run-dev.ps1 -CdpPort 9223`); see `.claude/skills/verify-ui/SKILL.md`
 - `docs/adr/` — Architecture Decision Records
-- `docs/learning/` — Enduring technical deep dives, harness capability reviews, and integration contracts (e.g. `harness-capabilities-matrix.md` — the consolidated harness × capability grid, `muse-harness-capabilities.md`)
+- `docs/learning/` — Enduring technical deep dives, harness capability reviews, and integration contracts (e.g. `harness-capabilities-matrix.md`)
 
 ## Where the architecture lives
 
@@ -39,6 +38,7 @@ For backend responsibility ownership, see the
 | Agent Node lifecycle, process registry, worktrees | [agent-nodes.md](development/agent-nodes.md) | `src-tauri/src/services/agent_node.rs`, `src-tauri/src/agent/`, `src-tauri/src/git/worktree/` |
 | Attention system, hooks, turn counting, node naming | [attention.md](development/attention.md) | `src-tauri/src/http/routes/attention.rs`, `src-tauri/src/commands/attention.rs`, `src-tauri/src/agent/session_lifecycle/` |
 | Probe panel, view modes, context lenses | [probe-ui.md](development/probe-ui.md) | `src/components/Probe/`, `src/stores/` |
+| Diagnostics, DevTools port, capture | [diagnostics.md](development/diagnostics.md) | `src-tauri/src/diagnostics/`, `scripts/diag-capture.mjs` |
 | Git query cache: freshness and retention | [git-query-cache.md](development/git-query-cache.md) | `src/lib/pathInvalidatedCache.ts`, `src/hooks/usePathInvalidatedQuery.ts`, `src-tauri/src/git/status_stats.rs` |
 | Windows, WSL paths, frameless window, shortcuts | [windows.md](development/windows.md) | `src-tauri/src/env/host_path.rs`, `src/components/TitleBar/`, `src/lib/windowFocus.ts` |
 | Startup, profiles, crash recovery, environment detection | [startup-and-profiles.md](development/startup-and-profiles.md) | `src-tauri/src/lib.rs`, `src-tauri/src/instance_guard.rs`, `src-tauri/src/env/environment.rs` |
@@ -63,9 +63,9 @@ Dated investigations and run write-ups are historical records, not current
 contracts: they live under [archive/](archive/README.md).
 
 Git-backed project folders use `git::project` for nearest-repository discovery
-and common-directory identity. `env::node_working_path` reconstructs saved scope
-for launch; `node_git_path` retains query/watcher identity and
-`node_worktree_path` retains checkout ownership. See
+and common-directory identity; `env::node_working_path`, `node_git_path` and
+`node_worktree_path` keep saved scope, query identity and checkout ownership
+apart. See
 [Agent Node worktree support](development/agent-nodes.md#worktree-support-git2-based).
 
 ## Anti-Patterns (DO NOT do)

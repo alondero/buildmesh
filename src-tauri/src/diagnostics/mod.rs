@@ -32,6 +32,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+pub mod cdp;
 mod watchdog;
 mod writer;
 pub(crate) use watchdog::{clear_expected_exit, mark_expected_exit, ExpectedExitReason};

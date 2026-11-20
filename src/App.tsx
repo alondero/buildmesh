@@ -24,6 +24,7 @@ import { ShortcutCheatsheet } from './components/ShortcutCheatsheet/ShortcutChea
 import { CommandOmnibar } from './components/CommandOmnibar/CommandOmnibar';
 import { UpdatePrompt } from './components/UpdatePrompt/UpdatePrompt';
 import { BootErrorPanel } from './components/BootErrorPanel/BootErrorPanel';
+import { DevtoolsPortBanner } from './components/Devtools/DevtoolsPortBanner';
 import { formatError } from './lib/errorUtils';
 import {
   captureNavigationState,
@@ -422,6 +423,10 @@ function App() {
           ("decorations": false in tauri.conf.json); dragging and
           double-click maximize are handled by the bar's drag regions. */}
       <TitleBar />
+      {/* Issue #2836 — the DevTools port is opt-in, and while it is open any
+          local process can drive this window. The notice says so for as long
+          as the port is open; it renders nothing when no port is open. */}
+      <DevtoolsPortBanner />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
         <div data-testid="terminal-workspace" className="min-w-[300px] flex-[1_0_300px] flex flex-col overflow-hidden">

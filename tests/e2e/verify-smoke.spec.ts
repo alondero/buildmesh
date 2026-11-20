@@ -148,6 +148,10 @@ const SMOKE_FIXTURES = {
     { id: 'anthropic', name: 'Claude', description: 'Anthropic Claude Code', icon: null, available: true, kind: 'cwrap' },
   ],
   get_app_preferences: { default_provider: 'anthropic', minimax_api_key_set: false, google_cloud_project: null },
+  // The smoke run is not the hub, so it opens no DevTools port (issue #2836).
+  // Fixtured so the app-chrome banner reads a status instead of warning about
+  // an unmocked IPC command.
+  get_devtools_status: { port: null, source: 'off' },
   get_provider_accounts: [],
   get_network_status: { lan_exposure_enabled: false, bound_port: 1992, realized_binds: [] },
   auto_resume_agent_nodes: [],

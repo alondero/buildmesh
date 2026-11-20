@@ -82,6 +82,10 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/http/routes/session_tests.rs': 'http::routes::session::tests',
   'src-tauri/src/services/device_session_expiry_tests.rs': 'services::device_session_expiry::tests',
   'src-tauri/src/commands/build_run_tests.rs': 'commands::build_run::tests',
+  // The opt-in DevTools port (issue #2836): the resolution rules and the
+  // command that reports them live in their own modules.
+  'src-tauri/src/diagnostics/cdp_tests.rs': 'diagnostics::cdp::tests',
+  'src-tauri/src/commands/devtools_tests.rs': 'commands::devtools::tests',
   'src-tauri/src/pty/output_window_tests.rs': 'pty::output_window::tests',
   'src-tauri/src/pty/sink_tests.rs': 'pty::sink::tests',
   'src-tauri/src/agent/launch_tests.rs': 'agent::launch::tests',

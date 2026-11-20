@@ -35,6 +35,7 @@ programs for you.
 - [Launch Configurations](#launch-configurations)
 - [Use more than one Codex login](#use-more-than-one-codex-login)
 - [Settings that matter](#settings-that-matter)
+- [Diagnose a slow hub](#diagnose-a-slow-hub)
 - [When Buildmesh cannot read your settings](#when-buildmesh-cannot-read-your-settings)
 - [Harness permission modes](#harness-permission-modes)
 - [Build and Run](#build-and-run)
@@ -1272,6 +1273,29 @@ CLI and WSL probes. Routes awaiting runtime verification explain that state
 and remain unavailable until verified. Failed checks keep a **Retry** action;
 defaults stay disabled if preferences failed to load, so a failed read cannot
 overwrite saved choices.
+
+## Diagnose a slow hub
+
+Some of the data that explains a slow or stuck hub only exists inside the
+window: the compositor's work, the running animations, the heap. Buildmesh
+can open a **DevTools port** for it — a Chrome DevTools Protocol endpoint on
+`127.0.0.1` that a diagnostic tool reads. It is **off by default**.
+
+Turn it on in **Settings → General → Diagnostics**: type a port (1024 to
+65535, for example `9222`) and leave the field to save it. The port is read
+when the window is created, so **restart Buildmesh** before it opens.
+
+While the port is open, Buildmesh says so in a strip under the title bar:
+any program on this computer can attach to the window and drive it. Chromium
+binds the endpoint to `127.0.0.1`, so the port is not reachable from the
+network — but "any local program" is a real widening, which is why the port
+is opt-in and says so while it is on. To close it again, clear the field and
+restart Buildmesh.
+
+With the port open, a diagnostic capture can be taken from the running app
+— the command and the contents of the bundle are in
+[Diagnostics and captures](development/diagnostics.md). **Take the capture
+before you reload the app**: a reload clears the state the capture is about.
 
 ## When Buildmesh cannot read your settings
 

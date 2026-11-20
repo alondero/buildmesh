@@ -10,6 +10,7 @@
     "dev": "vite",
     "dev:bg": "node scripts/dev-server.mjs start",
     "dev:stop": "node scripts/dev-server.mjs stop",
+    "diag:capture": "node scripts/diag-capture.mjs",
     "build": "tsc && vite build && vite build --mode mobile",
     "build:mobile": "vite build --mode mobile",
     "build:android-terminal": "vite build --config android/terminal/vite.config.ts",

@@ -178,6 +178,26 @@ worktree_directory: string | null,
  */
 confirm_before_quit: boolean, 
 /**
+ * The Chrome DevTools Protocol port the hub window opens at startup, or
+ * `None` (the default) for no port at all (issue #2836).
+ *
+ * A port lets a DevTools client — and `npm run diag:capture` — read the
+ * data that only exists inside the WebView: the compositor trace, the
+ * layer tree, the heap. It is **off by default**, and turning it on
+ * widens the surface: any process on this machine can drive the page
+ * through the port. Chromium binds the endpoint to `127.0.0.1`, so the
+ * port is not reachable from the network.
+ *
+ * The port is a **startup** switch: WebView2 reads its browser arguments
+ * when the window is created, which is before the settings UI can be
+ * used, so a change here takes effect on the next launch. The UI says so
+ * while the port is open.
+ *
+ * Additive on disk — older `preferences.json` files without it load as
+ * `None` via `#[serde(default)]`.
+ */
+diag_cdp_port: number | null, 
+/**
  * Custom template for the initial prompt handed to an agent spawned
  * from the Probe's GitHub Issues tab (`create_issue_node`).
  * `None` (the default) keeps the built-in wording (see

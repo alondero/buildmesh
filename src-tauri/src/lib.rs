@@ -168,8 +168,13 @@ pub fn run() {
     let mut context = tauri::generate_context!();
     startup::webview_data::apply(context.config_mut());
 
-    tauri::Builder::default()
-        .manage(crate::companion::CompanionState::default()).manage(crate::services::gh_auth_cache::GhAuthCache::new())
+    // Built, not run: the app has to exist before the DevTools port can be
+    // resolved (the port needs the app-data profile, which needs the app's
+    // own path resolver), and the port has to be resolved before the app
+    // *runs*, because running it is what creates the window.
+    let app = tauri::Builder::default()
+        .manage(crate::companion::CompanionState::default())
+        .manage(crate::services::gh_auth_cache::GhAuthCache::new())
         // Durable last-known Usage Meter readings (ADR-0037). Resolves the app
         // data dir lazily per call, since `manage` runs before `setup()`.
         .manage(crate::services::usage::last_known::UsageLastKnownCache::new())
@@ -207,14 +212,13 @@ pub fn run() {
                     match outcome {
                         // The user's retry got past it; carry on with the
                         // normal startup.
-                        Ok(()) => startup::installed()
-                            .expect("a successful retry installs the bootstrap"),
+                        Ok(()) => {
+                            startup::installed().expect("a successful retry installs the bootstrap")
+                        }
                         // The user quit with the failure outstanding. It is
                         // already recorded and already on screen, so this
                         // only has to end the process.
-                        Err(failure) => {
-                            return Err(Box::new(failure) as Box<dyn std::error::Error>)
-                        }
+                        Err(failure) => return Err(Box::new(failure) as Box<dyn std::error::Error>),
                     }
                 }
             };
@@ -235,8 +239,7 @@ pub fn run() {
             match instance_guard::with_profile_ownership(
                 &identity,
                 |report| {
-                    if let Err(e) =
-                        instance_guard::record_forwarded(&app_dir, &identifier, report)
+                    if let Err(e) = instance_guard::record_forwarded(&app_dir, &identifier, report)
                     {
                         eprintln!("could not record the forwarded launch: {e}");
                     }
@@ -320,6 +323,9 @@ pub fn run() {
             commands::preferences::set_app_circuit_agent_pool_size,
             commands::preferences::set_circuit_classifier_provider,
             commands::preferences::set_app_confirm_before_quit,
+            // The opt-in DevTools (CDP) port (issue #2836). A startup switch:
+            // it takes effect on the next launch.
+            commands::preferences::set_app_diag_cdp_port,
             commands::preferences::get_probe_spawn_prompt_defaults,
             commands::preferences::set_app_issue_spawn_prompt,
             commands::prompt_library::list_saved_prompts,
@@ -510,7 +516,6 @@ pub fn run() {
             commands::mesh_properties::get_mesh_pool_count,
             // Circuit-run capacity (issue #1467) — narrow single-column
             // write for the new `meshes.circuit_run_capacity` column.
-
             commands::mesh_properties::update_mesh_circuit_run_capacity,
             // Configurable Worktree Node directories (issue #1519): per-Mesh
             // override with same-environment validation for absolute paths.
@@ -559,6 +564,10 @@ pub fn run() {
             // Resolved absolute log locations (issue #1525) so the Boot Error
             // Panel can name a real path instead of "buildmesh.log".
             commands::diagnostics::get_diagnostic_paths,
+            // The opt-in DevTools (CDP) port this process opened (issue
+            // #2836), so the UI can say out loud that a local process can
+            // drive the window while it is open.
+            commands::devtools::get_devtools_status,
             // Frontend log bridge
             commands::frontend_log::log_frontend,
             // Attention (renamed from `*_attention_session` to `*_attention_node`)
@@ -634,98 +643,107 @@ pub fn run() {
             commands::opencode_oauth::set_opencode_console_workspace,
         ])
         .build(context)
-        .expect("error while building tauri application")
-        .run(|_app_handle, event| {
-            match &event {
-                tauri::RunEvent::ExitRequested { code, .. } => {
-                    diagnostics::mark_expected_exit(diagnostics::ExpectedExitReason::ExitRequested);
-                    tracing::info!(
-                        "App exit requested (code={:?}), marking running sessions as suspended",
-                        code
-                    );
-                    // Routes through SessionLifecycle (issue #132, #949) —
-                    // single owner of every `agent_nodes.status` write,
-                    // including the exit-time suspend sweep. `on_exit_sweep()`
-                    // wraps `db::mark_running_nodes_suspended()` exactly the
-                    // same way `recover_from_crash()` does for the startup
-                    // path; the wrappers are named separately so the trigger
-                    // (crash vs graceful shutdown) stays distinguishable in
-                    // logs and history.
-                    if let Err(e) = crate::agent::session_lifecycle::on_exit_sweep() {
-                        tracing::error!("Failed to mark sessions as suspended on exit: {}", e);
-                    }
-                    agent::process::kill_all_sessions();
-                }
-                tauri::RunEvent::Exit => {
-                    tracing::info!("App exit complete");
-                    // Stop advertising this instance's port: a sibling's next
-                    // harness spawn should not fan a callback out to a port
-                    // nothing answers on (issue #2343).
-                    crate::http::instances::unpublish(crate::http::current_http_port());
-                }
-                tauri::RunEvent::WindowEvent { label, event, .. } => match event {
-                    tauri::WindowEvent::CloseRequested { .. } => {
-                        USER_CLOSE_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
-                        diagnostics::mark_expected_exit(
-                            diagnostics::ExpectedExitReason::CloseRequested,
-                        );
-                        tracing::info!(window = %label, "Window close requested by user");
-                    }
-                    tauri::WindowEvent::Destroyed => {
-                        let user_initiated =
-                            USER_CLOSE_REQUESTED.load(std::sync::atomic::Ordering::SeqCst);
-                        if user_initiated {
-                            tracing::info!(window = %label, "Window destroyed after user close request");
-                        } else {
-                            // Forensics for the silent-exit class of failures
-                            // seen on 2026-08-26: NVIDIA driver resets killed
-                            // WebView2 twice and Buildmesh quit without ever
-                            // reaching ExitRequested, leaving no fingerprint.
-                            // A Destroyed-without-CloseRequested is that
-                            // failure mode surfacing through an observable
-                            // seam. Log loudly, then bounce the hub back so
-                            // agents keep running (guarded against loops).
-                            tracing::error!(
-                                window = %label,
-                                "Window destroyed WITHOUT a user close request — \
-                                 webview/GPU process death suspected"
-                            );
-                            #[cfg(target_os = "windows")]
-                            tracing::info!(
-                                "Deferring unexpected-exit recovery to the external watchdog"
-                            );
+        .expect("error while building tauri application");
 
-                            #[cfg(not(target_os = "windows"))]
-                            match crate::startup::installed() {
-                                Some(bootstrap) => match diagnostics::relaunch_detached(
-                                    &bootstrap.profile_dir().join("logs"),
-                                ) {
-                                    Ok(true) => {
-                                        tracing::info!("Auto-relaunch spawned (guard passed)");
-                                    }
-                                    Ok(false) => {
-                                        tracing::warn!(
-                                            "Auto-relaunch skipped — another auto-relaunch \
-                                             fired less than {}s ago",
-                                            diagnostics::AUTO_RELAUNCH_COOLDOWN_SECS
-                                        );
-                                    }
-                                    Err(e) => {
-                                        tracing::error!("Auto-relaunch failed: {}", e);
-                                    }
-                                },
-                                None => {
-                                    tracing::error!(
-                                        "Auto-relaunch failed (startup profile is not installed)"
+    // Issue #2836 — the opt-in DevTools (CDP) port has to be resolved
+    // **before** the app runs, because Tauri creates the window (and with it
+    // the WebView2 environment) on the event loop's first `Ready` event, and
+    // WebView2 reads its browser arguments when it creates that environment.
+    // The `setup` hook below runs *after* the window exists, so a port
+    // resolved there would be a port no process is listening on.
+    diagnostics::cdp::apply_startup_port(&app);
+
+    app.run(|_app_handle, event| {
+        match &event {
+            tauri::RunEvent::ExitRequested { code, .. } => {
+                diagnostics::mark_expected_exit(diagnostics::ExpectedExitReason::ExitRequested);
+                tracing::info!(
+                    "App exit requested (code={:?}), marking running sessions as suspended",
+                    code
+                );
+                // Routes through SessionLifecycle (issue #132, #949) —
+                // single owner of every `agent_nodes.status` write,
+                // including the exit-time suspend sweep. `on_exit_sweep()`
+                // wraps `db::mark_running_nodes_suspended()` exactly the
+                // same way `recover_from_crash()` does for the startup
+                // path; the wrappers are named separately so the trigger
+                // (crash vs graceful shutdown) stays distinguishable in
+                // logs and history.
+                if let Err(e) = crate::agent::session_lifecycle::on_exit_sweep() {
+                    tracing::error!("Failed to mark sessions as suspended on exit: {}", e);
+                }
+                agent::process::kill_all_sessions();
+            }
+            tauri::RunEvent::Exit => {
+                tracing::info!("App exit complete");
+                // Stop advertising this instance's port: a sibling's next
+                // harness spawn should not fan a callback out to a port
+                // nothing answers on (issue #2343).
+                crate::http::instances::unpublish(crate::http::current_http_port());
+            }
+            tauri::RunEvent::WindowEvent { label, event, .. } => match event {
+                tauri::WindowEvent::CloseRequested { .. } => {
+                    USER_CLOSE_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+                    diagnostics::mark_expected_exit(
+                        diagnostics::ExpectedExitReason::CloseRequested,
+                    );
+                    tracing::info!(window = %label, "Window close requested by user");
+                }
+                tauri::WindowEvent::Destroyed => {
+                    let user_initiated =
+                        USER_CLOSE_REQUESTED.load(std::sync::atomic::Ordering::SeqCst);
+                    if user_initiated {
+                        tracing::info!(window = %label, "Window destroyed after user close request");
+                    } else {
+                        // Forensics for the silent-exit class of failures
+                        // seen on 2026-08-26: NVIDIA driver resets killed
+                        // WebView2 twice and Buildmesh quit without ever
+                        // reaching ExitRequested, leaving no fingerprint.
+                        // A Destroyed-without-CloseRequested is that
+                        // failure mode surfacing through an observable
+                        // seam. Log loudly, then bounce the hub back so
+                        // agents keep running (guarded against loops).
+                        tracing::error!(
+                            window = %label,
+                            "Window destroyed WITHOUT a user close request — \
+                             webview/GPU process death suspected"
+                        );
+                        #[cfg(target_os = "windows")]
+                        tracing::info!(
+                            "Deferring unexpected-exit recovery to the external watchdog"
+                        );
+
+                        #[cfg(not(target_os = "windows"))]
+                        match crate::startup::installed() {
+                            Some(bootstrap) => match diagnostics::relaunch_detached(
+                                &bootstrap.profile_dir().join("logs"),
+                            ) {
+                                Ok(true) => {
+                                    tracing::info!("Auto-relaunch spawned (guard passed)");
+                                }
+                                Ok(false) => {
+                                    tracing::warn!(
+                                        "Auto-relaunch skipped — another auto-relaunch \
+                                         fired less than {}s ago",
+                                        diagnostics::AUTO_RELAUNCH_COOLDOWN_SECS
                                     );
                                 }
+                                Err(e) => {
+                                    tracing::error!("Auto-relaunch failed: {}", e);
+                                }
+                            },
+                            None => {
+                                tracing::error!(
+                                    "Auto-relaunch failed (startup profile is not installed)"
+                                );
                             }
                         }
                     }
-                    _ => {}
-                },
+                }
                 _ => {}
-            }
+            },
+            _ => {}
+        }
         });
 }
 
@@ -1101,6 +1119,11 @@ fn run_profile_startup(
     // back after a session degrades. Off the hot path; opt out with
     // `BUILDMESH_DIAG=0`, retune with `BUILDMESH_DIAG_INTERVAL_MS`.
     diagnostics::start_sampler(log_dir.clone());
+
+    // Issue #2836 — the DevTools port was resolved before the app was built
+    // (the window had to exist before the setting could be read), so the log
+    // line about it can only be written now, with the subscriber installed.
+    diagnostics::cdp::log_effective_port();
 
     // Install panic hook that logs thread ID + backtrace on every panic
     let crash_log_path = app_dir.join("logs").join("panic.log");
