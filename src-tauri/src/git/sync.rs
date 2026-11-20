@@ -1230,7 +1230,6 @@ mod tests {
     // end-to-end fetch path; these cover the parser edge cases
     // (HEAD / empty / refs/heads / nested branch / whitespace)
     // without needing a git repo.
-    // -----------------------------------------------------------------
 
     #[test]
     fn parse_remote_accepts_origin_slash_main() {
@@ -1317,7 +1316,6 @@ mod tests {
     // parse_branch_for_base_ref — the branch half, used to narrow the fetch
     // refspec to a single branch (latency fix). Mirrors the remote-parser
     // cases above so the two stay symmetric.
-    // -----------------------------------------------------------------
 
     #[test]
     fn parse_branch_accepts_short_remote_form() {

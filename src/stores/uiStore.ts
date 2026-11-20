@@ -63,12 +63,10 @@ function persistViewMode(mode: ViewMode): void {
   }
 }
 
-// ---------------------------------------------------------------------------
 // Grid Controls (wayfinder #988 — this ticket #995 is the state model, #996
 // the AgentNodeView filter/sort logic, #997 the View Header UI, #998 the
 // keyboard shortcuts). Only the state and its persistence live here: nothing
 // in this module reads the controls to decide what the grid renders.
-// ---------------------------------------------------------------------------
 
 // What the grid is ordered by. 'custom' is the user's manual drag order (the
 // `AgentNode.position` column) and stays the default, so the pre-#988 grid is

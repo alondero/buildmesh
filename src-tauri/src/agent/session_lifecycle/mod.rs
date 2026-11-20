@@ -113,9 +113,7 @@ const FORBIDDEN_HOOK_TRANSITION: &[SessionStatus] = &[
     SessionStatus::Lost,
 ];
 
-// ---------------------------------------------------------------------------
 // Wire types — Tauri event payloads (issue #161)
-// ---------------------------------------------------------------------------
 //
 // These structs are the source of truth for the three lifecycle event
 // payloads; ts-rs generates matching `*.ts` files into
@@ -174,9 +172,7 @@ pub struct AttentionClearedPayload {
     pub session_id: i64,
 }
 
-// ---------------------------------------------------------------------------
 // Normalized lifecycle contract (issue #1364)
-// ---------------------------------------------------------------------------
 //
 // The provider-neutral lifecycle signal: a typed kind plus a full envelope
 // preserving the provider's event name, session/turn id, completion reason,
@@ -470,9 +466,7 @@ pub struct ResumeFailedPayload {
     pub error: String,
 }
 
-// ---------------------------------------------------------------------------
 // Trait
-// ---------------------------------------------------------------------------
 
 /// Side-effect surface for lifecycle transitions. Mirrors `AttentionSink` in
 /// `commands/attention.rs` so the logic is testable without `AppHandle` or the
@@ -543,9 +537,7 @@ pub trait SessionLifecycleSink {
     fn emit_lifecycle_changed(&self, payload: LifecycleChangedPayload);
 }
 
-// ---------------------------------------------------------------------------
 // Production sink
-// ---------------------------------------------------------------------------
 
 /// Sink backed by the real DB + `AppHandle`. The **only** place in the
 /// codebase that calls the `db::update_agent_node_status*` family and the
@@ -662,14 +654,12 @@ impl SessionLifecycleSink for AppSessionLifecycleSink<'_> {
     }
 }
 
-// ---------------------------------------------------------------------------
 // DB-only sink — for paths where no `AppHandle` is reachable (e.g. the PTY
 // reader thread after app shutdown, or `clear_now` in `attention_autoclear.rs`
 // when `crate::http::app_handle()` returns `None`). Writes the DB but the
 // emit methods are no-ops, so a no-handle path silently drops the event
 // (matching pre-refactor behaviour where the `if let Some(app)` branch
 // guarded the emit).
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 pub mod testing;
@@ -776,9 +766,7 @@ impl SessionLifecycleSink for DbOnlySink {
     fn emit_lifecycle_changed(&self, _payload: LifecycleChangedPayload) {}
 }
 
-// ---------------------------------------------------------------------------
 // Transition entry points — one per state edge
-// ---------------------------------------------------------------------------
 
 /// The PTY child has been spawned — flip the node from whatever-it-was to
 /// `Spawning`. The forbidden set is the same one the reader thread uses
@@ -1560,9 +1548,7 @@ pub fn on_exit_sweep() -> Result<usize, String> {
     db::mark_running_nodes_suspended().map_err(|e| e.to_string())
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)] // allow-test-in-production: this inline session_lifecycle suite predates the sibling-test-file rule; relocating the pre-existing suite is out of scope.
 mod tests {
@@ -1603,11 +1589,9 @@ mod tests {
     // calls (without touching the global DB) reuses the same struct.
     use crate::agent::session_lifecycle::testing::RecordingSink;
 
-    // -----------------------------------------------------------------------
     // One transition = one write + (optional) one emit.
     // The headlining acceptance criterion: "Tauri events … are emitted from
     // exactly one place."
-    // -----------------------------------------------------------------------
 
     #[test]
     fn on_spawn_started_writes_spawning_with_forbidden_set() {
@@ -2232,11 +2216,9 @@ mod tests {
         assert_eq!(*sink.writes(), vec![(7, SessionStatus::Pending)]);
     }
 
-    // -----------------------------------------------------------------------
     // recover_from_crash delegates to db::mark_running_nodes_suspended().
     // The DB sweep itself is pinned by `db::agent_node_tests.rs` — this
     // module only owns the wiring (and accepts the AppSessionLifecycleSink
     // for symmetry with the other transitions, even though the sweep
     // doesn't emit any events).
-    // -----------------------------------------------------------------------
 }

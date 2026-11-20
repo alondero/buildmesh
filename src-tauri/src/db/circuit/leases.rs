@@ -712,9 +712,7 @@ pub(crate) fn archive_circuit_agent_inner(
     Ok(runs)
 }
 
-// ---------------------------------------------------------------------------
 // Retention sweep (issue #1236) — bounding an otherwise unbounded ledger.
-// ---------------------------------------------------------------------------
 
 /// The set a retention sweep may DELETE outright: terminal runs past the cutoff
 /// whose `trigger_identity` is a throwaway timestamp, minus each circuit's
@@ -914,11 +912,9 @@ pub(crate) fn prune_terminal_circuit_runs_before_inner(
     Ok((deleted, compacted))
 }
 
-// ---------------------------------------------------------------------------
 // Tests for reviewer + source ownership semantics (issue #1655: this test
 // module was previously embedded mid-file and broke `cargo clippy`'s
 // `items_after_test_module` lint; it now lives at the bottom of leases.rs).
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod activity_ownership_tests {

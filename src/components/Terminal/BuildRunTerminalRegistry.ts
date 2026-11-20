@@ -133,13 +133,7 @@ function payloadToBytes(payload: string | BuildRunOutputPayload): string | Uint8
   return '';
 }
 
-/** Centralized fit() that ALSO re-measures char widths — needed for
- *  Unicode 11+ glyph alignment so emoji output doesn't shear box-drawing
- *  borders. Mirrors TerminalRegistry.ts's `measureAndFit`. */
 function measureAndFit(inst: BuildRunInstance): void {
-  // xterm.js exposes `_core._charSizeService` as an internal API for
-  // re-measuring glyph widths. Mirrors the disable above; if/when xterm
-  // promotes this to a public type the two sites collapse together.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const charSizeService = (inst.term as any)['_core']?.['_charSizeService'];
   charSizeService?.measure();

@@ -561,9 +561,7 @@ fn current_statuses_emits_one_timing_log_line() {
     assert!(!value("codex_version").is_empty());
 }
 
-// -----------------------------------------------------------------------
 // The advisory policy: the pairing verification warns, it does not gate.
-// -----------------------------------------------------------------------
 
 fn advisory_pairing() -> ProviderPairing {
     ProviderPairing {

@@ -843,7 +843,6 @@ pub(super) fn classifier_budget_exhausted(view: &RunView, node_id: &str) -> bool
     })
 }
 
-// ---------------------------------------------------------------------------
 // Lost-turn watchdog (milestone 3, issue #1208).
 //
 // The turn webhook (`/api/attention/{id}`) is best-effort HTTP — a lost
@@ -854,7 +853,6 @@ pub(super) fn classifier_budget_exhausted(view: &RunView, node_id: &str) -> bool
 // review gate to fail and kill the agent before autoclear can recover it.
 // Publish through the normal lifecycle seam only after a finished turn or
 // explicit input request, and only while the observation is still current.
-// ---------------------------------------------------------------------------
 
 /// Quiet window before checking for a missed turn, also the retry interval
 /// for background or unavailable readiness evidence.

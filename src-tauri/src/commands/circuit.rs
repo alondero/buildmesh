@@ -534,9 +534,7 @@ pub fn list_circuit_runs(
     crate::services::circuit_control::list_runs(circuit_id, limit).map_err(String::from)
 }
 
-// ---------------------------------------------------------------------------
 // Human-in-the-loop (#1207): graceful pause/resume + collaborator approval.
-// ---------------------------------------------------------------------------
 
 /// Add bounded review rounds to the failed run on its retained work. Resuming the source uses
 /// the same lifecycle lease as Archive, so cleanup and process launch cannot

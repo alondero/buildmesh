@@ -396,13 +396,11 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
     });
   });
 
-  // -----------------------------------------------------------------
   // Issue #1535 (PR #1636 review round 3): per-field overrides, no
   // field shadowing, unmount cleanup, `''` vs `null` normalisation.
   // These five cases pin the architectural shape so future refactors
   // can't reintroduce the round-3 sync-effect / shared-shadow-ref
   // patterns.
-  // -----------------------------------------------------------------
   describe('per-field editable delta (PR #1636 review round 3)', () => {
     function keyedAccount(over: Partial<ProviderAccount> = {}): ProviderAccount {
       return account({
@@ -535,7 +533,6 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
     });
   });
 
-  // -----------------------------------------------------------------
   // Issue #1535: preserve dirty provider credentials across the
   // prop-synchronisation race the parent causes. The card must keep
   // a typed API key when (a) the user toggles Enabled while editing,
@@ -545,7 +542,6 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
   // overrides (no field shadowing), save composes from the latest
   // prop, mock `return false` (production path), defensive catch for
   // throws.
-  // -----------------------------------------------------------------
   describe('dirty credentials survive prop churn (issue #1535)', () => {
     function claudeCompatibleAccount(over: Partial<ProviderAccount> = {}): ProviderAccount {
       return account({
@@ -752,12 +748,10 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
     });
   });
 
-  // -----------------------------------------------------------------
   // Issue #2154 — the credential-store fallback notice. Both acceptance
   // states, driven through the real component:
   //   - the account whose key stayed in preferences.json says so
   //   - an account whose key is only in the credential store says nothing
-  // -----------------------------------------------------------------
   describe('key-stored-in-preferences notice (#2154)', () => {
     beforeEach(() => {
       mockIsWindows = true;

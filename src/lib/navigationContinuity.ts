@@ -325,9 +325,7 @@ function announceRecovery(plan: NavigationRestorePlan): void {
   }
 }
 
-// ---------------------------------------------------------------------------
 // Persistence
-// ---------------------------------------------------------------------------
 
 /**
  * Whether the live navigation may be recorded yet.

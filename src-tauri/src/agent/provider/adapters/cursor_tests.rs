@@ -74,7 +74,6 @@ fn advertises_transcript_support_after_reader_wiring() {
     assert!(CURSOR.descriptor().requires_attention_hook());
 }
 
-// -------------------------------------------------------------------
 // Attention hook injection — issue #1368 round-2.
 //
 // Cursor under `--force` behaves like AGY under
@@ -94,7 +93,6 @@ fn advertises_transcript_support_after_reader_wiring() {
 // were tautological (asserted that `ensure_hooks_json` wrote what
 // `ensure_hooks_json` told it to write); these tests assert against
 // the public schema Cursor actually loads.
-// -------------------------------------------------------------------
 
 use crate::agent::capabilities::AttentionCapability;
 use tempfile::TempDir;

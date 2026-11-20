@@ -3,14 +3,12 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-// ---------------------------------------------------------------------------
 // Autopilot Circuits (spec #1205 / walking skeleton #1206).
 //
 // Wire shapes for the three circuit ledger tables. The Graph Blueprint
 // AST itself is NOT re-declared here — it serialises to the
 // `graph_json` TEXT column and travels over IPC as that string; the
 // canonical Rust type lives in `circuit::model::CircuitGraph`.
-// ---------------------------------------------------------------------------
 
 /// One Autopilot Circuit — the persisted blueprint row.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

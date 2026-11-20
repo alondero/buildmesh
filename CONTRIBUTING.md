@@ -55,6 +55,10 @@ During implementation or after a `REQUEST_CHANGES` review, use
 scope-complete run requires `npm run verify -- --repair`; see
 [review and repair](docs/agents/development-harness.md#review-and-repair).
 
+Run `npm run lint:comments -- --base <commit>` to check a branch for new
+source comments. Capture implementation debt in issues and decision rationale
+in ADRs. See the [source comment lint](docs/development/README.md#source-comment-lint).
+
 On every pull request, CI runs the required checks: the static agent/docs/lint
 gates, the frontend build and bundle budget, the vitest unit and integration
 suites and the `verify-smoke` Playwright project whenever the diff touches

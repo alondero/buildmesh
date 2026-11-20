@@ -1,9 +1,7 @@
 import { vi } from 'vitest';
 import { cleanup, configure } from '@testing-library/react';
 
-// ============================================================
 // Async-query budget (issues #1520, #2539)
-// ============================================================
 
 // React Testing Library polls an async query (`findBy*`, `waitFor`) for 1s
 // before it reports a miss. The suite's own per-test budget is 30s
@@ -31,9 +29,7 @@ import { cleanup, configure } from '@testing-library/react';
 // reads this value.
 configure({ asyncUtilTimeout: 10_000 });
 
-// ============================================================
 // jsdom canvas shim (issue #1386, round-3 review)
-// ============================================================
 
 // jsdom does not implement `HTMLCanvasElement.getContext`; without a stub it
 // prints `Not implemented: HTMLCanvasElement's getContext()` once per call.
@@ -220,9 +216,7 @@ if (typeof HTMLCanvasElement !== 'undefined') {
   };
 }
 
-// ============================================================
 // Tauri API Mocks
-// ============================================================
 
 // Mock invoke - used for write_to_agent, list_agent_nodes, etc.
 //
@@ -271,9 +265,7 @@ vi.mock('@tauri-apps/api/event', () => ({
   }),
 }));
 
-// ============================================================
 // xterm.js Mocks
-// ============================================================
 
 // Mock Terminal class - must work with 'new Terminal(options)'
 vi.mock('@xterm/xterm', () => {
@@ -384,9 +376,7 @@ vi.mock('@xterm/addon-unicode11', () => {
   return { Unicode11Addon: MockUnicode11Addon };
 });
 
-// ============================================================
 // xterm/addon-fit Mock
-// ============================================================
 
 vi.mock('@xterm/addon-fit', () => {
   class MockFitAddon {
@@ -400,9 +390,7 @@ vi.mock('@xterm/addon-fit', () => {
   };
 });
 
-// ============================================================
 // Global test utilities
-// ============================================================
 
 beforeEach(async () => {
   mockListeners.clear();

@@ -5,9 +5,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 
-// ---------------------------------------------------------------------------
 // Per-node naming state — one entry per node, one lock
-// ---------------------------------------------------------------------------
 
 /// One reservation and retry budget per eligible node. Conversation text is
 /// read afresh on each attempt, outside the state lock.
@@ -336,9 +334,7 @@ pub(super) fn record_failed_attempt(reservation: &RenameReservation) -> Option<u
     Some(st.attempts)
 }
 
-// ---------------------------------------------------------------------------
 // Diagnostic helpers
-// ---------------------------------------------------------------------------
 
 /// Only consumer is the dev-only `debug_crash_snapshot` command (issue #2153),
 /// so a shipped build drops it with the command.
@@ -347,9 +343,7 @@ pub fn buffers_size_bytes() -> usize {
     0 // Naming no longer retains terminal output.
 }
 
-// ---------------------------------------------------------------------------
 // Diagnostic dump (opt-in via env var)
-// ---------------------------------------------------------------------------
 
 /// Write the selected dialogue and exact model prompt to a temp file when
 /// `BUILDMESH_DUMP_NAME_BUFFER` is set. Used to capture real fixtures when
@@ -374,9 +368,7 @@ pub(super) fn maybe_dump_rename_buffer(node_id: i64, raw: &str, cleaned: &str) {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Internal: LLM-based summarization
-// ---------------------------------------------------------------------------
 
 /// Resolve the absolute path of the `claude` binary used by
 /// `summarize_and_rename_with`.

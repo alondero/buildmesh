@@ -183,7 +183,6 @@ describe('theme text-token contrast (#732)', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Load-bearing label promotion: static-analysis guard.
 // Issue #732 called out specific sites that displayed meaningful data
 // (paths, branch names, dates, counts, mesh subheading, timestamps) using
@@ -197,7 +196,6 @@ describe('theme text-token contrast (#732)', () => {
 // somewhere else in the file and produce confusing false-positives; pin
 // the JSX body of the line, or a tail fragment that only appears on the
 // className line being guarded.
-// ---------------------------------------------------------------------------
 
 describe('load-bearing text-text-muted sites promoted to text-text-secondary (#732)', () => {
   const loadBearingSites: Array<{ file: string; fragment: string; mustNotContain: string }> = [
@@ -328,7 +326,6 @@ describe('load-bearing text-text-muted sites promoted to text-text-secondary (#7
   );
 });
 
-// ---------------------------------------------------------------------------
 // Status token layering (#741).
 //
 // Round-1 review caught that `.status-idle` was the lone `.status-*`
@@ -347,7 +344,6 @@ describe('load-bearing text-text-muted sites promoted to text-text-secondary (#7
 // omitted — keeping both halves of every pair in lockstep is the
 // only way the contract stays coherent across every Tailwind utility
 // (text-status-idle + bg-status-idle on both halves of every pair).
-// ---------------------------------------------------------------------------
 
 describe('status token layering (#741)', () => {
   it('dark --color-status-idle and --color-status-running are value-parity tokens', () => {

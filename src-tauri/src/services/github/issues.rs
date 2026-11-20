@@ -109,9 +109,7 @@ where
     Vec::<RawLabel>::deserialize(deserializer).map(|v| v.into_iter().map(|l| l.name).collect())
 }
 
-// ---------------------------------------------------------------------------
 // Blocked-by body parser
-// ---------------------------------------------------------------------------
 
 /// Cap for body-length scanning. GitHub allows up to ~65 KiB per issue
 /// body, and real "Blocked by" sections sit near the top — so a 64 KiB
@@ -671,13 +669,11 @@ impl GitHubClient {
 mod tests {
     use super::*;
 
-    // -----------------------------------------------------------------------
     // Issue deserialisation — covers the wider wire shape (html_url, state,
     // labels[].name) the mobile "View ↗" link and label chips depend on.
     // Issue #358: previously the struct only kept number/title/body, so the
     // mobile screen had to defensively default `issue.labels` and hide the
     // link when `url` was missing. These tests pin the new wire contract.
-    // -----------------------------------------------------------------------
 
     #[test]
     fn issue_deserialises_full_github_search_shape() {
@@ -896,7 +892,6 @@ mod tests {
         assert_eq!(result.items[0].labels, vec!["bug".to_string()]);
         assert!(result.items[1].labels.is_empty());
     }
-    // -----------------------------------------------------------------------
     // Blocked-by body parser — extracts the list of GitHub issue numbers
     // referenced under a `**Blocked by**` markdown section in an issue body.
     // The Issues Probe (issue #481) renders a red flag when an issue's
@@ -927,7 +922,6 @@ mod tests {
     // Bodies are assumed to be ≤64 KiB; the helper caps the scan to bound
     // regex memory. Real issue bodies from `list_issues_only` are <16 KiB
     // in practice (GitHub's body length cap is 65,536 chars).
-    // -----------------------------------------------------------------------
 
     #[test]
     fn parse_blocked_by_empty_body() {
@@ -1222,7 +1216,6 @@ This issue is related to #481 in a narrative sense.
         let _ = parse_blocked_by(&body);
     }
 
-    // -----------------------------------------------------------------------
     // Label add/remove + 422 → LabelNotFound mapping (issue #979)
     //
     // The Issues Probe's trigger-label toggle drives two new methods:
@@ -1245,7 +1238,6 @@ This issue is related to #481 in a narrative sense.
     // covered by the `#[ignore]`-gated `integration_*_label_live` tests
     // at the bottom — mirrors the file's existing
     // `integration_find_open_pr_for_branch_live` opt-in pattern.
-    // -----------------------------------------------------------------------
 
     #[test]
     fn percent_encode_path_component_passes_through_unreserved_chars() {
@@ -1487,7 +1479,6 @@ This issue is related to #481 in a narrative sense.
         assert!(result.is_ok());
     }
 
-    // -----------------------------------------------------------------------
     // Live API round-trips — opt-in only, gated behind `--ignored`. Mirrors
     // the existing `integration_find_open_pr_for_branch_live` pattern: a
     // real `GITHUB_TOKEN` / `gh auth login` is required, and the test
@@ -1497,7 +1488,6 @@ This issue is related to #481 in a narrative sense.
     // We don't pull in `wiremock` or a similar dependency just for these
     // two calls; the URL-encoding logic + the 422/404 mapping are pinned
     // by the unit tests above, and the live tests cover the wire shape.
-    // -----------------------------------------------------------------------
 
     #[test]
     #[ignore]

@@ -99,7 +99,6 @@ pub(crate) fn classifier_retry_cooldown_ms(failures: u32, last_error: Option<&st
     CLASSIFIER_TIMEOUT_COOLDOWNS_MS[cooldown_index]
 }
 
-// ---------------------------------------------------------------------------
 // State model — the pure mirror of the three ledger tables.
 //
 // The canonical enum bodies live in [`super::vocabulary`]. This module
@@ -107,7 +106,6 @@ pub(crate) fn classifier_retry_cooldown_ms(failures: u32, last_error: Option<&st
 // `db::circuit::ledger`, the TS generated twins) keep saying
 // `stepper::RunState` while only one owner defines the wire strings
 // (issue #1660).
-// ---------------------------------------------------------------------------
 
 pub use super::vocabulary::{RunState, StepStatus};
 
@@ -1284,9 +1282,7 @@ pub enum CircuitEvent {
     },
 }
 
-// ---------------------------------------------------------------------------
 // Effects — everything the seam must do on the stepper's behalf.
-// ---------------------------------------------------------------------------
 
 /// One persisted mutation of a step row. For `error`, the outer `None` means
 /// "leave as-is" while `Some(None)` explicitly clears a stored error.
@@ -1583,9 +1579,7 @@ impl Transition {
     }
 }
 
-// ---------------------------------------------------------------------------
 // The stepper.
-// ---------------------------------------------------------------------------
 
 /// What a finished turn that still owes its result file calls for. Produced by
 /// [`RunView::result_reminder_decision`] and read by both the stepper and the

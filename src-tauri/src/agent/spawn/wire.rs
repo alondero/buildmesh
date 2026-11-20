@@ -2,9 +2,7 @@ use serde::Serialize;
 use tauri::Emitter;
 use ts_rs::TS;
 
-// ---------------------------------------------------------------------------
 // Wire types — Tauri event payloads (issue #161)
-// ---------------------------------------------------------------------------
 
 /// Payload of the `agent-output` Tauri event. Production PTY bytes go
 /// over the binary Channel (`OutputSink`), not this event — mixing the

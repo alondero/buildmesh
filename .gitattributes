@@ -1,42 +1,9 @@
-# Repository line-ending policy (issue #2044).
-#
-# `text=auto` normalises every text file to LF in the index, and `eol=lf` writes
-# LF into the working tree on every platform regardless of a contributor's
-# core.autocrlf. That makes a checkout byte-identical on the Linux and Windows
-# runners: a script that parses a text file by pattern (for example
-# scripts/check-manifest-versions.mjs reading src-tauri/Cargo.lock) sees the same
-# bytes everywhere instead of depending on the runner it happens to run on.
-#
-# `auto` rather than `text` so the `binary` rule below, and any binary a future
-# change adds, keep their exact bytes.
-#
-# The two properties this buys are checked, not assumed: `npm run check:eol`
-# fails when a tracked text file is stored mixed or CRLF in the index, and the
-# rules below pin the files that must deviate.
 * text=auto eol=lf
 
-# Windows command interpreters need CRLF in the working tree, not in the index:
-# `eol=crlf` keeps the stored form LF (so the index stays uniform and the gate
-# above passes) while checkin/checkout gives cmd.exe and PowerShell the endings
-# they need. Last match wins, so these follow the `*` rule.
 *.ps1 text eol=crlf
 *.cmd text eol=crlf
 *.bat text eol=crlf
 
-# Generated ts-rs bindings are written with LF (issue #359). Pin them to LF so
-# the CI drift gate (`git diff --exit-code src/types/generated`) never trips on
-# a CRLF/LF mismatch on Windows runners where core.autocrlf may be enabled.
-# The harness catalog JSON snapshot (ADR-0037) is emitted by the same cargo
-# test pass and must stay LF for the same reason.
-# ts-rs also leaves a trailing space after a field that is followed by a doc
-# comment. Regenerated output must not be hand-edited, so `git diff --check`
-# (the harness whitespace gate) skips trailing-space errors for these files.
 src/types/generated/*.ts text eol=lf whitespace=-trailing-space
 src/types/generated/*.json text eol=lf
-# Fuzz corpus seeds are exact byte streams: CRLF line endings, NUL bytes,
-# invalid UTF-8, and at least one header value whose trailing space is the
-# thing under test. `binary` is `-diff -merge -text`: it keeps any checkout
-# from rewriting line endings (the pinned outcomes would then fail for a
-# reason that has nothing to do with the reader) and stops `git diff --check`
-# from reading that space as whitespace damage.
 src-tauri/fuzz/corpus/** binary

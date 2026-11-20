@@ -2353,7 +2353,7 @@ test('the real plan reuses frontend gates after a Rust-only edit and docs-only e
   const rust = ['rust-format', 'rust-clippy', 'rust-tests', 'binding-drift'];
 
   const rustOnly = rerun('src-tauri/src/secret_scrubber.rs');
-  for (const id of rust) assert.ok(rustOnly.includes(id), id);
+  for (const id of [...rust, 'lint-comments']) assert.ok(rustOnly.includes(id), id);
   for (const id of [...frontend, 'lint', 'lint-fixtures', 'lint-tests']) assert.ok(!rustOnly.includes(id), `${id} must be reused after a Rust-only edit`);
   // A Rust source file is an input of docs-tests (git2-ownership walks every
   // src-tauri/src/**/*.rs) and of the repo-wide infrastructure gates, but not of

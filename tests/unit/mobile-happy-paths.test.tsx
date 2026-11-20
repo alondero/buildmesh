@@ -119,9 +119,7 @@ describe("mobile happy paths (issue #1262)", () => {
     vi.restoreAllMocks();
   });
 
-  // -----------------------------------------------------------------------
   // PR creation
-  // -----------------------------------------------------------------------
 
   describe("PR creation", () => {
     it("renders the success toast and calls history.back() on a successful submit", async () => {
@@ -209,9 +207,7 @@ describe("mobile happy paths (issue #1262)", () => {
     });
   });
 
-  // -----------------------------------------------------------------------
   // Issue spawn
-  // -----------------------------------------------------------------------
 
   describe("Issue spawn", () => {
     it("calls onSpawned with the created node when the split button starts the launch", async () => {
@@ -294,9 +290,7 @@ describe("mobile happy paths (issue #1262)", () => {
     });
   });
 
-  // -----------------------------------------------------------------------
   // Archive resume
-  // -----------------------------------------------------------------------
 
   describe("Archive resume", () => {
     it("calls onResumed with the imported node when the resume button is clicked", async () => {

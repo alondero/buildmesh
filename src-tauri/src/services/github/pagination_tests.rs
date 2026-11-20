@@ -276,9 +276,7 @@ const ISSUES: &str = "/repos/acme/demo/issues";
 const SEARCH: &str = "/search/issues";
 const FILES: &str = "/repos/acme/demo/pulls/7/files";
 
-// ---------------------------------------------------------------------------
 // Link header parsing (pure, no sockets).
-// ---------------------------------------------------------------------------
 
 #[test]
 fn next_link_selects_the_next_relation_from_a_real_github_header() {
@@ -336,9 +334,7 @@ fn next_link_does_not_split_on_a_comma_inside_the_url() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // The walk, over a loopback server.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn three_pages_arrive_once_each_and_in_server_order() {
@@ -513,9 +509,7 @@ fn a_failing_second_file_page_is_not_a_complete_diff() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Caps, ceilings, and cancellation.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_search_past_the_service_ceiling_is_reported_incomplete() {
@@ -692,9 +686,7 @@ fn a_read_cancelled_before_it_starts_issues_no_request_at_all() {
     assert_eq!(fake.requests(), 0, "no API call may be spent");
 }
 
-// ---------------------------------------------------------------------------
 // Reconciliation ingest must refuse a partial feed (requirement 7).
-// ---------------------------------------------------------------------------
 
 #[test]
 fn reconciliation_ingest_refuses_a_truncated_trigger_feed() {
@@ -747,9 +739,7 @@ fn reconciliation_ingest_accepts_a_complete_feed_unchanged() {
     assert_eq!(numbers(&items), vec![1, 2]);
 }
 
-// ---------------------------------------------------------------------------
 // Circuit / Autopilot ingest, end to end over the production search path.
-// ---------------------------------------------------------------------------
 
 /// The search URL Autopilot actually builds for a labelled issue query.
 const LABEL_SEARCH_PATH: &str =

@@ -33,9 +33,7 @@ use std::panic::AssertUnwindSafe;
 use tauri::{command, AppHandle, Emitter};
 use ts_rs::TS;
 
-// ---------------------------------------------------------------------------
 // Wire types — Tauri event payloads (issue #161)
-// ---------------------------------------------------------------------------
 
 /// Payload of the `node-created` Tauri event. Emitted by [`create_issue_node`]
 /// after the `pending` row is committed, by the Circuit spawn path, and by
@@ -109,7 +107,6 @@ pub struct NodeSpawnFailedPayload {
     pub node_failed: bool,
 }
 
-// ---------------------------------------------------------------------------
 // Provider listing — moved to crate::agent::provider_menu (issue #1052).
 //
 // The Spawn Menu composition (provider_info_for / provider_info_for_pairing /
@@ -118,11 +115,8 @@ pub struct NodeSpawnFailedPayload {
 // crate::agent::provider_menu. The mobile HTTP route imports
 // `crate::agent::provider_menu::available_providers` directly — no re-export
 // remains here.
-// ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
 // Spawn / resume
-// ---------------------------------------------------------------------------
 
 /// Wire-facing spawn intent for [`spawn_agent`]. Internally tagged so
 /// resume vs first-turn prompt vs fresh boot cannot be sent together —
@@ -348,7 +342,6 @@ pub async fn spawn_issue_agent(
 // `SpawnIntent::Issue(context).initial_prompt()` everywhere (desktop draft,
 // background launch, Circuit worker).
 
-// ---------------------------------------------------------------------------
 // Two-stage issue spawn (fast stage-1 + background stage-2)
 //
 // These two commands split the original `spawn_issue_agent` into a fast DB
@@ -359,7 +352,6 @@ pub async fn spawn_issue_agent(
 // `start_node_background` (which does the slow git/worktree/PTY work)
 // without awaiting. The mobile issue and PR spawn routes use the same
 // fast path, so a phone is not held for the worktree/PTY work either.
-// ---------------------------------------------------------------------------
 
 /// A new agent node draft returned from the fast stage-1 spawn command.
 /// The frontend holds onto `prefill` and passes it back to
@@ -379,7 +371,6 @@ pub struct IssueNodeDraft {
     pub prefill: String,
 }
 
-// ---------------------------------------------------------------------------
 // Detached-spawn wrapper (issue #1700 — silent fire-and-forget swallowed
 // `SpawnOutcome::Skipped` / `AlreadyActive` and panics, leaving nodes stuck on
 // `pending` forever — and `AgentReviewButton` had no way to start a circuit
@@ -395,7 +386,6 @@ pub struct IssueNodeDraft {
 // [`dispatch_spawn_panic`] so the row never stays `pending` past one spawn
 // attempt and the frontend `agentNodeStore` always observes a terminal
 // event.
-// ---------------------------------------------------------------------------
 
 /// Per-outcome decision returned by [`classify_spawn_outcome`]. The wrappers
 /// [`dispatch_spawn_outcome`] / [`dispatch_spawn_panic`] materialise it into
@@ -753,7 +743,6 @@ fn create_issue_node_impl_with(
     Ok((IssueNodeDraft { node, prefill }, intent))
 }
 
-// ---------------------------------------------------------------------------
 // Two-stage PR spawn (fast stage-1 + background stage-2) — issue #420
 //
 // Mirror of the issue-spawn two-stage flow above. Spawns an agent that
@@ -764,7 +753,6 @@ fn create_issue_node_impl_with(
 // flattened `AgentNode` + `prefill`); the PR-spawn flow only diverges in
 // the *row* (`source_pr` is set, `branch` is the head ref) and in stage-2's
 // `git fetch origin <head_ref>` worktree adoption.
-// ---------------------------------------------------------------------------
 
 // The prefill string handed to the agent on PR spawn is owned by
 // [`crate::agent::spawn::SpawnIntent::initial_prompt`] as of issue #1180 —
@@ -1313,7 +1301,6 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
     Ok(resumed)
 }
 
-// ---------------------------------------------------------------------------
 // Process-lifecycle Tauri commands moved to crate::agent::process (issue #1052).
 //
 // The deep module owns `kill_agent` / `kill_agent_blocking` /
@@ -1325,7 +1312,6 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
 // The dependency arrow from `services::agent_node.rs` and `agent::spawn.rs`
 // (the inverted calls #1052 closes) now points at
 // `agent::process::kill_agent` directly.
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 #[path = "agent_spawn_menu_tests.rs"]

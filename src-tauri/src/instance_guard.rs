@@ -138,9 +138,7 @@ const PROFILE_OWNERSHIP_LOG_KEEP: usize = 1;
 /// `MAX_PATH`-sized name limit.
 const CLAIM_DIGEST_LEN: usize = 16;
 
-// ---------------------------------------------------------------------------
 // Identity
-// ---------------------------------------------------------------------------
 
 /// The (identifier, canonical profile dir) pair a claim is taken on.
 ///
@@ -247,9 +245,7 @@ fn claim_digest(identity: &ProfileIdentity) -> String {
     full[..CLAIM_DIGEST_LEN].to_string()
 }
 
-// ---------------------------------------------------------------------------
 // Errors and outcomes
-// ---------------------------------------------------------------------------
 
 /// Why a profile could not be claimed. Every variant is fatal: Buildmesh
 /// refuses to start rather than run as an undeclared second owner.
@@ -306,9 +302,7 @@ pub enum StartupError<E> {
     Body(E),
 }
 
-// ---------------------------------------------------------------------------
 // The claim
-// ---------------------------------------------------------------------------
 
 /// Proof that this process owns one profile, held for as long as the value
 /// lives. Dropping it releases the profile; the gate below parks it for the
@@ -429,9 +423,7 @@ pub fn with_profile_ownership<E>(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Bringing the owner's window forward
-// ---------------------------------------------------------------------------
 
 /// Publish this process id so a later second launch of this profile can find
 /// this process's window and bring it forward. Written by the gate the moment
@@ -527,9 +519,7 @@ fn append_ownership_line(profile_dir: &Path, line: &str) -> std::io::Result<()> 
     writer.write_line(line)
 }
 
-// ---------------------------------------------------------------------------
 // Platform layer
-// ---------------------------------------------------------------------------
 #[cfg(target_os = "windows")]
 mod platform {
     use super::ForwardReport;
@@ -844,9 +834,7 @@ mod platform {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

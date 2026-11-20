@@ -1,9 +1,7 @@
 use serde::Serialize;
 use ts_rs::TS;
 
-// ---------------------------------------------------------------------------
 // Wire types — Tauri event payloads (single source of truth, issue #359)
-// ---------------------------------------------------------------------------
 
 /// Payload of the `naming-backend-failed` Tauri event. Emitted from
 /// [`on_turn_with`] after `MAX_RENAME_ATTEMPTS` failed LLM calls for a single

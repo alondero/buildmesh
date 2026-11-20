@@ -182,9 +182,7 @@ use rusqlite::{params, Connection, OptionalExtension, Result as SqlResult};
 /// appended verbatim.
 pub(crate) const SCHEMA_VERSION: u32 = 52;
 
-// ---------------------------------------------------------------------------
 // ColumnSpec — one column the runner knows how to add and read back.
-// ---------------------------------------------------------------------------
 
 /// A column the runner adds (write side) and reads back (read side).
 ///
@@ -239,9 +237,7 @@ pub(crate) enum ReadDefault {
     CoalesceText(&'static str),
 }
 
-// ---------------------------------------------------------------------------
 // One-shot backfills + always-run data migrations.
-// ---------------------------------------------------------------------------
 
 /// A backfill that runs at most once per DB, gated on an
 /// `app_settings` flag written **after** the SQL commits. The runner
@@ -380,9 +376,7 @@ const REVIEW_CONTRACT_PROMPT_UPGRADE_DEFERRED: &str = "deferred";
 const LEGACY_REVIEW_GRAPH_PREDICATE: &str = "c.graph_json LIKE '%Review the work of agent {{source.agent_id}}%' OR c.graph_json LIKE '%An independent reviewer requested changes to your work.%' OR c.graph_json LIKE '%review PR {{pr.number}} as%' OR c.graph_json LIKE '%Follow the feedback comments on PR #{{pr.number}}%' OR c.graph_json LIKE '%Do not make further changes. If a required check fails%' OR c.graph_json LIKE '%prefer update-branch over rebasing%'";
 type ReviewContractCandidate = (Option<i64>, Option<String>, Option<i64>, bool);
 
-// ---------------------------------------------------------------------------
 // The registry.
-// ---------------------------------------------------------------------------
 
 /// Every column the schema ever grew, in projection-stable order.
 ///
@@ -403,9 +397,7 @@ pub(crate) fn all_column_specs() -> &'static [ColumnSpec] {
 }
 
 const SPECS: &[ColumnSpec] = &[
-    // ============================================================
     // meshes
-    // ============================================================
     // Initial CREATE columns (version 1 = always present on a fresh DB).
     // Kept here so the registry's mesh subset is the source of truth
     // for MESH_COLUMNS' order. The runner skips these on the
@@ -675,9 +667,7 @@ const SPECS: &[ColumnSpec] = &[
         type_with_default: "TEXT",
         read_default: ReadDefault::CoalesceText(""),
     },
-    // ============================================================
     // agent_nodes
-    // ============================================================
     // Initial CREATE columns. No COALESCE in the projection (these
     // are read via `Option<i64>`/`Option<String>` directly — the
     // column's nullable storage IS the read-default).
@@ -885,9 +875,7 @@ const SPECS: &[ColumnSpec] = &[
         type_with_default: "TEXT",
         read_default: ReadDefault::Nullable,
     },
-    // ============================================================
     // pending_worktree_removals
-    // ============================================================
     // v47 — blocked cleanup is persisted, backed off, and suppressed instead of
     // warned about on every drain (issue #2139). `attempt_count` /
     // `last_attempt_at` / `last_operation` / `last_error` are the evidence the
@@ -943,9 +931,7 @@ const SPECS: &[ColumnSpec] = &[
         type_with_default: "INTEGER NOT NULL DEFAULT 0",
         read_default: ReadDefault::CoalesceInt(0),
     },
-    // ============================================================
     // autopilot_runs
-    // ============================================================
     ColumnSpec {
         version: 1,
         table: "autopilot_runs",
@@ -1019,9 +1005,7 @@ const SPECS: &[ColumnSpec] = &[
         type_with_default: "INTEGER",
         read_default: ReadDefault::Nullable,
     },
-    // ============================================================
     // autopilot_circuits
-    // ============================================================
     // v40 - built-in review preset rows are durable execution templates,
     // but are not user-authored blueprints and stay hidden from the editor.
     ColumnSpec {
@@ -1032,7 +1016,6 @@ const SPECS: &[ColumnSpec] = &[
         read_default: ReadDefault::CoalesceInt(0),
     },
     // autopilot_circuit_runs
-    // ============================================================
     // v38: global per-mesh Circuit Run queue order. Kept off the run wire
     // model: the queue DTO exposes a 1-based rank instead of this storage key.
     ColumnSpec {
@@ -1102,9 +1085,7 @@ const SPECS: &[ColumnSpec] = &[
         type_with_default: "TEXT",
         read_default: ReadDefault::Nullable,
     },
-    // ============================================================
     // coordinator_drive_prompts
-    // ============================================================
     ColumnSpec {
         version: 1,
         table: "coordinator_drive_prompts",
@@ -1263,9 +1244,7 @@ const ALWAYS_STEPS: &[AlwaysStep] = &[
     AlwaysStep::EnsureCircuitRunArtifacts,
 ];
 
-// ---------------------------------------------------------------------------
 // The runner: evolve_to.
-// ---------------------------------------------------------------------------
 
 /// Probe `schema_version` from `app_settings`. Returns `0` for a fresh
 /// DB (no row) or a malformed value (`parse` failure → `0` so the
@@ -1372,9 +1351,7 @@ pub(crate) fn evolve_to(target_version: u32, conn: &Connection) -> SqlResult<()>
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // Step implementations.
-// ---------------------------------------------------------------------------
 
 fn add_column_if_missing(conn: &Connection, col: &ColumnSpec) -> SqlResult<()> {
     if !table_present(conn, col.table)? {
@@ -2259,9 +2236,7 @@ fn table_present(conn: &Connection, table: &str) -> SqlResult<bool> {
     )
 }
 
-// ---------------------------------------------------------------------------
 // The read projection: MESH_COLUMNS built from the registry.
-// ---------------------------------------------------------------------------
 
 /// The mesh-only subset of [`all_column_specs`], preserving iteration
 /// order (which pins the `map_mesh_row` positional reads — see

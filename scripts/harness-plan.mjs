@@ -43,8 +43,6 @@ const RUST_IGNORES = [DOCS, '^android/', '^tests/'];
 //   of every path a skill or Markdown link names — so it keeps reading the whole
 //   tree and stays unconditional.
 // - readme-tests reads exactly three files, so it skips on almost everything.
-// - lint-tests and lint-fixtures share one list: the ESLint config, the two
-//   deliberate hook-rule violation fixtures, and the checker itself.
 //
 // One rule cuts across all of them: a contract-test gate always reads its own
 // implementation script and its own test file, because those two files *are*
@@ -125,7 +123,14 @@ export function planGates(paths, { full = false } = {}) {
   scoped('agent-tests', 'test:agent', { tests: 'node', ignores: AGENT_TEST_IGNORES, minutes: AGENT_TEST_GATE_MINUTES, agentTest: true });
   scoped('docs-tests', 'test:docs', { tests: 'node' });
   scoped('readme-tests', 'test:readme', { tests: 'node', ignores: README_TEST_IGNORES });
-  scoped('lint-tests', 'test:lint', { tests: 'node', ignores: LINT_FIXTURE_IGNORES });
+  scoped('lint-tests', 'test:lint', {
+    tests: 'node',
+    ignores: ['^(?!tests/lint-fixtures/|eslint\\.config\\.js$|scripts/check-(?:eslint-fixtures|comments)\\.mjs$|tests/agent-infra/check-(?:eslint-fixtures|comments)\\.test\\.mjs$)'],
+  });
+  scoped('lint-comments', 'lint:comments', {
+    command: ['npm', 'run', 'lint:comments', '--', '--base', '$BASE'],
+    ignores: [DOCS, '\\.md$'],
+  });
   // ESLint already ignores docs/** and src-tauri/**; the Rust sources are not linted.
   npm('lint', 'lint', { ignores: [DOCS, '^src-tauri/'] });
   scoped('lint-fixtures', 'lint:fixtures', { ignores: LINT_FIXTURE_IGNORES });

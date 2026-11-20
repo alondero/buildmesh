@@ -532,11 +532,9 @@ pub fn revoke_device_session_inner(conn: &Connection, id: i64) -> SqlResult<bool
     Ok(affected > 0)
 }
 
-// ---------------------------------------------------------------------------
 // Token helpers — moved from `db/mod.rs` (issue #1655). `db/mod.rs` must
 // own connection + init + baseline DDL only; these are auth-domain concerns
 // even though they're used cross-module by the WS ticket store.
-// ---------------------------------------------------------------------------
 
 /// Generate a random 32-character hex token (16 bytes of random data).
 /// `pub(crate)` so the WS ticket store (`http::ws_ticket`, issue #500) can

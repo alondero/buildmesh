@@ -25,7 +25,6 @@ fn disabled_circuits_still_drive_manual_trigger_now_runs() {
     ));
 }
 
-// ------------------------------------------------------------------
 // Circuit-run admission gate (issue #1467).
 //
 // These tests pin the pure gate helper [`may_admit_run`] in three
@@ -35,7 +34,6 @@ fn disabled_circuits_still_drive_manual_trigger_now_runs() {
 // (`count_active_circuit_runs` / terminal commit) are pinned
 // separately in `db/circuit_tests.rs`; here we verify the gate
 // composes correctly with state transitions on real rows.
-// ------------------------------------------------------------------
 
 /// `running` and `paused` runs always pass the gate — they already
 /// hold a slot from their `pending` admission.

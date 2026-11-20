@@ -581,9 +581,7 @@ pub(crate) mod testing {
 #[path = "process_tests.rs"]
 mod tests;
 
-// ---------------------------------------------------------------------------
 // Debug
-// ---------------------------------------------------------------------------
 //
 // The two commands below are dev-only (issue #2153): they expose
 // process-registry state and have no product UI caller. The `cfg` mirrors the

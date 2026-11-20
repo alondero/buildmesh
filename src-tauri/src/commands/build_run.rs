@@ -15,9 +15,7 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter};
 use ts_rs::TS;
 
-// ---------------------------------------------------------------------------
 // Wire types — Tauri event payloads (issue #161)
-// ---------------------------------------------------------------------------
 
 /// Payload of the per-session `build-run-output-{sessionId}` Tauri event.
 /// Production PTY bytes go over a binary Channel (`subscribe_build_run_output`);
@@ -59,9 +57,7 @@ pub struct BuildRunExitedPayload {
     pub generation: u64,
 }
 
-// ---------------------------------------------------------------------------
 // Worktree path resolution
-// ---------------------------------------------------------------------------
 
 /// Validate that the worktree directory exists on disk.
 /// Returns an error if the node has no worktree_name or the directory hasn't been created yet.
@@ -94,9 +90,7 @@ fn validate_worktree_exists(
     ))
 }
 
-// ---------------------------------------------------------------------------
 // Process management
-// ---------------------------------------------------------------------------
 
 /// A build/run process tracked separately from agents.
 ///
@@ -486,9 +480,7 @@ fn teardown_inc(process: &BuildRunProcess, join: JoinPolicy) {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Shell selection
-// ---------------------------------------------------------------------------
 
 /// Build the `CommandBuilder` for either a one-shot build/run command or an
 /// interactive shell. Terminal mode drops the `-c` / `-e` / `/c` flag and
@@ -531,9 +523,7 @@ fn build_shell_command(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Tauri command
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -878,9 +868,7 @@ pub fn resize_build_run(node_id: i64, rows: u16, cols: u16) -> Result<(), String
     BUILD_RUN_REGISTRY.resize_pty(node_id, cols, rows)
 }
 
-// ---------------------------------------------------------------------------
 // Path decision
-// ---------------------------------------------------------------------------
 
 /// Where the build/run shell should be spawned for `node`.
 ///

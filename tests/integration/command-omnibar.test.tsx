@@ -52,11 +52,9 @@ import { seedAgentNodes } from '../unit/helpers/seedAgentNodes';
 import type { AgentNode } from '../../src/types/generated/AgentNode';
 import type { Mesh } from '../../src/types/generated/Mesh';
 
-// -----------------------------------------------------------------------
 // Fixtures — a single running node + a single mesh gives the palette
 // both @nodes and `>` commands to show, while staying small enough to
 // keep the index build under a millisecond.
-// -----------------------------------------------------------------------
 
 const RUNNING_NODE: AgentNode = {
   id: 1,
@@ -132,9 +130,7 @@ function resetStores() {
   seedAgentNodes([RUNNING_NODE], RUNNING_NODE.id);
 }
 
-// -----------------------------------------------------------------------
 // 1. Store-level lifecycle — the state machine the App.tsx binding calls.
-// -----------------------------------------------------------------------
 
 describe('Command Omnibar store lifecycle (issue #1414)', () => {
   beforeEach(() => {
@@ -171,9 +167,7 @@ describe('Command Omnibar store lifecycle (issue #1414)', () => {
   });
 });
 
-// -----------------------------------------------------------------------
 // 2. Mount lifecycle — render the palette, drive the store, observe.
-// -----------------------------------------------------------------------
 
 describe('Command Omnibar component lifecycle (issue #1414)', () => {
   beforeEach(() => {

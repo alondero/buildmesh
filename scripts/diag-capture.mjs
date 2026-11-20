@@ -91,9 +91,7 @@ export const DEV_BUNDLE_ID = 'com.alond.buildmesh.dev';
 /** How many log lines the bundle carries per log. */
 const LOG_TAIL_LINES = 80;
 
-// ---------------------------------------------------------------------------
 // Argument parsing
-// ---------------------------------------------------------------------------
 
 function argValue(argv, name) {
   const index = argv.indexOf(`--${name}`);
@@ -134,9 +132,7 @@ export function resolveOptions(argv, { profileDir, preferencePort } = {}) {
   };
 }
 
-// ---------------------------------------------------------------------------
 // The profile (where the logs live)
-// ---------------------------------------------------------------------------
 
 /**
  * The app-data profile directory for a bundle identifier.
@@ -175,9 +171,7 @@ export async function readPreferencePort(profileDir) {
   }
 }
 
-// ---------------------------------------------------------------------------
 // The trace summary
-// ---------------------------------------------------------------------------
 
 /**
  * Turn raw trace events into complete (`X`) events with a duration.
@@ -328,9 +322,7 @@ export function missingCompositorEvents(summary) {
   return EXPECTED_COMPOSITOR_EVENTS.filter(name => !names.has(name));
 }
 
-// ---------------------------------------------------------------------------
 // The page probe
-// ---------------------------------------------------------------------------
 
 /**
  * Read what the page itself says about its own health.
@@ -436,9 +428,7 @@ export async function readPageProbe(page, { frameWindowMs = 1000 } = {}) {
   }, frameWindowMs);
 }
 
-// ---------------------------------------------------------------------------
 // The logs
-// ---------------------------------------------------------------------------
 
 /**
  * The last lines of a log file that match a predicate.
@@ -508,9 +498,7 @@ export function buildStampFromDiagLines(diagLines) {
   return { gitSha: null, sessionLine: null };
 }
 
-// ---------------------------------------------------------------------------
 // The capture
-// ---------------------------------------------------------------------------
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -634,9 +622,7 @@ page-level story and the process-level story sit next to each other.
 `;
 }
 
-// ---------------------------------------------------------------------------
 // Entry point
-// ---------------------------------------------------------------------------
 
 async function main() {
   const argv = process.argv.slice(2);

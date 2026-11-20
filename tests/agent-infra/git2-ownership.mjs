@@ -123,9 +123,7 @@ export function seamDebtPaths(root) {
   return [...section.matchAll(/`([^`\s]*\/[^`]+\.rs)`/g)].map((match) => match[1]);
 }
 
-// ---------------------------------------------------------------------------
 // The SQL rule (issue #2527)
-// ---------------------------------------------------------------------------
 
 /**
  * A SQL statement, as it appears at the start of a string literal.

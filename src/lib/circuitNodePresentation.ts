@@ -103,9 +103,7 @@ export function hasActiveCircuitOwnership(
   return false;
 }
 
-// ---------------------------------------------------------------------------
 // Card-level outcome (the header chip)
-// ---------------------------------------------------------------------------
 //
 // `getCircuitNodePresentation` above answers the per-node question "is
 // automation driving, waiting, or finished?" for the glyph's Circuit ring.

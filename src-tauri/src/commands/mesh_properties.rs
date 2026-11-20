@@ -36,9 +36,7 @@ use tauri::{AppHandle, Emitter};
 /// and the literal test in `tests/unit/use-worktree-effective-dir.test.ts`.
 pub const WORKTREE_DIR_CHANGED_EVENT: &str = "worktree-directory-changed";
 
-// ---------------------------------------------------------------------------
 // Settings.json helpers (for base_ref only)
-// ---------------------------------------------------------------------------
 
 fn write_base_ref(mesh_path: &str, base_ref: &str) -> Result<(), String> {
     let settings_path = PathBuf::from(mesh_path).join(".claude/settings.json");
@@ -86,9 +84,7 @@ fn remove_base_ref(mesh_path: &str) -> Result<(), String> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // Tauri commands
-// ---------------------------------------------------------------------------
 
 #[tauri::command]
 pub fn get_mesh_properties(mesh_id: i64) -> Result<MeshRow, String> {

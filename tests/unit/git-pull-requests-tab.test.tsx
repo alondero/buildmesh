@@ -488,7 +488,6 @@ describe('GitPullRequestsTab', () => {
   // merge endpoint accepts. Picking one arms the confirm with THAT
   // strategy, and the confirm button names it, so the irreversible action
   // never hides which technique will land.
-  // ---------------------------------------------------------------------
 
   it('offers squash, merge-commit, and rebase in the strategy picker', async () => {
     mockBackend();

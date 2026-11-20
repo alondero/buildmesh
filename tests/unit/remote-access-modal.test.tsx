@@ -824,7 +824,6 @@ describe('RemoteAccessModal', () => {
     // stored so the unmount can't cancel it — the timer fires 2s later
     // and calls `setCertPathCopied(false)` on an unmounted component.
     // The fix stores the handle in a ref and clears it in a `useEffect`
-    // cleanup.
     const user = userEvent.setup();
     mockBackend(
       status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),

@@ -679,7 +679,6 @@ async fn capture_window_stops_when_the_process_exits() {
     assert_eq!(outcome, CaptureOutcome::Stopped);
 }
 
-// -----------------------------------------------------------------
 // Issue #1706 — Muse workspace trust (`~/.config/muse/trust.json`).
 //
 // Contract pinned here:
@@ -699,7 +698,6 @@ async fn capture_window_stops_when_the_process_exits() {
 // The byte-exact check that `trust_key` reproduces Muse's *own* stored keys
 // cannot be hermetic; it lives in the ignored
 // `live_trust_key_reproduces_the_installed_stores_keys` below.
-// -----------------------------------------------------------------
 
 fn trust_path(home: &Path) -> PathBuf {
     home.join("trust.json")

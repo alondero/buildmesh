@@ -679,9 +679,7 @@ impl PreferencesStore {
     }
 }
 
-// ---------------------------------------------------------------------------
 // The ambient store
-// ---------------------------------------------------------------------------
 //
 // The free functions below are the compatibility surface the rest of the
 // codebase uses. Each delegates to the *ambient* store: the process-wide one
@@ -964,9 +962,7 @@ fn normalize_legacy_default_provider(bare: &str) -> Option<&'static str> {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Test support
-// ---------------------------------------------------------------------------
 
 // There is no test-only ambient store: a test constructs its own
 // [`PreferencesStore`] over a temporary directory and passes the handle to the

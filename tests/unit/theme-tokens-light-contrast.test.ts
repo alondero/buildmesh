@@ -247,14 +247,12 @@ describe('light theme token coverage (#734)', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Status token layering (#741).
 //
 // Companion to the dark-theme block in theme-tokens-contrast.test.ts.
 // The idle ≡ running value-parity contract must hold in BOTH themes;
 // pinning only the dark @theme half lets the light override drift
 // silently. Both halves of every pair (foreground + -bg) are pinned.
-// ---------------------------------------------------------------------------
 
 describe('status token layering (#741)', () => {
   it('light --color-status-idle and --color-status-running are value-parity tokens', () => {

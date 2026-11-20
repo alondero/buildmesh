@@ -303,11 +303,9 @@ export function checkReadmeDrift({ readme, providerTypes, harnessLabel }) {
   return { failures, variants, harnessLabel: labels };
 }
 
-// ---------------------------------------------------------------------------
 // CLI wrapper. The pure function above is what tests exercise; the wrapper
 // just reads the source-of-truth files, calls the function, and translates
 // the result into the CI exit-code contract.
-// ---------------------------------------------------------------------------
 
 function bail(message) {
   console.error(`::error::${message}`);

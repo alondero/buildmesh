@@ -808,7 +808,6 @@ fn open_pr_missing_or_mismatched_lookup_stays_uncertain_without_replay() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Dispatch-to-crash recovery (issue #1907).
 //
 // The #1889 suite seeds an uncertain OpenPr effect directly. That proves the
@@ -817,7 +816,6 @@ fn open_pr_missing_or_mismatched_lookup_stays_uncertain_without_replay() {
 // the production dispatch (`ensure_open_pr_with_target`) against a deterministic
 // loopback endpoint, then abandon its result the way a crash would, reopen the
 // run from durable state, and reconcile. Only the network boundary is substituted.
-// ---------------------------------------------------------------------------
 
 const DISPATCH_OWNER: &str = "example";
 const DISPATCH_REPO: &str = "buildmesh";

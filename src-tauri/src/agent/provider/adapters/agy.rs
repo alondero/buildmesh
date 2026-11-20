@@ -552,9 +552,7 @@ mod tests {
             .unwrap();
     }
 
-    // -------------------------------------------------------------------
     // Capability contract — issue #1286.
-    // -------------------------------------------------------------------
 
     /// Issue #1286: end-to-end descriptor pin. The Spawn Menu,
     /// resolver, and autopilot compatibility gate all consume this
@@ -685,9 +683,7 @@ mod tests {
         assert_eq!(AGY.sandbox_args(), vec!["--sandbox".to_string()]);
     }
 
-    // -------------------------------------------------------------------
     // Attention hook injection — issue #1285.
-    // -------------------------------------------------------------------
 
     /// AGY's Stop payload carries the turn-end event in the simple
     /// `[{type, command}]` shape (no tool matcher — the whole turn is

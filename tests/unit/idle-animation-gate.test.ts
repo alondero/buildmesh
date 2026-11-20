@@ -48,9 +48,7 @@ const APP_TSX = readFileSync(resolve(__dirname, '../../src/App.tsx'), 'utf8');
 /** The stylesheet without its comments — comments are prose, not selectors. */
 const CSS = APP_CSS.replace(/\/\*[\s\S]*?\*\//g, '');
 
-// ---------------------------------------------------------------------------
 // CSS parsing helpers
-// ---------------------------------------------------------------------------
 
 interface Rule {
   selectors: string[];
@@ -398,9 +396,7 @@ function normaliseSelector(selector: string): string {
   return selector.replace(/\s+/g, ' ').trim().replace(/['"]/g, '');
 }
 
-// ---------------------------------------------------------------------------
 // Behaviour
-// ---------------------------------------------------------------------------
 
 let focusHandler: ((event: { payload: boolean }) => void) | null = null;
 
@@ -569,9 +565,7 @@ describe('useIdleAnimationGate', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // The stylesheet contract
-// ---------------------------------------------------------------------------
 
 describe('the idle gate rule', () => {
   it('pauses the animations instead of removing them', () => {

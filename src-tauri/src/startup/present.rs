@@ -88,9 +88,7 @@ pub(crate) fn present_failure(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Windows: the native surface
-// ---------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
 mod platform {
@@ -272,9 +270,7 @@ fn copy_to_clipboard(_text: &str) {}
 #[cfg(not(target_os = "windows"))]
 fn open_in_file_manager(_dir: &std::path::Path) {}
 
-// ---------------------------------------------------------------------------
 // Button binding (pure — unit-tested on every platform)
-// ---------------------------------------------------------------------------
 
 /// The `MessageBoxW` style, and what each of its buttons does.
 ///

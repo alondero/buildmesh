@@ -184,9 +184,7 @@ const NOOP_HANDLER: CallbackBusHandler = (sub) => {
   sub.notify();
 };
 
-// ------------------------------------------------------------------
 // Public client interfaces
-// ------------------------------------------------------------------
 
 /** Single-key client: `key` is a string that doubles as the GIT_CHANGED
  * subscription path. `subscribe(key, cb)` has no separate `path` arg. */
@@ -344,9 +342,7 @@ export interface PathInvalidatedCacheOptions<K, V> {
   stopOnError?: (error: Error) => boolean;
 }
 
-// ------------------------------------------------------------------
 // Subscriber + handler types (shared by both factories)
-// ------------------------------------------------------------------
 
 interface KeyedPathSubscriber<K> {
   /** Discriminator — `'keyed'` means the subscriber carries a cache key and
@@ -382,10 +378,8 @@ function isCallbackSubscriber(sub: PathSubscriber): sub is CallbackPathSubscribe
 type KeyedBusHandler<K> = (sub: KeyedPathSubscriber<K>, invalidatedKeys: Set<K>, force?: boolean) => void;
 type CallbackBusHandler = (sub: CallbackPathSubscriber) => void;
 
-// ------------------------------------------------------------------
 // Module-level bus globals — shared by both factories + the
 // `subscribeGitPathInvalidation` callback-only API.
-// ------------------------------------------------------------------
 const pathSubscribers = new Map<string, Set<PathSubscriber>>();
 // Per-subscriber extra match dirs (issue #1519): a mesh-root subscriber also
 // matches events under the mesh's configured worktree container, which may
@@ -542,14 +536,12 @@ function addPathSubscriber(sub: PathSubscriber, path: string, extraPaths?: Array
   };
 }
 
-// ------------------------------------------------------------------
 // Shared client internals. Both factories construct the same
 // read/refresh/invalidate/subscribeOn methods; only the public
 // `subscribe*` shape differs. The helper is internal — never exported.
 // Issue #347 follow-up: pulled read/refresh/invalidate into the helper
 // after the refactor initially left them duplicated between the two
 // factories.
-// ------------------------------------------------------------------
 
 // Issue #2017 — retention defaults for settled-but-inactive entries.
 // The TTL is long enough that an ordinary remount (panel close/reopen,
@@ -1016,9 +1008,7 @@ function createInternalClient<K, V>(
   };
 }
 
-// ------------------------------------------------------------------
 // The two factories
-// ------------------------------------------------------------------
 
 /**
  * Single-key cache client. `key` is a path-shaped string that doubles as

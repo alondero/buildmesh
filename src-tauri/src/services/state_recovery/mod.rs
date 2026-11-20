@@ -117,9 +117,7 @@ pub(crate) const NOTICE_FILE: &str = "recovery-notice.json";
 /// exceed is a bound they cannot be surprised by.
 pub(crate) const SNAPSHOT_RETENTION: usize = 3;
 
-// ---------------------------------------------------------------------------
 // Wire types — derived with ts-rs, never hand-declared in TS (issue #359).
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[ts(export, export_to = "StateRecoveryInfo.ts")]
@@ -216,9 +214,7 @@ pub struct RecoveryNotice {
     pub recorded_at: String,
 }
 
-// ---------------------------------------------------------------------------
 // Timestamps — injected so tests pin them.
-// ---------------------------------------------------------------------------
 
 /// RFC 3339 UTC, second resolution. Filenames use the same shape so a sorted
 /// listing is a chronological one.
@@ -235,9 +231,7 @@ fn path_string(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 
-// ---------------------------------------------------------------------------
 // Database capture.
-// ---------------------------------------------------------------------------
 
 /// Open a **private** connection to the database for snapshotting.
 ///
@@ -340,9 +334,7 @@ fn describe_corruption(conn: &Connection) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Bundle construction.
-// ---------------------------------------------------------------------------
 
 /// Build a container from the live state at `db_path` / `prefs_path`.
 ///
@@ -459,9 +451,7 @@ fn count_secret_preference_fields(raw: &[u8]) -> usize {
     count
 }
 
-// ---------------------------------------------------------------------------
 // Retention.
-// ---------------------------------------------------------------------------
 
 /// The one ordering rule for snapshots: oldest first, so `prune_snapshots`
 /// can drop from the front and the UI can render the reverse.
@@ -515,9 +505,7 @@ pub(crate) fn prune_snapshots(dir: &Path, keep: usize) -> io::Result<Vec<PathBuf
     Ok(removed)
 }
 
-// ---------------------------------------------------------------------------
 // Startup hooks.
-// ---------------------------------------------------------------------------
 
 /// Take a pre-migration snapshot when the database is about to be evolved.
 ///
@@ -681,9 +669,7 @@ fn prefs_path(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join("preferences.json")
 }
 
-// ---------------------------------------------------------------------------
 // Notice marker.
-// ---------------------------------------------------------------------------
 
 fn notice_path(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join(NOTICE_FILE)
@@ -703,9 +689,7 @@ pub(crate) fn clear_notice(app_data_dir: &Path) {
     let _ = std::fs::remove_file(notice_path(app_data_dir));
 }
 
-// ---------------------------------------------------------------------------
 // Staged restore.
-// ---------------------------------------------------------------------------
 
 /// Verify a bundle, snapshot the current state for rollback, and stage the
 /// payload for the next launch.
@@ -941,9 +925,7 @@ fn is_restorable_database(path: &Path) -> io::Result<bool> {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Command-facing surface.
-// ---------------------------------------------------------------------------
 
 /// Resolve the app-data directory, or explain why it is not available.
 fn require_app_data_dir() -> Result<PathBuf, String> {

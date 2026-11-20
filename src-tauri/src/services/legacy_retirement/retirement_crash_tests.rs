@@ -166,9 +166,7 @@ impl Phase {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixture
-// ---------------------------------------------------------------------------
 
 /// A temporary Mesh whose legacy Autopilot run is mid-wrap-up, plus the
 /// worktree that retirement has to retain for inspection.
@@ -470,9 +468,7 @@ impl LegacyFixture {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Durable state
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, PartialEq, Eq)]
 struct Snapshot {
@@ -699,9 +695,7 @@ fn assert_replacement_spawn_refused(fixture: &LegacyFixture) {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Child process
-// ---------------------------------------------------------------------------
 
 /// Subprocess entry point for the scenarios above: it runs one retirement
 /// phase with its own database singleton and process registry, then dies.
@@ -1114,9 +1108,7 @@ fn shell_arguments(command: &mut portable_pty::CommandBuilder) {
     command.args(["/c", "ping", "-n", "600", "127.0.0.1"]);
 }
 
-// ---------------------------------------------------------------------------
 // Scenarios
-// ---------------------------------------------------------------------------
 
 /// A crash on either side of the cleanup-intent transaction leaves the legacy
 /// run exactly as it was: no half-written retirement, no cancelled run without

@@ -375,9 +375,7 @@ export function stableGraphJson(graph: CircuitGraph): string {
   });
 }
 
-// ---------------------------------------------------------------------------
 // Fuzzy search — quick-connect menu ranking.
-// ---------------------------------------------------------------------------
 
 /** Subsequence match score; higher is better, null means "no match". */
 export function fuzzyScore(query: string, text: string): number | null {
@@ -412,9 +410,7 @@ export function fuzzyFilterSpecs(query: string): NodeKindSpec[] {
   return query === '' ? [...NODE_SPECS] : scored.map((s) => s.spec);
 }
 
-// ---------------------------------------------------------------------------
 // Mustache autocomplete — context namespace chips.
-// ---------------------------------------------------------------------------
 
 /** Context paths offered by `{{` autocomplete. Mirrors the stepper's
  *  `CircuitContext` namespaces; verification/retry resolve empty until
@@ -534,7 +530,6 @@ export function insertMustache(
   };
 }
 
-// ---------------------------------------------------------------------------
 // Upstream reachability (issue #1359).
 //
 // A pure, graph-only view of "what template variables does this node
@@ -552,7 +547,6 @@ export function insertMustache(
 //
 // `circuit.*` and `node.id` are always available — the trigger wrapper
 // sets them at run creation, and `with_node` is called per step.
-// ---------------------------------------------------------------------------
 
 /** Per-kind booleans so callers can render a stable schema without
  *  leaking the BFS internals. `nodeOutputIds` lists the upstream
@@ -854,9 +848,7 @@ export function sampleValueForPath(path: string): string {
   }
 }
 
-// ---------------------------------------------------------------------------
 // Gates: named outcome ports + edge condition badges.
-// ---------------------------------------------------------------------------
 
 /**
  * Named outcome source handles for gate nodes that route by outcome;
@@ -935,9 +927,7 @@ export function statusTextClass(status: string): string {
   }
 }
 
-// ---------------------------------------------------------------------------
 // Run observation — status overlays + traversed-path highlighting.
-// ---------------------------------------------------------------------------
 
 /** The slice of an `AutopilotCircuitRunStep` the overlays need. */
 export interface StepLike {
@@ -1027,7 +1017,6 @@ export function formatDurationMs(ms: number): string {
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
-// ---------------------------------------------------------------------------
 // Run diagnostics — the plain-English reading of a run's ledger (#1468).
 //
 // The Probe's Circuits tab used to compress a whole run into
@@ -1036,7 +1025,6 @@ export function formatDurationMs(ms: number): string {
 // was the first thing clipped. These helpers turn the raw ledger
 // vocabulary into the labels the card renders. They are pure so the
 // wording is unit-testable without mounting the Probe.
-// ---------------------------------------------------------------------------
 
 /**
  * Edge keys traversed by a run: each finished step routes along edges
@@ -1085,6 +1073,4 @@ export function toGraph(
   };
 }
 
-// ---------------------------------------------------------------------------
 // Dagre auto-layout lives in `circuitLayout.ts`.
-// ---------------------------------------------------------------------------
