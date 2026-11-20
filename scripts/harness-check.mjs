@@ -242,6 +242,10 @@ export const RUST_PATH_INCLUDES = {
   // sibling of `process_util.rs`, so its tests run under the module that
   // declares it rather than under a module named after the file.
   'src-tauri/src/process_util_tests.rs': 'process_util::process_util_tests',
+  // The renderer diagnostics sink's suite (issue #2833). `renderer.rs`
+  // declares it with `#[path]`, so its tests run under the module that
+  // declares them, not under a module named after the file.
+  'src-tauri/src/diagnostics/renderer_tests.rs': 'diagnostics::renderer::renderer_tests',
 };
 
 // A Rust production file whose tests live in a sibling `<stem>_tests` module

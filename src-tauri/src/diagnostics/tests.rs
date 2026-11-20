@@ -140,3 +140,15 @@ fn windows_vitals_report_a_live_process() {
 fn clear_expected_exit_without_start_is_noop() {
     clear_expected_exit();
 }
+
+/// The kill switch is the one rule that decides whether the diagnostics run
+/// at all, and it is also the rule that closes the renderer health line
+/// (issue #2833). `BUILDMESH_DIAG=0` turns them off; anything else leaves
+/// them on.
+#[test]
+fn the_kill_switch_turns_the_diagnostics_off() {
+    assert!(diagnostics_enabled_for(None));
+    assert!(diagnostics_enabled_for(Some("1")));
+    assert!(diagnostics_enabled_for(Some("")));
+    assert!(!diagnostics_enabled_for(Some("0")));
+}

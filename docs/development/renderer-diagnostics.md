@@ -113,7 +113,7 @@ That decides what a zero means, so it is worth stating plainly:
   which is the pathology this line exists to catch (issue #2830 measured a
   65 ms median keystroke delay).
 
-The same floor applies to the pointer split. in `lf_src`.
+The same floor applies to the pointer split.
 
 ## What is counted, and where
 

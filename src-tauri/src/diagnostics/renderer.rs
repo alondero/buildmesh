@@ -123,7 +123,19 @@ pub fn write_renderer_line(line: &str) -> RendererLineOutcome {
         // rather than dropping it.
         return RendererLineOutcome::Unavailable;
     };
-    let Some(writer) = guard.as_mut() else {
+    route_renderer_line(guard.as_mut(), line)
+}
+
+/// Write one line into the sink, or say why it could not be written.
+///
+/// Split from [`write_renderer_line`] so the decision can be exercised
+/// against a scratch file, instead of against the process-wide sink whose
+/// state depends on when the app started.
+fn route_renderer_line(
+    writer: Option<&mut RotatingWriter>,
+    line: &str,
+) -> RendererLineOutcome {
+    let Some(writer) = writer else {
         return RendererLineOutcome::Unavailable;
     };
     match writer.write_line_synced(line) {

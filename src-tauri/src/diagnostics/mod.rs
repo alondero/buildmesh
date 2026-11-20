@@ -305,7 +305,17 @@ const DEFAULT_INTERVAL: Duration = Duration::from_secs(5);
 /// health line is a diagnostic, and a user who turned diagnostics off should
 /// not get one line every ten seconds in the main log either.
 pub(crate) fn diagnostics_enabled() -> bool {
-    !matches!(std::env::var("BUILDMESH_DIAG").as_deref(), Ok("0"))
+    diagnostics_enabled_for(std::env::var("BUILDMESH_DIAG").ok().as_deref())
+}
+
+/// The kill switch as a rule over the environment value.
+///
+/// The value is passed in rather than read here so the rule can be tested
+/// without touching the process environment: the environment is global state
+/// that parallel tests share, so a test that set it would change the
+/// behaviour of every other test running at the same time.
+fn diagnostics_enabled_for(value: Option<&str>) -> bool {
+    !matches!(value, Some("0"))
 }
 
 fn sample_interval() -> Duration {
