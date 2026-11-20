@@ -33,6 +33,15 @@
   ],
   "advisories": [
     {
+      "id": "RUSTSEC-2026-0543",
+      "crate": "chrono",
+      "version": "0.4.45",
+      "kind": "unmaintained",
+      "owner": "maintainers (Rust timestamps)",
+      "rationale": "Buildmesh uses chrono for timestamps in persisted records and IPC models, and ts-rs pulls it in through its chrono-impl feature to export those timestamps as TypeScript strings. The advisory reports a maintenance warning for every chrono version. Keep the current dependency until a replacement preserves existing timestamp parsing, serialization, and generated bindings and removes the ts-rs chrono-impl feature.",
+      "reviewBy": "2027-01-15"
+    },
+    {
       "id": "RUSTSEC-2024-0429",
       "crate": "glib",
       "version": "0.18.5",

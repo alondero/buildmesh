@@ -1,7 +1,7 @@
 // Keep the DLL and console host from one verified Microsoft package. The Windows
 // inbox host can flush synchronized-update markers before its rendered output.
 import { createHash } from 'node:crypto';
-import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
@@ -71,18 +71,25 @@ async function prepare(rustArch, profileDir) {
     await writeFile(archive, bytes);
   }
   verifyPackage(bytes);
-  const extracted = join(cache, 'extracted');
-  execFileSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
-    '$ErrorActionPreference = "Stop"; Expand-Archive -LiteralPath $env:BUILDMESH_CONPTY_ARCHIVE -DestinationPath $env:BUILDMESH_CONPTY_EXTRACT -Force',
-  ], {
-    windowsHide: true,
-    env: { ...process.env, BUILDMESH_CONPTY_ARCHIVE: archive, BUILDMESH_CONPTY_EXTRACT: extracted },
-    stdio: 'inherit',
-  });
-  const resources = join(root, 'src-tauri/conpty/runtime');
-  await stageRuntime(extracted, rustArch, [resources, profileDir, join(profileDir, 'deps')]);
-  const arch = { x86_64: 'x64', aarch64: 'arm64', x86: 'x86' }[rustArch];
-  await copyChanged(join(extracted, `runtimes/win-${arch}/lib/uap10.0/conpty.lib`), join(profileDir, 'conpty.lib'));
+  const extracted = await mkdtemp(join(cache, 'extract-'));
+  try {
+    const extractArchive = [
+      "$ErrorActionPreference = 'Stop'",
+      'Add-Type -AssemblyName System.IO.Compression.FileSystem',
+      '[System.IO.Compression.ZipFile]::ExtractToDirectory($env:BUILDMESH_CONPTY_ARCHIVE, $env:BUILDMESH_CONPTY_EXTRACT)',
+    ].join('\n');
+    execFileSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', extractArchive], {
+      windowsHide: true,
+      env: { ...process.env, BUILDMESH_CONPTY_ARCHIVE: archive, BUILDMESH_CONPTY_EXTRACT: extracted },
+      stdio: 'inherit',
+    });
+    const resources = join(root, 'src-tauri/conpty/runtime');
+    await stageRuntime(extracted, rustArch, [resources, profileDir, join(profileDir, 'deps')]);
+    const arch = { x86_64: 'x64', aarch64: 'arm64', x86: 'x86' }[rustArch];
+    await copyChanged(join(extracted, `runtimes/win-${arch}/lib/uap10.0/conpty.lib`), join(profileDir, 'conpty.lib'));
+  } finally {
+    await rm(extracted, { recursive: true, force: true });
+  }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
