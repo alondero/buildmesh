@@ -71,8 +71,6 @@ async function prepare(rustArch, profileDir) {
     await writeFile(archive, bytes);
   }
   verifyPackage(bytes);
-  // Windows PowerShell supports the two-argument ZipFile overload. A fresh
-  // destination lets each build extract without requesting overwrite support.
   const extracted = await mkdtemp(join(cache, 'extract-'));
   try {
     const extractArchive = [
