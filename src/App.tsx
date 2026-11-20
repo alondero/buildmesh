@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { listen } from '@tauri-apps/api/event';
+import { listen } from './lib/tauri/eventListen';
 import type { ProviderErrorPayload } from './types/generated/ProviderErrorPayload';
 import type { ProviderWarningPayload } from './types/generated/ProviderWarningPayload';
 import type { ResumeFailedPayload } from './types/generated/ResumeFailedPayload';

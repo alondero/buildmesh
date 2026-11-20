@@ -7,6 +7,7 @@ import { applyTheme } from "./lib/theme";
 import { applyTextScale } from "./lib/textScale";
 import { applyTypeDensity } from "./lib/typeDensity";
 import { applyWindowZoomAtBoot } from "./lib/webviewZoom";
+import { startRendererHealthSampler } from "./lib/diagnostics/rendererHealth";
 
 // Forward console.error/warn, window.error, and unhandledrejection to the
 // Rust log file. Must run before any other code so we don't miss early
@@ -36,6 +37,16 @@ applyTypeDensity();
 // first paint. A failure here is logged, never fatal: the app must still
 // start if the platform cannot zoom.
 void applyWindowZoomAtBoot();
+
+// Issue #2833 — start the renderer health sampler. One structured line every
+// 10 s describing what the WebView was doing: interaction latency, long
+// frames, page size and the activity counters. Passive observers only — no
+// requestAnimationFrame loop — and the line travels through the log bridge
+// above into `logs/renderer-diagnostics.log`.
+//
+// Started before React mounts so the first frames of the session are inside
+// the first sample window; the observers buffer the entries they missed.
+startRendererHealthSampler();
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>

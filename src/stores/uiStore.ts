@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { useMeshStore } from './meshStore';
 import { STATUS_CONFIG } from '../lib/status';
+import { bumpRendererActivity } from '../lib/diagnostics/rendererHealthCounters';
 import type { SessionStatus } from '../types/generated/SessionStatus';
 import type { ProbeTab } from '../lib/probeContext';
 import { rememberProbeSubview, restoredProbeSubview } from '../lib/probeGroups';
@@ -677,6 +678,11 @@ export const useUIStore = create<UIState>((set, get) => {
         lastNonSingleMode: mode === 'single' ? get().lastNonSingleMode : mode,
       });
       persistViewMode(mode);
+      // Issue #2833 — the renderer health line counts view switches. Counted
+      // AFTER the idempotency check, so a same-mode call is not a switch, and
+      // outside the store: a counter held in the store would notify every
+      // `useUIStore` subscriber for a fact none of them reads.
+      bumpRendererActivity('view_switch');
     },
 
     exitSingleMode: () => {

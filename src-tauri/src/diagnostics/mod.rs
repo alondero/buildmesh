@@ -33,8 +33,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 pub mod cdp;
+mod renderer;
 mod watchdog;
 mod writer;
+pub(crate) use renderer::{is_renderer_health_line, write_renderer_line, RendererLineOutcome};
 pub(crate) use watchdog::{clear_expected_exit, mark_expected_exit, ExpectedExitReason};
 #[cfg(not(target_os = "windows"))]
 pub(crate) use watchdog::{relaunch_detached, AUTO_RELAUNCH_COOLDOWN_SECS};
@@ -298,7 +300,11 @@ const DEFAULT_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Env kill-switch. Diagnostics are on by default (the user opted into
 /// always-on); set `BUILDMESH_DIAG=0` to disable the sampler entirely.
-fn diagnostics_enabled() -> bool {
+///
+/// It also closes the renderer diagnostics sink (issue #2833): the renderer
+/// health line is a diagnostic, and a user who turned diagnostics off should
+/// not get one line every ten seconds in the main log either.
+pub(crate) fn diagnostics_enabled() -> bool {
     !matches!(std::env::var("BUILDMESH_DIAG").as_deref(), Ok("0"))
 }
 
@@ -316,6 +322,12 @@ fn sample_interval() -> Duration {
 /// must never take down the app it exists to observe. `log_dir` is the same
 /// `logs/` directory the tracing appender uses.
 pub fn start_sampler(log_dir: std::path::PathBuf) {
+    // Issue #2833 — open the renderer diagnostics sink first, and before the
+    // kill-switch check. The sink shares this `logs/` directory, and it must
+    // exist even when the native sampler is switched off: the renderer line
+    // is then *dropped* rather than redirected, and the decision is made by
+    // the sink itself.
+    renderer::install_log_dir(log_dir.clone());
     if !diagnostics_enabled() {
         tracing::info!("diagnostics sampler disabled via BUILDMESH_DIAG=0");
         return;

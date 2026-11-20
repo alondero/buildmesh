@@ -8,6 +8,12 @@
 //! handed to tracing, then capped. The log writer scrubs again on the way to
 //! disk, so a subscriber line that never passed through this command is held
 //! to the same rule.
+//!
+//! One message class is routed elsewhere: the renderer health line (issue
+//! #2833). The frontend sends one structured line every ten seconds through
+//! this same bridge, and the `RENDER_DIAG` prefix sends it to the renderer
+//! diagnostics sink — its own bounded, rotating file beside
+//! `diagnostics.log` — instead of the main log.
 
 use crate::secret_scrubber::SecretScrubber;
 use tauri::command;
@@ -24,6 +30,39 @@ const SCRUB_INPUT_CAP: usize = 64 * 1024;
 #[command]
 pub async fn log_frontend(level: String, message: String) {
     let message = prepare_frontend_message(&message);
+    // Issue #2833 — the renderer health line travels through this same
+    // bridge, but it lands in its own bounded, rotating sink
+    // (`logs/renderer-diagnostics.log`) rather than in the main tracing log.
+    // Three outcomes, and they are not the same:
+    //
+    // * `Written` — the line is in the renderer sink. Nothing more to do.
+    // * `Disabled` — `BUILDMESH_DIAG=0`. The line is dropped: the user
+    //   asked for no diagnostics, and a line every ten seconds in the main
+    //   log is exactly the noise they asked to stop.
+    // * `Unavailable` — the sink could not be opened. The line falls
+    //   through to the main log so the information is not lost.
+    if crate::diagnostics::is_renderer_health_line(&message) {
+        // The renderer sink does a disk write and an fsync. An async command
+        // that does that inline parks a Tokio worker for the duration, so the
+        // write is offloaded to the blocking pool — the same rule every other
+        // disk-touching command follows (issue #1380).
+        let line = message.clone();
+        let outcome = crate::commands::run_blocking("log_frontend_renderer", move || {
+            Ok::<crate::diagnostics::RendererLineOutcome, String>(
+                crate::diagnostics::write_renderer_line(&line),
+            )
+        })
+        .await
+        // An offload that could not even start is treated as an unavailable
+        // sink, so the line falls through to the main log rather than being
+        // lost.
+        .unwrap_or(crate::diagnostics::RendererLineOutcome::Unavailable);
+        match outcome {
+            crate::diagnostics::RendererLineOutcome::Written
+            | crate::diagnostics::RendererLineOutcome::Disabled => return,
+            crate::diagnostics::RendererLineOutcome::Unavailable => {}
+        }
+    }
     match level.as_str() {
         "error" => tracing::error!(target: "frontend", "{}", message),
         "warn" => tracing::warn!(target: "frontend", "{}", message),

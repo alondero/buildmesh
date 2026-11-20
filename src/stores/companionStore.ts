@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { listen } from '@tauri-apps/api/event';
+import { listen } from '../lib/tauri/eventListen';
 import type { CompanionTask } from '../types/generated/CompanionTask';
 import * as api from '../lib/tauri/companion';
 import { formatError } from '../lib/errorUtils';

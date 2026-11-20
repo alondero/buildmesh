@@ -26,6 +26,10 @@
  */
 import type { Terminal } from '@xterm/xterm';
 import { loadWebglRenderer } from './loadWebglRenderer';
+import {
+  bumpRendererActivity,
+  registerLiveWebglCounter,
+} from '../../lib/diagnostics/rendererHealthCounters';
 
 export const MAX_ACTIVE_WEBGL_CONTEXTS = 4;
 
@@ -54,6 +58,11 @@ export class WebglRendererPool {
     while (this.entries.size >= this.maxActive) {
       const evict = this.lru[0];
       if (evict === undefined) break;
+      // Issue #2833 — an eviction is a GPU context being taken away from a
+      // terminal that had one, so it is worth counting separately from an
+      // ordinary release: a rising eviction count is the signature of more
+      // visible terminals than the pool can serve.
+      bumpRendererActivity('webgl_eviction');
       this.release(evict);
     }
     this.touch(key);
@@ -100,3 +109,8 @@ export class WebglRendererPool {
  * a pane belongs to.
  */
 export const terminalWebglPool = new WebglRendererPool();
+
+// Issue #2833 — the renderer health line reports the live WebGL renderer
+// count as a page-size gauge. Only the process-wide pool is registered: a
+// test's private pool is not part of the running app's page size.
+registerLiveWebglCounter('webgl', () => terminalWebglPool.size());

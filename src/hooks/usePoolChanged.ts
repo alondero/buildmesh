@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { listen } from '@tauri-apps/api/event';
+import { listen } from '../lib/tauri/eventListen';
 
 /**
  * Event name emitted by the Rust pool service whenever a mesh's

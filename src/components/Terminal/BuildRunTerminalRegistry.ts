@@ -1,12 +1,16 @@
 import type { Terminal } from '@xterm/xterm';
 import type { FitAddon } from '@xterm/addon-fit';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { listen, type UnlistenFn } from '../../lib/tauri/eventListen';
 import * as api from '../../lib/tauri';
 import { createTerminalOptions } from './terminalConfig';
 import { terminalWebglPool } from './WebglRendererPool';
 import { TerminalWriter } from './TerminalWriter';
 import { TerminalResizeScheduler } from './TerminalResizeScheduler';
 import { decodeBase64Bytes } from '../../lib/base64';
+import {
+  bumpRendererActivity,
+  registerAttachedTerminalCounter,
+} from '../../lib/diagnostics/rendererHealthCounters';
 import type { BuildRunOutputPayload } from '../../types/generated/BuildRunOutputPayload';
 import type { BuildRunExitedPayload } from '../../types/generated/BuildRunExitedPayload';
 
@@ -257,7 +261,17 @@ export class BuildRunTerminalRegistry {
       }
     }
 
+    const previousContainer = inst.attachedContainer;
     inst.attachedContainer = container;
+
+    // Issue #2833 — the renderer health line counts terminal attach and
+    // detach activity, for the build/run panes as well as the agent
+    // terminals: a build/run pane is the same kind of xterm in the same DOM.
+    // The container comparison keeps an idempotent re-attach from counting
+    // twice.
+    if (previousContainer !== container) {
+      bumpRendererActivity('terminal_attach');
+    }
 
     inst.resizeScheduler.attach(container);
     inst.resizeScheduler.fitNextFrame();
@@ -334,6 +348,21 @@ export class BuildRunTerminalRegistry {
     inst.term.element?.remove();
     inst.attachedContainer = null;
     terminalWebglPool.release(`buildRun:${key}`);
+    // Issue #2833 — the matching detach counter.
+    bumpRendererActivity('terminal_detach');
+  }
+
+  /**
+   * How many build/run terminals are attached to a DOM container right now.
+   *
+   * Read by the renderer health line (issue #2833) as a page-size gauge.
+   */
+  attachedTerminalCount(): number {
+    let count = 0;
+    for (const inst of this.instances.values()) {
+      if (inst.attachedContainer !== null) count += 1;
+    }
+    return count;
   }
 
   /** Full teardown — called from the X button. Kills the Rust PTY,
@@ -618,6 +647,12 @@ export class BuildRunTerminalRegistry {
 }
 
 export const buildRunTerminalManager = new BuildRunTerminalRegistry();
+
+// Issue #2833 — the renderer health line reports the number of attached
+// xterm terminals as a page-size gauge. The registry owns the fact; the
+// sampler reads it through this provider rather than importing the
+// component module.
+registerAttachedTerminalCounter('buildRun', () => buildRunTerminalManager.attachedTerminalCount());
 
 // Expose globally for E2E tests, mirroring Terminal.tsx:27.
 declare global {

@@ -39,6 +39,7 @@ For backend responsibility ownership, see the
 | Attention system, hooks, turn counting, node naming | [attention.md](development/attention.md) | `src-tauri/src/http/routes/attention.rs`, `src-tauri/src/commands/attention.rs`, `src-tauri/src/agent/session_lifecycle/` |
 | Probe panel, view modes, context lenses | [probe-ui.md](development/probe-ui.md) | `src/components/Probe/`, `src/stores/` |
 | Diagnostics, DevTools port, capture | [diagnostics.md](development/diagnostics.md) | `src-tauri/src/diagnostics/`, `scripts/diag-capture.mjs` |
+| Renderer health line (the always-on WebView timeline) | [renderer-diagnostics.md](development/renderer-diagnostics.md) | `src/lib/diagnostics/`, `src-tauri/src/diagnostics/` |
 | Git query cache: freshness and retention | [git-query-cache.md](development/git-query-cache.md) | `src/lib/pathInvalidatedCache.ts`, `src/hooks/usePathInvalidatedQuery.ts`, `src-tauri/src/git/status_stats.rs` |
 | Windows, WSL paths, frameless window, shortcuts | [windows.md](development/windows.md) | `src-tauri/src/env/host_path.rs`, `src/components/TitleBar/`, `src/lib/windowFocus.ts` |
 | Startup, profiles, crash recovery, environment detection | [startup-and-profiles.md](development/startup-and-profiles.md) | `src-tauri/src/lib.rs`, `src-tauri/src/instance_guard.rs`, `src-tauri/src/env/environment.rs` |

@@ -157,6 +157,9 @@ For a real capture, start the dev profile with a port
 ## Related
 
 - [The Probe panel](probe-ui.md) — the in-app view of the same surfaces.
+- [Renderer diagnostics](renderer-diagnostics.md) — the always-on WebView
+  timeline: one line every ten seconds, no DevTools port and no capture
+  needed.
 - [Windows](../development/windows.md) and
   [startup and profiles](../development/startup-and-profiles.md) — the
   frameless window and the per-worktree profile the capture reads its logs

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { listen } from '@tauri-apps/api/event';
+import { listen } from '../lib/tauri/eventListen';
 import { isWindows } from '../lib/platform';
 import { setTitlebarMaximizeMetrics } from '../lib/tauri';
 

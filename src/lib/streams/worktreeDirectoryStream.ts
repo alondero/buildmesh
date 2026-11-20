@@ -1,4 +1,4 @@
-import { listen } from '@tauri-apps/api/event';
+import { listen } from '../tauri/eventListen';
 import { createStreamSubscription } from './streamSubscription';
 
 /**

@@ -14,6 +14,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
+import { bumpRendererActivity } from '../../lib/diagnostics/rendererHealthCounters';
 import { ModalDismissalProvider } from './modalDismissal';
 
 // Lets `<ModalCloseButton>` (rendered inside the consumer's children) route
@@ -206,6 +207,16 @@ export function Modal({
       setConfirmingDiscard(false);
     }
   }, [dirty]);
+
+  // Issue #2833 — the renderer health line counts the dialogs this session
+  // opened. Mounting IS the open: the Modal's own contract is "render it
+  // conditionally — mounting is what arms the Escape listener", so a mount is
+  // the one moment that means "a dialog appeared". A count at the call sites
+  // would miss every dialog that is opened by a state flag rather than by
+  // the component that owns the flag.
+  useEffect(() => {
+    bumpRendererActivity('dialog');
+  }, []);
 
   useEffect(() => {
     const previouslyFocused = document.activeElement as HTMLElement | null;

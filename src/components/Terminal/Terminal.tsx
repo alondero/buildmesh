@@ -16,9 +16,16 @@ import { rememberTerminalFocusRequest, shouldAdoptTerminalFocus, type DeferredTe
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
 import { dropdownId } from '../../lib/dropdownId';
+import { registerAttachedTerminalCounter } from '../../lib/diagnostics/rendererHealthCounters';
 
 export { type TerminalInstance } from './TerminalRegistry';
 export const terminalManager = new TerminalRegistry();
+
+// Issue #2833 — the renderer health line reports the number of attached
+// xterm terminals as a page-size gauge. The registry owns the fact; the
+// sampler reads it through this provider rather than importing the
+// component module.
+registerAttachedTerminalCounter('agent', () => terminalManager.attachedTerminalCount());
 
 /**
  * Backward compatibility export

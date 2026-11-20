@@ -43,7 +43,7 @@
  * testability gain. The dispatch surface is the smallest contract that
  * keeps the listeners testable.
  */
-import { listen } from '@tauri-apps/api/event';
+import { listen } from '../lib/tauri/eventListen';
 import type { AttentionClearedPayload } from '../types/generated/AttentionClearedPayload';
 import type { LifecycleChangedPayload } from '../types/generated/LifecycleChangedPayload';
 import type { SemanticTurnPayload } from '../types/generated/SemanticTurnPayload';

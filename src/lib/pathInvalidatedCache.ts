@@ -104,7 +104,7 @@
  * `docs/development/git-query-cache.md`.
  */
 
-import { listen } from '@tauri-apps/api/event';
+import { listen } from './tauri/eventListen';
 import { GIT_CHANGED } from './events';
 import { pathMatchesGitEvent } from './paths';
 
