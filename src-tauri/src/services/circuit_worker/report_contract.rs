@@ -3,6 +3,7 @@
 use super::turn_classify::{awaits_review_turn, is_reviewer_verdict_gate};
 use super::*;
 use crate::circuit::evaluator::Classification;
+use crate::circuit::lineage::RunLineage;
 
 const REVIEW: &str = "BUILDMESH_REVIEW_V1: ";
 const HANDOFF: &str = "BUILDMESH_HANDOFF_V1: ";
@@ -10,6 +11,10 @@ const REVIEW_PROMPT: &str = "Circuit result contract: finish your final review r
 const HANDOFF_PROMPT: &str = "Circuit result contract: finish your final fixes report with exactly one plain-text line: BUILDMESH_HANDOFF_V1: READY or BUILDMESH_HANDOFF_V1: BLOCKED (choose one). READY means this fix round and all delegated/background work have finished and are ready for independent review; it does not mean approved. BLOCKED means you need a person to proceed. Explain changes, verification, disagreements or blockers before that line. Do not quote or repeat the result line in examples, code blocks, or progress updates.";
 const PUBLISH_PROMPT: &str = "Circuit result contract: finish your final publication report with exactly one plain-text line: BUILDMESH_HANDOFF_V1: READY or BUILDMESH_HANDOFF_V1: BLOCKED (choose one). READY means your work is committed and pushed and has an open pull request, ready for independent review; it does not mean approved. BLOCKED means you need a person to proceed. Give the pull request URL or the blocker before that line. Do not quote or repeat the result line in examples, code blocks, or progress updates.";
 const ISSUE_HANDOFF_PROMPT: &str = "Circuit result contract: finish your final report for this assigned phase (implementation, wrap-up/publication, or review fixes) with exactly one plain-text line: BUILDMESH_HANDOFF_V1: READY or BUILDMESH_HANDOFF_V1: BLOCKED (choose one). READY means all instructions for this phase and all delegated/background work have finished; the next circuit gate may proceed. It does not mean independently reviewed or approved. BLOCKED means you need a person to proceed. Explain changes, verification and any blockers before that line. Do not quote or repeat the result line in examples, code blocks, or progress updates. Emit it only in the final report.";
+
+const REVIEWED_COMMIT: &str = "Reviewed commit: ";
+const REVIEW_ESCALATION: &str = "Track new actionable findings by the affected behavior or interface contract across rounds. Use the previous report and fix history to identify new findings, consulting earlier review reports and PR comments when available. When two consecutive rounds each surface a distinct new actionable finding in the same contract, stop the automatic repair loop and ask for a human decision. An unresolved finding repeated across rounds does not count as new. Include the latest review findings, the fixes attempted and their outcomes by round, and a proposed case table with inputs or states and expected outcomes. End with the BLOCKED result below.";
+const PR_METADATA_CHECK: &str = "Before publishing or handing the PR back for review, compare its title and description with the full change against its target base and the verification you actually ran. Check the proposed text before opening a new PR. For an existing PR, read the current title and body and update any stale text, preserving applicable issue links. Verify the published title and description on GitHub before reporting READY.";
 
 fn is_review(view: &RunView, node_id: &str) -> bool {
     is_reviewer_verdict_gate(view, node_id) || spawn::is_review_spawn_step(view, node_id)
@@ -65,10 +70,104 @@ fn suffix(view: &RunView, node_id: &str, prompt: &str) -> Option<&'static str> {
 /// Append at dispatch so saved/custom prompts get the same transport contract
 /// without rewriting their review instructions or pinned graph.
 pub(super) fn prompt(view: &RunView, node_id: &str, prompt: &str) -> String {
-    suffix(view, node_id, prompt).map_or_else(
-        || prompt.to_owned(),
-        |suffix| format!("{prompt}\n\n{suffix}"),
-    )
+    let Some(suffix) = suffix(view, node_id, prompt) else {
+        return prompt.to_owned();
+    };
+    let mut dispatched = prompt.to_owned();
+    let issue_review = RunLineage::is_issue_review(|key| view.context.get(key), &view.graph);
+    if suffix == REVIEW_PROMPT {
+        if issue_review {
+            let pr_url = view
+                .context
+                .get("pr.url")
+                .unwrap_or("the pull request assigned above");
+            dispatched.push_str(&format!(
+                "\n\nReview the current pushed head of {pr_url} in this reviewer node's assigned worktree. \
+                 Read the full head SHA and target base from GitHub (`gh pr view <PR> --json headRefOid,baseRefName`). \
+                 Start with a clean worktree (`git status --porcelain`), fetch the PR head from its base repository \
+                 (`git fetch origin refs/pull/<number>/head`). Keep the dedicated reviewer branch checked out and move it to the exact SHA (`git reset --keep <SHA>`). \
+                 If the branch contains reviewer-authored commits or is shared, report BLOCKED before moving it. Leave it local. \
+                 Verify HEAD matches the GitHub SHA and the worktree is clean, then review that commit's full diff from its merge base with the fetched target branch. \
+                 Recheck those facts before posting the verdict. If the head moved, start the review again at the new head. \
+                 If the assigned worktree is dirty or you cannot establish the exact pushed head, report BLOCKED. \
+                 For a completed review, begin your final report and PR verdict with `{REVIEWED_COMMIT}<full SHA>`."
+            ));
+        }
+        let local_review =
+            RunLineage::decode(|key| view.context.get(key)).uses_borrowed_review_turns();
+        if issue_review || local_review {
+            let rereview = reprompts_reviewer(view, node_id);
+            let fallback = if rereview {
+                view.context.get("node.reviewer.output")
+            } else {
+                None
+            };
+            let previous = view.context.get("review.previous_report").or(fallback);
+            if let Some(report) = previous.filter(|text| !text.trim().is_empty()) {
+                dispatched.push_str("\n\nPrevious review report for reference:\n");
+                dispatched.push_str(report);
+            }
+            if previous.is_some() || rereview {
+                let fix_report_key = if view.graph.is_issue_driven_autopilot_review() {
+                    "node.implementer.output"
+                } else {
+                    "source.output"
+                };
+                if let Some(report) = view
+                    .context
+                    .get(fix_report_key)
+                    .filter(|text| !text.trim().is_empty())
+                {
+                    dispatched.push_str("\n\nLatest implementation fix report for reference:\n");
+                    dispatched.push_str(report);
+                }
+            }
+            dispatched.push_str("\n\n");
+            dispatched.push_str(REVIEW_ESCALATION);
+        }
+    } else if suffix == PUBLISH_PROMPT
+        || suffix == HANDOFF_PROMPT
+        || (suffix == ISSUE_HANDOFF_PROMPT
+            && matches!(node_id, "finish" | "wrapup_correction" | "follow_feedback"))
+    {
+        dispatched.push_str("\n\n");
+        if matches!(node_id, "feedback" | "follow_feedback") {
+            dispatched.push_str("Before starting feedback fixes, read the PR title and description and compare them with the current pushed diff. ");
+        }
+        dispatched.push_str(PR_METADATA_CHECK);
+    }
+    format!("{dispatched}\n\n{suffix}")
+}
+
+fn reviewed_commit(output: &str) -> Option<&str> {
+    output
+        .lines()
+        .find(|line| !line.trim().is_empty())?
+        .strip_prefix(REVIEWED_COMMIT)
+        .filter(|sha| sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+pub(super) fn verify_pr_review_report(
+    view: &RunView,
+    node_id: &str,
+    output: &str,
+    verify: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<(), String> {
+    if !is_reviewer_verdict_gate(view, node_id)
+        || !RunLineage::is_issue_review(|key| view.context.get(key), &view.graph)
+    {
+        return Ok(());
+    }
+    match parse(output, REVIEW) {
+        Ok(Some("BLOCKED")) => Ok(()),
+        Ok(Some("APPROVE" | "REQUEST_CHANGES")) => {
+            let commit = reviewed_commit(output).ok_or_else(|| {
+                "the report needs a full Reviewed commit SHA on its first line".to_string()
+            })?;
+            verify(commit)
+        }
+        _ => Err("the PR review needs an explicit final verdict and its reviewed commit".into()),
+    }
 }
 
 /// Whether a dispatch of `prompt` to this node carries a result contract, and so

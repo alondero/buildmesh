@@ -116,6 +116,10 @@ struct ResultReadFixture {
 
 impl ResultReadFixture {
     fn new() -> Self {
+        Self::for_gate("implementer", "implementation_classifier")
+    }
+
+    fn for_gate(source: &str, gate: &str) -> Self {
         use crate::circuit::observation::{ObservationIdentity, ReportEvidence, WorkEvidence};
         static NEXT_ID: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-721_000);
         let db = install_temp_db();
@@ -161,7 +165,7 @@ impl ResultReadFixture {
             context: CircuitContext::new(),
             steps: vec![
                 StepView {
-                    node_id: "implementer".into(),
+                    node_id: source.into(),
                     status: StepStatus::Completed,
                     agent_node_id: Some(agent_id),
                     attempt: 1,
@@ -169,7 +173,7 @@ impl ResultReadFixture {
                     error: None,
                 },
                 StepView {
-                    node_id: "implementation_classifier".into(),
+                    node_id: gate.into(),
                     status: StepStatus::Running,
                     agent_node_id: None,
                     attempt: 1,
@@ -181,7 +185,7 @@ impl ResultReadFixture {
         let evidence = WorkEvidence {
             identity: Some(ObservationIdentity {
                 run_id: view.run_id,
-                step_id: "implementer".into(),
+                step_id: source.into(),
                 attempt: 1,
                 agent_node_id: agent_id,
                 session_incarnation: Some("1".into()),
@@ -201,7 +205,7 @@ impl ResultReadFixture {
             ..Default::default()
         };
         view.context.set(
-            "node.implementer.evidence.1",
+            &format!("node.{source}.evidence.1"),
             serde_json::to_string(&evidence).unwrap(),
         );
         crate::circuit::handoff::set_agent_turn_from(
@@ -209,14 +213,14 @@ impl ResultReadFixture {
             view.run_id,
             agent_id,
             Some(&crate::circuit::handoff::HandoffTurn {
-                node_id: "implementation_classifier".into(),
+                node_id: gate.into(),
                 attempt: 1,
             }),
         );
         let result = crate::circuit::handoff::paths_in(
             store.profile_dir(),
             view.run_id,
-            "implementation_classifier",
+            gate,
             1,
         )
         .result;

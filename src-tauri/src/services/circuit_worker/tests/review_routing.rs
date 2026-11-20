@@ -1,5 +1,154 @@
 // Circuit worker review routing tests. Included in the existing tests scope.
 #[test]
+fn pr_verdict_gate_holds_an_unbound_approval_and_rechecks_when_reopened() {
+    use crate::circuit::observation::CircuitObservationBlocker;
+
+    let mut fixture = ResultReadFixture::for_gate("reviewer", "review_classifier");
+    std::fs::write(
+        &fixture.result,
+        "All checks passed.\nBUILDMESH_REVIEW_V1: APPROVE",
+    )
+    .unwrap();
+    let assert_checkout_hold = |events: &[CircuitEvent]| {
+        assert!(events.iter().any(|event| matches!(
+            event,
+            CircuitEvent::ObservationDeferred {
+                blocker: CircuitObservationBlocker::PrReviewCheckoutUnverified { reason, .. },
+                ..
+            } if reason.contains("Reviewed commit SHA")
+        )), "{events:?}");
+    };
+    let (events, _, _) = fixture.probe();
+    assert_checkout_hold(&events);
+    assert_eq!(
+        fixture.view.step("review_classifier").unwrap().status,
+        StepStatus::Unverified
+    );
+    let (events, _, _) = fixture.probe();
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        CircuitEvent::ObservationDeferred {
+            blocker: CircuitObservationBlocker::PrReviewCheckoutUnverified { .. },
+            ..
+        }
+    )));
+
+    let step = fixture.view.steps.iter_mut()
+        .find(|step| step.node_id == "review_classifier").unwrap();
+    step.status = StepStatus::Running;
+    step.error = None;
+    let (events, _, _) = fixture.probe();
+    assert_checkout_hold(&events);
+}
+
+#[test]
+fn pr_review_requires_report_remote_and_clean_checkout_to_agree() {
+    use crate::env::test_helpers::{init_repo_with_commit, TestDir};
+
+    let view = report_gate_view();
+    let checkout = TestDir::new("pr_review_assigned_checkout");
+    let repo = init_repo_with_commit(checkout.path(), &[("reviewed.txt", "pushed code")]);
+    let head = repo.head().unwrap().target().unwrap().to_string();
+    let other = "0123456789abcdef0123456789abcdef01234567";
+    assert_ne!(head, other);
+    let check = |report: &str, remote: &str| {
+        report_contract::verify_pr_review_report(&view, "review_classifier", report, |sha| {
+            github::verify_reviewed_head(checkout.path().to_str().unwrap(), sha, || {
+                Ok(remote.into())
+            })
+        })
+    };
+    let approval = format!("Reviewed commit: {head}\nChecks passed.\nBUILDMESH_REVIEW_V1: APPROVE");
+    let findings =
+        format!("Reviewed commit: {head}\nFound a bug.\nBUILDMESH_REVIEW_V1: REQUEST_CHANGES");
+    for report in [&approval, &findings] {
+        assert_eq!(check(report, &head), Ok(()));
+        assert!(check(report, other)
+            .unwrap_err()
+            .contains("the report reviewed"));
+    }
+    assert!(check(&approval.replace(&head, other), other)
+        .unwrap_err()
+        .contains("assigned reviewer worktree is at"));
+    for report in [
+        "Approved, no findings.",
+        "Checks passed.\nBUILDMESH_REVIEW_V1: APPROVE",
+        "Reviewed commit: abc123\nChecks passed.\nBUILDMESH_REVIEW_V1: APPROVE",
+    ] {
+        assert!(check(report, &head).is_err(), "{report}");
+    }
+    std::fs::write(checkout.path().join("untracked.txt"), "unreviewed work").unwrap();
+    for report in [&approval, &findings] {
+        assert!(check(report, &head)
+            .unwrap_err()
+            .contains("uncommitted changes"));
+    }
+    assert_eq!(
+        check(
+            "Cannot review a dirty checkout.\nBUILDMESH_REVIEW_V1: BLOCKED",
+            &head,
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn built_in_pr_handoffs_check_metadata_and_rereview_requests_escalation_evidence() {
+    let mut view = report_gate_view();
+    view.context.set("pr.url", "https://github.com/example/buildmesh/pull/1");
+    view.context.set("node.implementer.output", "Fixed the empty input case");
+    for role in ["finish", "wrapup_correction", "follow_feedback"] {
+        let prompt = report_contract::prompt(&view, role, "Assigned work");
+        assert!(prompt.contains("compare its title and description"), "{role}");
+        assert!(prompt.contains("update any stale text"), "{role}");
+    }
+    let first = report_contract::prompt(&view, "reviewer", "Review this PR");
+    let next = report_contract::prompt(&view, "re_review", "Review again");
+    for prompt in [&first, &next] {
+        assert!(prompt.contains("headRefOid"));
+        assert!(prompt.contains("assigned worktree"));
+        assert!(prompt.contains("Keep the dedicated reviewer branch checked out"));
+        assert!(prompt.contains("Reviewed commit: <full SHA>"));
+        assert!(prompt.contains("two consecutive rounds"));
+        assert!(prompt.contains("fixes attempted and their outcomes by round"));
+        assert!(prompt.contains("case table"));
+    }
+    assert!(next.contains("Fixed the empty input case"));
+
+    view.graph = CircuitGraph::agent_review(None, None, 3);
+    view.context.set("source.review_preset", "1");
+    for role in ["publish", "feedback"] {
+        assert!(
+            report_contract::prompt(&view, role, "Assigned work")
+                .contains("compare its title and description"),
+            "{role}"
+        );
+    }
+    let next = report_contract::prompt(&view, "re_review", "Review again");
+    assert!(next.contains("two consecutive rounds"));
+    assert!(!next.contains("headRefOid"));
+
+    view.context.set("source.review_preset", "0");
+    view.context.set("review.extended", "1");
+    view.context.set("review.source_was_circuit_owned", "1");
+    view.context.set("review.previous_report", "A finding from the preceding round");
+    view.context.set("source.output", "Fixed the preceding finding");
+    let restarted = report_contract::prompt(&view, "reviewer", "Review the continued PR");
+    assert!(restarted.contains("headRefOid"));
+    assert!(restarted.contains("A finding from the preceding round"));
+    assert!(restarted.contains("Fixed the preceding finding"));
+    assert!(report_contract::prompt(&view, "feedback", "Fix findings")
+        .contains("compare its title and description"));
+    assert!(report_contract::verify_pr_review_report(
+        &view,
+        "verdict",
+        "Checks passed.\nBUILDMESH_REVIEW_V1: APPROVE",
+        |_| panic!("missing SHA should be caught before the checkout read"),
+    )
+    .is_err());
+}
+
+#[test]
 fn structured_review_routes_without_classifier() {
     use crate::circuit::evaluator::Classification;
     let mut view = report_gate_view();

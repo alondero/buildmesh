@@ -2858,6 +2858,18 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                         run.graph.node(node_id).map(|n| &n.kind),
                         Some(CircuitNodeKind::ReviewVerdict { .. })
                     ) {
+                        let lineage =
+                            super::lineage::RunLineage::decode(|key| run.context.get(key));
+                        if matches!(
+                            classification,
+                            Classification::Working | Classification::Continue
+                        ) && (run.graph.is_issue_driven_autopilot_review()
+                            || lineage.uses_borrowed_review_turns())
+                        {
+                            if let Some(report) = output {
+                                run.context.set("review.previous_report", report);
+                            }
+                        }
                         run.context
                             .set(&format!("node.{node_id}.review_verdict_source"), "agent");
                         run.context.set(
@@ -2896,9 +2908,12 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                             run,
                             &mut t,
                             node_id,
-                            "Review is inconclusive. Inspect the reviewer, then record a verdict or check again.".into(),
+                            "Review needs a human decision. Read the latest review report, then record a verdict or check again.".into(),
                         ) {
-                            let message = if run.graph.is_issue_driven_autopilot_review() {
+                            let message = if super::lineage::RunLineage::is_issue_review(
+                                |key| run.context.get(key),
+                                &run.graph,
+                            ) {
                                 PR_REVIEW_INCONCLUSIVE_MESSAGE
                             } else {
                                 LOCAL_REVIEW_INCONCLUSIVE_MESSAGE

@@ -383,6 +383,36 @@ fn classify_step_turn_with(
     };
     let readiness = reviewer_readiness(view, node_id, status, output, classify);
     evaluator::note_evaluation(agent_node_id);
+    if readiness == ReviewerReadiness::Reportable {
+        use crate::circuit::observation::CircuitObservationBlocker;
+        let held = view
+            .context
+            .get(&format!("node.{node_id}.observation_blocker"))
+            .and_then(|json| serde_json::from_str(json).ok());
+        if step.status == StepStatus::Unverified
+            && matches!(
+                held,
+                Some(CircuitObservationBlocker::PrReviewCheckoutUnverified { report_revision, .. })
+                    if report_revision == binding.report_revision
+            )
+        {
+            return None;
+        }
+        let verification = report_contract::verify_pr_review_report(view, node_id, output, |sha| {
+            super::github::verify_pr_review_checkout(view, &agent, sha)
+        });
+        if let Err(reason) = verification {
+            return (!superseded()).then(|| {
+                ClassifiedTurn::deferred(
+                    agent_node_id,
+                    CircuitObservationBlocker::PrReviewCheckoutUnverified {
+                        reason,
+                        report_revision: binding.report_revision.clone(),
+                    },
+                )
+            });
+        }
+    }
     let classification = match readiness {
         ReviewerReadiness::Working | ReviewerReadiness::Unavailable => None,
         ReviewerReadiness::Reportable => {

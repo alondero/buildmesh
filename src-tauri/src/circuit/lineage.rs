@@ -43,9 +43,7 @@ impl RunLineage {
         let extended = get(REVIEW_EXTENDED_KEY) == Some("1");
         let review_origin = if get(REVIEW_PRESET_KEY) == Some("1") {
             ReviewOrigin::LocalPreset
-        } else if graph.is_issue_driven_autopilot_review()
-            || (extended && get("review.source_was_circuit_owned") == Some("1"))
-        {
+        } else if Self::is_issue_review(&get, graph) {
             ReviewOrigin::IssueDriven
         } else if graph.has_local_review_contract() {
             ReviewOrigin::ReviewDerived
@@ -65,6 +63,8 @@ impl RunLineage {
         Self {
             review_origin: if get(REVIEW_PRESET_KEY) == Some("1") {
                 ReviewOrigin::LocalPreset
+            } else if Self::is_issue_review_extension(&get) {
+                ReviewOrigin::IssueDriven
             } else {
                 ReviewOrigin::Unknown
             },
@@ -87,12 +87,25 @@ impl RunLineage {
         get(REVIEW_EXTENDED_KEY) == Some("1")
     }
 
+    pub(crate) fn is_issue_review<'a>(
+        get: impl Fn(&str) -> Option<&'a str>,
+        graph: &CircuitGraph,
+    ) -> bool {
+        graph.is_issue_driven_autopilot_review() || Self::is_issue_review_extension(&get)
+    }
+
+    fn is_issue_review_extension<'a>(get: impl Fn(&str) -> Option<&'a str>) -> bool {
+        Self::is_extended(&get) && get("review.source_was_circuit_owned") == Some("1")
+    }
+
     pub fn is_local_preset(self) -> bool {
         self.review_origin == ReviewOrigin::LocalPreset
     }
 
     pub fn uses_borrowed_review_turns(self) -> bool {
-        self.is_local_preset() || matches!(self.recovery, RecoveryAncestry::FromRun { .. })
+        self.is_local_preset()
+            || (self.extended && self.review_origin == ReviewOrigin::IssueDriven)
+            || matches!(self.recovery, RecoveryAncestry::FromRun { .. })
     }
 
     pub fn mark_local_preset(context: &mut CircuitContext) {

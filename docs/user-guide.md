@@ -461,10 +461,18 @@ A review started from the title bar's **Start review or circuit** control and an
 issue-driven review flow run the same loop:
 
 1. The implementation agent commits, pushes and opens a pull request before any
-   review starts. An issue-driven flow does this in its wrap-up.
+   review starts. An issue-driven flow does this in its wrap-up. The agent checks
+   that the PR title and description match the full change and the verification
+   it ran, and repeats that check after addressing feedback.
 2. One reviewer agent reviews the work. When it requests changes, its findings go
    to the implementation agent, which commits and pushes fixes. The same reviewer,
    still open, is then asked to review again, up to the round limit.
+   For issue-driven PRs, Buildmesh checks that the commit in the verdict matches
+   the current pushed PR head and the reviewer's clean, assigned worktree. If that
+   check fails, review the current head and use **Check again**.
+   When two consecutive rounds each find a different new actionable issue in the
+   same behavior or interface, the reviewer is asked to pause for a decision and
+   provide the latest findings, the fix history, and a proposed case table.
 3. On approval the reviewer is closed and the implementation agent is asked to
    squash and merge the pull request. It marks a draft ready, rebases its
    branch onto the base branch the pull request targets, resolves the merge

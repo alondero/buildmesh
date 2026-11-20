@@ -21,6 +21,10 @@ pub enum CircuitObservationBlocker {
         path: String,
         reason: String,
     },
+    PrReviewCheckoutUnverified {
+        reason: String,
+        report_revision: String,
+    },
     ReportSuperseded,
     KnownWorkOutstanding,
     HumanResponseRequired,
@@ -51,6 +55,7 @@ impl CircuitObservationBlocker {
             | Self::InputUncertain
             | Self::InputPaste
             | Self::ResultFileUnavailable { .. }
+            | Self::PrReviewCheckoutUnverified { .. }
             | Self::HumanResponseRequired
             | Self::LifecycleEvidenceUnavailable
             | Self::EvidenceConflict
@@ -85,6 +90,7 @@ impl CircuitObservationBlocker {
             Self::InputPaste => "A terminal paste is still open. Finish or cancel the paste; Buildmesh will recheck automatically.".into(),
             Self::ReportUnavailable { reason } => format!("Waiting for a usable harness report: {reason}. Buildmesh will recheck automatically; no classifier call is needed yet."),
             Self::ResultFileUnavailable { path, reason } => format!("Cannot read result file {path}: {reason}. Inspect the file and its permissions; interpretation is withheld."),
+            Self::PrReviewCheckoutUnverified { reason, .. } => format!("Buildmesh could not verify the PR review. {reason}. Review the current pushed head in the assigned worktree and recheck evidence."),
             Self::ReportSuperseded => "The available report precedes the current session or assigned prompt. Waiting for a fresh report from this turn.".into(),
             Self::KnownWorkOutstanding => "The harness reports unfinished child or background work. Waiting for its completion evidence.".into(),
             Self::HumanResponseRequired => "The harness has an unresolved question or permission request. Respond in the agent session; a completion report cannot answer it.".into(),

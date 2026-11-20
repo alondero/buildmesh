@@ -6988,12 +6988,17 @@ fn issue_review_explicit_approval_completes_without_requesting_more_changes() {
 fn issue_review_inconclusive_verdict_waits_for_human_resolution() {
     let mut run = issue_review_run();
     issue_review_to_first_verdict(&mut run, 702);
+    let report =
+        "Escalating empty-input handling. The latest finding affects whitespace-only input.\n\
+                  The first fix covered missing input.\n\
+                  | Input | Expected |\n| --- | --- |\n| Whitespace | Reject |\n\
+                  BUILDMESH_REVIEW_V1: BLOCKED";
     let transition = advance_with_report_evidence(
         &mut run,
         &classified_with_output(
             "review_classifier",
             Some(Classification::Blocked),
-            Some("Cannot review: provider access is unavailable."),
+            Some(report),
         ),
     );
     let next = advance(&mut run, &tick(8));
@@ -7002,11 +7007,13 @@ fn issue_review_inconclusive_verdict_waits_for_human_resolution() {
         &classified_with_output(
             "review_classifier",
             Some(Classification::Blocked),
-            Some("Cannot review: provider access is unavailable."),
+            Some(report),
         ),
     );
     assert_eq!(run.state, RunState::Running);
     assert_eq!(status_of(&run, "review_classifier"), StepStatus::Unverified);
+    assert_eq!(run.context.get("node.reviewer.output"), Some(report));
+    assert!(run.step("follow_feedback").is_none());
     assert!(run.can_record_review("review_classifier", StepOutcome::Completed));
     assert!(run.can_record_review("review_classifier", StepOutcome::Working));
     let notifications: Vec<_> = transition
@@ -7242,6 +7249,10 @@ fn issue_review_reviewer_output_is_captured_into_node_context() {
     assert_eq!(
         run.context.get("node.reviewer.output"),
         Some("The implementation misses an explicit cleanup hook.")
+    );
+    assert_eq!(
+        run.context.get("review.previous_report"),
+        run.context.get("node.reviewer.output")
     );
     // The follow_feedback step runs the implementation agent and is
     // waiting on AgentReady.
