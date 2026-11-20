@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { listen } from '@tauri-apps/api/event';
+import { listen } from '../lib/tauri/eventListen';
 import type { NamingBackendFailedPayload } from '../types/generated/NamingBackendFailedPayload';
 
 // Re-export so existing callers that imported `NamingBackendFailedPayload`

@@ -660,6 +660,10 @@ describe('SpawnConfigurationMenu inline drag-and-drop', () => {
     const panel = await screen.findByTestId('spawn-configurations');
 
     const getHandles = () => within(panel).getAllByRole('menuitem', { name: /^Reorder / });
+    // The handles arrive asynchronously (`listSpawnConfigurations`), so the
+    // panel's testid can be on screen before the rows are. Waiting for them
+    // is what makes the synchronous queries below safe.
+    await within(panel).findAllByRole('menuitem', { name: /^Reorder / });
     stubRowRects(getHandles().map((h) => h.parentElement as HTMLElement));
     await keyboardDragDown(within(panel).getByRole('menuitem', { name: 'Reorder AGY Fast' }));
     expect(calls).toEqual([['agy-2', 'agy-1', 'agy-3']]);
@@ -690,7 +694,7 @@ describe('SpawnConfigurationMenu inline drag-and-drop', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Antigravity configurations', exact: true }));
     const panel = await screen.findByTestId('spawn-configurations');
 
-    const firstHandle = within(panel).getByRole('menuitem', { name: 'Reorder AGY Fast' });
+    const firstHandle = await within(panel).findByRole('menuitem', { name: 'Reorder AGY Fast' });
     firstHandle.focus();
     fireEvent.keyDown(firstHandle, { key: ' ', code: 'Space' });
     expect(firstHandle.getAttribute('aria-pressed')).toBe('true');
@@ -717,7 +721,7 @@ describe('SpawnConfigurationMenu inline drag-and-drop', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Antigravity configurations', exact: true }));
     const panel = await screen.findByTestId('spawn-configurations');
 
-    const handles = within(panel).getAllByRole('menuitem', { name: /^Reorder / });
+    const handles = await within(panel).findAllByRole('menuitem', { name: /^Reorder / });
     stubRowRects(handles.map((h) => h.parentElement as HTMLElement));
 
     await keyboardDragDown(handles[0]);
@@ -759,6 +763,10 @@ describe('SpawnConfigurationMenu inline drag-and-drop', () => {
 
     // Drag 1 (in flight) + Drag 2 (queued), then immediately close/unmount the flyout.
     const getHandles = (container: HTMLElement) => within(container).getAllByRole('menuitem', { name: /^Reorder / });
+    // The handles arrive asynchronously (`listSpawnConfigurations`), so the
+    // panel's testid can be on screen before the rows are. Waiting for them
+    // is what makes the synchronous queries below safe.
+    await within(panel).findAllByRole('menuitem', { name: /^Reorder / });
     stubRowRects(getHandles(panel).map((h) => h.parentElement as HTMLElement));
     await keyboardDragDown(within(panel).getByRole('menuitem', { name: 'Reorder AGY Fast' }));
     stubRowRects(getHandles(panel).map((h) => h.parentElement as HTMLElement));

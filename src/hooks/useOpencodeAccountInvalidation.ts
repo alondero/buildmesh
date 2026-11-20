@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { listen } from '@tauri-apps/api/event';
+import { listen } from '../lib/tauri/eventListen';
 
 /**
  * Event name emitted by `commands::opencode_oauth::{persist_opencode_tokens,

@@ -8,6 +8,7 @@ import {
   agentInputSubject, isAgentInput, isMeshSyncFailure, isWorktreeCleanup, limitNotifications, needsAttention, restoreNotifications,
   type Notification, type NotificationAction, type WorktreeNotice,
 } from '../lib/notifications';
+import { bumpRendererActivity } from '../lib/diagnostics/rendererHealthCounters';
 
 export interface AddToastOptions {
   /** Record the notification without showing a toast. See `addToast`. */
@@ -62,20 +63,24 @@ export const useToastStore = create<ToastState>()(persist((set) => ({
   toasts: [], notifications: [], cleanupLoading: false, cleanupError: null, worktreeRevision: 0,
   addToast: (provider, message, severity = 'error', action, options) => {
     const now = Date.now();
+    // `silent` records the problem in history and in Needs attention without
+    // putting anything on the three-deep toast stack. It is how a command
+    // that syncs N meshes reports N problems without N toasts: the caller
+    // shows one summary instead. Only meaningful with an action — a silent
+    // record with no action would be history nobody ever sees, so the flag is
+    // ignored there and the toast is shown as usual.
+    //
+    // Computed OUTSIDE the `set` callback (it depends only on the arguments,
+    // not on the state) so the renderer health counter can tell a toast that
+    // was shown from one that was only recorded — issue #2833.
+    const silent = options?.silent === true && action !== undefined;
+    if (!silent) bumpRendererActivity('toast');
     set(state => {
-      // `silent` records the problem in history and in Needs attention without
-      // putting anything on the three-deep toast stack. It is how a command
-      // that syncs N meshes reports N problems without N toasts: the caller
-      // shows one summary instead. Only meaningful with an action — a silent
-      // record with no action would be history nobody ever sees, so the flag is
-      // ignored there and the toast is shown as usual.
-      //
       // The recording step below is shared by both cases; only the toast stack
       // differs. Recording is the part that must not drift: a silent record and
       // a visible one have to deduplicate against the same unresolved problem
       // and be retained by the same rules, or the same failure would file two
       // differently-behaving records depending on which entry point reported it.
-      const silent = options?.silent === true && action !== undefined;
       const incoming = { id: ++nextToastId, provider, message, createdAt: now, severity, action };
       const merged = silent ? state.toasts : dedupToasts(state.toasts, incoming, now, TOAST_DEDUP_TTL_MS);
       // The record the history entry is built from: the toast as it ended up on

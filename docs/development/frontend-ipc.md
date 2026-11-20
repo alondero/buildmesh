@@ -17,6 +17,34 @@ routing the logging bridge back through the wrapper would introduce a logging
 cycle. Wire types come from `src/types/generated/`; see the
 [Rust conventions](rust-conventions.md) for their generation contract.
 
+## The event transport
+
+Commands have had a chokepoint since ADR-0010. Events did not: seventeen
+modules imported `listen` straight from `@tauri-apps/api/event`, so there was
+no single place that could answer "how many IPC events did this window
+receive, and of which kind?".
+
+`src/lib/tauri/eventListen.ts` is now the one owner of the event transport.
+It delegates to Tauri's `listen`, wraps the handler, and counts each
+**delivered** event by name. The call shape is unchanged — the same argument
+list, down to the number of arguments — so a caller sees no difference, and
+the existing tests that assert on the mocked `listen` keep working.
+
+Counting at delivery, not at registration, is the point: a stream that
+subscribed and then received nothing must not report traffic.
+
+Two consequences:
+
+* `emit` is still imported directly from `@tauri-apps/api/event`. It is
+  outbound, and the emitters are not what the diagnostics measure.
+* The ESLint restriction in `eslint.config.js` bans a direct `listen` import
+  outside `src/lib/tauri/eventListen.ts`, so a new listener cannot bypass
+  the count silently.
+
+The counts feed the renderer health line; see
+[diagnostics.md](diagnostics.md#the-renderer-health-line) for the line format
+and the rest of what it reports.
+
 ## Domain facets
 
 | Facet | Owns |

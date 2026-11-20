@@ -42,7 +42,7 @@ import { useProbeResource, type ProbeLoadContext } from '../../lib/probeResource
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { listen } from '@tauri-apps/api/event';
+import { listen } from '../../lib/tauri/eventListen';
 import {
   DndContext,
   KeyboardSensor,

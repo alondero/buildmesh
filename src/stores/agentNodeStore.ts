@@ -7,6 +7,7 @@ import type { AgentNodeState, AgentNodeRuntime } from './agentNode/types';
 export type { SpawnAgentOptions } from './agentNode/types';
 export { setWorktreeCloseActionResolverForTests } from './agentNode/closeSlice';
 import { formatError } from '../lib/errorUtils';
+import { bumpRendererActivity } from '../lib/diagnostics/rendererHealthCounters';
 import { create } from 'zustand';
 import * as api from '../lib/tauri';
 import {
@@ -404,6 +405,15 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     if (patch.status === 'idle' && runtime.failedAutoSpawns.has(id)) return;
     if (patch.status === 'error' && get().nodesById[id]) runtime.failedAutoSpawns.add(id);
     runtime.nodeRevision += 1;
+    // Issue #2833 — the renderer health line counts the node status
+    // transitions this window received. `patchAgentNode` is the single
+    // store-side seam every status write goes through (the `agent-lifecycle`
+    // listener, the spawn-failure listener and the archive path all patch
+    // through it), so one counter here sees every transition without a
+    // second subscription. Counted outside the store: a counter field would
+    // notify every `useAgentNodeStore` subscriber for a fact none of them
+    // reads.
+    if (patch.status !== undefined) bumpRendererActivity('node_status');
     // Issue #2325 — a delivered event is the newest observation of the
     // columns it carries, including one another window's `node-renamed`.
     // Hand those columns over: an in-flight rename must neither roll its

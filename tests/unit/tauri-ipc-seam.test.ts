@@ -27,4 +27,16 @@ describe('IPC import lint enforcement', () => {
     expect(await errors("import { _invoke } from '../lib/tauri/_invoke'; _invoke('x');", 'src/stores/agentNodeStore.ts')).toHaveLength(1);
     expect(await errors("import { _invoke } from './_invoke'; _invoke('x');", 'src/lib/tauri/agentNode.ts')).toEqual([]);
   });
+  // Issue #2833 — the IPC *event* transport has one owner, so the renderer
+  // health line can count the events the app receives. A direct `listen`
+  // import would bypass that count silently.
+  it('routes the IPC event transport through its one owner', async () => {
+    expect(await errors("import { listen } from '@tauri-apps/api/event'; listen('x', () => {});")).toHaveLength(1);
+    expect(await errors("import { listen } from '../../lib/tauri/eventListen'; listen('x', () => {});")).toEqual([]);
+    // `emit` is outbound and stays unrestricted: the health line measures
+    // what the app *receives*.
+    expect(await errors("import { emit } from '@tauri-apps/api/event'; emit('x');")).toEqual([]);
+    // The owner itself may import the raw transport.
+    expect(await errors("import { listen } from '@tauri-apps/api/event';", 'src/lib/tauri/eventListen.ts')).toEqual([]);
+  });
 });

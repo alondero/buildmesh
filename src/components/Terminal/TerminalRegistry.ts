@@ -10,7 +10,7 @@ import type { Terminal } from '@xterm/xterm';
 import type { FitAddon } from '@xterm/addon-fit';
 import type { SerializeAddon } from '@xterm/addon-serialize';
 import type { SearchAddon } from '@xterm/addon-search';
-import { listen, UnlistenFn } from '@tauri-apps/api/event';
+import { listen, type UnlistenFn } from '../../lib/tauri/eventListen';
 import type { AgentOutputPayload } from '../../types/generated/AgentOutputPayload';
 import type { AgentSpawnedPayload } from '../../types/generated/AgentSpawnedPayload';
 import type { SerializeTerminalRequestPayload } from '../../types/generated/SerializeTerminalRequestPayload';
@@ -26,6 +26,7 @@ import { FontSizeManager } from './FontSizeManager';
 import { ThemeManager } from './ThemeManager';
 import { terminalWebglPool } from './WebglRendererPool';
 import { decodeBase64Bytes } from '../../lib/base64';
+import { bumpRendererActivity } from '../../lib/diagnostics/rendererHealthCounters';
 import { setTheme, type ThemeName } from '../../lib/theme';
 import { TerminalResizeScheduler } from './TerminalResizeScheduler';
 
@@ -288,7 +289,19 @@ export class TerminalRegistry {
       }
     }
 
+    const previousContainer = inst.attachedContainer;
     inst.attachedContainer = container;
+
+    // Issue #2833 — the renderer health line counts terminal attach and
+    // detach activity. Counted at the single point where a terminal becomes
+    // visible in the DOM, so a pane swap (detach + attach) shows up as the
+    // churn it is. The container comparison is what makes the count honest:
+    // the mount effect and the auto-spawn effect both attach a freshly
+    // mounted terminal, and the second call re-parents an element that is
+    // already in place — that is not a second attach.
+    if (previousContainer !== container) {
+      bumpRendererActivity('terminal_attach');
+    }
 
     inst.resizeScheduler.attach(container);
     inst.resizeScheduler.fitNextFrame();
@@ -349,6 +362,23 @@ export class TerminalRegistry {
     inst.term.element?.remove();
     inst.attachedContainer = null;
     terminalWebglPool.release(`agent:${nodeId}`);
+    // Issue #2833 — the matching detach counter.
+    bumpRendererActivity('terminal_detach');
+  }
+
+  /**
+   * How many terminals are attached to a DOM container right now.
+   *
+   * Read by the renderer health line (issue #2833) as a page-size gauge. A
+   * terminal that was created but never attached, or that has been detached,
+   * is not in the DOM and does not count.
+   */
+  attachedTerminalCount(): number {
+    let count = 0;
+    for (const inst of this.instances.values()) {
+      if (inst.attachedContainer !== null) count += 1;
+    }
+    return count;
   }
 
   fit(nodeId: number): void {

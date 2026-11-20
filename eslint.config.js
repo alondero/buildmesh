@@ -137,9 +137,17 @@ const legacyTauriImporters = [
   "src/stores/meshStore.ts"
 ];
 
-function ipcImportRestrictions({ legacy = false, transport = false, raw = false } = {}) {
+function ipcImportRestrictions({ legacy = false, transport = false, raw = false, eventOwner = false } = {}) {
   return ['error', {
-    paths: raw ? [] : [{ name: '@tauri-apps/api/core', importNames: ['invoke'], message: 'Raw invoke belongs in the IPC chokepoint.' }],
+    paths: [
+      ...(raw ? [] : [{ name: '@tauri-apps/api/core', importNames: ['invoke'], message: 'Raw invoke belongs in the IPC chokepoint.' }]),
+      // Issue #2833 — the IPC *event* transport has one owner. Every event
+      // the app receives passes through it, so the renderer health line can
+      // count them by name; a direct `listen` import would bypass the count
+      // silently. `emit` stays unrestricted — it is outbound, and the
+      // emitters are not what the health line measures.
+      ...(eventOwner ? [] : [{ name: '@tauri-apps/api/event', importNames: ['listen'], message: 'The IPC event transport belongs in src/lib/tauri/eventListen.ts, which counts the events the renderer health line reports (issue #2833).' }]),
+    ],
     patterns: [
       ...(!legacy ? [{ regex: '(^|/)(?:lib/)?tauri(?:\\.ts)?$', message: 'Import the owning domain from lib/tauri/<facet>; the compatibility barrel is deprecated.' }] : []),
       ...(!transport ? [{ regex: '(^|/)tauri/_invoke(?:\\.ts)?$', message: 'Import the owning Tauri domain facet; _invoke is private to src/lib/tauri/.' }] : []),
@@ -338,6 +346,12 @@ export default [
   {
     files: ['src/lib/tauri/*.ts'],
     rules: { 'no-restricted-imports': ipcImportRestrictions({ transport: true }) },
+  },
+  {
+    // The one owner of the IPC event transport (issue #2833). Listed after
+    // the block above so it overrides it for this one file.
+    files: ['src/lib/tauri/eventListen.ts'],
+    rules: { 'no-restricted-imports': ipcImportRestrictions({ transport: true, eventOwner: true }) },
   },
   {
     files: ['src/lib/tauri/_invoke.ts', 'src/lib/frontendLog.ts'],

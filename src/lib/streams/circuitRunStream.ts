@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { listen } from '@tauri-apps/api/event';
+import { listen } from '../tauri/eventListen';
 import { createStreamSubscription } from './streamSubscription';
 import type { CircuitRunUpdatedPayload } from '../../types/generated/CircuitEvents';
 

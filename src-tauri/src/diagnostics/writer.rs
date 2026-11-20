@@ -76,6 +76,20 @@ impl RotatingWriter {
         Ok(())
     }
 
+    /// Write one line and flush it all the way to the disk.
+    ///
+    /// `write_line`'s `sync_all` cadence is every [`SYNC_EVERY`] lines, which
+    /// is right for a continuous sampler that must not stall on a thrashing
+    /// disk. The renderer health line is written once every ten seconds, so
+    /// an fsync per line costs nothing — and the whole point of that log is
+    /// to survive the crash or the reboot it is meant to explain.
+    pub fn write_line_synced(&mut self, line: &str) -> std::io::Result<()> {
+        let stamped = format!("{} {}\n", chrono::Utc::now().to_rfc3339(), line);
+        self.write_all(stamped.as_bytes())?;
+        self.flush()?;
+        self.file.sync_all()
+    }
+
     /// Force the live file to disk.
     ///
     /// `write_line`'s `sync_all` cadence is every [`SYNC_EVERY`] lines, which is

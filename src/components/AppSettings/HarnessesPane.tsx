@@ -16,7 +16,7 @@
  * banner instead of leaving a green "loaded" status over stale data.
  */
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
-import { listen } from '@tauri-apps/api/event';
+import { listen } from '../../lib/tauri/eventListen';
 import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
 import * as api from '../../lib/tauri';
 import { formatError } from '../../lib/errorUtils';
