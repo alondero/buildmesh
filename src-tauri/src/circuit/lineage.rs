@@ -87,7 +87,6 @@ impl RunLineage {
         get(REVIEW_EXTENDED_KEY) == Some("1")
     }
 
-    /// Review-only continuations replace the original graph but retain its scope.
     pub(crate) fn is_issue_review<'a>(
         get: impl Fn(&str) -> Option<&'a str>,
         graph: &CircuitGraph,

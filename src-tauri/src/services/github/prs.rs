@@ -513,7 +513,6 @@ impl GitHubClient {
         Ok((detail.mergeable, detail.mergeable_state))
     }
 
-    /// Read the current head of an open PR directly from GitHub.
     pub(crate) fn open_pull_request_head(
         &self,
         owner: &str,

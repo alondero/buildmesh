@@ -389,8 +389,6 @@ fn classify_step_turn_with(
             .context
             .get(&format!("node.{node_id}.observation_blocker"))
             .and_then(|json| serde_json::from_str(json).ok());
-        // An explicit evidence recheck puts the step back in Running so
-        // a repaired checkout or GitHub lookup can retry this same report.
         if step.status == StepStatus::Unverified
             && matches!(
                 held,

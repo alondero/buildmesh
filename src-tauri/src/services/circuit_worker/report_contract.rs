@@ -139,9 +139,6 @@ pub(super) fn prompt(view: &RunView, node_id: &str, prompt: &str) -> String {
     format!("{dispatched}\n\n{suffix}")
 }
 
-/// The report itself is retained with the verdict. Require an unquoted,
-/// full commit ID on the first nonblank line so a SHA in a finding or history
-/// cannot accidentally stand in for the revision being reviewed.
 fn reviewed_commit(output: &str) -> Option<&str> {
     output
         .lines()

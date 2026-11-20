@@ -33,7 +33,6 @@ fn pr_verdict_gate_holds_an_unbound_approval_and_rechecks_when_reopened() {
         }
     )));
 
-    // Recheck evidence reopens the step with the same report and attempt.
     let step = fixture.view.steps.iter_mut()
         .find(|step| step.node_id == "review_classifier").unwrap();
     step.status = StepStatus::Running;

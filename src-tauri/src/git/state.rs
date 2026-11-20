@@ -180,8 +180,6 @@ pub struct WrapupGitState {
     pub repo_error: Option<String>,
 }
 
-/// Read the full HEAD of this exact checkout, requiring a clean index and
-/// worktree. A path inside a different checkout must fail the exact open.
 pub(crate) fn clean_checkout_head(host_path: &str) -> Result<String, String> {
     let repo = Repository::open(host_path)
         .map_err(|error| format!("cannot open the assigned reviewer worktree: {error}"))?;
