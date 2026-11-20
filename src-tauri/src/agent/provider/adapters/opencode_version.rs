@@ -16,9 +16,11 @@ struct ExecutableStamp {
 
 struct CachedProbe {
     stamp: ExecutableStamp,
-    major: Option<u64>,
+    version: Option<Version>,
     checked: Instant,
 }
+
+pub(super) type Version = (u64, u64, u64);
 
 static VERSION_CACHE: LazyLock<Mutex<HashMap<PathBuf, CachedProbe>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -31,7 +33,7 @@ fn executable_stamp(path: &Path) -> Option<ExecutableStamp> {
     })
 }
 
-pub(crate) fn major(text: &str) -> Option<u64> {
+fn parse_version(text: &str) -> Option<Version> {
     static ANSI: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(r"\x1b\[[0-?]*[ -/]*[@-~]").expect("ANSI CSI pattern")
     });
@@ -43,32 +45,36 @@ pub(crate) fn major(text: &str) -> Option<u64> {
         .trim_start_matches('v');
     let mut parts = text.split('.');
     let major = parts.next()?.parse().ok()?;
-    parts.next()?.parse::<u64>().ok()?;
-    parts
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts
         .next()?
         .split_whitespace()
         .next()?
         .parse::<u64>()
         .ok()?;
-    Some(major)
+    Some((major, minor, patch))
 }
 
 pub(crate) fn probe(executable: &Path) -> Option<u64> {
+    probe_version(executable).map(|(major, _, _)| major)
+}
+
+pub(super) fn probe_version(executable: &Path) -> Option<Version> {
     probe_with_timeout(executable, Duration::from_secs(30))
 }
 
-fn probe_with_timeout(executable: &Path, timeout: Duration) -> Option<u64> {
+fn probe_with_timeout(executable: &Path, timeout: Duration) -> Option<Version> {
     let stamp = executable_stamp(executable);
     if let Some(cached) = VERSION_CACHE.lock().unwrap().get(executable) {
         if Some(cached.stamp) == stamp
-            && (cached.major.is_some() || cached.checked.elapsed() < Duration::from_secs(5))
+            && (cached.version.is_some() || cached.checked.elapsed() < Duration::from_secs(5))
         {
-            return cached.major;
+            return cached.version;
         }
     }
     // Do not hold the cache lock across subprocess I/O. Unknown results expire
     // quickly so a transient failure does not hide a repaired installation.
-    let major = probe_uncached(executable, timeout);
+    let version = probe_uncached(executable, timeout);
     if let Some(stamp) = stamp.filter(|stamp| Some(*stamp) == executable_stamp(executable)) {
         let mut cache = VERSION_CACHE.lock().unwrap();
         if cache.len() >= 128 {
@@ -78,15 +84,15 @@ fn probe_with_timeout(executable: &Path, timeout: Duration) -> Option<u64> {
             executable.to_path_buf(),
             CachedProbe {
                 stamp,
-                major,
+                version,
                 checked: Instant::now(),
             },
         );
     }
-    major
+    version
 }
 
-fn probe_uncached(executable: &Path, timeout: Duration) -> Option<u64> {
+fn probe_uncached(executable: &Path, timeout: Duration) -> Option<Version> {
     let recipe = SpawnRecipe {
         binary: "opencode",
         base_args: vec!["--version".into()],
@@ -98,13 +104,13 @@ fn probe_uncached(executable: &Path, timeout: Duration) -> Option<u64> {
     run_version_probe(command, timeout)
 }
 
-fn run_version_probe(mut command: std::process::Command, timeout: Duration) -> Option<u64> {
+fn run_version_probe(mut command: std::process::Command, timeout: Duration) -> Option<Version> {
     command.env_remove("FORCE_COLOR").env("NO_COLOR", "1");
     let output = run_private_command(command, "OpenCode version", timeout).ok()?;
     output
         .status
         .success()
-        .then(|| major(&String::from_utf8_lossy(&output.stdout)))
+        .then(|| parse_version(&String::from_utf8_lossy(&output.stdout)))
         .flatten()
 }
 
@@ -172,9 +178,14 @@ pub(crate) fn accepts_major(actual: Option<u64>, expected: u64) -> bool {
 }
 
 pub(crate) fn require_major(executable: &Path, expected: u64) -> Result<(), String> {
-    let actual = probe(executable);
+    require_version(executable, expected).map(|_| ())
+}
+
+pub(super) fn require_version(executable: &Path, expected: u64) -> Result<Option<Version>, String> {
+    let version = probe_version(executable);
+    let actual = version.map(|(major, _, _)| major);
     if accepts_major(actual, expected) {
-        return Ok(());
+        return Ok(version);
     }
     match actual {
         Some(actual) => Err(format!("This harness requires OpenCode {expected}; executable {} reported major {actual}. Pin the matching CLI executable in Settings.", executable.display())),

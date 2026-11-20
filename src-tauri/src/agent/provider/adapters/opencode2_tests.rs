@@ -560,7 +560,7 @@ fn v2_prefill_trims_lines_and_drops_blank_segments() {
 #[test]
 fn provisioning_keeps_one_external_deny_when_rules_follow_it() {
     let dir = tempfile::tempdir().unwrap();
-    config::provision(dir.path(), 3, None).unwrap();
+    config::provision(dir.path(), 3, None, None).unwrap();
     let path = config::config_path(dir.path(), 3);
     let mut doc: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -569,9 +569,9 @@ fn provisioning_keeps_one_external_deny_when_rules_follow_it() {
         .unwrap()
         .push(serde_json::json!({"action":"shell","resource":"*","effect":"ask"}));
     std::fs::write(&path, doc.to_string()).unwrap();
-    config::provision(dir.path(), 3, None).unwrap();
+    config::provision(dir.path(), 3, None, None).unwrap();
     let first = std::fs::read_to_string(&path).unwrap();
-    config::provision(dir.path(), 3, None).unwrap();
+    config::provision(dir.path(), 3, None, None).unwrap();
     assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
     let doc: serde_json::Value = serde_json::from_str(&first).unwrap();
     let rules = doc["permissions"].as_array().unwrap();
@@ -677,10 +677,10 @@ fn project_options_preserve_users_and_isolate_two_node_routes_idempotently() {
     let path = config::config_path(dir.path(), 1);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path,r#"{"plugins":[{"package":"user-plugin","options":{"keep":true}}],"permissions":[{"action":"shell","resource":"git push *","effect":"deny"}],"username":"keep"}"#).unwrap();
-    config::provision(dir.path(), 1, Some(("ses_nodeOne", 41234))).unwrap();
-    config::provision(dir.path(), 2, Some(("ses_nodeTwo", 41234))).unwrap();
+    config::provision(dir.path(), 1, Some(("ses_nodeOne", 41234)), None).unwrap();
+    config::provision(dir.path(), 2, Some(("ses_nodeTwo", 41234)), None).unwrap();
     let first = std::fs::read_to_string(&path).unwrap();
-    config::provision(dir.path(), 1, Some(("ses_nodeOne", 41234))).unwrap();
+    config::provision(dir.path(), 1, Some(("ses_nodeOne", 41234)), None).unwrap();
     assert_eq!(first, std::fs::read_to_string(&path).unwrap());
     let doc: serde_json::Value = serde_json::from_str(&first).unwrap();
     assert_eq!(doc["username"], "keep");
@@ -694,7 +694,7 @@ fn project_options_preserve_users_and_isolate_two_node_routes_idempotently() {
     );
     assert_eq!(doc["permissions"][1]["action"], "external_directory");
     let second_before = std::fs::read(config::config_path(dir.path(), 2)).unwrap();
-    config::provision(dir.path(), 1, Some(("ses_restarted", 41234))).unwrap();
+    config::provision(dir.path(), 1, Some(("ses_restarted", 41234)), None).unwrap();
     assert_eq!(
         second_before,
         std::fs::read(config::config_path(dir.path(), 2)).unwrap()
@@ -710,12 +710,62 @@ fn project_options_preserve_users_and_isolate_two_node_routes_idempotently() {
 }
 
 #[test]
+fn provisioning_applies_the_v1_plugin_deny_for_the_selected_cli_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join(".opencode/plugins/buildmesh-attention.js");
+    let old_template = include_str!("opencode_attention_plugin.js");
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    std::fs::write(&legacy, old_template).unwrap();
+    let path = config::config_path(dir.path(), 12);
+    let user_rule =
+        serde_json::json!({"action":"provider.use","resource":"example","effect":"deny"});
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        serde_json::json!({"policies": [user_rule]}).to_string(),
+    )
+    .unwrap();
+
+    let configured_rule = serde_json::json!({"action":"plugin.use","resource":"*/.opencode/plugins/buildmesh-attention.js","effect":"deny"});
+    let integration_rule = serde_json::json!({"action":"integration.use","resource":"plugin:*/.opencode/plugins/buildmesh-attention.js","effect":"deny"});
+    for (version, expected) in [
+        (
+            Some((2, 3, 2)),
+            vec![user_rule.clone(), configured_rule.clone()],
+        ),
+        (None, vec![user_rule.clone(), configured_rule.clone()]),
+        (Some((2, 2, 3)), vec![user_rule.clone(), configured_rule]),
+        (
+            Some((2, 2, 2)),
+            vec![user_rule.clone(), integration_rule.clone()],
+        ),
+        (Some((2, 0, 25)), vec![user_rule.clone(), integration_rule]),
+        (Some((2, 0, 24)), vec![user_rule]),
+    ] {
+        let provision =
+            || config::provision(dir.path(), 12, Some(("ses_workspace", 2992)), version).unwrap();
+        provision();
+        let first = std::fs::read_to_string(&path).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(
+            doc["policies"],
+            serde_json::json!(expected),
+            "version {version:?}"
+        );
+        assert_eq!(doc["plugins"][0]["package"], "../../buildmesh-attention2");
+        provision();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
+    }
+    assert_eq!(std::fs::read_to_string(legacy).unwrap(), old_template);
+}
+
+#[test]
 fn malformed_managed_config_is_never_overwritten() {
     let dir = tempfile::tempdir().unwrap();
     let path = config::config_path(dir.path(), 1);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, "{broken").unwrap();
-    assert!(config::provision(dir.path(), 1, None).is_err());
+    assert!(config::provision(dir.path(), 1, None, None).is_err());
     assert_eq!(std::fs::read_to_string(path).unwrap(), "{broken");
 }
 
@@ -726,7 +776,7 @@ fn user_project_jsonc_is_left_to_the_cli_and_never_shadowed_for_v1() {
     let path = dir.path().join(".opencode/opencode.jsonc");
     let original = "{ // user config\n\"plugins\":[\"user-plugin\",],\"username\":\"keep\",}\n";
     std::fs::write(&path, original).unwrap();
-    config::provision(dir.path(), 12, Some(("ses_jsoncSession", 2992))).unwrap();
+    config::provision(dir.path(), 12, Some(("ses_jsoncSession", 2992)), None).unwrap();
     assert_eq!(std::fs::read_to_string(path).unwrap(), original);
     assert!(!dir.path().join(".opencode/opencode.json").exists());
     assert!(config::config_path(dir.path(), 12).exists());
