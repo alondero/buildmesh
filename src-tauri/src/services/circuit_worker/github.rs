@@ -5,6 +5,46 @@ use crate::circuit::model::CircuitNodeKind;
 use crate::circuit::stepper::{CircuitEvent, RunView};
 use crate::db;
 
+pub(super) fn verify_pr_review_checkout(
+    view: &RunView,
+    agent: &crate::models::AgentNode,
+    reviewed_commit: &str,
+) -> Result<(), String> {
+    let (owner, repo, number) = view
+        .context
+        .get("pr.url")
+        .and_then(crate::services::github::pr_workflow::parse_pr_url)
+        .ok_or_else(|| "no valid GitHub pull request URL is recorded for this run".to_string())?;
+    let checkout = crate::env::node_worktree_path(agent)
+        .ok_or_else(|| "the reviewer has no assigned worktree".to_string())?;
+    verify_reviewed_head(&checkout.host_path, reviewed_commit, || {
+        crate::services::github::GitHubClient::new()
+            .and_then(|client| client.open_pull_request_head(&owner, &repo, number))
+            .map_err(|error| format!("could not read PR #{number} from GitHub: {error}"))?
+            .ok_or_else(|| format!("GitHub did not return a head for open PR #{number}"))
+    })
+}
+
+pub(super) fn verify_reviewed_head(
+    path: &str,
+    reviewed_commit: &str,
+    lookup: impl FnOnce() -> Result<String, String>,
+) -> Result<(), String> {
+    let pushed_head = lookup()?;
+    if !reviewed_commit.eq_ignore_ascii_case(&pushed_head) {
+        return Err(format!(
+            "the report reviewed {reviewed_commit} but the current pushed PR head is {pushed_head}"
+        ));
+    }
+    let checkout_head = crate::git::state::clean_checkout_head(path)?;
+    if !checkout_head.eq_ignore_ascii_case(&pushed_head) {
+        return Err(format!(
+            "the assigned reviewer worktree is at {checkout_head} but the current pushed PR head is {pushed_head}"
+        ));
+    }
+    Ok(())
+}
+
 /// Determine the target (issue vs PR number) for a GitHub action.
 /// If the action is CloseIssue, it explicitly requires an issue trigger.
 /// If this node has an upstream OpenPr node in its lineage, it targets that PR (pr.number).

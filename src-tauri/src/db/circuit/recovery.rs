@@ -65,6 +65,8 @@ pub(crate) struct ReviewRecovery {
     pub graph: CircuitGraph,
     pub name: String,
     pub frozen_launches: Vec<(String, String)>,
+    previous_review: Option<String>,
+    last_implementation_report: Option<String>,
 }
 
 pub(crate) enum ContinuationTarget {
@@ -375,6 +377,13 @@ fn review_recovery_checked(
         graph,
         name: "Continued review".into(),
         frozen_launches,
+        previous_review: context
+            .get("review.previous_report")
+            .or_else(|| context.get("node.reviewer.output"))
+            .map(str::to_owned),
+        last_implementation_report: (!local)
+            .then(|| context.get("node.implementer.output").map(str::to_owned))
+            .flatten(),
     })
 }
 
@@ -547,6 +556,12 @@ pub(crate) fn extend_failed_review_locked(
     let mut mutation = super::context_store::ContextMutation::new();
     mutation.reset(super::context_store::ContextScope::segment("node"));
     mutation.reset(super::context_store::ContextScope::segment("evidence"));
+    if let Some(report) = recovery.previous_review {
+        mutation.put("review.previous_report", report);
+    }
+    if let Some(report) = recovery.last_implementation_report {
+        mutation.put("source.output", report);
+    }
     mutation.remove("cleanup.pending");
     mutation.put("retry.attempt", next_attempt.to_string());
     mutation.put("retry.max_retries", next_limit.to_string());

@@ -513,6 +513,31 @@ impl GitHubClient {
         Ok((detail.mergeable, detail.mergeable_state))
     }
 
+    /// Read the current head of an open PR directly from GitHub.
+    pub(crate) fn open_pull_request_head(
+        &self,
+        owner: &str,
+        repo: &str,
+        pr_number: i64,
+    ) -> Result<Option<String>, GitHubError> {
+        let response = self
+            .client
+            .get(self.rest_url(&format!("/repos/{owner}/{repo}/pulls/{pr_number}")))
+            .header(AUTHORIZATION, format!("Bearer {}", self.token))
+            .header(USER_AGENT, "buildmesh")
+            .header(ACCEPT, "application/vnd.github+json")
+            .send()?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(rest_failure(status, response.text().unwrap_or_default()));
+        }
+        let pr: PullRequest = response.json()?;
+        Ok(
+            (pr.number == pr_number && pr.state == "open" && !pr.head_sha.is_empty())
+                .then_some(pr.head_sha),
+        )
+    }
+
     /// Whether a pull request has actually been merged
     /// (`GET /repos/{o}/{r}/pulls/{n}`: `merged`, `state`, `merged_at`).
     ///

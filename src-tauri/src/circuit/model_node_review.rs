@@ -3,8 +3,9 @@ use super::model::CircuitNode;
 use super::model::{CircuitEdge, CircuitGraph, CircuitNodeKind as K, EdgeCondition, StepOutcome};
 
 pub(crate) const LOCAL_APPROVED_MESSAGE: &str = "Review approved for {{source.name}} (agent {{source.agent_id}}). It was asked to squash-merge its pull request and has been handed back to you.";
-pub(crate) const LOCAL_REVIEW_INCONCLUSIVE_MESSAGE: &str = "Review needs attention for {{source.name}}: the reviewer could not give a verdict. See the review report in the run context.";
-pub(crate) const PR_REVIEW_INCONCLUSIVE_MESSAGE: &str = "Review needs attention for PR #{{pr.number}}: the reviewer could not give a verdict. See the review report in the run context.";
+pub(crate) const LOCAL_REVIEW_INCONCLUSIVE_MESSAGE: &str =
+    "Review needs attention for {{source.name}}. See the latest review report in the run context.";
+pub(crate) const PR_REVIEW_INCONCLUSIVE_MESSAGE: &str = "Review needs attention for PR #{{pr.number}}. See the latest review report in the run context.";
 
 impl CircuitGraph {
     /// Continuation accepts the review shape with editable prompts and launch settings.

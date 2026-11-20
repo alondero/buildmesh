@@ -180,6 +180,30 @@ pub struct WrapupGitState {
     pub repo_error: Option<String>,
 }
 
+/// Read the full HEAD of this exact checkout, requiring a clean index and
+/// worktree. A path inside a different checkout must fail the exact open.
+pub(crate) fn clean_checkout_head(host_path: &str) -> Result<String, String> {
+    let repo = Repository::open(host_path)
+        .map_err(|error| format!("cannot open the assigned reviewer worktree: {error}"))?;
+    if repo.workdir().is_none() {
+        return Err("the assigned reviewer repository has no worktree".into());
+    }
+    let head = || {
+        super::sha::resolve_sha(&repo, &super::sha::ShaSource::LocalHead)
+            .map_err(|error| error.to_string())
+    };
+    let before = head()?;
+    if primitives::is_dirty(&repo)
+        .map_err(|error| format!("cannot check reviewer worktree status: {error}"))?
+    {
+        return Err("the assigned reviewer worktree has uncommitted changes".into());
+    }
+    if head()? != before {
+        return Err("the assigned reviewer worktree changed HEAD during verification".into());
+    }
+    Ok(before.to_string())
+}
+
 /// The wrap-up verification's view of the repository at `host_path`.
 ///
 /// The open is self-healing: an MSYS-flavoured git leaves Git-Bash-style
