@@ -96,6 +96,15 @@ export const setAppCircuitAgentPoolSize = (size: number | null) =>
 export const setAppConfirmBeforeQuit = (confirm: boolean) =>
   _invoke('set_app_confirm_before_quit', { confirm });
 
+/** The Chrome DevTools Protocol port the hub opens at startup (issue #2836).
+ *  Pass `null` to turn the port off.
+ *
+ *  A startup switch: WebView2 reads its browser arguments when the window is
+ *  created, so a change takes effect on the **next launch**, not on the
+ *  running instance. */
+export const setAppDiagCdpPort = (port: number | null) =>
+  _invoke('set_app_diag_cdp_port', { port });
+
 /** Buildmesh-wide default Worktree Node directory (issue #1519).
  *  Pass `null` (or blank) to clear and restore `.worktrees` under
  *  each inheriting Mesh root. Relative resolves from each Mesh root;

@@ -33,6 +33,7 @@ pub mod clipboard;
 pub mod companion;
 pub mod coordinator;
 pub mod devices;
+pub mod devtools;
 pub mod diagnostics;
 pub mod diff;
 pub mod file_tree;

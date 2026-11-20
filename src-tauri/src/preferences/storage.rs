@@ -148,6 +148,30 @@ pub(crate) fn corruption_error(info: &CorruptionInfo) -> String {
     )
 }
 
+/// Read the preferences file for a **startup-time, single-purpose** lookup.
+///
+/// The full store ([`super::store::PreferencesStore`]) is not installed until
+/// the setup hook runs, and the setup hook runs *after* Tauri has created the
+/// window — and with it the WebView2 environment. The one preference the
+/// startup path needs (the DevTools port, issue #2836) therefore has to be
+/// read straight off disk, before the app is built.
+///
+/// This is deliberately narrow, and narrower than [`read_state`] on purpose:
+///
+/// * no secret hydration — the credential store is not open yet, and the
+///   caller wants one number, not an API key;
+/// * no migration and no launch-configuration reconciliation — they do not
+///   change the port;
+/// * no cache and no write — the store owns those, and this read must not
+///   become a second source of truth for the file.
+///
+/// A file that fails to read or parse yields `None`, which is the safe
+/// answer for an opt-in switch: the port stays closed.
+pub(crate) fn read_for_startup(path: &Path) -> Option<AppPreferences> {
+    let raw = std::fs::read(path).ok()?;
+    serde_json::from_slice::<AppPreferences>(&raw).ok()
+}
+
 /// The write gate: only a healthy or absent file may be written.
 ///
 /// [`read_state`] deliberately reports corruption as a *value* so a reader

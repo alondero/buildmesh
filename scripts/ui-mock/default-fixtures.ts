@@ -183,8 +183,12 @@ export function buildDefaultFixtures() {
       circuit_agent_pool_size: null, circuit_classifier_provider: null,
       harness_defaults: {}, spawn_configurations: [], deleted_launch_configurations: [],
       detached_provider_routes: [], harness_logins: [], worktree_directory: null, confirm_before_quit: true,
+      diag_cdp_port: null,
       issue_spawn_prompt: null, pr_spawn_prompt: null, saved_prompts: [],
     } satisfies AppPreferences,
+    // The DevTools port this process opened (issue #2836). The mock opens no
+    // port, so the app-chrome banner stays away — the mock is not the hub.
+    get_devtools_status: { port: null, source: 'off' },
     get_probe_spawn_prompt_defaults: {
       issue_template: 'Implement issue #{{number}}{{title_suffix}}: {{url}}',
       pr_template: '{{policy}}\nReview PR #{{number}}: {{url}}',

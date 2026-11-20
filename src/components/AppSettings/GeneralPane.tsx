@@ -34,6 +34,7 @@ import { useWindowZoom } from '../../hooks/useWindowZoom';
 import { setTypeDensity, type TypeDensity } from '../../lib/typeDensity';
 import { setWindowZoom, WINDOW_ZOOM_STEPS } from '../../lib/webviewZoom';
 import { useExitPromptStore } from '../../stores/exitPromptStore';
+import { useDevtoolsStore } from '../../stores/devtoolsStore';
 import { optimisticToggle } from '../../lib/optimisticToggle';
 import { useBlurCommit } from '../../hooks/useBlurCommit';
 import { SettingsRow, SettingsSection } from './SettingsRow';
@@ -41,6 +42,15 @@ import { ResourceLoadStatus } from './ResourceLoadStatus';
 import { UpdateAboutSection } from './UpdateAboutSection';
 import { CompanionSettingsSection } from './CompanionSettingsSection';
 import { useSettingsData } from './SettingsDataContext';
+
+/**
+ * The lowest port the DevTools endpoint may use (issue #2836).
+ *
+ * Mirrors `diagnostics::cdp::MIN_PORT` on the Rust side: ports below 1024
+ * are privileged on Unix and are rarely a DevTools port in practice. The
+ * backend refuses the same range, so the two agree on what is usable.
+ */
+const CDP_PORT_MIN = 1024;
 
 /**
  * Interface text size — the accessibility size slider for everything the app
@@ -284,6 +294,25 @@ export function GeneralPane() {
   const [worktreeDirSaving, setWorktreeDirSaving] = useState(false);
   const worktreeDirSavedRef = useRef('');
 
+  // Issue #2836 — the opt-in DevTools (CDP) port. The draft is the raw
+  // textfield value; `''` means "no port". The port is a **startup** switch
+  // (WebView2 reads its browser arguments when the window is created), so
+  // the draft and the running instance are two different things: the draft
+  // is what the next launch will use, and `devtoolsStatus` is what is open
+  // now. The row below says which is which.
+  const [cdpPortDraft, setCdpPortDraft] = useState('');
+  const [cdpPortSaving, setCdpPortSaving] = useState(false);
+  const [cdpPortSaved, setCdpPortSaved] = useState('');
+  const devtoolsStatus = useDevtoolsStore((s) => s.status);
+  const initDevtoolsStatus = useDevtoolsStore((s) => s.initDevtoolsStatus);
+
+  // The row has to say whether a port is open *now*, so it asks for the
+  // realized status itself rather than relying on the app-chrome banner
+  // having asked first. The store keeps one read.
+  useEffect(() => {
+    void initDevtoolsStatus();
+  }, [initDevtoolsStatus]);
+
   // Seed the draft from the latest winning preferences read *during render*
   // rather than from an effect. The input is controlled by the draft and its
   // `disabled` gate flips in the same render as the resource status, so
@@ -295,6 +324,13 @@ export function GeneralPane() {
   if (preferences && preferences !== adoptedPrefs) {
     setAdoptedPrefs(preferences);
     setWorktreeDirDraft(preferences.worktree_directory?.trim() ?? '');
+    const port = preferences.diag_cdp_port != null ? String(preferences.diag_cdp_port) : '';
+    setCdpPortDraft(port);
+    // The saved value is adopted in the same render as the draft, for the
+    // same reason: the payload is the authority, and a state update during
+    // render is the sanctioned pattern. Seeding it from an effect would
+    // leave the status line one render behind the payload it describes.
+    setCdpPortSaved(port);
   }
 
   // Last value confirmed saved (canonical string form), for rollback and the
@@ -359,6 +395,74 @@ export function GeneralPane() {
       setWorktreeDirSaving(false);
     }
   };
+
+  // Issue #2836 — commit the DevTools port draft (blur / Enter). `''` turns
+  // the port off; a number opens it on the next launch. A value that is not a
+  // usable port is refused *before* the write, so the field does not show a
+  // port the backend would not accept. Optimistic with rollback, like the
+  // worktree directory above.
+  const commitCdpPort = async () => {
+    const trimmed = cdpPortDraft.trim();
+    let parsed: number | null = null;
+    if (trimmed !== '') {
+      const value = Number(trimmed);
+      if (!Number.isInteger(value) || value < CDP_PORT_MIN || value > 65535) {
+        setCdpPortDraft(cdpPortSaved);
+        siteDirtyChange('diag-cdp-port', false);
+        setError(
+          `The DevTools port must be a whole number between ${CDP_PORT_MIN} and 65535. ` +
+            'Leave it empty to keep the port closed.',
+        );
+        return;
+      }
+      parsed = value;
+    }
+    const canonical = parsed === null ? '' : String(parsed);
+    setCdpPortDraft(canonical);
+    if (canonical === cdpPortSaved) {
+      siteDirtyChange('diag-cdp-port', false);
+      return;
+    }
+    const previous = cdpPortSaved;
+    setCdpPortSaved(canonical);
+    siteDirtyChange('diag-cdp-port', false);
+    setCdpPortSaving(true);
+    setError(null);
+    try {
+      await api.setAppDiagCdpPort(parsed);
+      await loadPreferences();
+    } catch (e) {
+      setCdpPortSaved(previous);
+      setCdpPortDraft(previous);
+      setError(formatError(e));
+    } finally {
+      setCdpPortSaving(false);
+    }
+  };
+
+  // Issue #2836 — the *realized* state (is a port open in this process?) and
+  // the *saved* intent (what the next launch will use) are two facts, and
+  // the row has to name both when they disagree. A port that is open while
+  // the field says something else is the case that matters: the field is
+  // what the user last asked for, not what is listening.
+  const devtoolsPortStatus = (() => {
+    const savedPort = cdpPortSaved === '' ? null : Number(cdpPortSaved);
+    if (!devtoolsStatus) {
+      // The realized status has not landed — or could not be read. Saying
+      // "Closed" would be a claim this row has no evidence for, and the claim
+      // is the one thing the row exists to make.
+      return savedPort
+        ? `Status unknown. Restart Buildmesh to open port ${savedPort}.`
+        : 'Status unknown.';
+    }
+    const openPort = devtoolsStatus.port ?? null;
+    if (openPort && savedPort && openPort !== savedPort) {
+      return `Open on 127.0.0.1 (port ${openPort}). Restart Buildmesh to switch to port ${savedPort}.`;
+    }
+    if (openPort) return `Open on 127.0.0.1 (port ${openPort}).`;
+    if (savedPort) return `Closed. Restart Buildmesh to open port ${savedPort}.`;
+    return 'Closed.';
+  })();
 
   // Issue #1501: flip the exit-confirmation prompt. Optimistic with
   // rollback so the checkbox never lies about the persisted value. The
@@ -599,6 +703,55 @@ export function GeneralPane() {
             }}
             className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
           />
+        </SettingsRow>
+      </SettingsSection>
+
+      {/* Issue #2836 — the opt-in DevTools (CDP) port. The control is a port
+          number rather than a checkbox: "off" and "on at 9222" are one
+          decision, and a checkbox would need a second field for the number
+          anyway. */}
+      <SettingsSection title="Diagnostics">
+        <SettingsRow
+          label="DevTools port"
+          htmlFor="devtools-port"
+          summary="Open a Chrome DevTools port so a diagnostic capture can read the WebView."
+          controlClassName="w-72 shrink-0"
+          details={
+            <>
+              Off by default. When set, Buildmesh starts its window with{' '}
+              <code>--remote-debugging-port=&lt;port&gt;</code>, which lets a
+              DevTools client — and <code>npm run diag:capture</code> — read the
+              data that only exists inside the WebView: the compositor trace,
+              the layer tree, the heap. While the port is open,{' '}
+              <strong>any program on this computer can drive this window</strong>;
+              Chromium binds it to <code>127.0.0.1</code>, so it is not
+              reachable from the network. The port is read when the window is
+              created, so a change takes effect on the <strong>next launch</strong>.
+              To close it, clear this field and restart Buildmesh.
+            </>
+          }
+        >
+          <input
+            id="devtools-port"
+            type="text"
+            inputMode="numeric"
+            aria-label="DevTools port"
+            placeholder="Off"
+            value={cdpPortDraft}
+            disabled={!prefsLoaded || cdpPortSaving}
+            onChange={e => {
+              setCdpPortDraft(e.target.value);
+              siteDirtyChange('diag-cdp-port', e.target.value.trim() !== cdpPortSaved);
+            }}
+            onBlur={commitOnBlur(commitCdpPort)}
+            onKeyDown={e => {
+              if (e.key === 'Enter') commitCdpPort();
+            }}
+            className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+          />
+          <p className="mt-1 text-xs text-text-muted" data-testid="devtools-port-status">
+            {devtoolsPortStatus}
+          </p>
         </SettingsRow>
       </SettingsSection>
 

@@ -63,6 +63,13 @@ maps action intent, dispatch, acknowledgement, cancellation, and restart policy.
 The durable circuit architecture itself is in
 [development/circuits.md](development/circuits.md).
 
+## Diagnostics architecture
+
+[Diagnostics and captures](development/diagnostics.md) explains the resource
+sampler, the opt-in DevTools port the hub window can open, and the
+`npm run diag:capture` bundle — what it records, and why the capture runs
+before any reload.
+
 ## Documentation maintenance
 
 Read [Documentation standards](documentation-standards.md) before adding or

@@ -182,6 +182,31 @@ pub fn set_app_confirm_before_quit(confirm: bool) -> Result<(), String> {
     preferences::save(prefs)
 }
 
+/// Set the Chrome DevTools Protocol port the hub opens at startup (issue
+/// #2836). `None` turns the port off.
+///
+/// The port is a startup switch: WebView2 reads its browser arguments when
+/// the window is created, so a change takes effect on the **next launch**,
+/// not on the running instance. The settings UI says so, and the banner it
+/// shows while a port is open reports the port that is actually open.
+///
+/// A port below 1024 is refused: those are privileged on Unix and are rarely
+/// a DevTools port in practice.
+#[command]
+pub fn set_app_diag_cdp_port(port: Option<u16>) -> Result<(), String> {
+    if let Some(port) = port {
+        if !crate::diagnostics::cdp::is_valid_port(port) {
+            return Err(format!(
+                "port {port} is not usable for the DevTools endpoint; use {MIN_PORT}..=65535",
+                MIN_PORT = crate::diagnostics::cdp::MIN_PORT
+            ));
+        }
+    }
+    let mut prefs = preferences::load()?;
+    prefs.diag_cdp_port = port;
+    preferences::save(prefs)
+}
+
 /// The built-in probe-spawn prompt templates, shown in Settings as the
 /// defaults for the GitHub Issues / Pull Requests probe spawn prompts.
 /// Sourced from `agent::spawn::intent::DEFAULT_*_SPAWN_TEMPLATE` so the
