@@ -3,6 +3,8 @@
 use crate::agent::managed_config;
 use std::path::Path;
 
+use super::super::opencode_version::Version;
+
 const PLUGIN: &str = include_str!("../opencode2_attention_plugin.ts");
 const PACKAGE: &str = "../../buildmesh-attention2";
 pub(super) const BACKGROUND_CONFIG: &str = r#"{"permissions":[{"action":"*","resource":"*","effect":"deny"},{"action":"external_directory","resource":"*","effect":"deny"}],"policies":[{"action":"tool.use","resource":"*","effect":"deny"}]}"#;
@@ -17,6 +19,7 @@ pub(super) fn provision(
     directory: &Path,
     node_id: i64,
     identity: Option<(&str, u16)>,
+    version: Option<Version>,
 ) -> Result<(), String> {
     let plugin_path = directory.join(".opencode/buildmesh-attention2/index.ts");
     let path = config_path(directory, node_id);
@@ -71,6 +74,9 @@ pub(super) fn provision(
     let rule = serde_json::json!({"action":"external_directory","resource":"*","effect":"deny"});
     rules.retain(|existing| existing != &rule);
     rules.push(rule);
+    if let Some(version) = version {
+        configure_legacy_plugin_policy(root, version)?;
+    }
     if std::fs::read_to_string(&plugin_path).ok().as_deref() != Some(PLUGIN) {
         managed_config::atomic_write(&plugin_path, PLUGIN).map_err(|e| e.to_string())?;
     }
@@ -78,5 +84,31 @@ pub(super) fn provision(
         managed_config::atomic_write(&path, &doc.to_pretty_json().map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
     }
+    Ok(())
+}
+
+fn configure_legacy_plugin_policy(
+    root: &mut serde_json::Map<String, serde_json::Value>,
+    version: Version,
+) -> Result<(), String> {
+    // OpenCode checks this policy against the discovered path before importing
+    // the V1 module. The suffix covers checkout ancestors and both path separators.
+    let plugin = serde_json::json!({"action":"plugin.use","resource":"*/.opencode/plugins/buildmesh-attention.js","effect":"deny"});
+    let integration = serde_json::json!({"action":"integration.use","resource":"plugin:*/.opencode/plugins/buildmesh-attention.js","effect":"deny"});
+    let rule = match version {
+        (2, ..) if version >= (2, 2, 3) => Some(&plugin),
+        (2, ..) if version >= (2, 0, 25) => Some(&integration),
+        _ => None,
+    };
+    if rule.is_none() && !root.contains_key("policies") {
+        return Ok(());
+    }
+    let policies = root
+        .entry("policies")
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .ok_or("OpenCode 2 policies must be an array")?;
+    policies.retain(|existing| existing != &plugin && existing != &integration);
+    policies.extend(rule.cloned());
     Ok(())
 }

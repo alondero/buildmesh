@@ -719,6 +719,10 @@ deliberately-set names above ever drift in.
 
 OpenCode 2 selects its managed project override through `OPENCODE_CONFIG` in
 the adapter's `launch_environment`; V1 does not read that per-node file.
+OpenCode 2.0.25 and later also use that override to block auto-discovery from
+importing Buildmesh's V1 script at `.opencode/plugins/buildmesh-attention.js`.
+The adapter uses the cached CLI version to select the policy action accepted by
+that release. V1 continues to load the same file through its own discovery.
 `new_session_id` supplies its `ses_` vocabulary. The blocking `prepare_session`
 seam runs before command construction and uses a private session API to apply
 the model (including an optional `#variant`) or fork a regenerate. A returned

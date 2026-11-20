@@ -54,7 +54,7 @@ fn probe_cache_reuses_results_and_invalidates_a_changed_executable() {
     let (dir, executable) =
         fixture("require('fs').appendFileSync(__dirname+'/count','x'); console.log('2.2.3');");
     assert_eq!(probe(&executable), Some(2));
-    assert_eq!(probe(&executable), Some(2));
+    assert_eq!(probe_version(&executable), Some((2, 2, 3)));
     assert_eq!(
         std::fs::read_to_string(dir.path().join("count")).unwrap(),
         "x"
@@ -137,23 +137,26 @@ fn version_probe_removes_forced_color_from_the_child_environment() {
         .arg("--version")
         .env("FORCE_COLOR", "1")
         .env("NO_COLOR", "0");
-    assert_eq!(run_version_probe(command, Duration::from_secs(5)), Some(2));
+    assert_eq!(
+        run_version_probe(command, Duration::from_secs(5)),
+        Some((2, 2, 3))
+    );
 }
 
 #[test]
 fn force_color_version_output_identifies_v2() {
     assert_eq!(
-        major("\x1b[1mopencode\x1b[0m \x1b[2mv\x1b[0m\x1b[1m2.2.3\x1b[0m\r\n"),
-        Some(2)
+        parse_version("\x1b[1mopencode\x1b[0m \x1b[2mv\x1b[0m\x1b[1m2.2.3\x1b[0m\r\n"),
+        Some((2, 2, 3))
     );
 }
 
 #[test]
 fn versions_are_strict_and_shared_binary_majors_stay_distinct() {
-    assert_eq!(major("opencode v2.2.3\r\n"), Some(2));
-    assert_eq!(major("1.18.3\n"), Some(1));
-    assert_eq!(major("v3.0.0"), Some(3));
+    assert_eq!(parse_version("opencode v2.2.3\r\n"), Some((2, 2, 3)));
+    assert_eq!(parse_version("1.18.3\n"), Some((1, 18, 3)));
+    assert_eq!(parse_version("v3.0.0"), Some((3, 0, 0)));
     for malformed in ["", "2", "opencode unknown", "error 2.2.3", "2.x.3"] {
-        assert_eq!(major(malformed), None);
+        assert_eq!(parse_version(malformed), None);
     }
 }

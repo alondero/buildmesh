@@ -154,7 +154,7 @@ impl AgentProvider for OpenCode2Adapter {
         _runtime: &LaunchRuntime,
         node_id: i64,
     ) -> Result<(), String> {
-        config::provision(Path::new(&resolved.host_path), node_id, None)
+        config::provision(Path::new(&resolved.host_path), node_id, None, None)
     }
     fn launch_environment(&self, resolved: &ResolvedPath, node_id: i64) -> Vec<(String, String)> {
         vec![(
@@ -178,9 +178,9 @@ impl AgentProvider for OpenCode2Adapter {
             .executable
             .or(fallback.as_deref())
             .ok_or("OpenCode 2 executable is missing")?;
-        self.validate_executable(executable)?;
+        let version = super::opencode_version::require_version(executable, 2)?;
         let directory = Path::new(&input.resolved.host_path);
-        config::provision(directory, input.node_id, None)?;
+        config::provision(directory, input.node_id, None, version)?;
         let config_path = config::config_path(directory, input.node_id);
         if let Some(agent) = input.config.agent.as_deref() {
             self.validate_agent_override(agent)?;
@@ -199,6 +199,7 @@ impl AgentProvider for OpenCode2Adapter {
             directory,
             input.node_id,
             Some((&target, crate::http_server::current_http_port())),
+            version,
         )?;
         Ok((target != id).then_some(target))
     }
