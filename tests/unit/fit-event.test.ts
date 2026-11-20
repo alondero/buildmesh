@@ -8,9 +8,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-// ============================================================
 // Fit Event Dispatch Pattern (from SessionView.tsx lines 39-45)
-// ============================================================
 
 function createFitEventDispatcher() {
   const timeouts: ReturnType<typeof setTimeout>[] = [];
@@ -36,9 +34,7 @@ function createFitEventDispatcher() {
   return { scheduleFit, cleanup, getDispatchCount: () => dispatchCount, getTimeouts: () => timeouts.length };
 }
 
-// ============================================================
 // TerminalContainer Timeout Pattern (from Terminal.tsx lines 113-118)
-// ============================================================
 
 function createTerminalContainerFitScheduler(onFit: () => void) {
   const timeouts: ReturnType<typeof setTimeout>[] = [];

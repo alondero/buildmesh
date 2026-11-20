@@ -306,9 +306,7 @@ describe('UsageTab (issue #601 ProbePanel usage tab)', () => {
     });
   });
 
-  // ---------------------------------------------------------------------
   // "Refreshed X ago" indicator
-  // ---------------------------------------------------------------------
   // The fake-timer setup scopes `toFake` to just `setInterval` /
   // `clearInterval` / `Date` so RTL's `findByText` polling (real
   // `setTimeout`) still resolves. `advanceTo(t)` offsets by -1s so

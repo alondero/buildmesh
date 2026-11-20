@@ -6,9 +6,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { terminalManager } from '../../src/components/Terminal/Terminal';
 
-// ============================================================
 // Mocks for Tauri API
-// ============================================================
 // `vi.hoisted` runs before the imports — necessary because the SUT import
 // above triggers the TerminalRegistry constructor, which now eagerly
 // subscribes to Tauri events (see issue #332 / agent-spawned reconcile).
@@ -111,9 +109,7 @@ vi.mock('@xterm/addon-fit', () => {
   return { FitAddon: MockFitAddon };
 });
 
-// ============================================================
 // TerminalManager Tests
-// ============================================================
 describe('TerminalManager', () => {
   beforeEach(() => {
     mockListeners.clear();
@@ -168,9 +164,7 @@ describe('TerminalManager', () => {
   });
 });
 
-// ============================================================
 // Event Listener Tests
-// ============================================================
 describe('Event Listener Integration', () => {
   beforeEach(() => {
     mockListeners.clear();

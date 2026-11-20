@@ -140,9 +140,7 @@ pub(super) fn recover_run_observers_with_probe(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Startup reconciliation (milestone 3, issue #1208).
-// ---------------------------------------------------------------------------
 
 /// What startup reconciliation decides for one Running spawn step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

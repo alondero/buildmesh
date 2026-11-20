@@ -319,7 +319,6 @@ fn produces_readable_transcript() {
     assert!(MCODE.descriptor().produces_readable_transcript);
 }
 
-// -----------------------------------------------------------------
 // Issue #1796 provisioning + issue #1797 validation.
 //
 // Contract pinned here:
@@ -341,7 +340,6 @@ fn produces_readable_transcript() {
 //      stdin read, including across an instance that has since exited
 //      (issue #2343), and an unreachable target in ANY position — last
 //      included — still leaves the hook exiting 0.
-// -----------------------------------------------------------------
 
 fn plugin_manifest_path(home: &Path) -> std::path::PathBuf {
     home.join("plugins")

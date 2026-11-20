@@ -861,7 +861,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
     // Windows direct execution (no wrapper, no bash): Claude-compatible
     // providers (Anthropic, MiniMax) reach claude.exe directly. These
     // pin the direct composition. Windows-only: the direct recipe is gated
@@ -869,7 +868,6 @@ mod tests {
     // that PR #531 absorbed into buildmesh — see
     // `sandbox::spawn::tests::repro_claude_exit_in_sandbox` for the live
     // AppContainer repro of why that chain can't run sandboxed.
-    // -----------------------------------------------------------------------
 
     /// Anthropic on the Windows-native path spawns `claude.exe` directly.
     #[cfg(target_os = "windows")]
@@ -1600,7 +1598,6 @@ mod tests {
     // Truth table (× = accept, ✗ = reject):
     //
     //   head_ref  owner  url      |  before  |  after (#471)
-    //   -----------------------------------------------
     //   "feat/x"  None   None    |    ×     |    ×
     //   "feat/x"  Some   None    |    ✗     |    ✗
     //   "feat/x"  None   Some    |    ✗     |    ✗

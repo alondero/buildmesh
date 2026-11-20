@@ -825,13 +825,11 @@ impl CircuitGraph {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Domain validation — pure, side-effect-free, owned by the model so the
 // IPC boundary (Tauri command) stays a dumb router. Internal services,
 // the background worker, and a future CLI all reach for the same
 // `validate_circuit_request` helper; the Tauri command's job is just to
 // parse arguments and persist.
-// ---------------------------------------------------------------------------
 
 /// Pure validation for a circuit creation request. Returns the
 /// normalised [`CircuitTriggerKind`], the trimmed trigger label (if any),

@@ -79,6 +79,7 @@ recovery. Focused commands below remain useful during iteration.
 | Scope | Command | Evidence it provides |
 |---|---|---|
 | Documentation and agent infrastructure | `npm run test:docs` and `npm run check:docs` | Link/structure contract, source drift, and documentation-impact regression tests |
+| Source comments | `npm run lint:comments -- --base <commit>` | Rejects comment additions across the supported source and build formats |
 | Frontend | `scripts\check.ps1 all-ts` | Build, lint, fixtures, unit/integration tests, README/docs gates, bundle budget |
 | Rust | `scripts\check.ps1 rust` | Rust tests and generated TypeScript binding refresh |
 | Frontend + Rust | `scripts\check.ps1 all` | The default Windows green bar; see the engineering contract for exclusions |
@@ -101,6 +102,22 @@ not restated here, because a copied list of check names is a claim nothing
 verifies. The Windows and macOS platform smoke builds are post-merge signals:
 they run on pushes to `main`, release tags, and manual dispatches, not on pull
 requests.
+
+### Source comment lint
+
+`npm run lint` runs the comment check before ESLint. It uses `HEAD` for local
+edits. Pass the branch comparison commit to check your committed changes
+too. The harness uses its recorded base and pull request CI uses the target
+commit. Existing comments may move within a file. Removed comments drop out
+of the allowance when the base advances.
+
+Delete tautologies and stale explanations. File a GitHub issue for an
+implementation workaround and move durable decision rationale to the
+[ADR index](../adr/README.md). Keep existing tool directives until their
+dependency can be removed. The check covers authored TypeScript, JavaScript,
+Rust, Kotlin, stylesheets, markup, shell scripts, and configuration including
+YAML and TOML. [ADR 0061](../adr/0061-source-comment-ratchet.md) records the
+trade-offs and source exclusions.
 
 ## Common change checklists
 

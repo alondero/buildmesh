@@ -1,8 +1,6 @@
 use crate::models::AgentNode;
 
-// ---------------------------------------------------------------------------
 // Naming dependencies — persistence and native dialogue acquisition.
-// ---------------------------------------------------------------------------
 
 pub(crate) trait SessionNamingRepository: Send + Sync {
     fn get_agent_node_by_id(&self, id: i64) -> Result<AgentNode, String>;

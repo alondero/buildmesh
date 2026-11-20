@@ -354,7 +354,11 @@ jobs:
       # Run before the build so a syntax-level regression trips in
       # seconds rather than waiting for tsc + vite.
       - name: ESLint gate (issue #1542)
-        run: npm run lint
+        env:
+          COMMENT_BASE: ${{ github.event.pull_request.base.sha || (github.event_name == 'push' && github.ref_type == 'branch' && github.event.before) || 'HEAD' }}
+        run: |
+          if [[ "$COMMENT_BASE" =~ ^0+$ ]]; then export COMMENT_BASE='HEAD^'; fi
+          npm run lint
 
       - name: ESLint fixtures verifier (issue #1542)
         run: npm run lint:fixtures

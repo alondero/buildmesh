@@ -150,7 +150,6 @@ describe('MeshColorPicker focus visibility (issue #2776)', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // The selection indicator — issue #2775.
 //
 // The ring used to be `ring-white`, which resolved to white in BOTH themes.
@@ -158,7 +157,6 @@ describe('MeshColorPicker focus visibility (issue #2776)', () => {
 // swatch dissolved into the dialog it sat in. The indicator is now the
 // theme-aware `ring-text-primary` step, and the selection also carries a
 // checkmark — a cue that does not depend on the ring's hue at all.
-// ---------------------------------------------------------------------------
 
 describe('MeshColorPicker selection indicator (#2775)', () => {
   it('marks the selected swatch with the theme-aware ring, not a white ring', () => {
@@ -213,10 +211,8 @@ describe('MeshColorPicker selection indicator (#2775)', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // The measurable half of the indicator: the ring and the checkmark ink are
 // measured against the surfaces they sit on, in BOTH themes.
-// ---------------------------------------------------------------------------
 
 const APP_CSS = readFileSync(resolve(__dirname, '../../src/App.css'), 'utf8');
 

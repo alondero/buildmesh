@@ -87,7 +87,6 @@ fn provider_provisioning_runs_hooks_after_trust_failure() {
     assert!(!hook_called.get());
 }
 
-// -----------------------------------------------------------------------
 // Warm-pool manual claim — .worktreeinclude re-application (issue #639
 // gap 1). The cold `create_git_worktree` and the Issue/PR `adopt…by_move`
 // both call `apply_worktree_include` so an adopted worktree is byte-for-
@@ -95,7 +94,6 @@ fn provider_provisioning_runs_hooks_after_trust_failure() {
 // (upgrade_warm_to_mode) MUST do the same — otherwise a user who edits a
 // `.worktreeinclude`-referenced file (typical: `.env`, build cache) between
 // prewarm time and spawn time lands on a stale copy.
-// -----------------------------------------------------------------------
 
 #[test]
 fn upgrade_warm_to_mode_reapplies_worktreeinclude_after_checkout() {
@@ -260,13 +258,11 @@ fn setup_warm_pool_with_include() -> (TempDir, std::path::PathBuf, std::path::Pa
     (td, root, pool)
 }
 
-// -----------------------------------------------------------------------
 // Warm-pool Issue/PR adoption (issue #612): move a detached pool worktree
 // onto the node's target name and check it out to the resolved base SHA on
 // its own branch. These pin the code-review fixes for two confirmed bugs:
 // resolving `base_ref` → SHA (offline resilience), and using `-b` (NOT
 // `-B`) so a re-spawn can never force-reset a branch carrying prior work.
-// -----------------------------------------------------------------------
 
 #[test]
 fn adopt_warm_worktree_moves_and_branches_at_base_sha() {
@@ -380,7 +376,6 @@ fn adopt_warm_worktree_refuses_to_clobber_an_existing_branch() {
         "target must not be materialised by a refused adoption"
     );
 }
-// -----------------------------------------------------------------------
 // SHA-drift detection (issue #444)
 //
 // `read_origin_ref_sha` returns the local SHA at `origin/<head_ref>` so
@@ -388,7 +383,6 @@ fn adopt_warm_worktree_refuses_to_clobber_an_existing_branch() {
 // and emit a `pr_sha_drift` warning on mismatch. The unit test creates
 // the local ref directly via git2 (no real remote / fetch roundtrip) so
 // the test is hermetic and fast.
-// -----------------------------------------------------------------------
 
 #[test]
 fn read_origin_ref_sha_returns_local_sha_when_ref_exists() {
@@ -892,7 +886,6 @@ fn fetch_single_ref_fetches_despite_dirty_parent() {
     );
 }
 
-// -----------------------------------------------------------------------
 // locked_fetch_pr_head — per-Mesh sync_lock wrap (issue #698)
 //
 // `locked_fetch_pr_head` must run inside `crate::git::sync_lock::with_mesh_
@@ -914,7 +907,6 @@ fn fetch_single_ref_fetches_despite_dirty_parent() {
 // — no `thread::sleep` race), then times `locked_fetch_pr_head`. With the
 // wrap, `locked_fetch_pr_head` blocks ~450 ms waiting for the holder;
 // without, it runs concurrently with the holder and finishes in tens of ms.
-// -----------------------------------------------------------------------
 
 /// Regression test for issue #698 — `locked_fetch_pr_head` must acquire
 /// the per-Mesh `with_mesh_sync_lock` keyed on the spawn's `node.path`,

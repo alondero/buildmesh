@@ -264,9 +264,7 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
     },
 ];
 
-// ---------------------------------------------------------------------------
 // Builders — produce the graph_json each contract entry pins.
-// ---------------------------------------------------------------------------
 
 /// Build the graph JSON the contract pins. Walking skeleton uses the
 /// `prompt` argument as the inject target; the review blueprint pins
@@ -285,9 +283,7 @@ pub fn build_graph(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Drift gate — compiler-checked exhaustiveness over `CircuitBlueprintKind`.
-// ---------------------------------------------------------------------------
 
 /// `const _: () = { ... }` is evaluated at compile time. The closure body
 /// is forced to be exhaustive over its `match` arms. Adding a new
@@ -309,9 +305,7 @@ const _: () = {
     let _ = catalog_index;
 };
 
-// ---------------------------------------------------------------------------
 // Tests.
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -746,11 +740,9 @@ mod tests {
         }
     }
 
-    // -------------------------------------------------------------------
     // Domain validation moved to `circuit::model`. The tests
     // below exercise the pure helper directly so internal services,
     // the worker, and any future CLI share the same contract.
-    // -------------------------------------------------------------------
 
     #[test]
     fn validate_circuit_request_rejects_incompatible_trigger_for_review_blueprint() {

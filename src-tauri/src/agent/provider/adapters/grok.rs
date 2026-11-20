@@ -1072,9 +1072,7 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------
     // Attention hook injection (issue #1282)
-    // -----------------------------------------------------------------
 
     /// End-to-end: injection writes the namespaced always-trusted global
     /// file at `<home>/.grok/hooks/buildmesh-attention.json`, with
@@ -1278,7 +1276,6 @@ mod tests {
         assert_eq!(resolved, temp.path().join(".grok").join("hooks"));
     }
 
-    // -----------------------------------------------------------------
     // Additive merging + atomic write — issue #1366.
     //
     // The pre-#1366 `ensure_hooks_json` wholesale-assigned
@@ -1294,7 +1291,6 @@ mod tests {
     // generated `command`, so provisioning upgrades old hook files instead
     // of appending duplicates. Either field must carry `/api/attention/`
     // and the `BUILDMESH_PORT` expansion token.
-    // -----------------------------------------------------------------
 
     #[test]
     fn marker_predicate_matches_legacy_urls_and_generated_commands() {

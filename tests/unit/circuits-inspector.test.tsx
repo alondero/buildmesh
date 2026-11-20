@@ -549,7 +549,6 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
   });
 });
 
-// ---------------------------------------------------------------------------
 // #1219 review feedback: Trigger type select for root nodes.
 //
 // #1219 collapsed the Probe tab's New Circuit row to name + blueprint only,
@@ -559,7 +558,6 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
 // unreachable from the UI. These tests pin the inspector-level seam
 // that fixes the dead end: root trigger nodes expose a Trigger type
 // select, and switching it rewires the kind via `defaultKind`.
-// ---------------------------------------------------------------------------
 
 describe('InspectorPanel — Trigger type select for root nodes (#1219)', () => {
   function manualTriggerNode(): CircuitNode {

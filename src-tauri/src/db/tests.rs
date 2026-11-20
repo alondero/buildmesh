@@ -2173,9 +2173,7 @@ async fn the_app_survives_a_saturated_pool_across_its_real_boundaries() {
     assert_eq!(meshes.len(), 1, "the seeded mesh must be visible again");
 }
 
-// ---------------------------------------------------------------------------
 // The write-ahead log is a bounded log (issue #2600)
-// ---------------------------------------------------------------------------
 
 /// The `-wal` sidecar next to a database file.
 fn wal_path(db_path: &std::path::Path) -> std::path::PathBuf {

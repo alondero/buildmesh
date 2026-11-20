@@ -23,7 +23,6 @@ fn pump_inside_with_batcher_exits_cleanly_on_reader_eof() {
     assert_eq!(&*got.lock().unwrap(), b"hello from pty\n");
 }
 
-// -----------------------------------------------------------------------
 // Reader-epilogue decision matrix (false "failed to start" fix).
 //
 // The reader thread's post-exit status write used to apply the 3s
@@ -33,7 +32,6 @@ fn pump_inside_with_batcher_exits_cleanly_on_reader_eof() {
 // + toasted `resume-failed` — and that stale Error then blocked the
 // replacing spawn's Spawning→Running promotion. These tests pin the
 // full matrix of `post_exit_action`.
-// -----------------------------------------------------------------------
 
 #[test]
 fn deliberate_kill_never_writes_status_even_within_early_exit_window() {
@@ -83,7 +81,6 @@ fn plain_terminal_natural_exit_is_idle_regardless_of_elapsed() {
     );
 }
 
-// -----------------------------------------------------------------------
 // Reader-thread session-id capture gate (issue #651)
 //
 // Prepare's pre-write (Assign mode) and the
@@ -95,7 +92,6 @@ fn plain_terminal_natural_exit_is_idle_regardless_of_elapsed() {
 // of `session_id_mode` (the source of truth) so the two writers can never
 // both target the same column. Each test pins one row of the truth table;
 // the regression test is the `Assign(_)` row.
-// -----------------------------------------------------------------------
 
 /// Regression for issue #651. Even if a future adapter returns
 /// `self_assigns_session_id() = true`, the reader thread MUST NOT capture
@@ -151,7 +147,6 @@ fn reader_should_not_capture_when_provider_does_not_self_assign() {
     );
 }
 
-// -----------------------------------------------------------------------
 // Reader epilogue — resume guard (issue #2137)
 //
 // The never-persisted-session respawn loop: `prepare_context` pre-writes a
@@ -160,7 +155,6 @@ fn reader_should_not_capture_when_provider_does_not_self_assign() {
 // an id whose transcript was never written, exits immediately, and the node
 // returns to a spawnable status — so it is relaunched with the same dead id
 // every few seconds, forever. These tests pin the decision that stops it.
-// -----------------------------------------------------------------------
 
 use crate::agent::spawn::resume_guard::{self, UnusableResumeVerdict};
 

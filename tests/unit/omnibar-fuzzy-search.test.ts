@@ -45,9 +45,7 @@ import type { GitHubIssue } from '../../src/types/generated/GitHubIssue';
 import type { GitHubPullRequest } from '../../src/types/generated/GitHubPullRequest';
 import type { SpawnOption } from '../../src/lib/groups';
 
-// ---------------------------------------------------------------------------
 // Fixtures
-// ---------------------------------------------------------------------------
 
 function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {
   return {
@@ -162,9 +160,7 @@ function item(overrides: Partial<IndexedItem> = {}): IndexedItem {
 /** Local alias so the field fixtures stay one-line: `f('text', 'primary')`. */
 const f = field;
 
-// ---------------------------------------------------------------------------
 // searchItems — matching semantics
-// ---------------------------------------------------------------------------
 
 describe('searchItems — matching semantics', () => {
   it('matches a contiguous substring (case-insensitive)', () => {
@@ -234,9 +230,7 @@ describe('searchItems — matching semantics', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Greedy-matcher oracle (review #1425)
-// ---------------------------------------------------------------------------
 
 /**
  * Brute-force best subsequence for the gap-sum objective: among all ways to
@@ -314,9 +308,7 @@ describe('greedy matcher is optimal for the gap-sum objective (review #1425)', (
   });
 });
 
-// ---------------------------------------------------------------------------
 // searchItems — scoring & ranking
-// ---------------------------------------------------------------------------
 
 describe('searchItems — scoring & ranking', () => {
   it('ranks a primary-field match above a secondary-field match', () => {
@@ -402,9 +394,7 @@ describe('compareResults', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // searchItems — match highlighting ranges
-// ---------------------------------------------------------------------------
 
 describe('searchItems — match highlighting ranges', () => {
   it('reports a single contiguous range for a substring match', () => {
@@ -477,9 +467,7 @@ describe('searchItems — match highlighting ranges', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // searchItems — empty-query modes
-// ---------------------------------------------------------------------------
 
 describe('searchItems — empty-query modes', () => {
   const items = [
@@ -503,9 +491,7 @@ describe('searchItems — empty-query modes', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // FIELD_WEIGHTS — the scoring vocabulary
-// ---------------------------------------------------------------------------
 
 describe('FIELD_WEIGHTS', () => {
   it('keeps primary strictly above secondary', () => {
@@ -513,9 +499,7 @@ describe('FIELD_WEIGHTS', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Indexers — Agent Nodes
-// ---------------------------------------------------------------------------
 
 describe('indexAgentNodes (issue #1410 §1)', () => {
   const meshes = [makeMesh({ id: 1, name: 'mesh-a' })];
@@ -575,9 +559,7 @@ describe('indexAgentNodes (issue #1410 §1)', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Indexers — Meshes
-// ---------------------------------------------------------------------------
 
 describe('indexMeshes (issue #1410 §1)', () => {
   const mesh = makeMesh({ id: 3, name: 'buildmesh', path: '/work/buildmesh', base_ref: 'main' });
@@ -616,9 +598,7 @@ describe('indexMeshes (issue #1410 §1)', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Indexers — App Commands
-// ---------------------------------------------------------------------------
 
 describe('indexCommands (issue #1410 §1)', () => {
   it('ships the required built-in commands', () => {
@@ -668,9 +648,7 @@ describe('indexCommands (issue #1410 §1)', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Indexers — GitHub Probes
-// ---------------------------------------------------------------------------
 
 describe('indexGitHub (issue #1410 §1)', () => {
   const meshes = [makeMesh({ id: 1, name: 'buildmesh' })];
@@ -723,9 +701,7 @@ describe('indexGitHub (issue #1410 §1)', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Indexers — Spawning Recipes
-// ---------------------------------------------------------------------------
 
 describe('indexSpawnOptions (issue #1410 §1)', () => {
   const meshes = [makeMesh({ id: 1, name: 'buildmesh' }), makeMesh({ id: 2, name: 'playground' })];
@@ -755,9 +731,7 @@ describe('indexSpawnOptions (issue #1410 §1)', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Indexers — Mesh-scoped Probe destinations ("Open <Destination> in <Mesh>")
-// ---------------------------------------------------------------------------
 
 describe('indexMeshProbeCommands', () => {
   const meshes = [makeMesh({ id: 1, name: 'buildmesh' }), makeMesh({ id: 2, name: 'ProjectY' })];
@@ -806,9 +780,7 @@ describe('indexMeshProbeCommands', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // buildOmnibarIndex — the merged palette
-// ---------------------------------------------------------------------------
 
 describe('buildOmnibarIndex', () => {
   it('merges all five domains into one palette', () => {
@@ -841,9 +813,7 @@ describe('buildOmnibarIndex', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Prefix filtering (issue #1410 §2)
-// ---------------------------------------------------------------------------
 
 describe('filterByPrefix (issue #1410 §2)', () => {
   const index = buildOmnibarIndex({
@@ -895,9 +865,7 @@ describe('filterByPrefix (issue #1410 §2)', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // searchOmnibar — prefix + fuzzy integration
-// ---------------------------------------------------------------------------
 
 describe('searchOmnibar', () => {
   const index = buildOmnibarIndex({
@@ -977,9 +945,7 @@ describe('searchOmnibar', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Stable ordering across repeated searches
-// ---------------------------------------------------------------------------
 
 describe('repeated searches', () => {
   it('is deterministic across runs', () => {

@@ -139,7 +139,6 @@ pub fn cleanup(session_id: i64) {
     }
 }
 
-// ---------------------------------------------------------------------------
 // ADR-0014 restricted-token spawn (GH #528) — the pivot off AppContainer.
 //
 // Same orchestration as `spawn_sandboxed` (grant the worktree + the home paths
@@ -157,7 +156,6 @@ pub fn cleanup(session_id: i64) {
 // include_user_sid=true)`, fixing the #528 hang and #533 loopback. Read
 // confinement (the strict `include_user_sid=false` mode) is deferred to #542;
 // `spawn_sandboxed` above (AppContainer) is the superseded predecessor.
-// ---------------------------------------------------------------------------
 
 /// Per-node cleanup for the restricted-token path: revoke the grants.
 struct RestrictedCleanup {

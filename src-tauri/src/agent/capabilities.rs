@@ -26,9 +26,7 @@ use ts_rs::TS;
 
 use crate::agent::provider::{AgentProvider, Platform};
 
-// ---------------------------------------------------------------------------
 // Wire types
-// ---------------------------------------------------------------------------
 
 /// What kind of effort / reasoning-control flag a harness accepts.
 ///
@@ -426,9 +424,7 @@ pub struct ResolvedAgentConfig {
     pub agent: Option<String>,
 }
 
-// ---------------------------------------------------------------------------
 // Per-field cascade inputs
-// ---------------------------------------------------------------------------
 
 /// Per-field input to the configuration resolver. Each layer is the "raw"
 /// value as it came from its source — whitespace-only inputs are normalised
@@ -485,9 +481,7 @@ pub struct AgentConfigInputs<'a> {
     pub agent: FieldInputs<'a>,
 }
 
-// ---------------------------------------------------------------------------
 // Resolver
-// ---------------------------------------------------------------------------
 
 /// Resolve the model, effort, and extra-args values for one spawn against
 /// the selected harness's capability contract.
@@ -617,9 +611,7 @@ fn normalize_non_empty(raw: &str) -> Option<String> {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Trait integration
-// ---------------------------------------------------------------------------
 
 /// Project the selected adapter's authoritative facts into the generated wire
 /// contract. This projection is shared by the menu, resolver and catalogue.
@@ -713,9 +705,7 @@ pub const MUSE_EFFORT_ALLOWED: &[&str] = &[
     "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
 ];
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 // allow-test-in-production: this inventory predates the sibling-test-file rule. Perch extends the existing harness tables; moving the suite is out of scope.
@@ -1855,9 +1845,7 @@ mod tests {
         assert_eq!(resolved.effort, None);
     }
 
-    // -----------------------------------------------------------------------
     // Application-default slot feed (issue #1150 / #1148)
-    // -----------------------------------------------------------------------
 
     /// The application slot drives the resolved value when explicit + mesh
     /// are empty (issue #1148 cascade: `explicit > mesh > application > native`).

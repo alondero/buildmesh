@@ -239,10 +239,8 @@ fn process_removals_fails_closed_when_is_claimed_errors() {
     );
 }
 
-// -------------------------------------------------------------------
 // Issue #2139 — blocked cleanups are persisted, backed off and reported
 // at most once per unchanged blocker.
-// -------------------------------------------------------------------
 
 /// The backoff schedule must grow, so a blocker the drain cannot clear
 /// costs less and less rows/second, and must cap so a worktree blocked
@@ -787,7 +785,6 @@ fn retry_without_a_queue_row_reports_gone() {
     ));
 }
 
-// -------------------------------------------------------------------
 // Issue #448 — pin the `source_pr = None` invariant on the issue-spawn
 // and hand-spawn paths. `services::agent_node::create` and
 // `create_pending` are the only entry points non-PR spawns go through
@@ -818,7 +815,6 @@ fn retry_without_a_queue_row_reports_gone() {
 //     `source_pr = Some(_)`. The assertion fires before any DB call, so
 //     these don't need a DB at all — they catch a regression at the
 //     wrapper boundary with zero infrastructure.
-// -------------------------------------------------------------------
 
 // Each test below installs its own database with `db::test_support::isolated`.
 
@@ -1157,7 +1153,6 @@ fn create_rejects_source_pr_pinned_sha_some() {
     });
 }
 
-// -----------------------------------------------------------------------
 // `create_blocking` (issue #1658 step 5) — single shared runner used by
 // Tauri commands and HTTP routes to fold the mesh-lookup +
 // branch-resolution + node-create sequence into one helper. Every test
@@ -1165,7 +1160,6 @@ fn create_rejects_source_pr_pinned_sha_some() {
 // that loses a `branch_override` short-circuit, the Pending-status
 // branch, or the "mesh not found" sentinel fails review by failing these
 // tests first.
-// -----------------------------------------------------------------------
 
 #[test]
 fn create_blocking_with_branch_override_matches_legacy_create_row() {
@@ -1480,11 +1474,9 @@ fn create_blocking_propagates_use_worktree_override_on_pending_path() {
     );
 }
 
-// -----------------------------------------------------------------------
 // Issue #2237 — one runner owns create and import, including the
 // initial-prompt capability rule. Terminal cannot take a prompt.
 // Codex can, and that success must not depend on the install menu.
-// -----------------------------------------------------------------------
 
 #[test]
 fn prompted_terminal_create_rejects_and_inserts_nothing() {
@@ -1803,13 +1795,11 @@ fn import_of_an_unknown_mesh_is_mesh_not_found() {
     assert!(matches!(err, AgentNodeError::MeshNotFound(-1)));
 }
 
-// -----------------------------------------------------------------------
 // Harness provenance (issue #2332) — the archive entry's originating
 // harness is the executor, and an unknown one is refused rather than
 // guessed. These pin the whole import boundary: the stored row, the
 // executor the spawn pipeline will resolve from it, and the argv that
 // executor composes.
-// -----------------------------------------------------------------------
 
 /// The regression this issue filed: a Cursor conversation discovered on
 /// disk used to be imported with no provider, defaulted to `anthropic`,
@@ -1958,7 +1948,6 @@ fn resolve_resumable_harness_returns_the_executor_and_refuses_the_rest() {
     assert!(resolve_resumable_harness("dsh").is_err());
 }
 
-// -----------------------------------------------------------------------
 // Regenerate (issue #775) — validation + resume-decision surface.
 //
 // The three pure helpers (`validate_status_eligible`,
@@ -1967,7 +1956,6 @@ fn resolve_resumable_harness_returns_the_executor_and_refuses_the_rest() {
 // via the Playwright e2e suite and the manual smoke test, so the
 // unit tests here stay focused on the rules the orchestrator
 // composes.
-// -----------------------------------------------------------------------
 
 #[test]
 fn validate_status_eligible_allows_running_idle_awaiting_error_suspended_completed() {

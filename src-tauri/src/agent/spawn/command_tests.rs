@@ -706,7 +706,6 @@ fn codex_launch_carries_the_review_prompt_next_to_its_attention_hooks() {
     }
 }
 
-// -----------------------------------------------------------------
 // Issue #1179: capability / recipe coherence table.
 //
 // For every adapter × every session mode × every value the resolver
@@ -714,7 +713,6 @@ fn codex_launch_carries_the_review_prompt_next_to_its_attention_hooks() {
 // the capability descriptor advertises. The single test below drives
 // the full matrix; per-adapter adapter-level tests continue to pin
 // the arg shapes directly via `*_args` helpers.
-// -----------------------------------------------------------------
 
 fn make_input<'a>(
     platform: Platform,
@@ -1294,14 +1292,12 @@ fn cascade_inputs_for_explicit_wins_over_mesh_when_application_empty() {
     assert_eq!(resolved.effort.as_deref(), Some("medium"));
 }
 
-// -----------------------------------------------------------------------
 // SpawnRequest → resolve_spawn_config integration (issue #1157 / #1358).
 //
 // The cascade tests above pin the helper + resolver precedence. These
 // drive a real SpawnRequest through the same call shape launch_process
 // uses, so a refactor that drops explicit or maps it to the wrong slot
 // fails here.
-// -----------------------------------------------------------------------
 /// AC #4 pin: a `SpawnRequest` with a populated layer-1 override
 /// (model + effort) drives the helper extracted from
 /// `spawn_agent_inner` and the resolved config carries the explicit

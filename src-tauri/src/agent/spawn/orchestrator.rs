@@ -102,9 +102,7 @@ pub(crate) enum ResumeSkipDecision {
     Proceed(String),
 }
 
-// ---------------------------------------------------------------------------
 // Public Tauri command interface
-// ---------------------------------------------------------------------------
 
 pub(super) fn prepare_initial_prompt(
     node: &crate::models::AgentNode,

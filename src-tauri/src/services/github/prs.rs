@@ -88,7 +88,6 @@ pub struct PullRequest {
     pub author: String,
 }
 
-// ---------------------------------------------------------------------------
 // Custom `Deserialize` for `PullRequest`.
 //
 // GitHub's `/pulls` response nests the head commit under a `head` object:
@@ -101,7 +100,6 @@ pub struct PullRequest {
 // The custom impl below reads `head` once and projects `head.ref` onto
 // `head_ref`, leaving the rest of the struct's `#[serde(default)]` rules in
 // place.
-// ---------------------------------------------------------------------------
 impl<'de> serde::Deserialize<'de> for PullRequest {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -1364,11 +1362,9 @@ fn is_duplicate_pr_error(body: &str) -> bool {
 pub(crate) mod tests {
     use super::*;
 
-    // -----------------------------------------------------------------------
     // Collaborator permission — the wire→enum mapping the Circuit gate keys
     // off (ADR-0012 §5). GitHub's legacy `permission` field is one of
     // admin/write/read/none; `has_push_access` is the trust boundary.
-    // -----------------------------------------------------------------------
 
     #[test]
     fn collaborator_permission_maps_legacy_values() {
@@ -1443,12 +1439,10 @@ pub(crate) mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
     // Pull request deserialisation — the `/pulls` list shape (number, title,
     // body, draft, state) and the `/pulls/{n}` detail shape (mergeable,
     // mergeable_state). The list endpoint omits mergeability; the detail
     // endpoint can return `mergeable: null` while GitHub computes the merge.
-    // -----------------------------------------------------------------------
 
     #[test]
     fn pull_request_deserialises_full_list_shape() {
@@ -1788,7 +1782,6 @@ pub(crate) mod tests {
         assert_eq!(absent.mergeable_state, "");
     }
 
-    // -----------------------------------------------------------------------
     // PR files deserialisation — issue #421, the wire shape of
     // `GET /repos/{o}/{r}/pulls/{n}/files`. The endpoint returns a bare
     // array; each item carries `filename`, `status`, `additions`,
@@ -1796,7 +1789,6 @@ pub(crate) mod tests {
     // line-by-line, so we don't need to reconstruct hunk structure here.
     // `previous_filename` is only set for renames (the corresponding entry
     // in GitHub's response has it; everything else omits it).
-    // -----------------------------------------------------------------------
 
     #[test]
     fn pr_file_deserialises_full_shape_with_patch() {
@@ -1892,7 +1884,6 @@ pub(crate) mod tests {
         assert_eq!(files[1].filename, "b.txt");
         assert_eq!(files[1].status, "deleted");
     }
-    // -----------------------------------------------------------------------
     // PR summaries GraphQL seam (issue #1529) — mapping + O(pages) cost.
     //
     // The old panel cost N+1 HTTP requests per refresh (1 REST list + N REST
@@ -1902,7 +1893,6 @@ pub(crate) mod tests {
     // with a request counter pins the cost; pure mapping tests pin the
     // null/unknown semantics explicitly (UNKNOWN ≠ conflict ≠ transport
     // failure).
-    // -----------------------------------------------------------------------
 
     #[test]
     fn graphql_states_for_filter_maps_open_and_closed() {
@@ -2731,12 +2721,10 @@ pub(crate) mod tests {
         handle.join().expect("server");
     }
 
-    // -----------------------------------------------------------------------
     // Merge method plumbing (merge-strategy dropdown). The PUT body must
     // carry the caller's method verbatim — the fake server asserts the
     // request body's `merge_method`, so a regression that hard-codes
     // `"squash"` (or drops the field) fails the test.
-    // -----------------------------------------------------------------------
 
     #[test]
     fn merge_pull_request_sends_the_chosen_method_and_echoes_it() {

@@ -9,7 +9,6 @@ use crate::db::{DbError, SqlResult};
 use crate::models::{AutopilotCircuit, AutopilotCircuitRun, AutopilotCircuitRunStep};
 
 // Circuits — CRUD for the blueprint rows.
-// ---------------------------------------------------------------------------
 
 /// Normalise the title-bar reviewer override into the stored run-context value.
 ///
@@ -1293,9 +1292,7 @@ pub(crate) fn delete_circuits_for_mesh_inner(conn: &Connection, mesh_id: i64) ->
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // Runs + steps — the execution ledger the circuit worker drives.
-// ---------------------------------------------------------------------------
 
 /// Create a fresh `pending` run seeded with its template context
 /// (`circuit.*`, pre-populated by the caller; see
@@ -2480,7 +2477,6 @@ pub fn clear_circuit_step_agent_node_by_agent_id(run_id: i64, agent_node_id: i64
     Ok(())
 }
 // Concurrency counters — the inputs to the stepper's capacity snapshot.
-// ---------------------------------------------------------------------------
 
 /// **Admitted** circuit runs on this mesh (issue #1467) — the input to
 /// the run-admission gate. Counts runs in `running` or `paused` only.

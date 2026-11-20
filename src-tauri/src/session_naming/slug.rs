@@ -3,9 +3,7 @@ use std::collections::HashSet;
 use super::words::{ADJECTIVES, NOUNS};
 use rand::seq::IndexedRandom;
 
-// ---------------------------------------------------------------------------
 // Random name generation (word lists + combinatorics)
-// ---------------------------------------------------------------------------
 
 #[rustfmt::skip]
 pub(super) static SLUG_REGEX: once_cell::sync::Lazy<regex::Regex> =
@@ -15,9 +13,7 @@ pub(super) static SLUG_REGEX: once_cell::sync::Lazy<regex::Regex> =
 /// branch, so every name this module produces stays within this cap.
 const MAX_NAME_CHARS: usize = 50;
 
-// ---------------------------------------------------------------------------
 // Public lifecycle API
-// ---------------------------------------------------------------------------
 
 /// Generate an initial random name for a newly spawned agent node.
 /// Returns a three-word hyphenated slug (e.g. "bold-keen-brook").
@@ -383,6 +379,4 @@ pub(super) fn slug_with_retry(raw: &str) -> Result<String, String> {
     fit_slug(&fallback).ok_or_else(|| slug_rejection(&candidate))
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------

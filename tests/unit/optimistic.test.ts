@@ -347,11 +347,9 @@ describe('withOptimistic', () => {
     expect(names).toEqual(['alpha', 'beta-2', 'gamma']);
   });
 
-  // ------------------------------------------------------------------
   // Issue #2325 — operation ownership. Each case states the intended
   // durable/latest state of the claimed column, not merely which
   // surface calls happened.
-  // ------------------------------------------------------------------
 
   it('keeps a newer rename and lifecycle observation through a successful pin (#2325)', async () => {
     // The reported reproduction: pin starts on

@@ -103,9 +103,7 @@ export interface UsePathInvalidatedQueryOptions {
   extraPaths?: Array<string | null | undefined>;
 }
 
-// ------------------------------------------------------------------
 // Public overloads — TypeScript picks one based on the client type.
-// ------------------------------------------------------------------
 
 /** Single-key shape: `client` is a `PathKeyedClient<V>`; `key` doubles as
  * the GIT_CHANGED subscription path. */

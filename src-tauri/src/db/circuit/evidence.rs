@@ -65,7 +65,6 @@ fn restore_projection_conflicts_inner(
     Ok(changed)
 }
 
-// ---------------------------------------------------------------------------
 // Circuit Run History provenance vocabulary (issue #1909 / #1847).
 //
 // Every append carries a `source` (who/what produced the event) and a
@@ -73,7 +72,6 @@ fn restore_projection_conflicts_inner(
 // existing identity (`node_id`/`attempt`) and time (`observed_at`). This is
 // the single vocabulary: the Probe renders these values and tests pin them,
 // so add here rather than inlining literals at call sites.
-// ---------------------------------------------------------------------------
 
 /// The circuit worker's stepper committed a run/step transition or effect.
 pub(super) const SOURCE_CIRCUIT_WORKER: &str = "circuit_worker";

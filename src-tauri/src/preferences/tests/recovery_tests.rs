@@ -47,9 +47,7 @@ fn read(path: &std::path::Path) -> Vec<u8> {
     std::fs::read(path).expect("read preferences.json")
 }
 
-// ---------------------------------------------------------------------------
 // Classification (pure)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn malformed_json_is_classified_as_invalid_json() {
@@ -146,9 +144,7 @@ fn unknown_forward_version_fields_are_ignored_not_rejected() {
     assert_eq!(prefs.default_provider.as_deref(), Some("claude"));
 }
 
-// ---------------------------------------------------------------------------
 // Preservation: a read and an ordinary write never touch a corrupt file
-// ---------------------------------------------------------------------------
 
 #[test]
 fn every_corrupt_shape_survives_a_load_and_an_attempted_update_unchanged() {
@@ -271,9 +267,7 @@ fn the_health_command_reports_corruption_with_recovery_context() {
     });
 }
 
-// ---------------------------------------------------------------------------
 // Last-known-good backup and recovery
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_successful_write_leaves_the_last_known_good_backup() {
@@ -465,9 +459,7 @@ fn a_backup_that_cannot_be_read_is_not_offered_as_a_recovery() {
     });
 }
 
-// ---------------------------------------------------------------------------
 // Explicit reset
-// ---------------------------------------------------------------------------
 
 #[test]
 fn an_explicit_reset_is_the_only_path_that_replaces_corrupt_data_and_it_archives() {
@@ -560,9 +552,7 @@ fn successive_resets_do_not_clobber_an_earlier_archive() {
     });
 }
 
-// ---------------------------------------------------------------------------
 // Migrations
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_valid_old_schema_file_migrates_in_memory_and_persists_exactly_once() {
@@ -729,9 +719,7 @@ fn a_missing_path_component_is_missing_on_every_platform() {
     // The guard removes the sentinel file when the test ends.
 }
 
-// ---------------------------------------------------------------------------
 // Isolation guard
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_corrupt_file_in_one_directory_cannot_affect_another() {
@@ -767,9 +755,7 @@ fn a_corrupt_file_in_one_directory_cannot_affect_another() {
     // The guard removes the directory when the test ends.
 }
 
-// ---------------------------------------------------------------------------
 // The atomic replacement (issue #2220)
-// ---------------------------------------------------------------------------
 
 /// Issue #2220: the atomic replacement is a `MoveFileExW` with
 /// `MOVEFILE_REPLACE_EXISTING`, and Windows refuses it while the destination

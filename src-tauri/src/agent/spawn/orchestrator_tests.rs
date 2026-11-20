@@ -7,10 +7,8 @@ use super::{
     ExplicitSpawnOverrides, IssueContext, ResumeCause, SpawnIntent, SpawnRequest, TerminalSize,
 };
 
-// -----------------------------------------------------------------------
 // SpawnRequest constructor + intent dispatch pins.
 // Resolver cascade coverage lives in command_tests.rs.
-// -----------------------------------------------------------------------
 
 /// Constructor contract pin (issue #1157): `SpawnRequest::new` must
 /// set `explicit` to `Default::default()` so every existing call site
@@ -380,7 +378,6 @@ async fn new_node_handover_reports_cleanup_failure_and_keeps_the_row() {
     );
 }
 
-// -----------------------------------------------------------------------
 // Resume-skip decision surface (issue #949 regression).
 //
 // Pins the PR #1121 fix: when a Startup resume is not viable, the
@@ -390,7 +387,6 @@ async fn new_node_handover_reports_cleanup_failure_and_keeps_the_row() {
 // truth for that contract; `spawn_with_intent`'s Skip arms call no
 // sink. A future refactor that re-introduces an `on_idle` write here
 // fails review by virtue of the decision being a single enum variant.
-// -----------------------------------------------------------------------
 
 #[test]
 fn decide_startup_resume_no_session_id_is_skipped() {

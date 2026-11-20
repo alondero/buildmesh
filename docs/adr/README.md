@@ -62,3 +62,11 @@ Use the next numeric filename and include:
 - [0057: Device Sessions expire, and one credential walk answers everything](0057-device-session-expiry-and-single-credential-walk.md)
 
 - [0058: PR repository identity and wire shapes live behind `services/github`](0058-pr-github-service-ownership.md) (partially supersedes ADR 0047's PR wire-DTO placement)
+
+- [0059: Count delivered events at the renderer IPC boundary](0059-single-renderer-event-transport.md)
+
+- [0060: Normalize repository text to LF in Git](0060-normalize-repository-line-endings.md)
+
+- [0061: Ratchet source comments against the Git comparison base](0061-source-comment-ratchet.md)
+
+- [0062: Resolve Probe blockers from the open issue feed](0062-resolve-blockers-from-the-issue-feed.md)

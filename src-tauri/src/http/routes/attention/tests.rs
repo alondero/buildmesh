@@ -2102,10 +2102,8 @@ fn idle_notification_with_pending_tasks_suppresses() {
     );
 }
 
-// -------------------------------------------------------------------
 // Grok Code (issue #1282) — camelCase wire, no transcript_path,
 // Notification carries structured `notificationType`.
-// -------------------------------------------------------------------
 
 /// Grok's permission prompt: the matcher fires `Notification` with
 /// `notificationType = "permission_prompt"`. We mark the node
@@ -2651,7 +2649,6 @@ fn grok_notification_type_via_snake_case_alias_also_marks_input() {
     );
 }
 
-// -------------------------------------------------------------------
 // Antigravity (agy) payload shape — issue #1285.
 //
 // AGY sends camelCase fields (`conversationId`, `transcriptPath`,
@@ -2659,7 +2656,6 @@ fn grok_notification_type_via_snake_case_alias_also_marks_input() {
 // `PreToolUse`). The route's `HookPayload` accepts both via serde
 // aliases; `decide` short-circuits `PreToolUse` to always-mark and
 // `Stop` with `fullyIdle: false` to always-suppress.
-// -------------------------------------------------------------------
 
 /// AGY's `Stop` with `fullyIdle: false` is a direct false-yield signal
 /// from the harness — the turn ended but background work is still
@@ -3373,7 +3369,6 @@ fn permission_payload_preserves_provider_event_and_health() {
     );
 }
 
-// -------------------------------------------------------------------
 // Runtime hook token scoping — issue #1366.
 //
 // The hook file at `~/.grok/hooks/buildmesh-attention.json` is the
@@ -3386,7 +3381,6 @@ fn permission_payload_preserves_provider_event_and_health() {
 // OnceLock storage (round-trip) and the comparator's three
 // outcomes (match / wrong / empty). The actual HTTP loopback
 // round-trip is covered by `http::tests::attention_webhook_*`.
-// -------------------------------------------------------------------
 
 #[test]
 fn extract_query_value_returns_value_when_key_matches() {
@@ -3532,13 +3526,11 @@ fn verify_attention_token_truth_table() {
     assert!(!verify_attention_token("grok", None, None));
 }
 
-// -------------------------------------------------------------------
 // Cursor Agent (issue #1368) — snake_case `conversation_id` +
 // `hook_event_name: "stop"` envelope. The route parser accepts
 // Cursor's documented casing via stacked `#[serde(alias)]` on
 // `session_id` (Claude's `session_id`, AGY's `conversationId`,
 // Cursor's `conversation_id`).
-// -------------------------------------------------------------------
 
 /// Cursor documents `conversation_id` (snake_case) as the canonical
 /// session id field. The route must extract the UUID from this

@@ -179,11 +179,9 @@ fn matches_existing(existing: &serde_json::Value, candidate: &str) -> bool {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Tests — drive the inner functions directly with an explicit `home` so we
 // never touch the process env (which is global and races across parallel
 // `cargo test` threads).
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

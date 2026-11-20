@@ -693,14 +693,12 @@ describe('CommandOmnibar — command execution routing', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // The go-to-Mesh entry (issue #2077). Scope is reachable from the keyboard:
 // the entry names the action it performs, and executing it is ONE write — the
 // Mesh selection — from which both the canvas scope (#2071 `deriveScope`) and
 // the Probe destination's subject follow. Neither half is asserted through a
 // mock of our own routing: the canvas half is read from the derived scope and
 // the Probe half from the resolver the Probe header itself renders.
-// ---------------------------------------------------------------------------
 describe('CommandOmnibar — go to Mesh entry (issue #2077)', () => {
   const projectY: Mesh = {
     ...mesh,

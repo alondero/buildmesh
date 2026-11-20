@@ -269,17 +269,6 @@ pub(crate) fn parse_muse_turns_with_text_limit(
                 // (`payload_type=runtime.session.task`) are filtered by the
                 // outer guard above and never reach this arm.
                 //
-                // Known limitation: a session that emits BOTH `started`
-                // with a prompt AND a separate `user_prompt_display` for
-                // the same prompt produces two identical user turns (no
-                // dedup). The Muse releases observed on this branch emit
-                // either-or (a bare `started` first, then a
-                // `user_prompt_display`, never both carrying the same
-                // prompt), so the parser treats the two events as
-                // mutually exclusive. A future Muse release that breaks
-                // the invariant would surface duplicates here — the fix
-                // is a per-session dedup keyed on the prompt text, not
-                // a same-line drop.
                 let Some(prompt) = event.get("prompt").and_then(|p| p.as_str()) else {
                     continue;
                 };

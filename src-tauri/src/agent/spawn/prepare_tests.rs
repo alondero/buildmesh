@@ -1,13 +1,11 @@
 use super::prepare::{resolve_base_ref_for_spawn, SpawnInFlightClaim};
 use tempfile::TempDir;
 
-// -----------------------------------------------------------------------
 // Per-session spawn claim (duplicate-spawn fix). `is_agent_already_running`
 // only sees registered processes and registration is seconds into the
 // pipeline, so the claim must cover the whole `spawn_agent_inner` body.
 // Test ids are unique across the suite (tests share the process-global
 // set and run in parallel).
-// -----------------------------------------------------------------------
 
 #[test]
 fn spawn_claim_rejects_concurrent_duplicate_for_same_session() {
@@ -172,7 +170,6 @@ fn spawn_claim_released_when_async_task_is_cancelled() {
     });
 }
 
-// -----------------------------------------------------------------------
 // base_ref resolution (master-trunk regression)
 //
 // Pre-fix, the spawn path hardcoded `"origin/main"` as the default
@@ -193,7 +190,6 @@ fn spawn_claim_released_when_async_task_is_cancelled() {
 // would make the detection chain dead code in production. The
 // `resolve_base_ref_treats_coalesce_sentinel_as_unset` test pins the
 // production call path (`Some("origin/main")`).
-// -----------------------------------------------------------------------
 
 #[test]
 fn resolve_base_ref_uses_config_value_when_set() {

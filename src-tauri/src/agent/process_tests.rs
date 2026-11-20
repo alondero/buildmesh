@@ -1047,14 +1047,12 @@ fn kill_session_without_process_preserves_output_subscription() {
     crate::agent::output::unregister(session_id);
 }
 
-// -----------------------------------------------------------------------
 // first_user_input timing-gate tests (spawn-latency investigation)
 //
 // `record_first_input_if_first` is the pure helper that `write_bytes`
 // calls after a successful PTY write. It does the compare-exchange,
 // emits the `spawn_timing:` log line on the false→true transition,
 // and returns whether it logged. Tests pin the one-shot contract.
-// -----------------------------------------------------------------------
 
 #[test]
 fn record_first_input_flips_flag_on_first_call() {

@@ -25,9 +25,7 @@ import { stepVerdict, type VerdictTone } from './runStepPresentation';
 type Graph = Pick<CircuitGraph, 'nodes' | 'edges'>;
 type OverviewLike = Pick<CircuitRunOverview, 'run' | 'steps' | 'graph'> & { review_round_limit?: number };
 
-// ---------------------------------------------------------------------------
 // Stages
-// ---------------------------------------------------------------------------
 
 export type StageState = 'done' | 'current' | 'failed' | 'upcoming' | 'skipped';
 
@@ -110,9 +108,7 @@ export function runStages(graph: Graph, rows: readonly RailRow[], labelOf: (node
   });
 }
 
-// ---------------------------------------------------------------------------
 // Review rounds
-// ---------------------------------------------------------------------------
 
 export type RoundState =
   | 'changes_requested'
@@ -290,9 +286,7 @@ export function roundStateLabel(state: RoundState): string {
   }
 }
 
-// ---------------------------------------------------------------------------
 // Who is involved, and what is happening now
-// ---------------------------------------------------------------------------
 
 export interface RunAgent {
   agentNodeId: number;

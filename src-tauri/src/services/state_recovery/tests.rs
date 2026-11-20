@@ -17,9 +17,7 @@
 use super::*;
 use rusqlite::params;
 
-// ---------------------------------------------------------------------------
 // Fixtures
-// ---------------------------------------------------------------------------
 
 /// A profile directory holding a database at the current schema, with one
 /// mesh, one agent node, one circuit, and the credentials a real install has.
@@ -138,9 +136,7 @@ fn read_string(path: &Path) -> String {
     String::from_utf8(std::fs::read(path).unwrap()).unwrap()
 }
 
-// ---------------------------------------------------------------------------
 // 1. Pre-migration snapshot
-// ---------------------------------------------------------------------------
 
 /// A database at an older schema must be snapshotted before `db::init`
 /// evolves it — and the snapshot must be restorable.
@@ -322,9 +318,7 @@ fn a_fresh_install_is_not_snapshotted() {
     assert!(!dir.path().join(SNAPSHOT_DIR).exists());
 }
 
-// ---------------------------------------------------------------------------
 // 2. Snapshot fidelity
-// ---------------------------------------------------------------------------
 
 /// `VACUUM INTO` is WAL-safe: a snapshot taken while committed transactions
 /// are still only in the `-wal` file contains them. A plain file copy would
@@ -457,9 +451,7 @@ fn a_corrupt_database_is_preserved_and_reported_never_reset() {
     assert_eq!(notice.snapshot_path, Some(snapshot.path.clone()));
 }
 
-// ---------------------------------------------------------------------------
 // 3. Export / import round-trip
-// ---------------------------------------------------------------------------
 
 #[test]
 fn export_import_round_trips_non_secret_state() {
@@ -574,9 +566,7 @@ fn the_restored_database_is_evolved_forward_to_the_current_schema() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // 4. Redaction — the leak gate
-// ---------------------------------------------------------------------------
 
 /// The issue's acceptance criterion, asserted on the bytes of a real default
 /// export: no provider token, root token, device token, or CA key.
@@ -773,9 +763,7 @@ fn a_profile_without_preferences_still_exports_and_restores() {
     assert_eq!(fixture.scalar("SELECT COUNT(*) FROM meshes"), 1);
 }
 
-// ---------------------------------------------------------------------------
 // 5. Rejecting a bad bundle without touching current data
-// ---------------------------------------------------------------------------
 
 /// Every rejection case, asserted against the same invariant: the live
 /// database and preferences are byte-identical afterwards, and nothing was
@@ -983,9 +971,7 @@ fn a_missing_bundle_is_rejected() {
     assert!(!error.is_empty());
 }
 
-// ---------------------------------------------------------------------------
 // 6. Staging mechanics
-// ---------------------------------------------------------------------------
 
 /// The staged payload must not become live state until the next launch, and a
 /// cancelled restore must leave nothing behind.
@@ -1118,9 +1104,7 @@ fn a_corrupted_staged_payload_is_refused_at_apply_time() {
     assert_eq!(name, "alpha", "the current state is kept, not replaced");
 }
 
-// ---------------------------------------------------------------------------
 // 7. Integrity reporting
-// ---------------------------------------------------------------------------
 
 #[test]
 fn integrity_check_passes_on_a_healthy_database() {
@@ -1155,9 +1139,7 @@ fn integrity_check_on_an_empty_profile_is_a_pass_with_an_explanation() {
     assert!(report.message.contains("nothing to check"));
 }
 
-// ---------------------------------------------------------------------------
 // 8. Listing and reporting
-// ---------------------------------------------------------------------------
 
 #[test]
 fn two_rapid_snapshots_do_not_overwrite_each_other() {
@@ -1215,9 +1197,7 @@ fn info_reports_the_profile_shape() {
     assert!(info.snapshot_dir.ends_with(SNAPSHOT_DIR));
 }
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 /// Path-explicit wrappers over the command-facing functions, so the tests
 /// never depend on the process-global app-data directory.

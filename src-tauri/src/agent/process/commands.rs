@@ -1,7 +1,6 @@
 //! Live-process commands and submission/interrupt orchestration; blocking seams stay explicit.
 
 use super::*;
-// ---------------------------------------------------------------------------
 // Tauri command surface — process lifecycle home
 //
 // `commands::agent::kill_agent / resize_agent / write_to_agent / send_to_agent /
@@ -20,7 +19,6 @@ use super::*;
 // `commands/test.rs:367` can reach them via `agent::process::kill_agent`
 // directly — the dependency arrow now points at the deep module rather than
 // the transport-named commands layer.
-// ---------------------------------------------------------------------------
 
 /// Kill all running agent processes. Used during graceful shutdown.
 /// Renamed from `kill_all_agents` for naming consistency with the existing

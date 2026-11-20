@@ -1,5 +1,4 @@
 // Circuit worker spawn tests. Included in the existing tests scope.
-// -----------------------------------------------------------------------
 // `resolve_circuit_spawn_inputs` (issue #1358 / slice 3 of #1355)
 //
 // The pure seam that translates a `CircuitNodeKind::SpawnAgentNode` into
@@ -9,7 +8,6 @@
 // impure-wrapper / pure-core pattern this file uses for
 // `reconcile_spawn_step` (line ~947) so the cascade + capability-mask
 // contract can be tested without a Tauri runtime, AppHandle, or DB.
-// -----------------------------------------------------------------------
 
 fn spawn_kind(
     provider: Option<&str>,

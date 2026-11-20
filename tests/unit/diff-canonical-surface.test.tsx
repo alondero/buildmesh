@@ -7,9 +7,7 @@ import {
 } from '../../src/lib/status';
 import { parsePatchIntoHunks } from '../../src/components/Diff/diffFormat';
 
-// ---------------------------------------------------------------------------
 // Status meta — one canonical source, all consumers agree.
-// ---------------------------------------------------------------------------
 
 describe('fileDiffStatusMeta (canonical, lib/status.ts)', () => {
   it('returns a known meta for each FileDiffStatus', () => {
@@ -47,9 +45,7 @@ describe('fileDiffStatusMeta (canonical, lib/status.ts)', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Patch parser — PrDiffView's raw-patch → HunkBlock bridge.
-// ---------------------------------------------------------------------------
 
 describe('parsePatchIntoHunks (#725)', () => {
   it('parses a single-hunk patch into one DiffHunk with line numbers', () => {

@@ -521,13 +521,11 @@ mod tests {
         assert!(sweep_due(t, t + ZOMBIE_SWEEP_INTERVAL.as_millis() as i64));
     }
 
-    // -----------------------------------------------------------------------
     // No-I/O-under-lock invariant (issues #1228/#1793). The first runs against
     // the process-global DB because the invariant is precisely "the global
     // writer mutex is released before the notification is dispatched", which a
     // per-test in-memory connection cannot express. Requires `--test-threads=1`
     // (the repo's standing contract for global-DB tests).
-    // -----------------------------------------------------------------------
 
     /// End-to-end against the global DB: the notification fires only after the
     /// writer lock is released. The notifier panics if `try_write_conn` reports

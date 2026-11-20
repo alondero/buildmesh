@@ -235,10 +235,8 @@ export async function checkEslintFixtures({ fixturesDir: dir = fixturesDir, esli
   return { failures, results, driftFailures: [] };
 }
 
-// ---------------------------------------------------------------------------
 // CLI wrapper. The pure function above is what tests exercise; the wrapper
 // translates the structured result into the CI exit-code contract.
-// ---------------------------------------------------------------------------
 
 function bail(message) {
   console.error(`::error::${message}`);

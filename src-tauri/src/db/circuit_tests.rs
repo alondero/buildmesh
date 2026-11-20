@@ -2699,9 +2699,7 @@ fn node_review_refuses_stale_ineligible_app_wide_reviewer_on_inherit() {
     assert_eq!(ctx.get("review.provider"), Some("codex"));
 }
 
-// ---------------------------------------------------------------------------
 // Circuit CRUD + persistence across "restarts" (re-open reads).
-// ---------------------------------------------------------------------------
 
 #[test]
 fn circuit_crud_round_trips_all_fields() {
@@ -2875,9 +2873,7 @@ fn circuits_persist_across_a_restart_equivalent_evolution_rerun() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Runs + steps ledger.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn run_and_step_ledger_records_status_outcome_and_timestamps() {
@@ -3631,9 +3627,7 @@ fn deleting_a_mesh_removes_its_circuits_runs_and_steps() {
     assert_eq!(remaining_runs, 0);
 }
 
-// ---------------------------------------------------------------------------
 // Concurrency counters.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn concurrency_counters_count_only_running_work() {
@@ -3739,9 +3733,7 @@ fn concurrency_counters_count_only_running_work() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Run-level admission gate (issue #1467).
-// ---------------------------------------------------------------------------
 
 /// `running`/`paused` runs count as admitted; `pending` runs do NOT.
 /// The gate's job is exactly to decide whether a pending run gets to
@@ -3901,9 +3893,7 @@ fn commit_circuit_advance_terminal_state_skips_already_terminal_runs() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Active-run listing (the worker pass's input).
-// ---------------------------------------------------------------------------
 
 #[test]
 fn active_run_listing_joins_circuit_fields_and_skips_terminal_runs() {
@@ -3980,10 +3970,8 @@ fn duplicate_trigger_identity_replays_the_existing_run() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Trigger-pass inputs (issue #1208): enabled circuits across meshes and
 // the interval cooldown anchor.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn enabled_circuits_listing_spans_meshes_and_skips_disabled() {
@@ -4055,10 +4043,8 @@ fn latest_run_created_at_tracks_the_newest_run_and_none_before_any() {
     assert!(identities.contains(&"interval:2500".to_string()));
 }
 
-// ---------------------------------------------------------------------------
 // Migration pin: a v33 database receives the circuit tables during the
 // migration runner's baseline-table phase.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn evolve_to_v34_creates_circuit_tables_and_queue_index_from_a_v33_db() {
@@ -4252,9 +4238,7 @@ fn review_preset_migration_collapses_duplicates_and_backfills_source_binding() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Milestone 2 (#1207): pause/resume, retry attempts, gate outcomes.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn paused_runs_stay_active_and_counters_count_them() {

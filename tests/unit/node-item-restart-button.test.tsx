@@ -187,10 +187,8 @@ describe('NodeItem restart button', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Issue #1306 — restartFreshAgent and spawnAgent fresh option:
 // passes `intent: { type: 'fresh' }` to spawn_agent IPC, clearing stale session ID and booting fresh.
-// ---------------------------------------------------------------------------
 describe('AgentNodeStore restartFreshAgent (issue #1306)', () => {
   beforeEach(() => {
     useAgentNodeStore.setState({ nodesById: {}, nodeIds: [],activeNodeId: null,

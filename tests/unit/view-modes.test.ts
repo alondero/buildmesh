@@ -267,7 +267,6 @@ describe('resolveSingleNode (wayfinder #982)', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // #2070 review - the two questions more than one surface asks, kept as pure
 // predicates in the derivation's own module so no consumer re-decides them.
 //
@@ -276,7 +275,6 @@ describe('resolveSingleNode (wayfinder #982)', () => {
 // read one boolean (correct only while `isMeshScoped` ignored nodes), and the
 // Probe context resolver carried its own copy of the selection chain. Both
 // now call the definition that `deriveScope` itself uses.
-// ---------------------------------------------------------------------------
 
 const SCOPE_CASES: Array<[ViewMode, NonSingleViewMode, number | null]> = [
   ['mesh', 'mesh', 10],

@@ -7,9 +7,7 @@ use crate::agent::capabilities::{capabilities_for, HarnessCapabilities};
 use crate::agent::provider::SpawnOptionId;
 use crate::models::Provider;
 
-// ---------------------------------------------------------------------------
 // Wire types — generated to TypeScript via `ts-rs` (issue #359, drift-gated)
-// ---------------------------------------------------------------------------
 
 /// Stable, actionable reason Autopilot is not allowed on this Mesh.
 ///
@@ -83,9 +81,7 @@ pub struct CircuitCompatibility {
     pub explicit_circuit_provider: bool,
 }
 
-// ---------------------------------------------------------------------------
 // Resolver
-// ---------------------------------------------------------------------------
 
 /// Resolved Autopilot Spawn Option + the precedence it came from.
 ///
@@ -205,9 +201,7 @@ pub fn lookup_capabilities(harness_id: &str) -> Option<HarnessCapabilities> {
         .map(|p| capabilities_for(p.adapter()))
 }
 
-// ---------------------------------------------------------------------------
 // Shared turn-signal predicate + reviewer gate (issue #1816)
-// ---------------------------------------------------------------------------
 
 /// Whether the harness reports its own turn lifecycle: a native attention
 /// hook or a backend-owned passive turn watcher that publishes standard Node
@@ -349,9 +343,7 @@ fn harness_display_label(harness_half: &str) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Evaluator
-// ---------------------------------------------------------------------------
 
 /// Inputs to the pure evaluator. Caller-owned — no DB or preferences reads
 /// here. The harness capabilities are passed in so this module stays free of
@@ -450,9 +442,7 @@ pub fn compute_for_mesh(
     })
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 #[path = "compatibility_tests.rs"]

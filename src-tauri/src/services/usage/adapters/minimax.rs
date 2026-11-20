@@ -9,11 +9,10 @@
 use crate::preferences::ProviderAccount;
 use crate::services::usage::adapter::{api_key_for, fetch_usage, UsageAdapter};
 use crate::services::usage::outcome::{ResponsePolicy, UsageOutcome, UsageReading};
-use crate::services::usage::types::UsagePage;
-use crate::services::usage::types::{UsageError, UsageWindow};
-// Only the test-only `parse_minimax_balance` below names `BillingBalance`.
 #[cfg(test)]
 use crate::services::usage::types::BillingBalance;
+use crate::services::usage::types::UsagePage;
+use crate::services::usage::types::{UsageError, UsageWindow};
 use serde::Deserialize;
 
 /// Drop-in [`UsageAdapter`] for `minimax`.
@@ -113,16 +112,6 @@ fn parse_minimax_response(body: &str) -> Result<(Vec<UsageWindow>, Option<String
     Ok((windows, detail))
 }
 
-/// Parses a pay-as-you-go cash-balance response into a [`BillingBalance`]
-/// (issue #537). Mirrors the `base_resp`-wrapped envelope MiniMax uses for its
-/// other endpoints; the inner field names below are the documented/assumed shape.
-///
-// TODO(#537 follow-up): the live cash-balance endpoint is unverified — MiniMax's
-// known `token_plan/remains` endpoint returns plan percentages, not cash. This
-// parser + its mock tests prove the BillingBalance pipeline; wiring an actual
-// HTTP fetch is deferred per the agreed slice (real endpoint not yet confirmed).
-// `cfg(test)`: exercised by the mock tests below, not yet by a live fetch
-// (issue #2450).
 #[cfg(test)]
 fn parse_minimax_balance(body: &str) -> Result<BillingBalance, UsageError> {
     #[derive(Deserialize)]

@@ -526,7 +526,6 @@ mod tests {
     // which is safe against the silent-UPDATE-failure corner case AND
     // sharp enough to recover orphan dirs.
 
-    // -----------------------------------------------------------------------
     // Issue #697 — PROCESS_REGISTRY-based claimed-row GC
     //
     // The original GC (#639 gap 4, hardened in #642.2, reverted for data
@@ -540,7 +539,6 @@ mod tests {
     // The four tests below pin the new contract's three branches
     // (live-agent-preserve, orphan-teardown, mid-move-drop) plus the
     // #642.2 corner case that drove the revert in the first place.
-    // -----------------------------------------------------------------------
 
     /// Build a v22-ish schema that ALSO carries an `agent_nodes` table. The
     /// live-session classification reads `agent_nodes.mesh_id` to decide
@@ -1785,11 +1783,9 @@ mod tests {
         );
     }
 
-    // -------------------------------------------------------------------
     // v24 pool-default-on backfill (ADR 0020). One-time flip of
     // worktree-enabled meshes from the old pool-off default (0) to the new
     // default (1), gated on the `pool_default_backfill_v24` flag.
-    // -------------------------------------------------------------------
 
     /// Build a v22-era DB with three meshes covering the backfill's
     /// decision table: worktree-enabled at 0 (flips), worktree-disabled at

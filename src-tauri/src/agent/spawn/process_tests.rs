@@ -152,7 +152,6 @@ fn attention_hook_preserves_other_settings() {
     assert_eq!(settings["hooks"]["Notification"][0]["matcher"], "");
 }
 
-// =====================================================================
 // Issue #1370 — preserve user-authored hooks and harden attention delivery
 //
 // The pre-#1370 implementation did `settings["hooks"] = expected_hooks`,
@@ -168,7 +167,6 @@ fn attention_hook_preserves_other_settings() {
 // "needs your permission" → MarkInput, plain `Stop` → transcript-scan
 // decision. The route tests in `http/routes/attention.rs` cover those;
 // this module owns the hook WRITER invariants.
-// =====================================================================
 
 /// A pre-existing user-authored `Notification` matcher group is preserved
 /// byte-for-byte and the Buildmesh handler is appended as a sibling group.

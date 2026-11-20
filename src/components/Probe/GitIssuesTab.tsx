@@ -1,57 +1,5 @@
 import { PROBE_TAB_DEFINITIONS } from '../../lib/probeContext';
 import { useProbeResource, type ProbeLoadContext } from '../../lib/probeResource';
-/**
- * GitIssuesTab — the Probe Panel's Git Issues tab body (issue #378).
- *
- * Thin wrapper port of the legacy `GitHubIssuesModal` (issue #113). The
- * dock supplies the header, mesh-name subheading, and close button, so
- * this component drops the modal's backdrop / header / Escape handler
- * and renders the same list + split-spawn button in the probe's 360px
- * body.
- *
- * Both call sites use the same backend-owned acceptance path:
- *
- *   1. `create_issue_node` — commits a `pending` row and starts the intent-
- *      driven launch in the background.
- *   2. `node-spawn-completed` / `node-spawn-failed` store listeners mirror
- *      the backend lifecycle transition.
- *
- * The user sees the dock-close → node-appear transition in well under
- * 500ms instead of the 5-10s they used to wait for the old synchronous
- * `spawn_issue_agent`.
- *
- * Blocked-by indicator (issue #481 follow-up)
- * -------------------------------------------
- * Below each issue's split Spawn button we render a small red flag when
- * the issue's `blocked_by` list contains at least one number that's still
- * in the loaded open-issues set. The cross-reference is frontend-side
- * (no extra API call) so the indicator naturally tracks GitHub state
- * via the existing `get_repo_issues` refresh — closed blockers disappear
- * from the flag the next time the list reloads.
- *
- * Known limitations (out of scope for v1, all documented in the plan):
- *   - Cross-repo blockers aren't detected (we only cross-reference
- *     against this repo's loaded open issues).
- *   - "Blocks" (reverse direction) is not surfaced — GitHub's issue
- *     editor supports both "Blocked by" and "Blocks" sections, but v1
- *     only handles the former.
- *
- * Pagination (issue #1528)
- * -----------------------
- * `list_issues_only` no longer stops at one `per_page=100` response: the
- * backend walks every `rel="next"` page through the shared paginator in
- * `services::github::pagination`, up to a bounded page budget, so the
- * blocked-by cross-reference below sees page 2 and beyond.
- *
- * Two bounds remain, and neither is silent on the backend: GitHub's search
- * API caps at 1,000 matches, and the walk itself has a page budget. When
- * either bites, `GitHubPageCompleteness` says so. This tab cannot render
- * that banner yet because `get_repo_issues` still returns a bare
- * `GitHubIssue[]` — see the wire-shape note in
- * `docs/development/probe-ui.md#github-list-completeness`. Until the command
- * returns the metadata, a blocker beyond the first 1,000 matches may still go
- * unflagged.
- */
 
 import { formatError } from '../../lib/errorUtils';
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
@@ -178,10 +126,6 @@ export function GitIssuesTab() {
   // the SessionBrowserModal pattern so the click-outside handling
   // stays simple.
   const [openDropdown, setOpenDropdown] = useState<number | null>(null);
-  // The provider list is fetched once at mount and reused for the lifetime
-  // of the tab. Re-fetching on each open would be wasteful, and the list is
-  // stable for the duration of a session (adding a new provider requires
-  // an app restart).
   const [providerList, setProviderList] = useState<SpawnOption[]>([]);
   // Per-row expand state for the issue body. Set keyed by issue number
   // (not a single boolean) so cross-referencing two long issues stays
@@ -197,16 +141,6 @@ export function GitIssuesTab() {
 
   useEffect(() => registerIssueNavigation(setNavigationRequest), []);
 
-  // Cross-reference index for the blocked-by indicator. Built once per
-  // render of the loaded open issues list — both as a Set (for fast
-  // membership tests in the row render) and a Map (for resolving the
-  // blocker number → title in the tooltip text). First paint has an
-  // empty index because `issues` is `[]` until the IPC resolves, so
-  // every row's `stillBlockedBy` collapses to `[]` during loading.
-  // This is documented in the plan and pinned by the "first paint hides
-  // flags" test — the alternative ("show flag whenever blocked_by is
-  // non-empty") would be incorrect because we genuinely can't tell
-  // whether a blocker is still open without the loaded set.
   const issuesByNumber = useMemo(
     () => new Map(issues.map(i => [i.number, i])),
     [issues],
@@ -220,10 +154,6 @@ export function GitIssuesTab() {
   const { url: githubUrl } = useMeshGitHubUrl(activeMeshId, activeMeshPath);
   const issuesListUrl = githubUrl ? `${githubUrl}/issues` : '';
 
-  // Client-side filter over the loaded list. Title, body, and label
-  // names are all matched so a user searching for a label name finds
-  // the issues carrying it. Case-insensitive, no debounce — the whole
-  // fetched page set is already in memory (see the pagination note above).
   const filteredIssues = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (q === '') return issues;
@@ -410,10 +340,6 @@ export function GitIssuesTab() {
                   status={issue.blocked_by.some((n) => issuesByNumber.has(n)) ? 'blocked' : 'default'}
                   metaSlot={(() => {
                     const chips: React.ReactNode[] = [];
-                    // Blocked-by flag — promoted from a cramped under-button
-                    // text link to a proper warning chip so it's scannable at
-                    // a glance. The left-edge stripe (via `status`) already
-                    // signals "attention" — the chip names the blocker.
                     const stillBlockedBy = issue.blocked_by.filter((n) => issuesByNumber.has(n));
                     if (stillBlockedBy.length > 0) {
                       const tooltip = buildBlockedByTooltip(stillBlockedBy, issuesByNumber);
@@ -530,11 +456,6 @@ export function GitIssuesTab() {
                         disabled={spawning !== null}
                         isSpawning={spawning === issue.number}
                       />
-                      {/* Blocked-by indicator has moved to `metaSlot`
-                          (a proper warning chip + left-edge stripe) so
-                          it's scannable at a glance — the old under-button
-                          text link was too cramped to notice in a busy
-                          list. */}
 
                     </div>
                   }

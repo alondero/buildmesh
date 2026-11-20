@@ -79,9 +79,7 @@ pub fn maybe_poll_github() {
     run_github_poll_pass();
 }
 
-// ---------------------------------------------------------------------------
 // Pure decision cores.
-// ---------------------------------------------------------------------------
 
 /// Best-effort parser for SQLite `datetime('now')` output
 /// (`YYYY-MM-DD HH:MM:SS`) into a wall-clock anchor. Shared logic with
@@ -158,9 +156,7 @@ pub(crate) fn unseen_identities<'a>(
         .collect()
 }
 
-// ---------------------------------------------------------------------------
 // Impure passes.
-// ---------------------------------------------------------------------------
 
 /// One GitHub poll pass over every enabled circuit. Per-circuit failures
 /// are logged and isolated — one bad remote must not starve the others.

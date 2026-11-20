@@ -223,9 +223,7 @@ export function nodeInputContext(node: Pick<AgentNode, 'status' | 'lifecycle'>):
   return node.lifecycle.semantic_turn?.description ?? node.lifecycle.message ?? undefined;
 }
 
-// ---------------------------------------------------------------------------
 // Input request semantics (issue #1966)
-// ---------------------------------------------------------------------------
 //
 // An `awaiting_input` node is blocked on *something*, and the normalized
 // lifecycle kind says what. Only a `permission_requested` observation is
@@ -292,14 +290,12 @@ export function nodeInputRequest(
   };
 }
 
-// ---------------------------------------------------------------------------
 // File-diff status meta (issue #725). The badge "A/M/D/R/? + coloured letter"
 // shown on a file card / tree row was duplicated three ways before this
 // consolidation: `<Diff>` owned the table, `ChangedFilesSection` held two
 // parallel maps (statusColors / statusPrefix), and `PrDiffView` had its own
 // minimal copy. The shared review surface, the file tree, and the PR list
 // all read from this single source of truth.
-// ---------------------------------------------------------------------------
 
 export interface FileDiffStatusMeta {
   letter: string;

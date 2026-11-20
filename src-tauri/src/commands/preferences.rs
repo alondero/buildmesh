@@ -34,9 +34,7 @@ pub fn get_app_preferences() -> Result<AppPreferences, String> {
     preferences::load()
 }
 
-// ---------------------------------------------------------------------------
 // Corrupt-file recovery (issue #1523)
-// ---------------------------------------------------------------------------
 
 /// Whether `preferences.json` is missing, healthy, or corrupt — the signal
 /// the Settings pane renders its recovery panel from.
@@ -504,9 +502,7 @@ pub fn remove_provider_account(app: AppHandle, id: String) -> Result<(), String>
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // Proxied Provider pairings (ADR-0016 §4, issue #576)
-// ---------------------------------------------------------------------------
 
 /// The full effective set of **Proxied Provider** pairings — stored pairings
 /// for proxiable accounts only (ADR-0025). The harness-config page renders this
@@ -846,9 +842,7 @@ pub fn remove_provider_pairing(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // Application-level Agent Harness defaults (issue #1150 / #1148)
-// ---------------------------------------------------------------------------
 
 /// Upsert the **application-level default** for one Agent Harness (issue
 /// #1150 / #1148 step 2). Validates `value` against the harness's capability
@@ -896,9 +890,7 @@ pub fn clear_harness_default(profile_id: String) -> Result<(), String> {
     preferences::save(prefs)
 }
 
-// ---------------------------------------------------------------------------
 // Resolved harness view (issue #1656)
-// ---------------------------------------------------------------------------
 //
 // Single IPC entry point that returns the full per-harness cascade — the
 // Settings modal and the spawn menu both consume this so the UI no longer

@@ -4,9 +4,7 @@ use crate::db;
 
 use crate::services::github::{self, GitHubClient, PullRequest};
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 pub(crate) struct RepoInfo {
     pub(crate) branch: String,

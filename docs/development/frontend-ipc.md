@@ -45,6 +45,9 @@ The counts feed the renderer health line; see
 [diagnostics.md](diagnostics.md#the-renderer-health-line) for the line format
 and the rest of what it reports.
 
+[ADR 0059](../adr/0059-single-renderer-event-transport.md) records the
+measurement boundary and the trade-off behind grouping per-instance event names.
+
 ## Domain facets
 
 | Facet | Owns |

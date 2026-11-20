@@ -141,11 +141,6 @@ function ipcImportRestrictions({ legacy = false, transport = false, raw = false,
   return ['error', {
     paths: [
       ...(raw ? [] : [{ name: '@tauri-apps/api/core', importNames: ['invoke'], message: 'Raw invoke belongs in the IPC chokepoint.' }]),
-      // Issue #2833 — the IPC *event* transport has one owner. Every event
-      // the app receives passes through it, so the renderer health line can
-      // count them by name; a direct `listen` import would bypass the count
-      // silently. `emit` stays unrestricted — it is outbound, and the
-      // emitters are not what the health line measures.
       ...(eventOwner ? [] : [{ name: '@tauri-apps/api/event', importNames: ['listen'], message: 'The IPC event transport belongs in src/lib/tauri/eventListen.ts, which counts the events the renderer health line reports (issue #2833).' }]),
     ],
     patterns: [
@@ -263,10 +258,6 @@ export default [
           caughtErrorsIgnorePattern: '^_',
         },
       ],
-      // Permit `any` but warn. Two intentional uses remain (xterm.js
-      // private API in TerminalRegistry.ts / BuildRunTerminalRegistry.ts);
-      // a future tightening would extract a typed wrapper instead of
-      // expanding the allow-list.
       '@typescript-eslint/no-explicit-any': 'warn',
       // `// @ts-expect-error` is allowed when followed by a description
       // (forces the contributor to record why the suppression is
@@ -348,8 +339,6 @@ export default [
     rules: { 'no-restricted-imports': ipcImportRestrictions({ transport: true }) },
   },
   {
-    // The one owner of the IPC event transport (issue #2833). Listed after
-    // the block above so it overrides it for this one file.
     files: ['src/lib/tauri/eventListen.ts'],
     rules: { 'no-restricted-imports': ipcImportRestrictions({ transport: true, eventOwner: true }) },
   },

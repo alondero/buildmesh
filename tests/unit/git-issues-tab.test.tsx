@@ -640,7 +640,6 @@ describe('GitIssuesTab (#378)', () => {
   // Test selectors all pivot off the `[data-blocked-by]` attribute on
   // the flag's container so we don't depend on icon library / SVG path
   // details — keeps the test resilient to icon-style tweaks.
-  // -------------------------------------------------------------------
 
   it('shows the blocked-by flag when a blocker is in the loaded open issues', async () => {
     // #102 is blocked by #101, which is itself in the loaded open set.

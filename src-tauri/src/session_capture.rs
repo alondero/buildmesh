@@ -50,9 +50,7 @@ pub fn try_extract_session_id(data: &str) -> Option<&str> {
         .map(|m| m.as_str())
 }
 
-// ---------------------------------------------------------------------------
 // ChunkCapture — stateful wrapper for the PTY-reader callback (issue #1221)
-// ---------------------------------------------------------------------------
 
 /// Maximum number of bytes the wrapper holds back across feed() calls.
 ///
