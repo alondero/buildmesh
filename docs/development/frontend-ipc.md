@@ -42,8 +42,8 @@ Two consequences:
   the count silently.
 
 The counts feed the renderer health line; see
-[renderer-diagnostics.md](renderer-diagnostics.md) for the line format and
-the rest of what it reports.
+[diagnostics.md](diagnostics.md#the-renderer-health-line) for the line format
+and the rest of what it reports.
 
 ## Domain facets
 
