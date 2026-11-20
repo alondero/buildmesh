@@ -242,6 +242,23 @@ describe('agent workflow title-bar control', () => {
     await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'launch/claude:minimax', undefined));
   });
 
+  it('returns focus to the harness row after a keyboard pick from a configuration flyout', async () => {
+    listConfigurations.mockResolvedValue([
+      { id: 'launch/claude:minimax', name: 'MiniMax', spawn_option_id: 'claude:minimax', model: null, effort: null, extra_args: null },
+    ]);
+    renderButton(node, [...PROVIDERS, configurationOption('launch/claude:minimax', 'MiniMax', 'claude:minimax')]);
+    fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
+    const harness = screen.getByRole('menuitem', { name: 'Claude Code', exact: true });
+    harness.focus();
+    await userEvent.keyboard('{ArrowRight}');
+    await screen.findByRole('menuitem', { name: 'MiniMax' });
+    await userEvent.keyboard('{ArrowDown}');
+    await userEvent.keyboard('{Enter}');
+    expect(screen.queryByTestId('spawn-configurations')).toBeNull();
+    expect(screen.getByTestId('reviewer-provider-selection').textContent).toBe('MiniMax');
+    expect(document.activeElement).toBe(harness);
+  });
+
   it('sends a cross-harness pick without warning about the model', async () => {
     // #1690: a cross-harness pick resolves model and effort from the picked
     // harness's own configuration, so it must not be presented as risky, and

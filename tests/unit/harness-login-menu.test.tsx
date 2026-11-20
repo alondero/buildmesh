@@ -130,6 +130,28 @@ describe('the Codex login submenu', () => {
     expect(onSelect).toHaveBeenLastCalledWith('codex', false, undefined, 'work');
   });
 
+  it('returns focus to the harness row after a keyboard pick from a login configuration', async () => {
+    const onSelect = vi.fn();
+    render(<GroupedProviderMenu providers={[codex]} onSelect={onSelect} />);
+    const harness = await screen.findByRole('menuitem', { name: 'Codex', exact: true });
+    await screen.findByRole('button', { name: 'Codex logins' });
+    harness.focus({ preventScroll: true });
+    await userEvent.keyboard('{ArrowRight}');
+    const logins = await screen.findByRole('menu', { name: 'Codex logins' });
+    expect(within(logins).getByRole('menuitem', { name: /^Default/ })).toBe(document.activeElement);
+    await userEvent.keyboard('{ArrowRight}');
+    const configurations = await screen.findByRole('menu', { name: 'Codex Default configurations' });
+    await within(configurations).findByRole('menuitem', { name: 'Any login' });
+    await userEvent.keyboard('{ArrowDown}');
+    await userEvent.keyboard('{Enter}');
+    expect(onSelect).toHaveBeenCalledWith('codex', false, 'launch/any', 'default');
+    // Both flyout levels unmount and focus lands back on the harness row, not
+    // the document.
+    expect(screen.queryByRole('menu', { name: 'Codex Default configurations' })).toBeNull();
+    expect(screen.queryByRole('menu', { name: 'Codex logins' })).toBeNull();
+    expect(document.activeElement).toBe(harness);
+  });
+
   it('hides a configuration pinned to another login from the Default login', async () => {
     render(<GroupedProviderMenu providers={[codex]} onSelect={vi.fn()} />);
     const menu = await openLogins();
