@@ -824,7 +824,7 @@ The current built-in catalog is:
 | Cline | Yes | Hook | Needs Cline 3.0.62 or newer. Manage providers with `cline auth`; Buildmesh injects account credentials at spawn |
 | Meta Muse | Yes | Passive watcher | Native on Windows since v1.3.0; WSL guest otherwise. Reasoning effort is available as `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra` |
 | Perch | Yes | None | Interactive CLI. Model and effort overrides are available; there is no transcript reader. Circuits use its result file (below) |
-| Devin | Yes | Hook | Native CLI (`devin`). Supports model override, interactive prefill, and attention hooks via `.devin/config.local.json`; no effort override or transcript reader |
+| Devin | Yes | None | Native CLI (`devin`). Supports model override and interactive prefill; Circuits use its result file (below) |
 | Terminal | No | None | A plain shell; closing the app loses its live process |
 
 A harness with no attention signal can still run Autopilot Circuits, as the

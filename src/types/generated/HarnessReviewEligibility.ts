@@ -110,7 +110,7 @@ export const HARNESS_REVIEW_ELIGIBILITY_CATALOG = {
     },
     "devin": {
       "is_plain_terminal": false,
-      "requires_attention_hook": true,
+      "requires_attention_hook": false,
       "supports_passive_turn_watcher": false,
       "supports_result_file_handoff": true
     },

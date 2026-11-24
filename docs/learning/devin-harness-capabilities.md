@@ -14,8 +14,7 @@ Status: current against `devin 3000.14.30821 (a09cd7f323ee)` on 2026-11-24.
 
 Devin CLI is Cognition's native interactive terminal coding agent (`devin` /
 `devin.exe`). Buildmesh launches the native binary directly, passes interactive
-prefill via `-- <prompt>`, provisions attention hooks into
-`.devin/config.local.json`, and reads usage directly from the Windsurf / Codeium
+prefill via `-- <prompt>`, and reads usage directly from the Windsurf / Codeium
 `GetUserStatus` ConnectRPC endpoint using the CLI's saved `credentials.toml`.
 
 ## Sources
@@ -35,30 +34,30 @@ Verified against:
 ## Harness capability contract
 
 - **Binary & detection**: `devin` (`.exe` on Windows), native compiled binary
-  everywhere (`WindowsShell::Direct`). Windows GUI discovery includes
-  `%LOCALAPPDATA%\devin\cli\bin` in `supplemental_user_bin_dirs`, and Unix
-  discovery includes `~/.local/bin`. Config directories are not used for
-  detection because `~/.config/devin` can exist without the CLI binary.
+  everywhere (`WindowsShell::Direct`). Windows GUI discovery reads
+  `LOCALAPPDATA` (`%LOCALAPPDATA%\devin\cli\bin`, falling back to
+  `<home>\AppData\Local\devin\cli\bin`), and Unix discovery includes
+  `~/.local/bin`. Config directories are not used for detection because
+  `~/.config/devin` can exist without the CLI binary.
 - **Prefill & model override**: `supports_prefill: true`,
   `prefill_auto_submits: true` (`-- <prompt>`), `supports_model_override: true`
   (`--model <MODEL>`). Effort override is `EffortControlKind::None` (thinking
   level is interactive-only).
 - **Permission modes**:
-  - `unattended` (default; `AttentionLaunchMode::SkipPermissions` reflects this default posture): `--permission-mode dangerous --respect-workspace-trust false`
-  - `prompt`: no permission flag (Devin asks for approval and can emit `PermissionRequest` hooks)
+  - `unattended` (default): `--permission-mode dangerous --respect-workspace-trust false`
+  - `prompt`: no permission flag (Devin asks for approval)
 - **Session identity & resume**: `self_assigns_session_id() -> true`,
   `captures_session_id_from_pty() -> false`, `supports_resume: true`
-  (`--resume <SESSION_ID>`). `session_id` is captured from attention hook
-  payloads (`http::routes::attention::normalizers::devin`, UUID format per
-  `Hooks Overview #command-hooks`).
-- **Attention hooks**: provisioned into `.devin/config.local.json` under the
-  `"hooks"` key (documented as a gitignored local override in
-  `Hooks Overview #where-hooks-live`) for `SessionStart`, `UserPromptSubmit`,
-  `Stop`, `PermissionRequest`, `PreToolUse`, and `PostToolUse` (the tool hooks
-  match `^(ask_user_question|exit_plan_mode)$`). `http::routes::attention::normalizers::devin`
-  parses and classifies these payloads (`tests/fixtures/attention/devin.json`).
-  `circuit_observation` stays `ObservationStrategy::UNWIRED` until end-to-end
-  hook delivery is live-verified.
+  (`--resume <SESSION_ID>`). `Hooks Overview #command-hooks` shows a truncated
+  UUID-shaped `session_id` example (`3f8d1c2a-...`), though the full format is
+  not stated in the docs and has not yet been confirmed from a live session.
+- **Attention hooks & Circuit completion**: `attention_capability` is currently
+  `None` (`requires_attention_hook: false`) and `circuit_observation` is
+  `ObservationStrategy::UNWIRED`. Inside Autopilot Circuits, Devin completes
+  turns via result-file handoff until live hook delivery, the Windows hook
+  shell, the live `session_id` format, and `.claude/settings.local.json`
+  deduplication (`Hooks Overview #where-hooks-live` notes Devin reads `.claude/`
+  hooks when `read_config_from.claude` is enabled) are verified.
 - **Background inference**: `None` (`background_recipe` stays unwired until
   `-p/--print` is live-verified with an authenticated session).
 
@@ -70,7 +69,8 @@ Verified against:
   `api_server_url` defaulting to `https://server.codeium.com`), with fallback to
   `WINDSURF_API_KEY` and `WINDSURF_API_SERVER_URL` override.
 - **Request**: `POST {api_server_url}/exa.seat_management_pb.SeatManagementService/GetUserStatus`
-  with `Content-Type: application/json`, `Connect-Protocol-Version: 1`, and
+  over `https` (or `http` for loopback addresses only) with
+  `Content-Type: application/json`, `Connect-Protocol-Version: 1`, and
   `metadata.api_key`.
 - **Rendering**:
   - Daily and weekly quota windows (`100 - remainingPercent`, clamped to `0..=100`,

@@ -113,7 +113,7 @@ Legend: ✅ advertised, ❌ not advertised. Column shorthand:
 | Meta Muse | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | Native on Windows since Muse 1.3.0; workspace trust pre-provisioned (#1706); `--reasoning-effort` closed vocabulary (#1704) |
 | Cline | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | Native Provider; hook delivers turn completion only (no clean-exit dispatch); reader over `<id>.messages.json` (#1776) |
 | Perch | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | Resume via `--thread`; closed `--effort`; [deep dive](perch-harness-capabilities.md) |
-| Devin | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | Hooks provisioned into `.devin/config.local.json`; `-- <prompt>` prefill; [deep dive](devin-harness-capabilities.md) |
+| Devin | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | `-- <prompt>` prefill; result-file completion in Circuits; [deep dive](devin-harness-capabilities.md) |
 | Terminal | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | Plain shell; the only `PlainShell` launch mode |
 
 Ten harnesses are archive-resumable (Resume **and** Transcript): Claude Code,
@@ -188,7 +188,6 @@ Non-boolean detail for the nine harnesses with a native attention hook
 | Grok Code | Permission ask | Turn completed, input required, question, permission | 1.0.5 | Global hook directory |
 | MiniMax Code | Skip permissions (pinned: `permissionMode: bypassPermissions`) | Turn completed | 0.4.12 | — |
 | Cline | Skip permissions | Turn completed | 3.0.62 | — |
-| Devin | Skip permissions | Turn completed, input required, question, permission | 3000.14.30821 | Workspace trust |
 
 Launch mode is a real boundary, not a label. Under **Skip permissions** the
 harness auto-approves tool calls, so a permission request is impossible by
@@ -263,7 +262,7 @@ before.
 | DeepSeek Harness | Result file | ✅ |
 | Freebuff | Result file | ✅ |
 | Perch | Result file | ✅ |
-| Devin | Attn hook | ✅ |
+| Devin | Result file | ✅ |
 | Terminal | None (plain shell) | ❌ |
 
 Eligibility is necessary, not sufficient, and several ✅ rows are weaker than
@@ -332,7 +331,7 @@ chooses its own and Buildmesh recovers it.
 | Meta Muse | Self-assigns | No |
 | Cline | Self-assigns | No |
 | Perch | Buildmesh mints | No |
-| Devin | Self-assigns | No (hook callback) |
+| Devin | Self-assigns | No |
 | Terminal | Buildmesh mints | No |
 
 Three other adapter-level behaviours worth knowing when adding support:

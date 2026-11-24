@@ -1624,6 +1624,33 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn supplemental_user_bin_dirs_prefer_localappdata_for_devin() {
+        let _env = crate::env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var_os("LOCALAPPDATA");
+        let home = PathBuf::from(r"C:\Users\me");
+
+        unsafe {
+            std::env::set_var("LOCALAPPDATA", r"D:\CustomLocal");
+        }
+        let custom = super::supplemental_user_bin_dirs(Some(&home));
+        assert!(custom.contains(&PathBuf::from(r"D:\CustomLocal\devin\cli\bin")));
+
+        unsafe {
+            std::env::remove_var("LOCALAPPDATA");
+        }
+        let fallback = super::supplemental_user_bin_dirs(Some(&home));
+        assert!(fallback.contains(&PathBuf::from(r"C:\Users\me\AppData\Local\devin\cli\bin")));
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("LOCALAPPDATA", value) },
+            None => unsafe { std::env::remove_var("LOCALAPPDATA") },
+        }
+    }
+
     #[test]
     fn config_dir_alone_counts_as_installed() {
         // No binary on PATH, but ~/.claude exists → Claude Code still offered.
