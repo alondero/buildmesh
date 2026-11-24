@@ -78,7 +78,7 @@ fn sandboxed_preparation_is_refused_before_project_plugins_can_execute() {
 }
 
 #[test]
-fn both_background_adapters_reject_a_mismatched_binary_major() {
+fn background_adapter_rejects_a_mismatched_binary_major() {
     use crate::preferences::launch_configurations::{capture, LaunchOverrides};
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(if cfg!(windows) {
@@ -99,17 +99,16 @@ fn both_background_adapters_reject_a_mismatched_binary_major() {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
-        for (harness, expected) in [("opencode", 1), ("opencode2", 2)] {
-            let mut plan = capture(&prefs, harness, &LaunchOverrides::default()).unwrap();
-            plan.harness.executable = Some(path.clone());
-            let launch = crate::agent::background::resolve_plan(plan, &prefs).unwrap();
-            let command = launch.command(dir.path(), &dir.path().join("result.txt"), "hello");
-            assert_eq!(
-                command.is_ok(),
-                actual == expected,
-                "harness={harness}, major={actual}"
-            );
-        }
+        let harness = "opencode2";
+        let mut plan = capture(&prefs, harness, &LaunchOverrides::default()).unwrap();
+        plan.harness.executable = Some(path.clone());
+        let launch = crate::agent::background::resolve_plan(plan, &prefs).unwrap();
+        let command = launch.command(dir.path(), &dir.path().join("result.txt"), "hello");
+        assert_eq!(
+            command.is_ok(),
+            actual == 2,
+            "harness={harness}, major={actual}"
+        );
     }
 }
 
@@ -713,7 +712,7 @@ fn project_options_preserve_users_and_isolate_two_node_routes_idempotently() {
 fn provisioning_applies_the_v1_plugin_deny_for_the_selected_cli_version() {
     let dir = tempfile::tempdir().unwrap();
     let legacy = dir.path().join(".opencode/plugins/buildmesh-attention.js");
-    let old_template = include_str!("opencode_attention_plugin.js");
+    let old_template = "// legacy V1 Buildmesh attention plugin";
     std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
     std::fs::write(&legacy, old_template).unwrap();
     let path = config::config_path(dir.path(), 12);

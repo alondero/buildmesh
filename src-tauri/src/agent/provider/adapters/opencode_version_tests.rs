@@ -79,57 +79,6 @@ fn probe_cache_reuses_results_and_invalidates_a_changed_executable() {
 }
 
 #[test]
-fn v1_interactive_and_background_launches_allow_unknown_and_timed_out_probes() {
-    use crate::agent::{
-        capabilities::ResolvedAgentConfig,
-        launch::SessionIdModeRef,
-        provider::{AgentProvider, SessionPreparation},
-    };
-    use crate::preferences::launch_configurations::{capture, LaunchOverrides};
-    for (source, timeout) in [
-        (
-            "console.log('unexpected version output');",
-            Duration::from_secs(5),
-        ),
-        ("setTimeout(() => {}, 10000);", Duration::from_millis(150)),
-    ] {
-        let (dir, executable) = fixture(source);
-        // Seed the same production cache with a genuinely unknown/timeout result.
-        assert_eq!(probe_with_timeout(&executable, timeout), None);
-        let path = dir.path().to_string_lossy().into_owned();
-        let resolved = crate::env::ResolvedPath {
-            host_path: path.clone(),
-            spawn_path: path.clone(),
-            raw_path: path,
-            env_type: crate::models::EnvType::Windows,
-        };
-        assert!(super::super::opencode::OPENCODE
-            .prepare_session(SessionPreparation {
-                resolved: &resolved,
-                executable: Some(&executable),
-                node_id: 1,
-                session: SessionIdModeRef::None,
-                config: &ResolvedAgentConfig::default(),
-                sandbox: false,
-            })
-            .is_ok());
-        let prefs = crate::preferences::AppPreferences::default();
-        let mut plan = capture(&prefs, "opencode", &LaunchOverrides::default()).unwrap();
-        plan.harness.executable = Some(executable.clone());
-        let launch = crate::agent::background::resolve_plan(plan, &prefs).unwrap();
-        assert!(launch
-            .command(dir.path(), &dir.path().join("result"), "hello")
-            .is_ok());
-        let error = super::super::opencode2::OPENCODE2
-            .validate_executable(&executable)
-            .unwrap_err();
-        assert!(error.contains("Could not determine"), "{error}");
-        assert!(error.contains("retry"), "{error}");
-        assert!(!error.contains("Pin"), "{error}");
-    }
-}
-
-#[test]
 fn version_probe_removes_forced_color_from_the_child_environment() {
     let (_dir, executable) = fixture("console.log(process.env.FORCE_COLOR === undefined && process.env.NO_COLOR === '1' ? 'opencode v2.2.3' : 'unexpected probe environment');");
     let mut command = fixture_command(&executable);

@@ -102,16 +102,8 @@ const DETECTABLE: &[Detectable] = &[
         config_dirs: &[".gemini/antigravity-cli", ".antigravity", ".antigravitycli"],
     },
     Detectable {
-        id: "opencode",
-        name: "OpenCode 1",
-        harness: "opencode",
-        binaries: &["opencode"],
-        major_version: Some(1),
-        config_dirs: &[],
-    },
-    Detectable {
         id: "opencode2",
-        name: "OpenCode 2",
+        name: "OpenCode",
         harness: "opencode2",
         // The npm V2 CLI ships this alias alongside the shared command. Prefer
         // it so an earlier V1 installation does not hide V2 during discovery.
@@ -1586,7 +1578,7 @@ mod tests {
             .map(|p| p.id)
             .collect();
         ids.sort();
-        assert_eq!(ids, vec!["codex", "opencode", "opencode2"]);
+        assert_eq!(ids, vec!["codex", "opencode2"]);
     }
 
     #[test]
@@ -1959,7 +1951,6 @@ mod tests {
                 "codex" => assert_eq!(provider, Provider::Codex),
                 "cursor" => assert_eq!(provider, Provider::Cursor),
                 "agy" => assert_eq!(provider, Provider::Agy),
-                "opencode" => assert_eq!(provider, Provider::OpenCode),
                 "opencode2" => assert_eq!(provider, Provider::OpenCode2),
                 "cline" => assert_eq!(provider, Provider::Cline),
                 "grok" => assert_eq!(provider, Provider::Grok),

@@ -61,7 +61,7 @@ methods on `TranscriptReader`
   24 turns, falling back to the whole file only when that window holds no
   assistant text (the digest's rule). Stores that are not a JSONL tail override
   it with their own bounded read: Cline's single JSON document and the
-  OpenCode 1 and 2 SQLite stores take the same read as a log tail.
+  OpenCode SQLite store take the same read as a log tail.
 - **`describe_tool_call`** turns one `ToolCall` into an activity line. The
   default takes the first of `command`, `cmd`, `file_path`, `filePath`,
   `notebook_path`, `pattern`, `query`, `path`, `absolute_path`, `url`,

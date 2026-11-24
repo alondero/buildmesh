@@ -207,9 +207,9 @@ export function AccountsPane() {
 
       <SettingsSection title="OpenCode Go">
         <p className="text-sm text-text-secondary">
-          Connect OpenCode Console in OpenCode 2 and select your Go workspace,
-          or connect OpenCode Go in OpenCode 1 with your API key. Usage and reset
-          times appear in the Usage tab automatically.
+          Connect OpenCode Console in OpenCode and select your Go workspace,
+          or connect OpenCode Go with the API key saved by its connection flow.
+          Usage and reset times appear in the Usage tab automatically.
         </p>
       </SettingsSection>
 

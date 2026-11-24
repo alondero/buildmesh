@@ -180,7 +180,7 @@ describe('HarnessOrderList — keyboard a11y (issue #727)', () => {
     provider('claude', 'Claude Code'),
     provider('codex', 'Codex'),
     provider('antigravity', 'Antigravity'),
-    provider('opencode', 'OpenCode'),
+    provider('opencode2', 'OpenCode'),
   ];
 
   it('exposes a focusable drag handle per row with role=button and aria-roledescription=sortable', () => {
@@ -282,7 +282,7 @@ describe('HarnessOrderList — keyboard a11y (issue #727)', () => {
 
     // onReorder should fire with Claude moved past Codex.
     expect(onReorder).toHaveBeenCalledTimes(1);
-    expect(onReorder).toHaveBeenCalledWith(['codex', 'claude', 'antigravity', 'opencode']);
+    expect(onReorder).toHaveBeenCalledWith(['codex', 'claude', 'antigravity', 'opencode2']);
   });
 
   it('cancels the drag with Escape and does not invoke onReorder', async () => {

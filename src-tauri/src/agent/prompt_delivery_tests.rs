@@ -2115,7 +2115,7 @@ fn paste_confirmation_policy_is_declared_per_harness() {
         ("kimi", adapters::KIMI.paste_gate_policy()),
         ("mcode", adapters::MCODE.paste_gate_policy()),
         ("muse", adapters::MUSE.paste_gate_policy()),
-        ("opencode", adapters::OPENCODE.paste_gate_policy()),
+        ("opencode2", adapters::OPENCODE2.paste_gate_policy()),
         ("perch", adapters::PERCH.paste_gate_policy()),
         ("terminal", adapters::TERMINAL.paste_gate_policy()),
     ];

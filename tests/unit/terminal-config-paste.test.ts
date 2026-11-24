@@ -9,7 +9,7 @@ describe('ignoreBracketedPasteForHarness', () => {
   it('is false for other harnesses that rely on bracketed paste for multi-line prompts', () => {
     expect(ignoreBracketedPasteForHarness('anthropic')).toBe(false);
     expect(ignoreBracketedPasteForHarness('codex')).toBe(false);
-    expect(ignoreBracketedPasteForHarness('opencode')).toBe(false);
+    expect(ignoreBracketedPasteForHarness('opencode2')).toBe(false);
     expect(ignoreBracketedPasteForHarness('claude:minimax')).toBe(false);
   });
 });

@@ -299,13 +299,13 @@ fn evaluate_terminal_emits_plain_terminal_reason() {
 /// blocker would be the mesh's `use_worktree` flag.
 #[test]
 fn evaluate_opencode_with_attention_hook_is_allowed() {
-    let caps = lookup_capabilities("opencode").expect("opencode known");
+    let caps = lookup_capabilities("opencode2").expect("opencode known");
     assert!(caps.supports_prefill);
     assert!(caps.requires_attention_hook);
     assert!(!caps.is_plain_terminal);
     let result = evaluate(CircuitCompatibilityInput {
-        resolved_spawn_option: "opencode",
-        resolved_harness_id: "opencode",
+        resolved_spawn_option: "opencode2",
+        resolved_harness_id: "opencode2",
         capabilities: Some(caps),
         mesh_use_worktree: true,
         explicit_circuit_provider: false,
@@ -328,7 +328,7 @@ fn evaluate_opencode_with_attention_hook_is_allowed() {
 #[test]
 fn evaluate_opencode_without_attention_hook_emits_reason() {
     let caps = HarnessCapabilities {
-        harness_id: "opencode".into(),
+        harness_id: "opencode2".into(),
         supports_extra_args: true,
         supports_resume: true,
         auto_resume_on_startup: true,
@@ -350,8 +350,8 @@ fn evaluate_opencode_without_attention_hook_emits_reason() {
         default_permission_mode: None,
     };
     let result = evaluate(CircuitCompatibilityInput {
-        resolved_spawn_option: "opencode",
-        resolved_harness_id: "opencode",
+        resolved_spawn_option: "opencode2",
+        resolved_harness_id: "opencode2",
         capabilities: Some(caps),
         mesh_use_worktree: true,
         explicit_circuit_provider: false,
@@ -360,7 +360,7 @@ fn evaluate_opencode_without_attention_hook_emits_reason() {
     assert!(
         result.reasons.iter().any(|r| matches!(
             r,
-            CircuitCompatibilityReason::MissingAttentionHook { harness_id } if harness_id == "opencode"
+            CircuitCompatibilityReason::MissingAttentionHook { harness_id } if harness_id == "opencode2"
         )),
         "pre-#1295 capabilities must still surface MissingAttentionHook; got {:?}",
         result.reasons
@@ -377,9 +377,9 @@ fn evaluate_opencode_without_attention_hook_emits_reason() {
 #[test]
 fn evaluate_opencode_with_worktree_disabled_is_only_worktree_reason() {
     let result = evaluate(CircuitCompatibilityInput {
-        resolved_spawn_option: "opencode",
-        resolved_harness_id: "opencode",
-        capabilities: lookup_capabilities("opencode"),
+        resolved_spawn_option: "opencode2",
+        resolved_harness_id: "opencode2",
+        capabilities: lookup_capabilities("opencode2"),
         mesh_use_worktree: false,
         explicit_circuit_provider: true,
     });

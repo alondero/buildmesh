@@ -275,12 +275,10 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
     );
   });
 
-  it('renders model + extra-args + timeout but NO effort when OpenCode is selected (no effort control)', () => {
-    renderNode(spawnNode({ provider: 'opencode' }));
+  it('renders model + timeout but NO extra-args or effort when OpenCode is selected', () => {
+    renderNode(spawnNode({ provider: 'opencode2' }));
     expect(screen.getByTestId('inspector-model-input')).toBeTruthy();
-    expect(screen.getByTestId('inspector-extra-args-input')).toBeTruthy();
-    // OpenCode has EffortControlKind::None — no dropdown, but timeout
-    // (#1219) is independent of the effort capability and still renders.
+    expect(screen.queryByTestId('inspector-extra-args-input')).toBeNull();
     expect(screen.queryByTestId('inspector-effort-select')).toBeNull();
     expect(screen.getByTestId('inspector-timeout')).toBeTruthy();
   });
@@ -537,7 +535,7 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
     const onChange = vi.fn();
     renderNode(
       spawnNode({
-        provider: 'opencode',
+        provider: 'opencode2',
         model: 'anthropic/claude-sonnet-4-5',
       }),
       onChange,

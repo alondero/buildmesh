@@ -1,6 +1,6 @@
 # ADR-0050: Isolate OpenCode major versions and node configuration
 
-Status: accepted for the additive V2 adapter; V1 retirement remains gated.
+Status: accepted; amended 2026-11-23 to retire the OpenCode 1 adapter.
 **Date:** 2026-10-30
 **Issue:** [#2655](https://github.com/alondero/buildmesh/issues/2655)
 
@@ -66,13 +66,27 @@ path. Reusing the V1 id would misinterpret existing transcripts and resumes.
 Using V2 project `model` as an override does not apply the model in the observed
 2.2.3 runtime. Sharing project V2 config with V1 is rejected by V1's validator.
 
+## Amendment: OpenCode 1 retirement (2026-11-23)
+
+OpenCode 1 was removed after V2 passed its live acceptance. There is one
+OpenCode harness: the `opencode2` identity and adapter. A stored provider value
+of `opencode` parses as OpenCode 2 when a node, preference or circuit row is
+read, so existing identities and conversations keep working without a database
+migration or a rewrite of their saved session ids. The V1 adapter, attention
+plugin, session capture, transcript reader and report path are deleted; the
+shared OpenCode store helpers remain because the V2 reader uses them.
+
+Detection now requires a known 2.x major for both discovery and launch. The npm
+`opencode2` alias is still preferred over the shared `opencode` stem. Managed V2
+configs keep the `plugin.use` / `integration.use` deny for the retired
+`.opencode/plugins/buildmesh-attention.js`, so a stale V1 hook in a checkout
+cannot load alongside V2.
+
 ## Consequences
 
-V1 rows, capture services and readers remain intact. Default harness choice and
-menu preferences are not migrated. Remove V1 only after the issue's live
-Windows/macOS acceptance and a migration of eligible persisted rows are proven.
-V2 currently refuses the Mesh OS sandbox because its prelaunch API cannot yet
-share the PTY containment. This refusal happens before any project plugin loads.
+Default harness choice and menu preferences are not migrated. A preference that
+names `opencode` resolves to OpenCode 2. V2 currently refuses the Mesh OS
+sandbox because its prelaunch API cannot yet share the PTY containment. This refusal happens before any project plugin loads.
 V2 requires native launch preparation, disables extra arguments that
 could bypass isolation, and advertises no Circuit foreground or child-work
 contract. Managed files contain local callback identity and should remain local

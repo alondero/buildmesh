@@ -76,6 +76,7 @@ export function frontendInScope(paths) {
 // `pathIncludeDrift` below, so a new `#[path]` fails the gate that runs on the
 // Rust diff itself, not only the one CI happens to run (review of PR #2232).
 export const RUST_PATH_INCLUDES = {
+  'src-tauri/src/coordinator/node_digest_tests.rs': 'coordinator::node_digest::node_digest_tests',
   // The HTTP auth layer's suite moved to a sibling file (issue #589): the
   // module keeps the name `tests`, so every test path is unchanged.
   'src-tauri/src/http/auth_tests.rs': 'http::auth::tests',
@@ -99,7 +100,6 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/agent/provider/adapters/devin_tests.rs': 'agent::provider::adapters::devin::tests',
   'src-tauri/src/agent/provider/adapters/kimi_tests.rs': 'agent::provider::adapters::kimi::tests',
   'src-tauri/src/agent/provider/adapters/muse_tests.rs': 'agent::provider::adapters::muse::tests',
-  'src-tauri/src/agent/provider/adapters/opencode_contract_tests.rs': 'agent::provider::adapters::opencode::tests',
   'src-tauri/src/agent/provider/adapters/terminal_tests.rs': 'agent::provider::adapters::terminal::tests',
   'src-tauri/src/models/models_tests.rs': 'models::tests',
 
@@ -134,7 +134,6 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/agent/provider/adapters/freebuff_tests.rs': 'agent::provider::adapters::freebuff::tests',
   'src-tauri/src/agent/provider/adapters/grok_tests.rs': 'agent::provider::adapters::grok::provisioning_tests',
   'src-tauri/src/agent/provider/adapters/mcode_tests.rs': 'agent::provider::adapters::mcode::tests',
-  'src-tauri/src/agent/provider/adapters/opencode_tests.rs': 'agent::provider::adapters::opencode::child_session_tests',
   'src-tauri/src/agent/provider/adapters/perch_tests.rs': 'agent::provider::adapters::perch::tests',
   'src-tauri/src/circuit/compatibility_tests.rs': 'circuit::compatibility::tests',
   'src-tauri/src/agent/prompt_delivery_tests.rs': 'agent::prompt_delivery::tests',
@@ -218,6 +217,8 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/services/usage/adapters/devin_tests.rs': 'services::usage::adapters::devin::tests',
   'src-tauri/src/services/usage/adapters/grok_tests.rs': 'services::usage::adapters::grok::tests',
   'src-tauri/src/services/usage/adapters/minimax_tests.rs': 'services::usage::adapters::minimax::tests',
+  'src-tauri/src/services/transcript_reader/readers/opencode_tests.rs': 'services::transcript_reader::readers::opencode::opencode_tests',
+  'src-tauri/src/services/transcript_reader/mod_tests.rs': 'services::transcript_reader::tests',
   'src-tauri/src/services/usage/adapters/opencode_tests.rs': 'services::usage::adapters::opencode::tests',
   'src-tauri/src/services/usage/adapters/perch_tests.rs': 'services::usage::adapters::perch::tests',
   'src-tauri/src/services/provider_verification_tests.rs': 'services::provider_verification::tests',

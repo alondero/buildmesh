@@ -492,7 +492,7 @@ mod tests {
         for harness in [
             "claude",
             "codex",
-            "opencode",
+            "opencode2",
             "kimi",
             "grok",
             "agy",

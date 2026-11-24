@@ -235,7 +235,7 @@ describe('AppSettingsModal reviewer provider', () => {
 
   it('uses background capabilities for naming and disables unsupported harnesses', async () => {
     tauriMocks.listProviders.mockResolvedValue([
-      provider('codex', 'Codex'), provider('opencode', 'OpenCode'),
+      provider('codex', 'Codex'), provider('opencode2', 'OpenCode'),
       provider('freebuff', 'Freebuff'), provider('terminal', 'Terminal'),
     ]);
     await renderModal();

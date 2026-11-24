@@ -61,7 +61,6 @@ pub enum Provider {
     #[default]
     Anthropic,
     Agy,
-    OpenCode,
     OpenCode2,
     Codex,
     /// Cursor's interactive coding agent CLI.
@@ -106,7 +105,6 @@ impl Provider {
         &[
             Provider::Anthropic,
             Provider::Agy,
-            Provider::OpenCode,
             Provider::OpenCode2,
             Provider::Codex,
             Provider::Cursor,
@@ -152,8 +150,7 @@ impl Provider {
         match normalized.as_str() {
             "anthropic" | "claude" => Some(Provider::Anthropic),
             "agy" => Some(Provider::Agy),
-            "opencode" => Some(Provider::OpenCode),
-            "opencode2" => Some(Provider::OpenCode2),
+            "opencode" | "opencode2" => Some(Provider::OpenCode2),
             "codex" => Some(Provider::Codex),
             "cursor" => Some(Provider::Cursor),
             "grok" => Some(Provider::Grok),
@@ -178,7 +175,6 @@ impl Provider {
         match self {
             Provider::Anthropic => &adapters::ANTHROPIC,
             Provider::Agy => &adapters::AGY,
-            Provider::OpenCode => &adapters::OPENCODE,
             Provider::OpenCode2 => &adapters::OPENCODE2,
             Provider::Codex => &adapters::CODEX,
             Provider::Cursor => &adapters::CURSOR,
@@ -202,7 +198,6 @@ impl std::fmt::Display for Provider {
         match self {
             Provider::Anthropic => write!(f, "anthropic"),
             Provider::Agy => write!(f, "agy"),
-            Provider::OpenCode => write!(f, "opencode"),
             Provider::OpenCode2 => write!(f, "opencode2"),
             Provider::Codex => write!(f, "codex"),
             Provider::Cursor => write!(f, "cursor"),

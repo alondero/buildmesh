@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn v2_alias_remains_discoverable_when_v1_precedes_it_on_path() {
+fn v2_alias_is_discovered_even_when_an_older_opencode_precedes_it_on_path() {
     let v1 = PathBuf::from("/legacy/opencode");
     let v2 = PathBuf::from("/npm/opencode2");
     let profiles = detect_profiles(
@@ -10,30 +10,16 @@ fn v2_alias_remains_discoverable_when_v1_precedes_it_on_path() {
         None,
         &|path| path == v1 || path == v2,
     );
-    let confirmed = confirm_versions(profiles, &|path| {
-        if path == v1 {
-            Some(1)
-        } else if path == v2 {
-            Some(2)
-        } else {
-            None
-        }
-    });
+    let confirmed = confirm_versions(profiles, &|path| (path == v2).then_some(2));
     let executables: Vec<_> = confirmed
         .iter()
         .map(|p| (p.harness.as_str(), p.executable.as_deref()))
         .collect();
-    assert_eq!(
-        executables,
-        [
-            ("opencode", Some(v1.as_path())),
-            ("opencode2", Some(v2.as_path()))
-        ]
-    );
+    assert_eq!(executables, [("opencode2", Some(v2.as_path()))]);
 }
 
 #[test]
-fn v2_alias_still_requires_a_confirmed_v2_major() {
+fn v2_requires_a_confirmed_v2_major() {
     let profiles = detect_profiles(&[PathBuf::from("/npm")], &[""], None, &|path| {
         path == Path::new("/npm/opencode2")
     });
@@ -48,21 +34,19 @@ fn v2_alias_still_requires_a_confirmed_v2_major() {
 }
 
 #[test]
-fn unknown_version_keeps_v1_visible_but_withholds_v2() {
+fn unknown_version_withholds_v2() {
     let profiles = detect_profiles(&[PathBuf::from("/bin")], &[""], None, &|p| {
         p == Path::new("/bin/opencode")
     });
-    let confirmed = confirm_versions(profiles, &|_| None);
-    assert_eq!(confirmed.len(), 1);
-    assert_eq!(confirmed[0].harness, "opencode");
+    assert!(confirm_versions(profiles, &|_| None).is_empty());
 }
 
 #[test]
-fn known_majors_select_the_matching_harness_with_one_probe_per_path() {
+fn known_majors_accept_only_v2_with_one_probe_per_path() {
     let profiles = detect_profiles(&[PathBuf::from("/bin")], &[""], None, &|p| {
         p == Path::new("/bin/opencode")
     });
-    assert_eq!(profiles.len(), 2);
+    assert_eq!(profiles.len(), 1);
     let calls = std::cell::Cell::new(0);
     for major in [1, 2, 3] {
         calls.set(0);
@@ -71,12 +55,9 @@ fn known_majors_select_the_matching_harness_with_one_probe_per_path() {
             Some(major)
         });
         assert_eq!(calls.get(), 1);
-        if major < 3 {
+        if major == 2 {
             assert_eq!(confirmed.len(), 1);
-            assert_eq!(
-                confirmed[0].harness,
-                if major == 1 { "opencode" } else { "opencode2" }
-            );
+            assert_eq!(confirmed[0].harness, "opencode2");
         } else {
             assert!(confirmed.is_empty());
         }

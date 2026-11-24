@@ -39,8 +39,8 @@ const agyTarget: LaunchTarget = {
 };
 
 const opencodeTarget: LaunchTarget = {
-  id: 'opencode',
-  harness_id: 'opencode',
+  id: 'opencode2',
+  harness_id: 'opencode2',
   harness_name: 'OpenCode',
   provider_name: 'Native authentication',
   models: [],
@@ -91,11 +91,11 @@ const agyOption: SpawnOption = {
 
 const opencodeOption: SpawnOption = {
   ...agyOption,
-  id: 'opencode',
+  id: 'opencode2',
   label: 'OpenCode',
-  harness_id: 'opencode',
-  group_key: 'opencode',
-  capabilities: { ...agyOption.capabilities!, harness_id: 'opencode' },
+  harness_id: 'opencode2',
+  group_key: 'opencode2',
+  capabilities: { ...agyOption.capabilities!, harness_id: 'opencode2' },
 };
 
 function deferred<T>() {
@@ -157,7 +157,7 @@ describe('launchConfigurationOrder helpers', () => {
 
     const initial = [
       makeConfig('agy-1', 'AGY 1', 'agy'),
-      makeConfig('oc-1', 'OC 1', 'opencode'),
+      makeConfig('oc-1', 'OC 1', 'opencode2'),
       makeConfig('agy-2', 'AGY 2', 'agy'),
       makeConfig('agy-3', 'AGY 3', 'agy'),
     ];
@@ -168,7 +168,7 @@ describe('launchConfigurationOrder helpers', () => {
   it('groups configurations by harness using target display names and fallback order', () => {
     const groups = groupConfigurationsByHarness(
       [
-        makeConfig('oc-1', 'OC 1', 'opencode'),
+        makeConfig('oc-1', 'OC 1', 'opencode2'),
         makeConfig('agy-1', 'AGY 1', 'agy'),
         makeConfig('custom-1', 'Custom 1', 'custom-harness'),
         makeConfig('agy-2', 'AGY 2', 'agy'),
@@ -177,7 +177,7 @@ describe('launchConfigurationOrder helpers', () => {
     );
     expect(groups.map((g) => ({ id: g.harnessId, name: g.harnessName, ids: g.configurations.map((c) => c.id) }))).toEqual([
       { id: 'agy', name: 'Antigravity', ids: ['agy-1', 'agy-2'] },
-      { id: 'opencode', name: 'OpenCode', ids: ['oc-1'] },
+      { id: 'opencode2', name: 'OpenCode', ids: ['oc-1'] },
       { id: 'custom-harness', name: 'custom-harness', ids: ['custom-1'] },
     ]);
   });
@@ -189,7 +189,7 @@ describe('LaunchConfigurations grouped drag-and-drop', () => {
       makeConfig('agy-1', 'AGY Fast', 'agy'),
       makeConfig('agy-2', 'AGY Deep', 'agy'),
       makeConfig('agy-3', 'AGY Review', 'agy'),
-      makeConfig('oc-1', 'OC Solo', 'opencode'),
+      makeConfig('oc-1', 'OC Solo', 'opencode2'),
     ];
     const reorder = vi.fn().mockResolvedValue(undefined);
     const onChanged = vi.fn();
@@ -207,7 +207,7 @@ describe('LaunchConfigurations grouped drag-and-drop', () => {
     );
 
     const agyGroup = await screen.findByTestId('launch-config-group-agy');
-    const ocGroup = screen.getByTestId('launch-config-group-opencode');
+    const ocGroup = screen.getByTestId('launch-config-group-opencode2');
 
     expect(within(agyGroup).getAllByRole('button', { name: /^Reorder / })).toHaveLength(3);
     expect(within(ocGroup).queryByRole('button', { name: /^Reorder / })).toBeNull();
@@ -297,8 +297,8 @@ describe('LaunchConfigurations grouped drag-and-drop', () => {
     let backendConfigs = [
       makeConfig('agy-1', 'AGY Fast', 'agy'),
       makeConfig('agy-2', 'AGY Deep', 'agy'),
-      makeConfig('oc-1', 'OC Alpha', 'opencode'),
-      makeConfig('oc-2', 'OC Beta', 'opencode'),
+      makeConfig('oc-1', 'OC Alpha', 'opencode2'),
+      makeConfig('oc-2', 'OC Beta', 'opencode2'),
     ];
     const agyWrite = deferred<void>();
     const ocWrite = deferred<void>();
@@ -323,7 +323,7 @@ describe('LaunchConfigurations grouped drag-and-drop', () => {
     );
 
     const agyGroup = await screen.findByTestId('launch-config-group-agy');
-    const ocGroup = screen.getByTestId('launch-config-group-opencode');
+    const ocGroup = screen.getByTestId('launch-config-group-opencode2');
     stubRowRects(Array.from(agyGroup.querySelectorAll<HTMLElement>('li')));
     stubRowRects(Array.from(ocGroup.querySelectorAll<HTMLElement>('li')));
 

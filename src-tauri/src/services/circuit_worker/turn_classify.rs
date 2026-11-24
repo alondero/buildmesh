@@ -1796,7 +1796,7 @@ mod classifier_selection_tests {
 
         preferences.circuit_classifier_provider = Some("claude:minimax".into());
         assert_eq!(classifier_provider(&preferences), "claude:minimax");
-        preferences.default_provider = Some("opencode".into());
+        preferences.default_provider = Some("opencode2".into());
         assert_eq!(classifier_provider(&preferences), "claude:minimax");
     }
 }

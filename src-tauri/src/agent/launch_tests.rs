@@ -56,12 +56,8 @@ fn regenerate_resume_matches_explicit_resume_for_adapters_without_a_fork() {
     );
 }
 
-/// The inverse guard on the same table: OpenCode is the adapter that
-/// opts in, so it must be the one whose `Regenerate` argv differs.
-/// Without this the test above could pass vacuously if every adapter
-/// silently lost its fork override.
 #[test]
-fn opencode_is_the_only_resumable_adapter_that_opts_into_forking() {
+fn no_adapter_opts_into_forking_through_resume_args() {
     let opting_in: Vec<&str> = crate::models::Provider::all()
         .iter()
         .filter(|provider| {
@@ -73,7 +69,7 @@ fn opencode_is_the_only_resumable_adapter_that_opts_into_forking() {
         .collect();
     assert_eq!(
         opting_in,
-        vec!["opencode"],
+        Vec::<&str>::new(),
         "fork opt-in is a per-adapter decision; a new entry here means a \
              harness genuinely supports branching and its resume shape needs \
              review"

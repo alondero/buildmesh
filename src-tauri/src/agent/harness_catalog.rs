@@ -99,8 +99,7 @@ fn inspector_label(provider: Provider) -> &'static str {
     match provider {
         Provider::Anthropic => "Claude Code",
         Provider::Agy => "Antigravity",
-        Provider::OpenCode => "OpenCode",
-        Provider::OpenCode2 => "OpenCode 2",
+        Provider::OpenCode2 => "OpenCode",
         Provider::Codex => "Codex",
         Provider::Cursor => "Cursor",
         Provider::Grok => "Grok Code",

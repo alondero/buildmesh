@@ -1589,7 +1589,7 @@ fn interrupt_watch_waits_for_a_late_record_and_stops_when_the_node_moves() {
 /// unconfirmed Enter reverted; for the rest a quiet Enter may be work.
 #[test]
 fn prompt_submission_confirmation_follows_the_harness() {
-    for id in ["anthropic", "codex", "grok", "opencode"] {
+    for id in ["anthropic", "codex", "grok", "opencode2"] {
         assert!(harness_confirms_prompt_submission(id), "{id}");
     }
     for id in ["agy", "mcode", "kimi", "terminal", "cursor"] {
@@ -1605,8 +1605,8 @@ fn prompt_submission_confirmation_follows_the_harness() {
 #[test]
 fn submit_replay_follows_the_harness() {
     assert!(
-        harness_replays_unconfirmed_submit("opencode"),
-        "opencode discards input written before its TUI attaches the reader"
+        harness_replays_unconfirmed_submit("opencode2"),
+        "OpenCode discards input written before its TUI attaches the reader"
     );
     for id in [
         "anthropic",

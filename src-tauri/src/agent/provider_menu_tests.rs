@@ -143,7 +143,7 @@ fn a_verified_proxied_row_carries_no_warning() {
 #[test]
 fn effective_permission_resolves_default_stored_and_stale() {
     use crate::agent::capabilities::{PERMISSION_MODE_PROMPT, PERMISSION_MODE_UNATTENDED};
-    use crate::agent::provider::adapters::{ANTHROPIC, OPENCODE, TERMINAL};
+    use crate::agent::provider::adapters::{ANTHROPIC, OPENCODE2, TERMINAL};
 
     // No stored value: the harness unattended default, marked default.
     let mode = effective_permission_for_adapter(&ANTHROPIC, None).expect("claude has modes");
@@ -163,7 +163,7 @@ fn effective_permission_resolves_default_stored_and_stale() {
     assert!(mode.is_default);
 
     // Blank stored value: same as absent.
-    let mode = effective_permission_for_adapter(&OPENCODE, Some("   ")).expect("blank falls back");
+    let mode = effective_permission_for_adapter(&OPENCODE2, Some("   ")).expect("blank falls back");
     assert_eq!(mode.mode_id, PERMISSION_MODE_UNATTENDED);
     assert!(mode.label.contains("--auto"));
 
@@ -824,14 +824,14 @@ fn order_providers_multiple_newcomers_sort_alphabetically() {
             row_native("claude"),
             row_native("codex"),
             row_native("agy"),
-            row_native("opencode"),
+            row_native("opencode2"),
         ],
         &order,
     );
     let ids: Vec<_> = ordered.iter().map(|p| p.id.as_str()).collect();
     assert_eq!(
         ids,
-        vec!["agy", "claude", "codex", "opencode", "terminal"],
+        vec!["agy", "claude", "codex", "opencode2", "terminal"],
         "newcomers must sort alphabetically by harness_id, not by input order"
     );
 }
@@ -1258,27 +1258,29 @@ fn compose_provider_menu_propagates_proxied_order() {
 
 #[test]
 fn configuration_menu_preserves_spawn_configuration_order_for_proxied_recipes() {
-    let mut prefs = crate::preferences::AppPreferences::default();
-    prefs.proxied_provider_order = vec![ProxiedProviderOrder {
-        harness_id: "claude".into(),
-        provider_ids: vec!["moonshot".into(), "minimax".into()],
-    }];
-    prefs.spawn_configurations = vec![
-        crate::preferences::spawn_configurations::SpawnConfiguration {
-            id: "launch/minimax-first".into(),
-            name: "MiniMax First".into(),
-            spawn_option_id: "claude:minimax".into(),
-            harness_id: Some("claude".into()),
-            ..Default::default()
-        },
-        crate::preferences::spawn_configurations::SpawnConfiguration {
-            id: "launch/moonshot-second".into(),
-            name: "Moonshot Second".into(),
-            spawn_option_id: "claude:moonshot".into(),
-            harness_id: Some("claude".into()),
-            ..Default::default()
-        },
-    ];
+    let prefs = crate::preferences::AppPreferences {
+        proxied_provider_order: vec![ProxiedProviderOrder {
+            harness_id: "claude".into(),
+            provider_ids: vec!["moonshot".into(), "minimax".into()],
+        }],
+        spawn_configurations: vec![
+            crate::preferences::spawn_configurations::SpawnConfiguration {
+                id: "launch/minimax-first".into(),
+                name: "MiniMax First".into(),
+                spawn_option_id: "claude:minimax".into(),
+                harness_id: Some("claude".into()),
+                ..Default::default()
+            },
+            crate::preferences::spawn_configurations::SpawnConfiguration {
+                id: "launch/moonshot-second".into(),
+                name: "Moonshot Second".into(),
+                spawn_option_id: "claude:moonshot".into(),
+                harness_id: Some("claude".into()),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
     let base = vec![
         row_native("claude"),
         row_proxied("claude", "minimax"),

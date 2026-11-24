@@ -15,7 +15,6 @@
 export type InspectorHarnessId =
   | "anthropic"
   | "agy"
-  | "opencode"
   | "opencode2"
   | "codex"
   | "cursor"
@@ -52,7 +51,6 @@ export const HARNESS_REVIEW_ELIGIBILITY_CATALOG = {
   "ids": [
     "anthropic",
     "agy",
-    "opencode",
     "opencode2",
     "codex",
     "cursor",
@@ -148,12 +146,6 @@ export const HARNESS_REVIEW_ELIGIBILITY_CATALOG = {
       "is_plain_terminal": false,
       "requires_attention_hook": false,
       "supports_passive_turn_watcher": true,
-      "supports_result_file_handoff": true
-    },
-    "opencode": {
-      "is_plain_terminal": false,
-      "requires_attention_hook": true,
-      "supports_passive_turn_watcher": false,
       "supports_result_file_handoff": true
     },
     "opencode2": {

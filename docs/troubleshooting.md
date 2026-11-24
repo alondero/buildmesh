@@ -177,26 +177,23 @@ on new nodes. If an already-open node is stuck, press Ctrl+C once, then type.
 Downgrading the CLI to 1.55 with `COMMANDCODE_SKIP_UPDATES=1` also restores
 typing outside Buildmesh.
 
-## OpenCode 2 does not start or report attention
+## OpenCode does not start or report attention
 
-Check `opencode --version` in the same native runtime as the node. Use the
-**OpenCode 2** harness for 2.2.x and **OpenCode** for 1.18.3. V2 discovery tries
-the npm CLI's `opencode2` alias before `opencode`; check `opencode2 --version`
-if V1 takes precedence on PATH. Pin a separate executable in each Harness
-Profile when the alias is unavailable. Restarting Buildmesh refreshes version
-detection. After the deferred probe, an unknown
-result is still shown and launchable through the V1 harness for compatibility.
-OpenCode 2 is not detected until the probe identifies a 2.x version. The V1
-fallback does not establish that the executable is V1; if you installed V2,
-resolve the failed probe before launching it through that entry.
-The default harness and existing node identities are not migrated automatically.
+Check `opencode --version` in the same native runtime as the node. Buildmesh
+offers the harness only for a 2.x version; an older 1.x executable is refused
+with an incompatible-version error rather than launched. Detection tries the
+npm CLI's `opencode2` alias before `opencode`, so check `opencode2 --version`.
+Pin the harness executable when the alias is unavailable. Restarting Buildmesh
+refreshes version detection; while the version is unknown the harness is
+withheld. Nodes saved under the old OpenCode 1 harness id now open with this
+harness.
 
-OpenCode 2 currently refuses an active developer Mesh OS sandbox: API session
+OpenCode currently refuses an active developer Mesh OS sandbox: API session
 preparation cannot yet run inside the same containment as the terminal. Turn
 off the Mesh sandbox or choose another harness. It fails before loading project
 plugins; it never silently prepares a sandboxed node outside containment.
 
-Each V2 node starts with `--standalone`, so it owns a private server and does
+Each node starts with `--standalone`, so it owns a private server and does
 not attach to OpenCode's shared background service. Buildmesh does not disable
 or reconfigure that service. Model updates and regenerate forks use a separate
 bounded `api --standalone` invocation before the terminal starts; an API error
@@ -208,23 +205,23 @@ current login.
 Buildmesh writes `.opencode/buildmesh-attention2/index.ts` and an independent
 `.opencode/buildmesh2/<node-id>/opencode.json` selected by `OPENCODE_CONFIG`.
 It leaves the user's project JSON/JSONC files in place, including their plugins.
-V1 does not read the managed V2 keys. Do not move these keys into a shared V1
-config: V1 rejects `plugins` and `permissions`. If plugin activation fails,
+Do not copy these keys into a shared project config if another OpenCode build
+still reads it: OpenCode 1 rejects `plugins` and `permissions`. If plugin activation fails,
 check that the managed package directory contains `index.ts`, that it is not
 disabled by your plugin policy, and that loopback callbacks can reach Buildmesh.
 Restart the node after correcting the config. Malformed managed config is
 reported rather than overwritten.
 
-V2 normally permits paths outside the project. Buildmesh adds an explicit
+OpenCode normally permits paths outside the project. Buildmesh adds an explicit
 `external_directory` **deny** rule to each managed node config. On Windows
 2.2.3, a full-TUI read outside the containing Git worktree was denied with
 `--auto`. OpenCode treats that worktree as internal even when the node starts
 in a subdirectory. External writes and other platforms remain unverified.
 This is a configured CLI rule, separate from the Mesh's OS sandbox. Background
 inference additionally configures tool deny rules in its own scratch project.
-WSL and Windows Interop V2 launches are not yet supported.
+WSL and Windows Interop launches are not yet supported.
 
-## A prompt typed into a new OpenCode 1 node comes back on its own
+## A prompt typed into a new OpenCode node comes back on its own
 
 OpenCode's TUI attaches its input reader while it starts up, and keystrokes
 that arrive before it is ready are discarded — the composer stays empty and no

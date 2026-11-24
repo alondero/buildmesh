@@ -15,7 +15,7 @@ fn saved_opencode_binaries_are_validated_before_deferred_discovery_publishes() {
     }
     let _restore = Restore(detection::detection_snapshot());
     detection::observe_installations(Default::default());
-    for (harness, expected) in [("opencode", 1), ("opencode2", 2)] {
+    for (harness, expected) in [("opencode2", 2)] {
         for actual in [1, 2] {
             let dir = tempfile::tempdir().unwrap();
             let executable = dir.path().join(if cfg!(windows) {

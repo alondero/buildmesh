@@ -15,7 +15,6 @@ export const HARNESS_CATALOG = {
   "ids": [
     "anthropic",
     "agy",
-    "opencode",
     "opencode2",
     "codex",
     "cursor",
@@ -45,8 +44,7 @@ export const HARNESS_CATALOG = {
     "kimi": "Kimi Code",
     "mcode": "MiniMax Code",
     "muse": "Meta Muse",
-    "opencode": "OpenCode",
-    "opencode2": "OpenCode 2",
+    "opencode2": "OpenCode",
     "perch": "Perch",
     "terminal": "Terminal"
   },
@@ -687,62 +685,6 @@ export const HARNESS_CATALOG = {
       "supports_extra_args": true,
       "supports_model_override": true,
       "supports_passive_turn_watcher": true,
-      "supports_prefill": true,
-      "supports_result_file_handoff": true,
-      "supports_resume": true
-    },
-    "opencode": {
-      "accepts_initial_prompt": true,
-      "attention_capability": {
-        "events": [
-          "turn_completed",
-          "question_requested",
-          "permission_requested"
-        ],
-        "kind": "hook",
-        "launch_mode": "permission_ask",
-        "min_version": null,
-        "trust": null
-      },
-      "auto_resume_on_startup": true,
-      "available_on": [
-        "windows",
-        "linux",
-        "macos"
-      ],
-      "background_inference": {
-        "max_prompt_bytes": null,
-        "prompt_input": {
-          "kind": "stdin"
-        },
-        "result_output": "open_code_json_lines",
-        "supports_provider_routing": false
-      },
-      "default_permission_mode": "unattended",
-      "effort_control": {
-        "kind": "none"
-      },
-      "harness_id": "opencode",
-      "is_plain_terminal": false,
-      "permission_modes": [
-        {
-          "description": "Auto-approve (today's behavior; required for unattended runs).",
-          "id": "unattended",
-          "label": "--auto"
-        },
-        {
-          "description": "OpenCode asks for approval like a human-launched session.",
-          "id": "prompt",
-          "label": "Prompts on (no flag)"
-        }
-      ],
-      "produces_readable_transcript": true,
-      "requires_attention_hook": true,
-      "supports_agent": true,
-      "supports_effort_override": false,
-      "supports_extra_args": true,
-      "supports_model_override": true,
-      "supports_passive_turn_watcher": false,
       "supports_prefill": true,
       "supports_result_file_handoff": true,
       "supports_resume": true

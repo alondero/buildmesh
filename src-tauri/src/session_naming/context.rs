@@ -287,56 +287,6 @@ mod tests {
     }
 
     #[test]
-    fn opencode_naming_reads_first_messages_of_the_selected_session() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("opencode.db");
-        let conn = rusqlite::Connection::open(&path).unwrap();
-        conn.execute_batch("CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
-            CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, data TEXT);").unwrap();
-        for (id, session, text) in [
-            ("first", "ses_task", "Fix login"),
-            ("other", "ses_other", "Unrelated task"),
-        ] {
-            conn.execute(
-                "INSERT INTO message VALUES (?1, ?2, 0, ?3)",
-                rusqlite::params![id, session, json!({"role":"user"}).to_string()],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO part VALUES (?1, ?1, ?2, ?3)",
-                rusqlite::params![id, session, json!({"type":"text","text":text}).to_string()],
-            )
-            .unwrap();
-        }
-        for n in 1..250 {
-            let id = format!("later-{n}");
-            conn.execute(
-                "INSERT INTO message VALUES (?1, 'ses_task', ?2, ?3)",
-                rusqlite::params![id, n, json!({"role":"assistant"}).to_string()],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO part VALUES (?1, ?1, 'ses_task', ?2)",
-                rusqlite::params![
-                    id,
-                    json!({"type":"text","text":"Working on login"}).to_string()
-                ],
-            )
-            .unwrap();
-        }
-        let text = from_tail(transcript_reader::read_naming_from_file(
-            &path,
-            "ses_task",
-            TranscriptFormat::OpenCode,
-        ))
-        .unwrap();
-        let messages: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(messages[0], json!({"role":"user","text":"Fix login"}));
-        assert_eq!(messages.as_array().unwrap().len(), 4);
-        assert!(!text.contains("Unrelated"));
-    }
-
-    #[test]
     fn unavailable_or_assistant_only_conversation_defers_naming() {
         use transcript_reader::{Turn, UnavailableReason};
         for tail in [

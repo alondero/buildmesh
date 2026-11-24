@@ -228,11 +228,6 @@ pub struct HarnessDescriptor {
     pub circuit_observation: crate::circuit::strategy::ObservationStrategy,
     pub produces_readable_transcript: bool,
     pub supports_model_override: bool,
-    /// Whether the harness exposes an agent / persona selector
-    /// (`--agent <name>` on OpenCode 1, session-API `agent` on
-    /// OpenCode 2, `run --agent` for background inference). Issue #1552 /
-    /// #2716: default `false`; adapters opt in only when they can apply
-    /// the value on every launch path.
     pub supports_agent: bool,
     pub supports_extra_args: bool,
     pub supports_prefill: bool,
@@ -728,10 +723,6 @@ mod tests {
         capabilities_for(&crate::agent::provider::adapters::AGY)
     }
 
-    fn opencode_caps() -> HarnessCapabilities {
-        capabilities_for(&crate::agent::provider::adapters::OPENCODE)
-    }
-
     fn opencode2_caps() -> HarnessCapabilities {
         capabilities_for(&crate::agent::provider::adapters::OPENCODE2)
     }
@@ -975,46 +966,6 @@ mod tests {
         );
         assert_eq!(
             agy.available_on,
-            vec![
-                "windows".to_string(),
-                "linux".to_string(),
-                "macos".to_string()
-            ]
-        );
-
-        let opencode = opencode_caps();
-        assert_eq!(opencode.harness_id, "opencode");
-        assert!(opencode.supports_resume);
-        assert!(opencode.auto_resume_on_startup);
-        // Issue #1295: plugin hook unblocks the Autopilot gate.
-        assert!(opencode.requires_attention_hook);
-        // Issue #1295 — pin the attention hook shape (events +
-        // permission_ask launch mode, no trust/min_version) so the
-        // descriptor cannot silently revert to `{ kind: "none" }`.
-        assert!(matches!(
-            opencode.attention_capability,
-            AttentionCapability::Hook {
-                launch_mode: AttentionLaunchMode::PermissionAsk,
-                trust: None,
-                min_version: None,
-                ..
-            }
-        ));
-        // Issue #1296 — SQLite reader; the descriptor must mirror it
-        // so the Coordinator Node Digest hydrates for OpenCode rows.
-        assert!(opencode.produces_readable_transcript);
-        assert!(opencode.supports_model_override);
-        assert!(opencode.supports_agent);
-        assert!(!opencode.supports_effort_override);
-        assert!(opencode.supports_extra_args);
-        assert!(opencode.supports_prefill);
-        assert_eq!(opencode.effort_control, EffortControlKind::None);
-        // `available_on` order matters — it is preserved through the
-        // IPC wire type and the frontend Inspector. Pin it so an
-        // adapter re-order trips the inventory pin test instead of
-        // silently drifting the TS mirror.
-        assert_eq!(
-            opencode.available_on,
             vec![
                 "windows".to_string(),
                 "linux".to_string(),
@@ -1385,7 +1336,7 @@ mod tests {
             codex_caps(),
             cursor_caps(),
             agy_caps(),
-            opencode_caps(),
+            opencode2_caps(),
             terminal_caps(),
             kimi_caps(),
             grok_caps(),
@@ -1426,7 +1377,7 @@ mod tests {
             &crate::agent::provider::adapters::CODEX,
             &crate::agent::provider::adapters::CURSOR,
             &crate::agent::provider::adapters::AGY,
-            &crate::agent::provider::adapters::OPENCODE,
+            &crate::agent::provider::adapters::OPENCODE2,
             &crate::agent::provider::adapters::TERMINAL,
             &crate::agent::provider::adapters::KIMI,
             &crate::agent::provider::adapters::GROK,
@@ -1532,11 +1483,7 @@ mod tests {
     /// control, regardless of which precedence layer supplied it".
     #[test]
     fn resolver_drops_effort_for_harness_without_effort_control() {
-        // agy_caps() dropped from this list in issue #1286: agy's CLI
-        // accepts `--effort <low|medium|high>`, so the mask now keeps
-        // matching values. The non-effort harnesses (opencode, terminal,
-        // kimi) still drop every layer.
-        for caps in [opencode_caps(), terminal_caps(), kimi_caps()] {
+        for caps in [terminal_caps(), kimi_caps()] {
             let inputs = AgentConfigInputs {
                 model: FieldInputs::default(),
                 effort: FieldInputs {
@@ -1782,15 +1729,9 @@ mod tests {
         assert_eq!(resolved.effort, None);
     }
 
-    /// Agent / persona mask (issue #1552 / #2716): the resolver forwards
-    /// the value only when `supports_agent` is true. OpenCode and
-    /// OpenCode 2 keep it; every other harness drops it so a stale
-    /// `harness_defaults` entry can never splice `--agent` into an
-    /// unrelated CLI. The cascade itself is explicit > application.
     #[test]
     fn resolver_masks_agent_to_agent_capable_harnesses_only() {
         for (caps, keeps) in [
-            (opencode_caps(), true),
             (opencode2_caps(), true),
             (anthropic_caps(), false),
             (codex_caps(), false),
@@ -1822,7 +1763,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let resolved = resolve_agent_config(&opencode_caps(), inputs, None);
+        let resolved = resolve_agent_config(&opencode2_caps(), inputs, None);
         assert_eq!(resolved.agent.as_deref(), Some("plan"));
     }
 
@@ -1830,7 +1771,7 @@ mod tests {
     fn agent_capability_matrix_only_opencode_family_opts_in() {
         for provider in crate::models::Provider::all() {
             let caps = capabilities_for(provider.adapter());
-            let expect = matches!(caps.harness_id.as_str(), "opencode" | "opencode2");
+            let expect = caps.harness_id == "opencode2";
             assert_eq!(
                 caps.supports_agent, expect,
                 "{} supports_agent={} expected {expect}",
@@ -2088,7 +2029,7 @@ mod tests {
             ("codex", codex_caps(), "--ask-for-approval"),
             ("cursor", cursor_caps(), "--force"),
             ("agy", agy_caps(), "--dangerously-skip-permissions"),
-            ("opencode", opencode_caps(), "--auto"),
+            ("opencode2", opencode2_caps(), "--auto"),
             ("commandcode", commandcode_caps(), "--yolo"),
             ("muse", muse_caps(), "--disable-approval"),
             ("perch", perch_caps(), "--permission take_the_wheel"),
