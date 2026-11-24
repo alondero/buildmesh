@@ -5,6 +5,7 @@ mod claude;
 mod cline;
 mod codex;
 mod cursor;
+mod devin;
 mod grok;
 mod kimi;
 mod mcode;
@@ -42,6 +43,10 @@ fn dispatch(provider: &str) -> Option<Normalizer> {
         "cursor" => Normalizer {
             parse: cursor::parse,
             classify: cursor::classify,
+        },
+        "devin" => Normalizer {
+            parse: devin::parse,
+            classify: devin::classify,
         },
         "grok" => Normalizer {
             parse: grok::parse,

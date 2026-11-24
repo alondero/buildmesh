@@ -81,7 +81,7 @@ fn attention_url(node_id: i64, port: u16) -> String {
 
 fn hook_command(url: &str, windows: bool) -> String {
     if windows {
-        format!("curl.exe -fsS --connect-timeout 2 --max-time 10 -o NUL -X POST --data-binary \"@-\" {url}")
+        format!("curl.exe -fsS --connect-timeout 2 --max-time 10 -o NUL -X POST --data-binary \"@-\" {url} >NUL 2>NUL || exit 0")
     } else {
         format!("curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary @- {url} >/dev/null 2>&1 || true")
     }

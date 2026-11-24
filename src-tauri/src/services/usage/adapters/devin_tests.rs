@@ -240,7 +240,7 @@ fn an_empty_key_in_the_file_is_not_a_credential() {
 }
 
 #[test]
-fn fingerprint_changes_with_the_key_and_never_contains_it() {
+fn fingerprint_changes_with_the_key_and_is_deterministic() {
     let a = fingerprint_for(Some(&Credentials {
         api_key: "secret-a".into(),
         server_url: DEFAULT_SERVER.into(),
@@ -269,12 +269,14 @@ fn a_missing_credential_reports_not_signed_in() {
 }
 
 #[test]
-fn a_non_http_server_is_refused_before_any_request() {
-    let outcome = fetch_with(Some(Credentials {
-        api_key: "k".into(),
-        server_url: "file:///etc/passwd".into(),
-    }));
-    assert!(matches!(outcome, UsageOutcome::Unavailable { .. }));
+fn non_https_non_loopback_servers_are_refused_before_any_request() {
+    for url in ["file:///etc/passwd", "http://example.test"] {
+        let outcome = fetch_with(Some(Credentials {
+            api_key: "k".into(),
+            server_url: url.into(),
+        }));
+        assert!(matches!(outcome, UsageOutcome::Unavailable { .. }), "{url}");
+    }
 }
 
 type RecordedRequests = Arc<Mutex<Vec<(String, String, Vec<String>)>>>;

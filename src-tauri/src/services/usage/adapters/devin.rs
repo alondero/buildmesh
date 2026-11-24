@@ -132,9 +132,21 @@ fn login_rejected() -> UsageOutcome {
 }
 
 fn supported_http(url: &str) -> bool {
-    reqwest::Url::parse(url)
-        .map(|parsed| matches!(parsed.scheme(), "http" | "https"))
-        .unwrap_or(false)
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    match parsed.scheme() {
+        "https" => parsed.host_str().is_some(),
+        "http" => match parsed.host_str() {
+            Some(host) if host.eq_ignore_ascii_case("localhost") => true,
+            Some(host) => host
+                .trim_matches(|ch| ch == '[' || ch == ']')
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback()),
+            None => false,
+        },
+        _ => false,
+    }
 }
 
 fn fetch_with(credentials: Option<Credentials>) -> UsageOutcome {

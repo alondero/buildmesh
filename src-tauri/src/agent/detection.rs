@@ -351,7 +351,14 @@ fn supplemental_user_bin_dirs(home: Option<&Path>) -> Vec<PathBuf> {
         dirs.push(home.join(".local").join("bin"));
         dirs.push(home.join(".cargo").join("bin"));
         dirs.push(home.join(".volta").join("bin"));
-        if cfg!(windows) {
+    }
+    if cfg!(windows) {
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+        {
+            dirs.push(local_app_data.join("devin").join("cli").join("bin"));
+        } else if let Some(home) = home {
             dirs.push(
                 home.join("AppData")
                     .join("Local")

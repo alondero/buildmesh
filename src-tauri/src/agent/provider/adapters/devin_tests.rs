@@ -28,7 +28,7 @@ fn unattended_mode_skips_prompts_and_the_trust_dialog() {
 }
 
 #[test]
-fn session_identity_is_hook_reported_and_resume_is_explicit() {
+fn session_identity_flags_and_resume_args_match_hook_capture() {
     assert!(DEVIN.self_assigns_session_id());
     assert!(!DEVIN.captures_session_id_from_pty());
     assert_eq!(DEVIN.resume_args("abc"), vec!["--resume", "abc"]);
@@ -63,6 +63,7 @@ fn hook_command_is_curl_to_the_node_route() {
     assert!(windows.starts_with("curl.exe -fsS"));
     assert!(windows.contains("-o NUL"));
     assert!(windows.contains(&url));
+    assert!(windows.ends_with("|| exit 0"));
 }
 
 #[test]

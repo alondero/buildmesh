@@ -28,7 +28,9 @@ Verified against:
 - Official documentation: [Devin CLI](https://devin.ai/cli),
   [Essential Commands](https://docs.devin.ai/cli/essential-commands),
   [Lifecycle Hooks](https://docs.devin.ai/cli/extensibility/hooks/lifecycle-hooks),
-  and [Hooks Overview](https://docs.devin.ai/cli/hooks/overview).
+  and [Hooks Overview](https://docs.devin.ai/cli/extensibility/hooks/overview)
+  (including `#where-hooks-live` and `#command-hooks`).
+- Official brand mark: [Devin SVG favicon](https://devin.ai/favicon.svg).
 
 ## Harness capability contract
 
@@ -42,16 +44,21 @@ Verified against:
   (`--model <MODEL>`). Effort override is `EffortControlKind::None` (thinking
   level is interactive-only).
 - **Permission modes**:
-  - `unattended`: `--permission-mode dangerous --respect-workspace-trust false`
-  - `prompt`: no permission flag
+  - `unattended` (default; `AttentionLaunchMode::SkipPermissions` reflects this default posture): `--permission-mode dangerous --respect-workspace-trust false`
+  - `prompt`: no permission flag (Devin asks for approval and can emit `PermissionRequest` hooks)
 - **Session identity & resume**: `self_assigns_session_id() -> true`,
   `captures_session_id_from_pty() -> false`, `supports_resume: true`
-  (`--resume <SESSION_ID>`).
+  (`--resume <SESSION_ID>`). `session_id` is captured from attention hook
+  payloads (`http::routes::attention::normalizers::devin`, UUID format per
+  `Hooks Overview #command-hooks`).
 - **Attention hooks**: provisioned into `.devin/config.local.json` under the
-  `"hooks"` key for `SessionStart`, `UserPromptSubmit`, `Stop`,
-  `PermissionRequest`, `PreToolUse`, and `PostToolUse` (the tool hooks match
-  `^(ask_user_question|exit_plan_mode)$`). `circuit_observation` stays
-  `ObservationStrategy::UNWIRED` until end-to-end hook delivery is live-verified.
+  `"hooks"` key (documented as a gitignored local override in
+  `Hooks Overview #where-hooks-live`) for `SessionStart`, `UserPromptSubmit`,
+  `Stop`, `PermissionRequest`, `PreToolUse`, and `PostToolUse` (the tool hooks
+  match `^(ask_user_question|exit_plan_mode)$`). `http::routes::attention::normalizers::devin`
+  parses and classifies these payloads (`tests/fixtures/attention/devin.json`).
+  `circuit_observation` stays `ObservationStrategy::UNWIRED` until end-to-end
+  hook delivery is live-verified.
 - **Background inference**: `None` (`background_recipe` stays unwired until
   `-p/--print` is live-verified with an authenticated session).
 
