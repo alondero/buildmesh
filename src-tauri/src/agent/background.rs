@@ -509,7 +509,7 @@ mod tests {
     #[test]
     fn missing_capability_and_non_native_runtime_report_the_requirement() {
         for harness in [
-            "terminal", "freebuff", "cline", "cursor", "muse", "dsh", "perch",
+            "terminal", "freebuff", "cline", "cursor", "muse", "dsh", "perch", "devin",
         ] {
             let error = resolve_plan(plan(harness), &AppPreferences::default())
                 .err()

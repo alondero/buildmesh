@@ -782,6 +782,10 @@ mod tests {
         capabilities_for(&crate::agent::provider::adapters::PERCH)
     }
 
+    fn devin_caps() -> HarnessCapabilities {
+        capabilities_for(&crate::agent::provider::adapters::DEVIN)
+    }
+
     #[test]
     fn opencode2_capabilities_pin_the_v2_contract() {
         use crate::agent::session_lifecycle::LifecycleKind;
@@ -1353,6 +1357,21 @@ mod tests {
                 "macos".to_string()
             ]
         );
+
+        let devin = devin_caps();
+        assert_eq!(devin.harness_id, "devin");
+        assert!(devin.supports_resume);
+        assert!(devin.auto_resume_on_startup);
+        assert!(devin.requires_attention_hook);
+        assert!(!devin.supports_passive_turn_watcher);
+        assert!(!devin.produces_readable_transcript);
+        assert!(devin.supports_model_override);
+        assert!(!devin.supports_effort_override);
+        assert!(devin.supports_extra_args);
+        assert!(devin.supports_prefill);
+        assert!(!devin.is_plain_terminal);
+        assert!(devin.background_inference.is_none());
+        assert_eq!(devin.effort_control, EffortControlKind::None);
     }
 
     /// `supports_effort_override` must mirror `effort_control != None`. The
@@ -1377,6 +1396,7 @@ mod tests {
             freebuff_caps(),
             cline_caps(),
             perch_caps(),
+            devin_caps(),
         ] {
             let has_effort_control = !matches!(caps.effort_control, EffortControlKind::None);
             assert_eq!(
@@ -1417,6 +1437,7 @@ mod tests {
             &crate::agent::provider::adapters::FREEBUFF,
             &crate::agent::provider::adapters::CLINE,
             &crate::agent::provider::adapters::PERCH,
+            &crate::agent::provider::adapters::DEVIN,
         ] {
             let from_trait = adapter.descriptor().effort_control.clone();
             let from_descriptor = capabilities_for(adapter).effort_control;
@@ -2071,6 +2092,7 @@ mod tests {
             ("commandcode", commandcode_caps(), "--yolo"),
             ("muse", muse_caps(), "--disable-approval"),
             ("perch", perch_caps(), "--permission take_the_wheel"),
+            ("devin", devin_caps(), "--permission-mode dangerous"),
         ];
         for (id, caps, flag) in flag_harnesses {
             assert_eq!(caps.permission_modes.len(), 2, "{id}");

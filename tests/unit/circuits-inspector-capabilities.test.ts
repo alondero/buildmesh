@@ -123,7 +123,7 @@ describe('blocksReviewCircuit', () => {
   });
 
   it('allows a harness with a native hook, a passive turn watcher or a result-file handoff', () => {
-    for (const id of ['anthropic', 'codex', 'commandcode', 'muse', 'cline', 'dsh', 'freebuff', 'perch']) {
+    for (const id of ['anthropic', 'codex', 'commandcode', 'muse', 'cline', 'dsh', 'freebuff', 'perch', 'devin']) {
       expect(blocksReviewCircuit(id), id).toBe(false);
     }
   });

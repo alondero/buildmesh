@@ -11,8 +11,8 @@
 use super::adapter::{api_key_for, UsageAdapter};
 use super::adapters::{
     AgyAdapter, AnthropicAdapter, CodexAdapter, CommandcodeAdapter, CursorAdapter, DeepseekAdapter,
-    FreebuffAdapter, GrokAdapter, KimiAdapter, MinimaxAdapter, MuseCodeAdapter, OpenaiAdapter,
-    OpencodeAdapter, OpenrouterAdapter, PerchAdapter,
+    DevinAdapter, FreebuffAdapter, GrokAdapter, KimiAdapter, MinimaxAdapter, MuseCodeAdapter,
+    OpenaiAdapter, OpencodeAdapter, OpenrouterAdapter, PerchAdapter,
 };
 use super::cache::{FlightTicket, LeaderGuard};
 use super::outcome::UsageOutcome;
@@ -35,8 +35,9 @@ static DEEPSEEK_ADAPTER: DeepseekAdapter = DeepseekAdapter;
 static FREEBUFF_ADAPTER: FreebuffAdapter = FreebuffAdapter;
 static MUSE_CODE_ADAPTER: MuseCodeAdapter = MuseCodeAdapter;
 static PERCH_ADAPTER: PerchAdapter = PerchAdapter;
+static DEVIN_ADAPTER: DevinAdapter = DevinAdapter;
 
-static USAGE_METERS: [&'static dyn UsageAdapter; 15] = [
+static USAGE_METERS: [&'static dyn UsageAdapter; 16] = [
     &ANTHROPIC_ADAPTER,
     &CODEX_ADAPTER,
     &CURSOR_ADAPTER,
@@ -62,6 +63,7 @@ static USAGE_METERS: [&'static dyn UsageAdapter; 15] = [
     // Perch reads the CLI session and the account endpoint. Detection-gated
     // on the `perch` harness.
     &PERCH_ADAPTER,
+    &DEVIN_ADAPTER,
 ];
 
 /// Seam entry point: `catalog.dispatch(id).fetch(accounts)` proves the seam
@@ -600,6 +602,7 @@ mod tests {
             ("freebuff", Some("freebuff")),
             ("muse-code", Some("muse")),
             ("perch", Some("perch")),
+            ("devin", Some("devin")),
         ];
         for (id, harness) in cases {
             let adapter = dispatch(id).unwrap_or_else(|| panic!("missing adapter: {id}"));
@@ -678,6 +681,7 @@ mod tests {
             "freebuff",
             "muse-code",
             "perch",
+            "devin",
         ] {
             let adapter = dispatch(id).unwrap_or_else(|| panic!("missing adapter: {id}"));
             assert_eq!(adapter.id(), id, "dispatch({id}) returned wrong adapter");

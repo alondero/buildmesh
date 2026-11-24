@@ -2108,6 +2108,7 @@ fn paste_confirmation_policy_is_declared_per_harness() {
         ("codex", adapters::CODEX.paste_gate_policy()),
         ("commandcode", adapters::COMMANDCODE.paste_gate_policy()),
         ("cursor", adapters::CURSOR.paste_gate_policy()),
+        ("devin", adapters::DEVIN.paste_gate_policy()),
         ("dsh", adapters::DSH.paste_gate_policy()),
         ("freebuff", adapters::FREEBUFF.paste_gate_policy()),
         ("grok", adapters::GROK.paste_gate_policy()),
@@ -2118,7 +2119,7 @@ fn paste_confirmation_policy_is_declared_per_harness() {
         ("perch", adapters::PERCH.paste_gate_policy()),
         ("terminal", adapters::TERMINAL.paste_gate_policy()),
     ];
-    assert_eq!(policies.len(), 15, "one row per harness adapter");
+    assert_eq!(policies.len(), 16, "one row per harness adapter");
     for (name, policy) in policies {
         let expected = if *name == "codex" {
             PasteGatePolicy::RenderedWithSplitMarker

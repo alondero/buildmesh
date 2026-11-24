@@ -28,6 +28,7 @@ export const HARNESS_CATALOG = {
     "muse",
     "cline",
     "perch",
+    "devin",
     "terminal"
   ],
   "labels": {
@@ -37,6 +38,7 @@ export const HARNESS_CATALOG = {
     "codex": "Codex",
     "commandcode": "Command Code",
     "cursor": "Cursor",
+    "devin": "Devin",
     "dsh": "DeepSeek Harness",
     "freebuff": "Freebuff",
     "grok": "Grok Code",
@@ -375,6 +377,56 @@ export const HARNESS_CATALOG = {
         }
       ],
       "produces_readable_transcript": true,
+      "requires_attention_hook": true,
+      "supports_agent": false,
+      "supports_effort_override": false,
+      "supports_extra_args": true,
+      "supports_model_override": true,
+      "supports_passive_turn_watcher": false,
+      "supports_prefill": true,
+      "supports_result_file_handoff": true,
+      "supports_resume": true
+    },
+    "devin": {
+      "accepts_initial_prompt": true,
+      "attention_capability": {
+        "events": [
+          "turn_completed",
+          "input_required",
+          "question_requested",
+          "permission_requested"
+        ],
+        "kind": "hook",
+        "launch_mode": "skip_permissions",
+        "min_version": "3000.14.30821",
+        "trust": "workspace trust"
+      },
+      "auto_resume_on_startup": true,
+      "available_on": [
+        "windows",
+        "macos",
+        "linux"
+      ],
+      "background_inference": null,
+      "default_permission_mode": "unattended",
+      "effort_control": {
+        "kind": "none"
+      },
+      "harness_id": "devin",
+      "is_plain_terminal": false,
+      "permission_modes": [
+        {
+          "description": "Prompts off — tools run without asking and the workspace trust dialog is skipped (required for unattended runs).",
+          "id": "unattended",
+          "label": "--permission-mode dangerous --respect-workspace-trust false"
+        },
+        {
+          "description": "Devin asks for approval the way a human-launched session does.",
+          "id": "prompt",
+          "label": "Prompts on (no flag)"
+        }
+      ],
+      "produces_readable_transcript": false,
       "requires_attention_hook": true,
       "supports_agent": false,
       "supports_effort_override": false,

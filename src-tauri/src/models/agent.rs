@@ -93,6 +93,7 @@ pub enum Provider {
     /// Perch CLI (`perch`) — interactive coding agent from perchai-cli.
     /// See `agent::provider::adapters::perch`.
     Perch,
+    Devin,
     /// Plain shell terminal (PowerShell on Windows, `sh` on macOS/Linux,
     /// routed through `wsl.exe` on WSL meshes). No LLM agent loop.
     /// See `agent::provider::adapters::terminal`.
@@ -118,6 +119,7 @@ impl Provider {
             Provider::Muse,
             Provider::Cline,
             Provider::Perch,
+            Provider::Devin,
             Provider::Terminal,
         ]
     }
@@ -163,6 +165,7 @@ impl Provider {
             "muse" => Some(Provider::Muse),
             "cline" => Some(Provider::Cline),
             "perch" => Some(Provider::Perch),
+            "devin" => Some(Provider::Devin),
             "terminal" => Some(Provider::Terminal),
             _ => None,
         }
@@ -188,6 +191,7 @@ impl Provider {
             Provider::Muse => &adapters::MUSE,
             Provider::Cline => &adapters::CLINE,
             Provider::Perch => &adapters::PERCH,
+            Provider::Devin => &adapters::DEVIN,
             Provider::Terminal => &adapters::TERMINAL,
         }
     }
@@ -211,6 +215,7 @@ impl std::fmt::Display for Provider {
             Provider::Muse => write!(f, "muse"),
             Provider::Cline => write!(f, "cline"),
             Provider::Perch => write!(f, "perch"),
+            Provider::Devin => write!(f, "devin"),
             Provider::Terminal => write!(f, "terminal"),
         }
     }

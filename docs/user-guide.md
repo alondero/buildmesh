@@ -70,7 +70,7 @@ Buildmesh so the detection cache is refreshed.
 
 | Credential path | Applies to | Where to configure it |
 |---|---|---|
-| Harness-owned login or API key | Claude Code, Codex, Antigravity, OpenCode, Cursor, Grok Code, Kimi Code, MiniMax Code, DeepSeek Harness, Command Code, Freebuff, Meta Muse, and Perch | The selected CLI's own login/configuration flow |
+| Harness-owned login or API key | Claude Code, Codex, Antigravity, OpenCode, Cursor, Grok Code, Kimi Code, MiniMax Code, DeepSeek Harness, Command Code, Freebuff, Meta Muse, Perch, and Devin | The selected CLI's own login/configuration flow |
 | Buildmesh provider account | Anthropic, MiniMax, and Kimi usage/quota integrations | **Settings → Providers** |
 | Custom compatible endpoint | OpenAI Responses or Anthropic Messages APIs | **Settings → Providers → Add provider → Other / custom** |
 
@@ -824,6 +824,7 @@ The current built-in catalog is:
 | Cline | Yes | Hook | Needs Cline 3.0.62 or newer. Manage providers with `cline auth`; Buildmesh injects account credentials at spawn |
 | Meta Muse | Yes | Passive watcher | Native on Windows since v1.3.0; WSL guest otherwise. Reasoning effort is available as `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra` |
 | Perch | Yes | None | Interactive CLI. Model and effort overrides are available; there is no transcript reader. Circuits use its result file (below) |
+| Devin | Yes | Hook | Native CLI (`devin`). Supports model override, interactive prefill, and attention hooks via `.devin/config.local.json`; no effort override or transcript reader |
 | Terminal | No | None | A plain shell; closing the app loses its live process |
 
 A harness with no attention signal can still run Autopilot Circuits, as the
@@ -1475,6 +1476,7 @@ auto mode because there is nobody to answer a prompt.
 | Command Code | `--yolo` | Asks |
 | Meta Muse | `--disable-approval --disable-sandbox` | Asks (its own OS sandbox stays on) |
 | Perch | `--permission take_the_wheel` | Asks |
+| Devin | `--permission-mode dangerous --respect-workspace-trust false` | Asks |
 | MiniMax Code | Full Access (`permissionMode: bypassPermissions`, pinned in its config) | Not offered — always Full Access |
 | Kimi Code, Grok Code, Cline, DeepSeek Harness, Freebuff, Terminal | No permission flag | Each runs with its own defaults |
 

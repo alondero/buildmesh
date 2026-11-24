@@ -49,7 +49,7 @@ Run `cargo test -p buildmesh agent::capabilities` after an adapter edit, then
 
 ## Harness catalog
 
-Fifteen detectable harness ids plus the always-present Terminal give sixteen rows.
+The catalog lists sixteen detectable harness ids plus the built-in Terminal (seventeen rows total, pinned by `inventory_matches_research_matrix`).
 The OpenCode majors share a binary; a deferred version probe selects the matching id.
 "Adapter id" is the stable id matching the database `provider` column.
 
@@ -70,6 +70,7 @@ The OpenCode majors share a binary; a deferred version probe selects the matchin
 | Meta Muse | `muse` | `muse` | — |
 | Cline | `cline` | `cline` | `.cline` |
 | Perch | `perch` | `perch` | `.perch` |
+| Devin | `devin` | `devin` | — |
 | Terminal | `terminal` | — (always present) | — |
 
 Two entries are not harnesses of their own:
@@ -112,6 +113,7 @@ Legend: ✅ advertised, ❌ not advertised. Column shorthand:
 | Meta Muse | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | Native on Windows since Muse 1.3.0; workspace trust pre-provisioned (#1706); `--reasoning-effort` closed vocabulary (#1704) |
 | Cline | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | Native Provider; hook delivers turn completion only (no clean-exit dispatch); reader over `<id>.messages.json` (#1776) |
 | Perch | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | Resume via `--thread`; closed `--effort`; [deep dive](perch-harness-capabilities.md) |
+| Devin | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | Hooks provisioned into `.devin/config.local.json`; `-- <prompt>` prefill; [deep dive](devin-harness-capabilities.md) |
 | Terminal | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | Plain shell; the only `PlainShell` launch mode |
 
 Ten harnesses are archive-resumable (Resume **and** Transcript): Claude Code,
@@ -186,6 +188,7 @@ Non-boolean detail for the nine harnesses with a native attention hook
 | Grok Code | Permission ask | Turn completed, input required, question, permission | 1.0.5 | Global hook directory |
 | MiniMax Code | Skip permissions (pinned: `permissionMode: bypassPermissions`) | Turn completed | 0.4.12 | — |
 | Cline | Skip permissions | Turn completed | 3.0.62 | — |
+| Devin | Skip permissions | Turn completed, input required, question, permission | 3000.14.30821 | Workspace trust |
 
 Launch mode is a real boundary, not a label. Under **Skip permissions** the
 harness auto-approves tool calls, so a permission request is impossible by
@@ -260,6 +263,7 @@ before.
 | DeepSeek Harness | Result file | ✅ |
 | Freebuff | Result file | ✅ |
 | Perch | Result file | ✅ |
+| Devin | Attn hook | ✅ |
 | Terminal | None (plain shell) | ❌ |
 
 Eligibility is necessary, not sufficient, and several ✅ rows are weaker than
@@ -328,6 +332,7 @@ chooses its own and Buildmesh recovers it.
 | Meta Muse | Self-assigns | No |
 | Cline | Self-assigns | No |
 | Perch | Buildmesh mints | No |
+| Devin | Self-assigns | No (hook callback) |
 | Terminal | Buildmesh mints | No |
 
 Three other adapter-level behaviours worth knowing when adding support:
@@ -390,6 +395,6 @@ column here.
 - [Harness attention reliability audit](harness-attention-reliability.md) — per-harness hook evidence and remaining gaps
 - [User guide: harnesses and capabilities](../user-guide.md#harnesses-and-capabilities)
 - [Troubleshooting](../troubleshooting.md)
-- Per-harness deep dives: [Antigravity](agy-harness-capabilities.md), [Claude Code](claude-code-harness-capabilities.md), [Grok Code](grok-harness-capabilities.md), [MiniMax Code](mcode-harness-capabilities.md), [OpenCode](opencode-harness-capabilities.md), [Cline](cline-harness-capabilities.md), [Meta Muse](muse-harness-capabilities.md), [Perch](perch-harness-capabilities.md)
+- Per-harness deep dives: [Antigravity](agy-harness-capabilities.md), [Claude Code](claude-code-harness-capabilities.md), [Grok Code](grok-harness-capabilities.md), [MiniMax Code](mcode-harness-capabilities.md), [OpenCode](opencode-harness-capabilities.md), [Cline](cline-harness-capabilities.md), [Meta Muse](muse-harness-capabilities.md), [Perch](perch-harness-capabilities.md), [Devin](devin-harness-capabilities.md)
 - [Domain vocabulary](../../CONTEXT.md) — Agent Harness vs Model Provider
 - [AI context](../knowledge-primer.md)

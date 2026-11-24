@@ -197,6 +197,14 @@ const DETECTABLE: &[Detectable] = &[
         major_version: None,
         config_dirs: &[".perch"],
     },
+    Detectable {
+        id: "devin",
+        name: "Devin",
+        harness: "devin",
+        binaries: &["devin"],
+        major_version: None,
+        config_dirs: &[],
+    },
 ];
 
 /// Harnesses whose WSL cross-runtime probes are deliberately disabled. Cline
@@ -343,6 +351,15 @@ fn supplemental_user_bin_dirs(home: Option<&Path>) -> Vec<PathBuf> {
         dirs.push(home.join(".local").join("bin"));
         dirs.push(home.join(".cargo").join("bin"));
         dirs.push(home.join(".volta").join("bin"));
+        if cfg!(windows) {
+            dirs.push(
+                home.join("AppData")
+                    .join("Local")
+                    .join("devin")
+                    .join("cli")
+                    .join("bin"),
+            );
+        }
     }
     if cfg!(not(windows)) {
         dirs.push(PathBuf::from("/opt/homebrew/bin"));
@@ -1896,6 +1913,7 @@ mod tests {
             "/bin/cmd",
             "/bin/freebuff",
             "/bin/perch",
+            "/bin/devin",
         ]);
         let profiles = detect_profiles(&path_dirs, &[""], None, &exists);
         for p in &profiles {
@@ -1917,6 +1935,7 @@ mod tests {
                 "commandcode" => assert_eq!(provider, Provider::CommandCode),
                 "freebuff" => assert_eq!(provider, Provider::Freebuff),
                 "perch" => assert_eq!(provider, Provider::Perch),
+                "devin" => assert_eq!(provider, Provider::Devin),
                 other => panic!("unexpected detected id {other}"),
             }
         }
