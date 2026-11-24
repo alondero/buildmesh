@@ -18,7 +18,8 @@
     "terminal"
   ],
   "aliases": {
-    "claude": "anthropic"
+    "claude": "anthropic",
+    "opencode": "opencode2"
   },
   "eligibility": {
     "agy": {

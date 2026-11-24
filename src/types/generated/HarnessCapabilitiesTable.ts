@@ -827,7 +827,8 @@ export const HARNESS_CATALOG = {
     }
   },
   "aliases": {
-    "claude": "anthropic"
+    "claude": "anthropic",
+    "opencode": "opencode2"
   }
 } as Catalog;
 

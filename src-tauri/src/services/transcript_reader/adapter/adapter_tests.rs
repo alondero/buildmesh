@@ -43,3 +43,10 @@ fn only_minimax_code_declares_the_idle_wake_up_gap() {
         );
     }
 }
+
+#[test]
+fn dispatch_resolves_the_legacy_opencode_id_to_opencode2() {
+    let legacy = crate::services::transcript_reader::adapter::dispatch("opencode")
+        .expect("legacy OpenCode row owns a reader");
+    assert_eq!(legacy.id(), "opencode2");
+}

@@ -1179,10 +1179,10 @@ profiles and pairings it ranks against too.
 
 ### One alias table
 
-The `claude` → `anthropic` mapping is declared once, in
-`agent::harness_catalog::HARNESS_PROFILE_ALIASES`. `harness_profile_alias` and
-`harness_profile_id_for_adapter` resolve it in both directions, so no module
-re-derives it. `agent::harness_catalog::HARNESS_MENU_LAST` sits next to it: a
+The `claude` → `anthropic` and retired `opencode` → `opencode2` mappings are
+declared once, in `agent::harness_catalog::HARNESS_PROFILE_ALIASES`.
+`harness_profile_alias` and `harness_profile_id_for_adapter` resolve them in
+both directions, so no module re-derives them. `agent::harness_catalog::HARNESS_MENU_LAST` sits next to it: a
 harness declares its own Spawn Menu position rather than the comparator
 special-casing one id, which is why Terminal sorts last.
 

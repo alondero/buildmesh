@@ -38,9 +38,10 @@ themselves. Three harnesses drifted silently.
 3. The Inspector and docs gates consume the generated artifact. Lookup helpers
    (`getCapabilitiesFor`, `effortAllowedFor`) stay in TypeScript because they
    are logic, not data.
-4. The Harness Profile id `claude` is not a `Provider` variant. The catalog
-   exports `HARNESS_PROFILE_ALIASES` (`claude` → `anthropic`) so that mapping
-   is deliberate. Completeness tests require
+4. The Harness Profile ids `claude` and `opencode` are not `Provider`
+   variants. The catalog exports `HARNESS_PROFILE_ALIASES` (`claude` →
+   `anthropic`, `opencode` → `opencode2`) so those mappings are deliberate.
+   Completeness tests require
    `BUILTIN_HARNESS_IDS == catalog keys ∪ aliases`.
 5. Docs: every generated label must appear as a `| <label> |` row in
    `docs/user-guide.md` and `docs/learning/harness-capabilities-matrix.md`.

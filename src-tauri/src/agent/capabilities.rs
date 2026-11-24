@@ -1859,12 +1859,6 @@ mod tests {
             permission_mode: FieldInputs::default(),
             agent: FieldInputs::default(),
         };
-        // Issue #1286: agy now accepts `--effort <low|medium|high>`, so
-        // the application's `high` value passes the mask. Switch the
-        // harness under test to `kimi` (advertises `supports_model_override`
-        // but not effort), preserving the original "model passes,
-        // effort drops" shape. `opencode` would also work but lacks
-        // model override; kimi is the closest match.
         let resolved = resolve_agent_config(&kimi_caps(), inputs, None);
         assert_eq!(
             resolved.model.as_deref(),

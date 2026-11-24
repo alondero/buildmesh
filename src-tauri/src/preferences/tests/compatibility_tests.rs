@@ -258,6 +258,24 @@ fn normalize_harness_default_trims_blanks_and_whitespace() {
 }
 
 #[test]
+fn harness_default_for_reads_legacy_opencode_key() {
+    let mut prefs = AppPreferences::default();
+    prefs.harness_defaults.insert(
+        "opencode".to_string(),
+        HarnessConfigValue {
+            model: Some("opencode-model".to_string()),
+            effort: None,
+            permission_mode: None,
+            agent: None,
+        },
+    );
+    for harness in ["opencode", "opencode2"] {
+        let read = harness_default_for(&prefs, &SpawnOptionId::from(harness)).unwrap();
+        assert_eq!(read.model.as_deref(), Some("opencode-model"));
+    }
+}
+
+#[test]
 fn harness_default_for_reads_back_stored_value() {
     let mut prefs = AppPreferences::default();
     prefs.harness_defaults.insert(

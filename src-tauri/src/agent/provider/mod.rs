@@ -81,6 +81,7 @@ pub const BUILTIN_HARNESS_IDS: &[&str] = &[
     "kimi",
     "mcode",
     "dsh",
+    "opencode",
     "opencode2",
     "commandcode",
     "freebuff",

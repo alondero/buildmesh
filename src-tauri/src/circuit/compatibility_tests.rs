@@ -81,6 +81,19 @@ fn resolve_harness_adapter_id_maps_claude_to_anthropic() {
 }
 
 #[test]
+fn resolve_harness_adapter_id_maps_legacy_opencode_to_opencode2() {
+    assert_eq!(resolve_harness_adapter_id("opencode"), Some("opencode2"));
+    assert_eq!(resolve_harness_adapter_id("OpenCode"), Some("opencode2"));
+    assert_eq!(
+        resolve_harness_adapter_id("  OPENCODE  "),
+        Some("opencode2")
+    );
+    let caps = lookup_capabilities("opencode").expect("legacy OpenCode resolves");
+    assert!(caps.produces_readable_transcript);
+    assert_eq!(reviewer_harness_reason("opencode"), None);
+}
+
+#[test]
 fn resolve_harness_adapter_id_maps_commandcode_and_aliases() {
     assert_eq!(
         resolve_harness_adapter_id("commandcode"),

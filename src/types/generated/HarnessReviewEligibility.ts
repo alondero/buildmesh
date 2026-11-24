@@ -67,7 +67,8 @@ export const HARNESS_REVIEW_ELIGIBILITY_CATALOG = {
     "terminal"
   ],
   "aliases": {
-    "claude": "anthropic"
+    "claude": "anthropic",
+    "opencode": "opencode2"
   },
   "eligibility": {
     "agy": {

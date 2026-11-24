@@ -624,6 +624,7 @@ fn merge_confirmed_versions(
 }
 
 fn version_requirement(harness: &str) -> Option<u64> {
+    let harness = crate::agent::harness_catalog::harness_adapter_id(harness);
     DETECTABLE
         .iter()
         .find(|d| d.harness == harness)?
@@ -825,6 +826,7 @@ pub(crate) fn validate_saved_native_profile(profile: &HarnessProfile) -> Result<
 }
 
 pub(crate) fn canonical_harness(id: &str) -> Option<&'static str> {
+    let id = crate::agent::harness_catalog::harness_adapter_id(id);
     DETECTABLE
         .iter()
         .find(|tool| tool.id == id || tool.harness == id)
@@ -1558,6 +1560,21 @@ mod tests {
         assert_eq!(ids, vec!["claude"]);
         assert_eq!(profiles[0].name, "Claude Code");
         assert_eq!(profiles[0].harness, "anthropic");
+    }
+
+    #[test]
+    fn version_requirement_resolves_legacy_opencode_harness() {
+        assert_eq!(version_requirement("opencode"), Some(2));
+        assert_eq!(version_requirement("opencode2"), Some(2));
+    }
+
+    #[test]
+    fn canonical_harness_resolves_legacy_opencode_id() {
+        assert_eq!(canonical_harness("opencode"), Some("opencode2"));
+        assert_eq!(
+            canonical_wsl_harness("opencode-wsl-Ubuntu"),
+            Some("opencode2")
+        );
     }
 
     #[test]

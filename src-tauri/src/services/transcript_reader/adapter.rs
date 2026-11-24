@@ -210,6 +210,7 @@ static ADAPTERS: [&'static dyn TranscriptAdapter; 10] = [
 /// module — is the dispatch and test surface. Returns `None` for unknown
 /// harness ids. Transcript reads never fall back to another harness.
 pub(crate) fn dispatch(harness_id: &str) -> Option<&'static dyn TranscriptAdapter> {
+    let harness_id = crate::agent::harness_catalog::harness_adapter_id(harness_id);
     ADAPTERS.iter().copied().find(|a| a.id() == harness_id)
 }
 

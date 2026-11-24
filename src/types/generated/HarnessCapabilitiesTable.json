@@ -814,6 +814,7 @@
     }
   },
   "aliases": {
-    "claude": "anthropic"
+    "claude": "anthropic",
+    "opencode": "opencode2"
   }
 }
