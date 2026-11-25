@@ -17,7 +17,7 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 import type { SpawnOption } from '../../lib/groups';
 import type { SpawnConfiguration } from '../../types/generated/SpawnConfiguration';
-import { deleteSpawnConfiguration, getLaunchTargets, listProviders, listSpawnConfigurations, reorderSpawnConfigurations, saveSpawnConfiguration, verifyLaunchConfiguration } from '../../lib/tauri/provider';
+import { deleteSpawnConfiguration, getHarnessModelCatalog, getLaunchTargets, listProviders, listSpawnConfigurations, reorderSpawnConfigurations, saveSpawnConfiguration, verifyLaunchConfiguration } from '../../lib/tauri/provider';
 import {
   applyHarnessConfigurationOrder,
   getLaunchConfigurationReorderCoordinator,
@@ -483,6 +483,7 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
       {draft ? <LaunchConfigurationEditor key={draftSession.current} value={draft} targets={targets} onCancel={option.configuration ? () => { cancelDraft(); close(); } : cancelDraft}
         onSave={persistConfiguration}
         onVerify={verifyLaunchConfiguration}
+        getModelCatalog={getHarnessModelCatalog}
         onDelete={draft.id ? async () => {
           const session = draftSession.current;
           const deletedId = draft.id;

@@ -359,6 +359,10 @@ fn resolve_plan(
         },
         extra.as_deref(),
     );
+    crate::agent::capabilities::mask_independent_effort_for_encoded_model(
+        Provider::from_db_str(&harness.harness).adapter(),
+        &mut config,
+    );
     let route = if let Some(provider_id) = id.provider_id() {
         let account = prefs
             .provider_accounts

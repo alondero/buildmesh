@@ -578,6 +578,17 @@ pub trait AgentProvider: Send + Sync {
         Ok(())
     }
 
+    fn model_catalog_probe(&self) -> Option<crate::agent::model_catalog::ModelCatalogProbe> {
+        None
+    }
+
+    fn parse_model_catalog(
+        &self,
+        _stdout: &str,
+    ) -> Result<Vec<crate::agent::model_catalog::HarnessCatalogModel>, String> {
+        Err("Harness does not support model and effort discovery".into())
+    }
+
     /// Whether the harness's attention integration reports a prompt that
     /// starts a turn (`UserPromptSubmit`, OpenCode's `session.busy`). Only then can
     /// a submitted keystroke that no observation follows be read as "started
@@ -836,6 +847,10 @@ pub trait AgentProvider: Send + Sync {
         _platform: Platform,
     ) -> Option<crate::agent::background::BackgroundRecipe> {
         None
+    }
+
+    fn model_encodes_effort(&self, _model: &str) -> bool {
+        false
     }
 
     /// Args for effort override.

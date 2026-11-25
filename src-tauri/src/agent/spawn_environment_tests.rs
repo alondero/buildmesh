@@ -228,7 +228,10 @@ fn agent_spawn_drops_the_launching_claude_code_sessions_markers() {
         let cmd = super::wrap(recipe, EnvType::Windows, None, None, ".", 4242, false)
             .expect("an unsandboxed command always assembles");
         for key in CLAUDE_SESSION_MARKER_ENV_VARS {
-            assert!(cmd.get_env(key).is_none(), "{key} reached a spawned agent: an agent launched from inside a Claude Code session would inherit the launching session's identity and, for CLAUDE_CODE_CHILD_SESSION, save no transcript (issue #2136)");
+            assert!(
+                cmd.get_env(key).is_none(),
+                "{key} reached a spawned agent: an agent launched from inside a Claude Code session would inherit the launching session's identity and, for CLAUDE_CODE_CHILD_SESSION, save no transcript (issue #2136)"
+            );
         }
     });
 }
@@ -648,8 +651,16 @@ fn live_wsl_host_launches_windows_harnesses() {
                     vec![],
                 )
             } else {
-                ("powershell.exe".to_string(), vec!["-NoProfile".into(), "-EncodedCommand".into(),
-                        encode_for_powershell("[IO.File]::WriteAllText((Join-Path $PWD.ProviderPath 'probe.txt'), $env:BUILDMESH_SESSION_ID)")])
+                (
+                    "powershell.exe".to_string(),
+                    vec![
+                        "-NoProfile".into(),
+                        "-EncodedCommand".into(),
+                        encode_for_powershell(
+                            "[IO.File]::WriteAllText((Join-Path $PWD.ProviderPath 'probe.txt'), $env:BUILDMESH_SESSION_ID)",
+                        ),
+                    ],
+                )
             };
             let recipe = SpawnRecipe {
                 binary: "probe",
@@ -1937,10 +1948,11 @@ fn format_powershell_command_quotes_multiline_prefill_safely() {
     for (i, _) in cmd_str.match_indices('\n') {
         let quotes_before = cmd_str[..i].chars().filter(|c| *c == '\'').count();
         assert!(
-                quotes_before % 2 == 1,
-                "newline at byte {} is outside a quoted string — PowerShell will parse it as a new statement.\nCommand: {}",
-                i, cmd_str
-            );
+            quotes_before % 2 == 1,
+            "newline at byte {} is outside a quoted string — PowerShell will parse it as a new statement.\nCommand: {}",
+            i,
+            cmd_str
+        );
     }
 }
 
@@ -1955,4 +1967,27 @@ fn format_powershell_command_escapes_embedded_single_quotes() {
         "expected doubled-quote escaping, got: {}",
         cmd_str
     );
+}
+
+#[cfg(windows)]
+#[test]
+fn background_runtime_probe_wraps_wsl_without_a_host_working_directory() {
+    let recipe = SpawnRecipe {
+        binary: "codex",
+        base_args: vec!["debug".into(), "models".into()],
+        trailing_args: Vec::new(),
+        windows_shell: WindowsShell::Direct,
+    };
+    let command =
+        super::background_command_for_runtime(&recipe, None, EnvType::Wsl, Some("Ubuntu")).unwrap();
+    assert_eq!(command.get_program(), "wsl.exe");
+    let args: Vec<_> = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(args[0..2], ["-d", "Ubuntu"]);
+    assert!(args.windows(2).any(|pair| pair == ["--exec", "sh"]));
+    assert_eq!(args.last().map(String::as_str), Some("models"));
+    assert!(!args.iter().any(|arg| arg == "--cd"));
+    assert!(args.iter().any(|arg| arg == "codex"));
 }

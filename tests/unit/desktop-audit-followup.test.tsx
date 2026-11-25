@@ -118,7 +118,7 @@ describe('October desktop audit follow-up', () => {
   });
 
   it('saving and deleting a Launch Configuration refreshes both catalogs while live probes remain pending', async () => {
-    const target: LaunchTarget = { id: 'claude', harness_id: 'claude', harness_name: 'Claude Code', provider_name: 'Native authentication', models: [], efforts: [], route_attached: false, manual_model: false, supports_model: false, supports_extra_args: true };
+    const target: LaunchTarget = { id: 'claude', harness_id: 'claude', harness_name: 'Claude Code', provider_name: 'Native authentication', models: [], efforts: [], route_attached: false, manual_model: false, supports_model: false, supports_model_effort_discovery: false, supports_extra_args: true, supports_agent: false };
     let saved: SpawnConfiguration | null = null;
     let routingReads = 0;
     let liveReads = 0;

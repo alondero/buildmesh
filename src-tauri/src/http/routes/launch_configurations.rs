@@ -27,6 +27,21 @@ pub async fn targets(_: &ParsedRequest) -> Response {
     )
 }
 
+pub async fn model_catalog(req: &ParsedRequest) -> Response {
+    let Some(harness_id) = req.query_param("harness") else {
+        return Response::json_error("400 Bad Request", "Missing harness query parameter");
+    };
+    let login_id = req.query_param("login");
+    respond(
+        crate::commands::run_blocking("harness_model_catalog", move || {
+            let catalog =
+                launch_catalog::harness_model_catalog_blocking(&harness_id, login_id.as_deref())?;
+            serde_json::to_string(&catalog).map_err(|e| e.to_string())
+        })
+        .await,
+    )
+}
+
 pub async fn save(req: &ParsedRequest) -> Response {
     let value = match serde_json::from_slice::<ConfigurationRequest>(&req.body) {
         Ok(value) => value,

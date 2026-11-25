@@ -74,7 +74,7 @@ function providerList(): ProviderInfo[] {
     attention_capability: null,
     supports_passive_turn_watcher: false,
     produces_readable_transcript: true,
-    supports_model_override: false,
+    supports_model_override: false, supports_model_effort_discovery: false,
     supports_effort_override: false,
     supports_extra_args: false, supports_agent: false,
     supports_prefill: false,

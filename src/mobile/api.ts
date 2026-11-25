@@ -269,6 +269,8 @@ export async function getUsage(refresh = false, signal?: AbortSignal): Promise<i
 export const launchConfigurationApi = {
   list: async (): Promise<import('../types/generated/SpawnConfiguration').SpawnConfiguration[]> => (await apiFetch('/api/launch-configurations')).json(),
   targets: async (): Promise<import('../types/generated/LaunchTarget').LaunchTarget[]> => (await apiFetch('/api/launch-targets')).json(),
+  modelCatalog: async (harnessId: string, loginId?: string): Promise<import('../types/generated/HarnessModelCatalog').HarnessModelCatalog> =>
+    (await apiFetch(`/api/launch-targets/model-catalog?harness=${encodeURIComponent(harnessId)}${loginId ? `&login=${encodeURIComponent(loginId)}` : ''}`)).json(),
   save: async (value: import('../types/generated/SpawnConfiguration').SpawnConfiguration, route?: import('../types/generated/ProviderPairing').ProviderPairing): Promise<import('../types/generated/SpawnConfiguration').SpawnConfiguration> =>
     (await apiFetch('/api/launch-configurations/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...value, route }) })).json(),
   verify: async (value: import('../types/generated/SpawnConfiguration').SpawnConfiguration, route?: import('../types/generated/ProviderPairing').ProviderPairing): Promise<import('../types/generated/PairingVerification').PairingVerification> =>

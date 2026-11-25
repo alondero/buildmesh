@@ -53,15 +53,15 @@ impl AgentProvider for OpenCode2Adapter {
                 available_on: { &[Platform::Windows, Platform::Macos, Platform::Linux] },
                 permission_modes: {
                     vec![
-                    PermissionModeOption::unattended(
-                        "--auto",
-                        "Use OpenCode's auto-approve mode with managed project permission rules.",
-                    ),
-                    PermissionModeOption::prompt(
-                        "Prompts on (no flag)",
-                        "OpenCode asks before permission-gated tools.",
-                    ),
-                ]
+                        PermissionModeOption::unattended(
+                            "--auto",
+                            "Use OpenCode's auto-approve mode with managed project permission rules.",
+                        ),
+                        PermissionModeOption::prompt(
+                            "Prompts on (no flag)",
+                            "OpenCode asks before permission-gated tools.",
+                        ),
+                    ]
                 },
                 ..Default::default()
             });
@@ -85,6 +85,27 @@ impl AgentProvider for OpenCode2Adapter {
             trailing_args: vec![],
             windows_shell: shell_for(platform),
         }
+    }
+
+    fn model_catalog_probe(&self) -> Option<crate::agent::model_catalog::ModelCatalogProbe> {
+        Some(crate::agent::model_catalog::ModelCatalogProbe {
+            binary: None,
+            args: vec!["api".into(), "--standalone".into(), "model.list".into()],
+            effort_storage: crate::agent::model_catalog::ModelEffortStorage::EncodedInModel,
+            login_home_env: None,
+            env_remove: &[
+                "OPENCODE_CONFIG",
+                "OPENCODE_CONFIG_CONTENT",
+                "OPENCODE_CONFIG_DIR",
+            ],
+        })
+    }
+
+    fn parse_model_catalog(
+        &self,
+        stdout: &str,
+    ) -> Result<Vec<crate::agent::model_catalog::HarnessCatalogModel>, String> {
+        parse_opencode_model_catalog(stdout)
     }
 
     fn confirms_prompt_submission(&self) -> bool {
@@ -267,7 +288,7 @@ fn prepare_identity(
             cause == crate::agent::spawn::ResumeCause::Regenerate,
         ),
         SessionIdModeRef::None => {
-            return Err("OpenCode 2 requires an assigned session identity".into())
+            return Err("OpenCode 2 requires an assigned session identity".into());
         }
     };
     if crate::http::request::parse_opencode_session_id(id).as_deref() != Some(id) {
@@ -299,7 +320,7 @@ fn prepare_identity(
             ) {
                 Ok(response) if response["data"]["id"].as_str() == Some(&target) => false,
                 Ok(_) => {
-                    return Err("OpenCode 2 lookup returned a different session identity".into())
+                    return Err("OpenCode 2 lookup returned a different session identity".into());
                 }
                 // A failed initial create can leave only Buildmesh's persisted id.
                 // Recover this explicit server result; do not mask transient failures.
@@ -471,6 +492,62 @@ fn decode_api_output(output: std::process::Output) -> Result<serde_json::Value, 
             "OpenCode 2 session API returned malformed JSON: {e}"
         ))
     })
+}
+
+fn parse_opencode_model_catalog(
+    stdout: &str,
+) -> Result<Vec<crate::agent::model_catalog::HarnessCatalogModel>, String> {
+    let root: serde_json::Value = serde_json::from_str(stdout).map_err(|e| e.to_string())?;
+    let rows = root["data"]
+        .as_array()
+        .ok_or("OpenCode model catalog has no data array")?;
+    let mut models = Vec::new();
+    for row in rows {
+        if row["enabled"].as_bool() != Some(true) || row["status"].as_str().is_none() {
+            continue;
+        }
+        let (Some(provider), Some(model_id)) = (
+            row["providerID"].as_str(),
+            row["id"].as_str().filter(|id| !id.trim().is_empty()),
+        ) else {
+            continue;
+        };
+        let base = format!("{provider}/{model_id}");
+        if models
+            .iter()
+            .any(|model: &crate::agent::model_catalog::HarnessCatalogModel| model.id == base)
+        {
+            continue;
+        }
+        let efforts = row["variants"]
+            .as_array()
+            .map(|variants| {
+                variants
+                    .iter()
+                    .filter_map(|variant| {
+                        let id = variant["id"].as_str()?.trim();
+                        if id.is_empty() {
+                            return None;
+                        }
+                        let id = id.to_string();
+                        Some(crate::agent::model_catalog::HarnessCatalogEffort {
+                            name: id.clone(),
+                            description: None,
+                            model: Some(format!("{base}#{id}")),
+                            id,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        models.push(crate::agent::model_catalog::HarnessCatalogModel {
+            id: base,
+            name: row["name"].as_str().unwrap_or(model_id).into(),
+            description: None,
+            efforts,
+        });
+    }
+    Ok(models)
 }
 
 #[cfg(test)]

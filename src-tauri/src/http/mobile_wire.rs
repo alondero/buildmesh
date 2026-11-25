@@ -117,6 +117,7 @@ fn harness_capabilities(
         supports_result_file_handoff: !plain_terminal,
         produces_readable_transcript: true,
         supports_model_override: true,
+        supports_model_effort_discovery: false,
         supports_agent: false,
         supports_effort_override: false,
         supports_extra_args: true,
@@ -455,6 +456,27 @@ fn fixtures() -> Vec<Fixture> {
         fixture("meshes", &vec![mesh()]),
         fixture("nodes", &vec![agent_node()]),
         fixture("providers", &provider_menu()),
+        fixture(
+            "harness_model_catalog",
+            &crate::agent::model_catalog::HarnessModelCatalog {
+                harness_id: "agy".to_string(),
+                effort_storage: crate::agent::model_catalog::ModelEffortStorage::EncodedInModel,
+                models: vec![crate::agent::model_catalog::HarnessCatalogModel {
+                    id: "gemini-4-neon-high".to_string(),
+                    name: "Gemini 4 Neon".to_string(),
+                    description: Some("Exact Antigravity catalog group".to_string()),
+                    efforts: ["low", "medium", "high", "xhigh"]
+                        .into_iter()
+                        .map(|effort| crate::agent::model_catalog::HarnessCatalogEffort {
+                            id: effort.to_string(),
+                            name: effort.to_string(),
+                            description: Some("Effort is encoded in the model id".to_string()),
+                            model: Some(format!("gemini-4-neon-{effort}")),
+                        })
+                        .collect(),
+                }],
+            },
+        ),
         fixture(
             "usage",
             &vec![crate::http::routes::providers::MobileProviderUsage {

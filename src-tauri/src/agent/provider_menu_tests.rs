@@ -513,6 +513,7 @@ fn caps_all_false(id: &str) -> crate::agent::capabilities::HarnessCapabilities {
         supports_result_file_handoff: false,
         produces_readable_transcript: false,
         supports_model_override: false,
+        supports_model_effort_discovery: false,
         supports_agent: false,
         supports_effort_override: false,
         supports_prefill: false,

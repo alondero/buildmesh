@@ -50,7 +50,7 @@ function provider(id: string, label: string): ProviderInfo {
       auto_resume_on_startup: false,
       requires_attention_hook: false,
       produces_readable_transcript: false,
-      supports_model_override: false,
+      supports_model_override: false, supports_model_effort_discovery: false,
       supports_effort_override: false,
       supports_prefill: false,
       is_plain_terminal: id === 'terminal',

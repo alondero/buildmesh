@@ -35,6 +35,13 @@ use toml_edit::{value, DocumentMut, Item, Table};
 pub struct CodexAdapter;
 pub static CODEX: CodexAdapter = CodexAdapter;
 
+const CODEX_INHERITED_CREDENTIAL_ENV_VARS: &[&str] = &[
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "CODEX_API_KEY",
+    "CODEX_ACCESS_TOKEN",
+];
+
 const CODEX_OWNERSHIP_LIMIT: &str = "Codex recorded a completed foreground turn, but its rollout cannot verify all owned child and background work. Inspect the agent and Recheck evidence; this turn does not establish assigned-work completion.";
 
 /// Native `request_user_input` hooks were verified against Codex 0.154.0.
@@ -127,10 +134,11 @@ impl AgentProvider for CodexAdapter {
                 ..input
             },
         );
-        prepared
-            .environment
-            .env_remove
-            .extend(["OPENAI_API_KEY".into(), "OPENAI_BASE_URL".into()]);
+        prepared.environment.env_remove.extend(
+            CODEX_INHERITED_CREDENTIAL_ENV_VARS
+                .iter()
+                .map(|key| key.to_string()),
+        );
         if routing.is_some() {
             prepared
                 .environment
@@ -216,35 +224,35 @@ impl AgentProvider for CodexAdapter {
                 },
                 circuit_observation: {
                     ObservationStrategy {
-            push: PushSource::Hooks(HookPush {
-                parse: |value| hook_contract::parse("codex", false, value),
-                source: "codex_native_hook",
-                request_source: "codex_request_hook",
-                ownership_gap: None,
-                foreground: true,
-            }),
-            pull: PullSource::NativeTurnCompletion(NativePull {
-                source: "codex_rollout_task_complete",
-                recheck_source: "codex_rollout_foreground_recheck",
-                label: "Codex",
-                ownership_limit: CODEX_OWNERSHIP_LIMIT,
-            }),
-            turn_identity: TurnIdentity::NativeToken,
-            owned_work: OwnedWorkCoverage::Unavailable {
-                reason: "rollouts do not expose a complete child/background registry",
-            },
-            final_report: FinalReportSource::PullMessage,
-            reconciliation: ReconciliationPolicy {
-                yielded_budget_ms: 60_000,
-            },
-            passive_watcher: None,
-            notes: StrategyNotes {
-                foreground: "Identity-bound rollout task_complete pull",
-                owned_work: "rollouts do not expose a complete child/background registry",
-                final_report: "Scrubbed task_complete response; oversized or missing records remain unavailable",
-                reconciliation: "Bounded native rollout pull with session, turn, input and timestamp fences",
-            },
-        }
+                        push: PushSource::Hooks(HookPush {
+                            parse: |value| hook_contract::parse("codex", false, value),
+                            source: "codex_native_hook",
+                            request_source: "codex_request_hook",
+                            ownership_gap: None,
+                            foreground: true,
+                        }),
+                        pull: PullSource::NativeTurnCompletion(NativePull {
+                            source: "codex_rollout_task_complete",
+                            recheck_source: "codex_rollout_foreground_recheck",
+                            label: "Codex",
+                            ownership_limit: CODEX_OWNERSHIP_LIMIT,
+                        }),
+                        turn_identity: TurnIdentity::NativeToken,
+                        owned_work: OwnedWorkCoverage::Unavailable {
+                            reason: "rollouts do not expose a complete child/background registry",
+                        },
+                        final_report: FinalReportSource::PullMessage,
+                        reconciliation: ReconciliationPolicy {
+                            yielded_budget_ms: 60_000,
+                        },
+                        passive_watcher: None,
+                        notes: StrategyNotes {
+                            foreground: "Identity-bound rollout task_complete pull",
+                            owned_work: "rollouts do not expose a complete child/background registry",
+                            final_report: "Scrubbed task_complete response; oversized or missing records remain unavailable",
+                            reconciliation: "Bounded native rollout pull with session, turn, input and timestamp fences",
+                        },
+                    }
                 },
                 produces_readable_transcript: true,
                 supports_model_override: true,
@@ -297,6 +305,23 @@ impl AgentProvider for CodexAdapter {
             trailing_args: Vec::new(),
             windows_shell: shell_for(platform),
         }
+    }
+
+    fn model_catalog_probe(&self) -> Option<crate::agent::model_catalog::ModelCatalogProbe> {
+        Some(crate::agent::model_catalog::ModelCatalogProbe {
+            binary: None,
+            args: vec!["debug".into(), "models".into()],
+            effort_storage: crate::agent::model_catalog::ModelEffortStorage::Separate,
+            login_home_env: Some("CODEX_HOME"),
+            env_remove: CODEX_INHERITED_CREDENTIAL_ENV_VARS,
+        })
+    }
+
+    fn parse_model_catalog(
+        &self,
+        stdout: &str,
+    ) -> Result<Vec<crate::agent::model_catalog::HarnessCatalogModel>, String> {
+        parse_codex_model_catalog(stdout)
     }
 
     fn permission_args(&self, mode_id: &str) -> Vec<String> {
@@ -364,7 +389,10 @@ impl AgentProvider for CodexAdapter {
             BackgroundPromptInput::Stdin,
             BackgroundResultOutput::LastMessageFile,
         );
-        recipe.env_remove = vec!["OPENAI_API_KEY".into(), "OPENAI_BASE_URL".into()];
+        recipe.env_remove = CODEX_INHERITED_CREDENTIAL_ENV_VARS
+            .iter()
+            .map(|key| key.to_string())
+            .collect();
         Some(recipe)
     }
 
@@ -513,6 +541,48 @@ impl AgentProvider for CodexAdapter {
     fn prefill_args(&self, text: &str) -> Vec<String> {
         vec![text.into()]
     }
+}
+
+fn parse_codex_model_catalog(
+    stdout: &str,
+) -> Result<Vec<crate::agent::model_catalog::HarnessCatalogModel>, String> {
+    let root: serde_json::Value = serde_json::from_str(stdout).map_err(|e| e.to_string())?;
+    let rows = root["models"]
+        .as_array()
+        .ok_or("Codex model catalog has no models array")?;
+    let mut models = Vec::new();
+    for row in rows {
+        if row["visibility"].as_str() != Some("list") {
+            continue;
+        }
+        let Some(id) = row["slug"].as_str() else {
+            continue;
+        };
+        let efforts = row["supported_reasoning_levels"]
+            .as_array()
+            .map(|levels| {
+                levels
+                    .iter()
+                    .filter_map(|level| {
+                        let id = level["effort"].as_str()?.to_string();
+                        Some(crate::agent::model_catalog::HarnessCatalogEffort {
+                            name: id.clone(),
+                            description: level["description"].as_str().map(str::to_owned),
+                            id,
+                            model: None,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        models.push(crate::agent::model_catalog::HarnessCatalogModel {
+            id: id.into(),
+            name: row["display_name"].as_str().unwrap_or(id).into(),
+            description: row["description"].as_str().map(str::to_owned),
+            efforts,
+        });
+    }
+    Ok(models)
 }
 
 #[cfg(test)]

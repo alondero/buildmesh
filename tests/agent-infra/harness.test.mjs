@@ -323,6 +323,26 @@ test('one + (exact) sibling', () => { throw new Error('persistent sibling'); });
   assert.doesNotMatch(readFileSync(skipped.failures[0].rerun.log, 'utf8'), /isolation.test.jsx/);
 });
 
+test('real Vitest isolation reruns a nested test by its case title', async t => {
+  const fixture = repo(t);
+  symlinkSync(join(root, 'node_modules'), join(fixture.cwd, 'node_modules'), 'junction');
+  fixture.put('scripts/harness-vitest-isolate.mjs', readFileSync(join(root, 'scripts/harness-vitest-isolate.mjs')));
+  fixture.put('package.json', '{"type":"module"}');
+  fixture.put('vitest.config.mjs', 'export default { test: { include: ["tests/*.test.js"], environment: "node", passWithNoTests: false } };');
+  fixture.put('tests/isolation.test.js', `import { describe, expect, test } from 'vitest';
+describe('nested suite', () => {
+  test('passes only in isolation', () => { expect(process.env.VITEST_MAX_WORKERS).toBe('1'); });
+  test('sibling', () => {});
+});
+`);
+
+  const row = await runGate(fixture.cwd, { id: 'frontend-tests', command: ['node', 'node_modules/vitest/vitest.mjs', 'run'], tests: 'vitest', minutes: FIXTURE_GATE_MINUTES }, fixture.base);
+
+  assert.equal(row.failures[0].id, 'tests/isolation.test.js > nested suite passes only in isolation');
+  assert.equal(row.failures[0].rerun.count, 1, JSON.stringify(row.failures[0]));
+  assert.equal(row.failures[0].outcome, 'FLAKY', JSON.stringify(row.failures[0]));
+});
+
 test('a green Vitest gate is not failed by a passing test named after a runtime error (#2204)', async t => {
   // The end-to-end half of #2204: a real `vitest run` in which the only test
   // passes and is *called* "does NOT leak an unhandled rejection …". The default

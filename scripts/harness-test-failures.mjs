@@ -85,7 +85,10 @@ export function vitestReport(root, report, output = '') {
     const failed = (suite.assertionResults ?? []).filter(test => test.status === 'failed');
     if (suite.status === 'failed' && (!failed.length || suite.message)) unattributed = true;
     if (suite.status === 'failed' && !failed.length) failures.push({ id: file, file, name: null });
-    for (const test of failed) failures.push({ id: `${file} > ${test.fullName}`, file, name: test.fullName });
+    for (const test of failed) {
+      const testName = [...(test.ancestorTitles ?? []), test.title].filter(Boolean).join(' > ') || test.fullName;
+      failures.push({ id: `${file} > ${test.fullName}`, file, name: test.fullName, ...(testName !== test.fullName ? { testName } : {}) });
+    }
   }
   return { failures, count: report.numPassedTests ?? 0, unattributed: unattributed || failures.length !== report.numFailedTests, report };
 }
@@ -116,7 +119,7 @@ export function readTestReport(root, kind, path, output) {
 
 const escapeRegex = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 export function isolatedCommand(test, kind, reportPath) {
-  if (kind === 'vitest') return ['node', 'scripts/harness-vitest-isolate.mjs', test.file, `^${escapeRegex(test.name)}$`, reportPath];
+  if (kind === 'vitest') return ['node', 'scripts/harness-vitest-isolate.mjs', test.file, `^${escapeRegex(test.testName ?? test.name)}$`, reportPath];
   const { kind: targetKind, name } = test.target;
   if (targetKind === 'doc') throw new Error('Doctest isolation unavailable; no reliable exact selector.');
   const target = targetKind === 'lib' ? ['--lib'] : [`--${targetKind}`, name];

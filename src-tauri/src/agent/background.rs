@@ -137,8 +137,14 @@ pub(crate) fn resolve_plan(
         adapter.validate_agent_override(agent)?;
         args.extend(adapter.background_agent_args(agent));
     }
-    if let Some(effort) = &plan.effort {
-        args.extend(adapter.effort_args(effort));
+    let model_encodes_effort = plan
+        .model
+        .as_deref()
+        .is_some_and(|model| adapter.model_encodes_effort(model));
+    if !model_encodes_effort {
+        if let Some(effort) = &plan.effort {
+            args.extend(adapter.effort_args(effort));
+        }
     }
     Ok(BackgroundLaunch {
         env,
@@ -334,6 +340,20 @@ mod tests {
             &LaunchOverrides::default(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn agy_background_does_not_pair_independent_effort_with_a_qualified_model() {
+        let prefs = AppPreferences::default();
+        let mut saved = plan("agy");
+        saved.model = Some("gemini-4-neon-low".into());
+        saved.effort = Some("high".into());
+        let launch = resolve_plan(saved, &prefs).unwrap();
+        assert!(launch.args.iter().any(|arg| arg == "gemini-4-neon-low"));
+        assert!(
+            !launch.args.iter().any(|arg| arg == "--effort"),
+            "an effort-qualified model must not receive a second independent effort argument"
+        );
     }
 
     #[test]

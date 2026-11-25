@@ -27,8 +27,4 @@ allowed: Array<string>, } | { "kind": "inline_config",
 /**
  * Config key the CLI reads (e.g. `"model_reasoning_effort"`).
  */
-key: string, 
-/**
- * Allowed values the CLI accepts for this key.
- */
-allowed: Array<string>, };
+key: string, allowed: Array<string>, };

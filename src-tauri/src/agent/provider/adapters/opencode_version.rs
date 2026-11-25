@@ -117,7 +117,7 @@ fn run_version_probe(mut command: std::process::Command, timeout: Duration) -> O
 /// These commands may start a private server. Own the whole process tree on
 /// success, error and timeout, including a Unix process group created by the
 /// background command wrapper. No child can keep an output pipe open forever.
-pub(super) fn run_private_command(
+pub(crate) fn run_private_command(
     mut command: std::process::Command,
     label: &str,
     timeout: Duration,

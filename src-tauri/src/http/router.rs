@@ -255,6 +255,7 @@ enum Handler {
     ApiUsage,
     LaunchConfigurations,
     LaunchTargets,
+    LaunchModelCatalog,
     LaunchConfigurationSave,
     LaunchConfigurationVerify,
     LaunchConfigurationDelete,
@@ -293,6 +294,13 @@ const ROUTES: &[Route] = &[
         scope: RouteScope::Admin,
         body: BodyPolicy::None,
         handler: Handler::LaunchTargets,
+    },
+    Route {
+        method: "GET",
+        m: RouteMatch::Exact("/api/launch-targets/model-catalog"),
+        scope: RouteScope::Admin,
+        body: BodyPolicy::None,
+        handler: Handler::LaunchModelCatalog,
     },
     Route {
         method: "POST",
@@ -954,6 +962,9 @@ async fn run_handler(handler: Handler, req: &ParsedRequest) -> DispatchResult {
         Handler::ApiUsage => Http(routes::providers::usage(req).await),
         Handler::LaunchConfigurations => Http(routes::launch_configurations::list(req).await),
         Handler::LaunchTargets => Http(routes::launch_configurations::targets(req).await),
+        Handler::LaunchModelCatalog => {
+            Http(routes::launch_configurations::model_catalog(req).await)
+        }
         Handler::LaunchConfigurationSave => Http(routes::launch_configurations::save(req).await),
         Handler::LaunchConfigurationVerify => {
             Http(routes::launch_configurations::verify(req).await)

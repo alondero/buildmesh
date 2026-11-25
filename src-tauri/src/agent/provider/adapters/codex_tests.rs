@@ -400,9 +400,9 @@ impl Rendezvous {
             arrived = guard;
             if timeout.timed_out() && *arrived < self.participants {
                 return Err(format!(
-                        "probe never overlapped its {} siblings within {PROBE_RENDEZVOUS:?} - the chain ran serially",
-                        self.participants - 1
-                    ));
+                    "probe never overlapped its {} siblings within {PROBE_RENDEZVOUS:?} - the chain ran serially",
+                    self.participants - 1
+                ));
             }
         }
     }
@@ -774,9 +774,9 @@ fn proxy_profile_is_exact_secret_free_and_toml_escaped() {
         "https://example.com/v1/\"quoted\"",
     );
     assert_eq!(
-            rendered,
-            "model_provider = \"buildmesh_1234\"\n\n[model_providers.buildmesh_1234]\nname = \"Buildmesh: Provider \\\"quoted\\\"\"\nbase_url = \"https://example.com/v1/\\\"quoted\\\"\"\nwire_api = \"responses\"\nenv_key = \"BUILDMESH_CODEX_PROVIDER_KEY\"\nrequires_openai_auth = false\n"
-        );
+        rendered,
+        "model_provider = \"buildmesh_1234\"\n\n[model_providers.buildmesh_1234]\nname = \"Buildmesh: Provider \\\"quoted\\\"\"\nbase_url = \"https://example.com/v1/\\\"quoted\\\"\"\nwire_api = \"responses\"\nenv_key = \"BUILDMESH_CODEX_PROVIDER_KEY\"\nrequires_openai_auth = false\n"
+    );
     assert!(!rendered.contains("OPENAI_API_KEY"));
 }
 
@@ -883,9 +883,9 @@ fn pinned_codex_cli_loads_profile_for_fresh_and_resume() {
                 "metadata": {}
             });
             let body = format!(
-                    "data: {{\"type\":\"response.output_text.delta\",\"item_id\":\"{message_id}\",\"output_index\":0,\"content_index\":0,\"delta\":\"verified\"}}\n\ndata: {}\n\n",
-                    serde_json::json!({"type":"response.completed","response":completed})
-                );
+                "data: {{\"type\":\"response.output_text.delta\",\"item_id\":\"{message_id}\",\"output_index\":0,\"content_index\":0,\"delta\":\"verified\"}}\n\ndata: {}\n\n",
+                serde_json::json!({"type":"response.completed","response":completed})
+            );
             write!(
                     stream,
                     "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -2005,9 +2005,9 @@ fn launch_hooks_are_not_double_wrapped_and_do_not_rely_on_process_env() {
                 "{event} {field} must not nest a shell Codex already launches: {value}"
             );
             assert!(
-                    !value.contains("BUILDMESH_PORT") && !value.contains("BUILDMESH_SESSION_ID"),
-                    "{event} {field} must bake the callback URL; Codex hook env is a Core snapshot that drops BUILDMESH_*: {value}"
-                );
+                !value.contains("BUILDMESH_PORT") && !value.contains("BUILDMESH_SESSION_ID"),
+                "{event} {field} must bake the callback URL; Codex hook env is a Core snapshot that drops BUILDMESH_*: {value}"
+            );
             assert!(
                 value.contains("/api/attention/42"),
                 "{event} {field} must bake the node id into the callback URL: {value}"
@@ -2180,4 +2180,86 @@ fn permission_mode_changes_argv_of_next_spawn() {
         CODEX.descriptor().default_permission_mode().as_deref(),
         Some(PERMISSION_MODE_UNATTENDED)
     );
+}
+
+#[test]
+fn model_catalog_preserves_exact_per_model_reasoning_levels() {
+    let models = parse_codex_model_catalog(
+        r#"{"models":[{"slug":"gpt-a","display_name":"GPT A","description":"fast","visibility":"list","supported_reasoning_levels":[{"effort":"low","description":"light"},{"effort":"experimental","description":"model-defined"}]},{"slug":"hidden","visibility":"hidden","supported_reasoning_levels":[]},{"slug":"unannounced","supported_reasoning_levels":[]}]}"#,
+    )
+    .unwrap();
+
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].id, "gpt-a");
+    assert_eq!(models[0].name, "GPT A");
+    assert_eq!(
+        models[0]
+            .efforts
+            .iter()
+            .map(|effort| effort.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["low", "experimental"]
+    );
+    assert_eq!(
+        models[0].efforts[1].description.as_deref(),
+        Some("model-defined")
+    );
+}
+
+#[test]
+fn prepare_launch_removes_inherited_credential_overrides() {
+    use crate::agent::capabilities::ResolvedAgentConfig;
+    use crate::agent::launch::{HarnessLaunchInput, SessionIdModeRef};
+    use crate::models::EnvType;
+
+    let config = ResolvedAgentConfig {
+        model: None,
+        effort: None,
+        extra_args: None,
+        permission_mode: None,
+        agent: None,
+    };
+    let prepared = CODEX.prepare_launch(HarnessLaunchInput {
+        routing: None,
+        node_id: None,
+        platform: Platform::Windows,
+        runtime: EnvType::Windows,
+        session: SessionIdModeRef::None,
+        config: &config,
+        prefill: None,
+        sandbox: false,
+    });
+    for key in [
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "CODEX_API_KEY",
+        "CODEX_ACCESS_TOKEN",
+    ] {
+        assert!(
+            prepared
+                .environment
+                .env_remove
+                .iter()
+                .any(|removed| removed == key),
+            "Codex launch must remove inherited {key}; got {:?}",
+            prepared.environment.env_remove
+        );
+    }
+}
+
+#[test]
+fn background_recipe_removes_inherited_credential_overrides() {
+    let recipe = CODEX.background_recipe(Platform::Windows).unwrap();
+    for key in [
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "CODEX_API_KEY",
+        "CODEX_ACCESS_TOKEN",
+    ] {
+        assert!(
+            recipe.env_remove.iter().any(|removed| removed == key),
+            "Codex background recipe must remove inherited {key}; got {:?}",
+            recipe.env_remove
+        );
+    }
 }

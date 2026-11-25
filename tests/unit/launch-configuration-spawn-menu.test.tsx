@@ -14,7 +14,7 @@ vi.mock('../../src/lib/tauri/provider', () => ({
     { id: 'launch/claude:minimax', name: 'MiniMax', spawn_option_id: 'claude:minimax', model: null, effort: null, extra_args: null },
     { id: 'launch/codex-sol', name: 'Codex Sol', spawn_option_id: 'codex', model: 'gpt-5.6-sol', effort: null, extra_args: null },
   ]),
-  verifyLaunchConfiguration: vi.fn(), getLaunchTargets: vi.fn().mockResolvedValue([]),
+  verifyLaunchConfiguration: vi.fn(), getLaunchTargets: vi.fn(), getHarnessModelCatalog: vi.fn().mockResolvedValue([]),
   saveSpawnConfiguration: vi.fn(),
   deleteSpawnConfiguration: vi.fn(),
   reorderSpawnConfigurations: vi.fn(),
@@ -54,7 +54,7 @@ describe('launch configurations in the spawn menu', () => {
     const saved: SpawnConfiguration = { ...configuration('launch/new', 'New Codex', 'codex'), extra_args: '--json' };
     const native = { ...row('codex', 'codex'), capabilities: HARNESS_CAPABILITIES.codex };
     vi.mocked(api.getLaunchTargets).mockResolvedValueOnce([
-      { id: 'codex', harness_id: 'codex', harness_name: 'Codex', provider_name: 'OpenAI', models: [], efforts: [], route_attached: false, manual_model: true, supports_model: true, supports_extra_args: true },
+      { id: 'codex', harness_id: 'codex', harness_name: 'Codex', provider_name: 'OpenAI', models: [], efforts: [], route_attached: false, manual_model: true, supports_model: true, supports_model_effort_discovery: false, supports_extra_args: true, supports_agent: false },
     ]);
     vi.mocked(api.saveSpawnConfiguration).mockResolvedValueOnce(saved);
     vi.mocked(api.listProviders).mockResolvedValueOnce([{
@@ -131,8 +131,8 @@ describe('launch configurations in the spawn menu', () => {
 
   it('opens the catalogue-backed editor from a Codex recipe', async () => {
     vi.mocked(api.getLaunchTargets).mockResolvedValueOnce([
-      { id: 'codex', harness_id: 'codex', harness_name: 'Codex', provider_name: 'OpenAI', models: [], efforts: [], route_attached: false, manual_model: true, supports_model: true, supports_extra_args: true },
-      { id: 'codex:minimax', harness_id: 'codex', harness_name: 'Codex', provider_name: 'MiniMax', models: [], efforts: [], route_attached: false, manual_model: true, supports_model: true, supports_extra_args: false },
+      { id: 'codex', harness_id: 'codex', harness_name: 'Codex', provider_name: 'OpenAI', models: [], efforts: [], route_attached: false, manual_model: true, supports_model: true, supports_model_effort_discovery: false, supports_extra_args: true, supports_agent: false },
+      { id: 'codex:minimax', harness_id: 'codex', harness_name: 'Codex', provider_name: 'MiniMax', models: [], efforts: [], route_attached: false, manual_model: true, supports_model: true, supports_model_effort_discovery: false, supports_extra_args: false, supports_agent: false },
     ]);
     render(<GroupedProviderMenu providers={[
       row('codex', 'codex'),
@@ -152,7 +152,7 @@ describe('launch configurations in the spawn menu', () => {
     let finishSave!: (value: SpawnConfiguration) => void;
     let finishRefresh!: () => void;
     vi.mocked(api.getLaunchTargets).mockResolvedValueOnce([
-      { id: 'codex', harness_id: 'codex', harness_name: 'Codex', provider_name: 'OpenAI', models: [], efforts: [], route_attached: false, manual_model: true, supports_model: true, supports_extra_args: true },
+      { id: 'codex', harness_id: 'codex', harness_name: 'Codex', provider_name: 'OpenAI', models: [], efforts: [], route_attached: false, manual_model: true, supports_model: true, supports_model_effort_discovery: false, supports_extra_args: true, supports_agent: false },
     ]);
     vi.mocked(api.saveSpawnConfiguration).mockReturnValueOnce(new Promise((resolve) => { finishSave = resolve; }));
     vi.mocked(api.listProviders).mockReturnValueOnce(new Promise((resolve) => { finishRefresh = () => resolve([refreshedProvider]); }));
@@ -182,7 +182,7 @@ describe('launch configurations in the spawn menu', () => {
     const saved: SpawnConfiguration = { id: 'launch/new', name: 'New Codex', spawn_option_id: 'codex', model: null, effort: null, extra_args: null };
     const refreshedProvider = { id: saved.id, harness_id: 'codex', unavailable_reason: undefined } as unknown as ProviderInfo;
     vi.mocked(api.getLaunchTargets).mockResolvedValueOnce([
-      { id: 'codex', harness_id: 'codex', harness_name: 'Codex', provider_name: 'OpenAI', models: [], efforts: [], route_attached: false, manual_model: true, supports_model: true, supports_extra_args: true },
+      { id: 'codex', harness_id: 'codex', harness_name: 'Codex', provider_name: 'OpenAI', models: [], efforts: [], route_attached: false, manual_model: true, supports_model: true, supports_model_effort_discovery: false, supports_extra_args: true, supports_agent: false },
     ]);
     vi.mocked(api.saveSpawnConfiguration).mockResolvedValueOnce(saved);
     vi.mocked(api.listProviders).mockResolvedValueOnce([refreshedProvider]);

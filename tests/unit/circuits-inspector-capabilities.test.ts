@@ -53,7 +53,7 @@ function fixtureCaps(overrides: Partial<HarnessCapabilities> & Pick<HarnessCapab
     supports_passive_turn_watcher: false,
     supports_result_file_handoff: false,
     produces_readable_transcript: false,
-    supports_model_override: false,
+    supports_model_override: false, supports_model_effort_discovery: false,
     supports_agent: false,
     supports_effort_override: overrides.effort_control.kind !== 'none',
     supports_extra_args: false,

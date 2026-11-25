@@ -91,6 +91,7 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/pty/output_window_tests.rs': 'pty::output_window::tests',
   'src-tauri/src/pty/sink_tests.rs': 'pty::sink::tests',
   'src-tauri/src/agent/launch_tests.rs': 'agent::launch::tests',
+  'src-tauri/src/agent/model_catalog_tests.rs': 'agent::model_catalog::tests',
   // The owner keeps its inline `mod tests` for the cases that already live
   // there, so the new sibling takes its own module name.
   'src-tauri/src/agent/managed_config_replace_tests.rs': 'agent::managed_config::replace_tests',
@@ -187,6 +188,7 @@ export const RUST_PATH_INCLUDES = {
   'src-tauri/src/preferences/launch_configurations_tests.rs': 'preferences::launch_configurations::tests',
   'src-tauri/src/preferences/spawn_configurations_tests.rs': 'preferences::spawn_configurations::tests',
   'src-tauri/src/preferences/resolver/accounts_tests.rs': 'preferences::resolver::accounts::tests',
+  'src-tauri/src/preferences/resolver/cascade_tests.rs': 'preferences::resolver::cascade::tests',
   'src-tauri/src/preferences/resolver/catalog_tests.rs': 'preferences::resolver::catalog::tests',
   'src-tauri/src/preferences/resolver/harness_tests.rs': 'preferences::resolver::harness::tests',
   'src-tauri/src/preferences/resolver/pairings_tests.rs': 'preferences::resolver::pairings::tests',
@@ -369,7 +371,7 @@ export const RUST_IMPLEMENTATION_TESTS = {
 // a file that stops being included.
 export function pathIncludeDrift(root) {
   const declared = new Set();
-  for (const file of execFileSync('git', ['ls-files', RUST_SRC], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).split('\n')) {
+  for (const file of execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', RUST_SRC], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).split('\n')) {
     if (!file.endsWith('.rs')) continue;
     const source = readFileSync(join(root, file), 'utf8');
     for (const match of source.matchAll(/#\[path\s*=\s*"([^"]+)"\]/g)) {

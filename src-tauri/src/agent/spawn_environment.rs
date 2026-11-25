@@ -713,6 +713,72 @@ pub(crate) fn background_command(
     Ok(cmd)
 }
 
+pub(crate) fn background_command_for_runtime(
+    recipe: &SpawnRecipe,
+    executable: Option<&std::path::Path>,
+    env_type: EnvType,
+    wsl_distro: Option<&str>,
+) -> Result<std::process::Command, String> {
+    let executable_override = executable
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| recipe.binary.into());
+    let args: Vec<String> = recipe.argv().map(str::to_owned).collect();
+    if env_type == EnvType::Wsl && cfg!(windows) {
+        let mut cmd = crate::process_util::command_no_window("wsl.exe");
+        let default_distro = crate::env::get_default_wsl_distro();
+        let mut wsl_args = Vec::new();
+        if let Some(distro) = wsl_distro.or(default_distro.as_deref()) {
+            wsl_args.extend(["-d".into(), distro.into()]);
+        }
+        wsl_args.extend([
+            "--exec".into(),
+            "sh".into(),
+            "-lc".into(),
+            "export PATH=\"$HOME/.local/bin:$HOME/.npm-global/bin:$PATH\"; exec \"$@\"".into(),
+            "buildmesh".into(),
+            executable_override.clone(),
+        ]);
+        wsl_args.extend(args);
+        ensure_windows_command_line_fits(WindowsShell::Direct, "wsl.exe", &wsl_args, None)?;
+        cmd.args(wsl_args);
+        strip_claude_session_markers_from_command(&mut cmd);
+        return Ok(cmd);
+    }
+    if env_type == EnvType::WindowsInterop && !cfg!(windows) {
+        let script = format!(
+            "{}; exit $LASTEXITCODE",
+            format_powershell_command(&executable_override, &args)
+        );
+        ensure_powershell_command_line_fits(&script)?;
+        let mut cmd = crate::process_util::command_no_window("powershell.exe");
+        cmd.args([
+            "-NoLogo",
+            "-NoProfile",
+            "-EncodedCommand",
+            &encode_for_powershell(&script),
+        ]);
+        strip_claude_session_markers_from_command(&mut cmd);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        return Ok(cmd);
+    }
+    let host_env = if cfg!(windows) {
+        EnvType::Windows
+    } else {
+        EnvType::Wsl
+    };
+    if env_type != host_env {
+        return Err(format!(
+            "model discovery cannot reach a {} harness from this host",
+            env_type
+        ));
+    }
+    background_command(recipe, executable)
+}
+
 pub fn wrap(
     mut recipe: SpawnRecipe,
     env_type: EnvType,

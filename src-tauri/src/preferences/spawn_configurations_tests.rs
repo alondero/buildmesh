@@ -125,11 +125,11 @@ fn spawn_configurations_preserve_sparse_values_and_roundtrip_old_preferences() {
 }
 
 #[test]
-fn spawn_configurations_reject_unsupported_fields_and_effort_vocabulary() {
+fn spawn_configurations_reject_unsupported_fields_and_closed_effort_vocabulary() {
     assert!(validate(configuration("terminal"))
         .unwrap_err()
         .contains("model"));
-    let mut value = configuration("codex");
+    let mut value = configuration("claude");
     value.effort = Some("not-an-effort".into());
     assert!(validate(value).unwrap_err().contains("not allowed"));
     let mut value = configuration("cursor");

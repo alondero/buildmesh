@@ -242,7 +242,7 @@ pub(crate) fn resolve_spawn_config(
     explicit_agent: Option<&str>,
 ) -> crate::agent::capabilities::ResolvedAgentConfig {
     let capabilities = crate::agent::capabilities::capabilities_for(provider.adapter());
-    crate::agent::capabilities::resolve_agent_config(
+    let mut resolved = crate::agent::capabilities::resolve_agent_config(
         &capabilities,
         cascade_inputs_for(
             explicit_model,
@@ -253,5 +253,10 @@ pub(crate) fn resolve_spawn_config(
             explicit_agent,
         ),
         explicit_extra_args,
-    )
+    );
+    crate::agent::capabilities::mask_independent_effort_for_encoded_model(
+        provider.adapter(),
+        &mut resolved,
+    );
+    resolved
 }

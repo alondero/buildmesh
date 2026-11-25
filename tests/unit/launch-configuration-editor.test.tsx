@@ -6,14 +6,14 @@ import { LaunchConfigurations } from '../../src/components/Providers/LaunchConfi
 import type { ProviderPairing } from '../../src/types/generated/ProviderPairing';
 import type { SpawnConfiguration } from '../../src/types/generated/SpawnConfiguration';
 
-const targets: LaunchTarget[] = [{ id: 'claude:minimax', harness_id: 'claude', harness_name: 'Claude Code', provider_name: 'MiniMax', models: [{ id: 'MiniMax-M3', name: 'MiniMax M3', surface: 'anthropic', efforts: [] }], efforts: ['low', 'high'], route_attached: false, manual_model: false, supports_model: true, supports_extra_args: true }];
+const targets: LaunchTarget[] = [{ id: 'claude:minimax', harness_id: 'claude', harness_name: 'Claude Code', provider_name: 'MiniMax', models: [{ id: 'MiniMax-M3', name: 'MiniMax M3', surface: 'anthropic', efforts: [] }], efforts: ['low', 'high'], route_attached: false, manual_model: false, supports_model: true, supports_model_effort_discovery: false, supports_extra_args: true, supports_agent: false }];
 const route: ProviderPairing = { harness_id: 'claude', provider_id: 'minimax', surface: 'anthropic', base_url: 'https://api.minimax.io/anthropic', model_tiers: { default: 'MiniMax-M3', opus: null, fable: null, sonnet: null, haiku: null, small_fast: null } };
 
 describe('Launch Configuration editor', () => {
   it('saves and reopens a MiniMax Code session model reference', async () => {
     const target: LaunchTarget = {
       id: 'mcode', harness_id: 'mcode', harness_name: 'MiniMax Code', provider_name: 'Native authentication',
-      models: [], efforts: [], route_attached: false, manual_model: true, supports_model: true, supports_extra_args: true, supports_agent: false,
+      models: [], efforts: [], route_attached: false, manual_model: true, supports_model: true, supports_model_effort_discovery: false, supports_extra_args: true, supports_agent: false,
     };
     const value: SpawnConfiguration = {
       id: 'launch/mcode-review', name: 'MiniMax review', spawn_option_id: 'mcode', model: null, effort: null, extra_args: null,
@@ -40,7 +40,7 @@ describe('Launch Configuration editor', () => {
     const claude: LaunchTarget = {
       id: 'claude-wsl-ubuntu', harness_id: 'claude-wsl-ubuntu', harness_name: 'Claude Code (WSL: Ubuntu)', provider_name: 'Native authentication',
       models: [], efforts: ['low', 'medium', 'high', 'xhigh', 'max'], route_attached: false,
-      manual_model: true, supports_model: true, supports_extra_args: true, supports_agent: false,
+      manual_model: true, supports_model: true, supports_model_effort_discovery: false, supports_extra_args: true, supports_agent: false,
     };
     render(<LaunchConfigurationEditor
       value={{ id: '', name: '', spawn_option_id: 'claude-wsl-ubuntu', model: null, effort: null, extra_args: null }}
@@ -273,4 +273,27 @@ describe('Launch Configuration editor', () => {
       expect.objectContaining({ name: 'Verbose review', extra_args: '--json' }), undefined, expect.any(Function),
     ));
   });
+
+  it('fetches discovery catalogs through the injected launch-configuration transport', async () => {
+    const nativeTarget: LaunchTarget = {
+      id: 'codex', harness_id: 'codex', harness_name: 'Codex', provider_name: 'Native authentication',
+      models: [], efforts: [], route_attached: false, manual_model: true, supports_model: true,
+      supports_model_effort_discovery: true, supports_extra_args: true, supports_agent: false,
+    };
+    const existing: SpawnConfiguration = { id: 'launch/native', name: 'Native', spawn_option_id: 'codex', model: null, effort: null, extra_args: null };
+    const modelCatalog = vi.fn().mockResolvedValue({
+      harness_id: 'codex', effort_storage: 'separate',
+      models: [{ id: 'gpt-native', name: 'GPT Native', efforts: [] }],
+    });
+    const api = {
+      list: vi.fn().mockResolvedValue([existing]), targets: vi.fn().mockResolvedValue([nativeTarget]),
+      save: vi.fn(), remove: vi.fn(), modelCatalog,
+    };
+    render(<LaunchConfigurations api={api} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit Native' }));
+
+    await waitFor(() => expect(modelCatalog).toHaveBeenCalledWith('codex'));
+    await screen.findByRole('option', { name: /GPT Native/ });
+  });
+
 });

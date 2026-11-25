@@ -16,7 +16,7 @@ describe('default mock Settings contracts', () => {
     const providers = await window.__TAURI_INTERNALS__.invoke('list_providers');
     expect(providers[0]).toMatchObject({
       label: 'Claude', harness_id: 'anthropic',
-      capabilities: { supports_model_override: true, effort_control: { kind: 'closed' } },
+      capabilities: { supports_model_override: true, supports_model_effort_discovery: false, effort_control: { kind: 'closed' } },
     });
   });
 

@@ -405,6 +405,8 @@ export const getResolvedHarnessView = (
 
 export const listSpawnConfigurations = () => _invoke<SpawnConfiguration[]>('list_spawn_configurations');
 export const getLaunchTargets = () => _invoke<import('../../types/generated/LaunchTarget').LaunchTarget[]>('get_launch_targets');
+export const getHarnessModelCatalog = (harnessId: string, loginId?: string) =>
+  _invoke<import('../../types/generated/HarnessModelCatalog').HarnessModelCatalog>('get_harness_model_catalog', { harnessId, loginId });
 export const verifyLaunchConfiguration = (value: SpawnConfiguration, route?: ProviderPairing) =>
   _invoke<PairingVerification>('verify_launch_configuration', { value, route });
 export const saveSpawnConfiguration = async (value: SpawnConfiguration, route?: ProviderPairing): Promise<SpawnConfiguration> => {

@@ -99,6 +99,7 @@ fn route_table_scope_snapshot() {
     let expected = "\
 GET /api/launch-configurations -> Admin
 GET /api/launch-targets -> Admin
+GET /api/launch-targets/model-catalog -> Admin
 POST /api/launch-configurations/save -> Admin
 POST /api/launch-configurations/verify -> Admin
 POST /api/launch-configurations/delete -> Admin

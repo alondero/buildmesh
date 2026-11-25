@@ -108,8 +108,8 @@ const fixtures = {
   get_launch_targets: [
     // The native target keeps the first form short: no model, no effort and
     // no extra arguments.
-    { id: HARNESS_ID, harness_id: HARNESS_ID, harness_name: 'Codex', provider_name: 'OpenAI', models: [], efforts: [], route_attached: false, manual_model: false, supports_model: false, supports_extra_args: false },
-    { id: `${HARNESS_ID}:minimax`, harness_id: HARNESS_ID, harness_name: 'Codex', provider_name: 'MiniMax', models: [{ id: 'MiniMax-M3', name: 'MiniMax M3', surface: 'openai', efforts: ['none', 'high'] }], efforts: ['none', 'high'], route, route_attached: false, manual_model: false, default_model: 'MiniMax-M3', supports_model: true, supports_extra_args: true },
+    { id: HARNESS_ID, harness_id: HARNESS_ID, harness_name: 'Codex', provider_name: 'OpenAI', models: [], efforts: [], route_attached: false, manual_model: false, supports_model: false, supports_model_effort_discovery: false, supports_extra_args: false, supports_agent: false },
+    { id: `${HARNESS_ID}:minimax`, harness_id: HARNESS_ID, harness_name: 'Codex', provider_name: 'MiniMax', models: [{ id: 'MiniMax-M3', name: 'MiniMax M3', surface: 'openai', efforts: ['none', 'high'] }], efforts: ['none', 'high'], route, route_attached: false, manual_model: false, default_model: 'MiniMax-M3', supports_model: true, supports_model_effort_discovery: false, supports_extra_args: true, supports_agent: false },
   ],
   verify_launch_configuration: [],
 };

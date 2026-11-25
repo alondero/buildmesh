@@ -67,6 +67,22 @@ fn saved_opencode_binaries_are_validated_before_deferred_discovery_publishes() {
 }
 
 #[test]
+fn codex_configuration_validation_accepts_a_model_defined_effort() {
+    let saved = crate::preferences::spawn_configurations::validate(
+        crate::preferences::spawn_configurations::SpawnConfiguration {
+            id: "launch/codex-experimental".into(),
+            name: "Codex experimental".into(),
+            spawn_option_id: "codex".into(),
+            effort: Some("experimental".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(saved.effort.as_deref(), Some("experimental"));
+}
+
+#[test]
 fn mcode_configuration_round_trips_and_resolves_model_before_defaults() {
     use crate::preferences::{
         launch_catalog, launch_configurations, spawn_configurations, AppPreferences,
@@ -376,6 +392,21 @@ fn explicit_overrides_win_and_terminal_masks_unsupported_fields() {
     assert_eq!(
         (plan.model, plan.effort, plan.extra_args),
         (None, None, None)
+    );
+}
+
+#[test]
+fn encoded_agy_configuration_does_not_inherit_the_independent_application_effort() {
+    let prefs: super::super::AppPreferences = serde_json::from_value(serde_json::json!({
+        "harness_defaults": {"agy": {"effort": "high"}},
+        "spawn_configurations": [{"id":"launch/neon-low", "name":"Neon Low", "spawn_option_id":"agy", "model":"gemini-4-neon-low", "effort":null, "extra_args":null}]
+    }))
+    .unwrap();
+    let plan = resolve(&prefs, "launch/neon-low", &LaunchOverrides::default()).unwrap();
+    assert_eq!(plan.model.as_deref(), Some("gemini-4-neon-low"));
+    assert_eq!(
+        plan.effort, None,
+        "the frozen launch plan must not reintroduce an independent effort over an effort-qualified model"
     );
 }
 

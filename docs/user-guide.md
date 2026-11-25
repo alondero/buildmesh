@@ -1126,10 +1126,25 @@ value a save depends on stays on screen. The endpoint, the model choices and
 **Verify provider and model** stay outside it.
 
 Model choices belong to the selected provider and API surface; **Custom model**
-allows a model not yet in the catalogue. Effort choices are restricted to documented
-provider/model and harness support. MiniMax M3 through Codex offers `none` (thinking
-off) and `high` (thinking on), not graded reasoning depth. MiniMax through Claude
-Code has no documented graded effort selector; use the harness's thinking toggle.
+allows a model not yet in the catalogue when the editor is using the ordinary
+or fallback controls. Effort choices are restricted to documented
+provider/model and harness support. Native Codex, OpenCode and Antigravity
+installations can also enumerate their exact model/effort catalogues; when that
+discovery succeeds the editor lists only the combinations the selected model
+supports and does not offer a new custom model. A configuration that already
+carries an unlisted model keeps that value as a transitional advanced-route
+choice. When a Codex configuration pins a Harness Login, discovery uses that
+login's home; an unpinned configuration uses the runtime default. Discovery is
+installation-specific, is cached briefly, and falls back to the ordinary
+harness controls if the command is unavailable or fails. The ordinary controls
+also remain usable while discovery is still running, so saving then records
+the visible fallback values rather than waiting for the probe. Devin is not part of
+that discovery because its CLI model list is the global catalogue rather than
+the account-filtered selection; enter an exact effort-qualified Devin model
+manually when your account offers it. MiniMax
+M3 through Codex offers `none` (thinking off) and `high` (thinking on), not
+graded reasoning depth. MiniMax through Claude Code has no documented graded
+effort selector; use the harness's thinking toggle.
 See MiniMax's [Codex guide](https://platform.minimax.io/docs/token-plan/codex) and
 [Claude Code guide](https://platform.minimax.io/docs/token-plan/claude-code).
 Model identifiers and argument formats vary by harness, provider, and account;
@@ -1246,7 +1261,10 @@ and email.
 
 Logins apply to native Windows launches. A Mesh opened from a WSL path keeps
 the WSL Codex login, and a launch that asks for another login there is refused
-with a message rather than running on the wrong account.
+with a message rather than running on the wrong account. Buildmesh removes
+inherited `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `CODEX_API_KEY` and
+`CODEX_ACCESS_TOKEN` variables from native Codex processes so an inherited
+shell variable is not treated as the selected login or paired credential.
 
 To remove a login, choose **Remove**. Configurations pinned to it fall back to
 the login picked in the spawn menu. Its folder stays on disk, so adding a login
