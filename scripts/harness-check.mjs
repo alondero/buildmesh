@@ -249,6 +249,9 @@ export const RUST_PATH_INCLUDES = {
   // declares it with `#[path]`, so its tests run under the module that
   // declares them, not under a module named after the file.
   'src-tauri/src/diagnostics/renderer_tests.rs': 'diagnostics::renderer::renderer_tests',
+  'src-tauri/src/services/devin_session_tests.rs': 'services::devin_session::tests',
+  'src-tauri/src/env/environment_tests.rs': 'env::environment::environment_tests',
+  'src-tauri/src/http/request_tests.rs': 'http::request::request_tests',
 };
 
 // A Rust production file whose tests live in a sibling `<stem>_tests` module

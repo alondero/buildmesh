@@ -1456,3 +1456,99 @@ pub(crate) fn cline_dir_with_resolver<F: Fn(&str) -> Option<std::ffi::OsString>>
             .join(".cline"),
     }
 }
+
+fn devin_store_override<F: Fn(&str) -> Option<std::ffi::OsString>>(
+    get: &F,
+    posix_only: bool,
+) -> Option<PathBuf> {
+    let non_empty = |key: &str| {
+        get(key)
+            .map(|value| value.to_string_lossy().trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    if let Some(dir) = non_empty("DEVIN_SESSIONS_DIR") {
+        if !posix_only || dir.starts_with('/') {
+            return Some(PathBuf::from(dir).join("sessions.db"));
+        }
+    }
+    if let Some(file) = non_empty("CHISEL_SESSION_DB") {
+        if !posix_only || file.starts_with('/') {
+            return Some(PathBuf::from(file));
+        }
+    }
+    None
+}
+
+fn devin_data_dir_native<F: Fn(&str) -> Option<std::ffi::OsString>>(get: &F) -> Option<PathBuf> {
+    let non_empty = |key: &str| {
+        get(key)
+            .map(|value| value.to_string_lossy().trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    };
+    if cfg!(windows) {
+        if let Some(appdata) = non_empty("APPDATA") {
+            return Some(appdata.join("devin"));
+        }
+        let profile = non_empty("USERPROFILE").or_else(|| non_empty("HOME"))?;
+        return Some(profile.join("AppData").join("Roaming").join("devin"));
+    }
+    if cfg!(target_os = "macos") {
+        return Some(non_empty("HOME")?.join("Library/Application Support/devin"));
+    }
+    if let Some(xdg) = non_empty("XDG_DATA_HOME") {
+        return Some(xdg.join("devin"));
+    }
+    Some(non_empty("HOME")?.join(".local/share/devin"))
+}
+
+pub(crate) fn devin_db_path_with_seams<
+    F: Fn(&str) -> Option<std::ffi::OsString>,
+    H: FnOnce() -> Option<PathBuf>,
+>(
+    env_type: EnvType,
+    spawn_path: &str,
+    get: F,
+    guest_home: H,
+) -> Option<PathBuf> {
+    let _ = spawn_path;
+    if let EnvType::Wsl = env_type {
+        if let Some(path) = devin_store_override(&get, true) {
+            return Some(path);
+        }
+        return Some(
+            guest_home()?
+                .join(".local")
+                .join("share")
+                .join("devin")
+                .join("cli")
+                .join("sessions.db"),
+        );
+    }
+    if let Some(path) = devin_store_override(&get, false) {
+        return Some(path);
+    }
+    let root = match env_type {
+        EnvType::Windows => devin_data_dir_native(&get)?,
+        EnvType::WindowsInterop => {
+            super::windows_home().map(|home| PathBuf::from(home).join(r"AppData\Roaming\devin"))?
+        }
+        EnvType::Wsl => unreachable!("Wsl arm returns above"),
+    };
+    Some(root.join("cli").join("sessions.db"))
+}
+
+pub(crate) fn devin_db_path_for_env(env_type: EnvType, spawn_path: &str) -> Option<PathBuf> {
+    devin_db_path_with_seams(env_type, spawn_path, |key| env::var_os(key), wsl_home)
+}
+
+pub(crate) fn devin_db_path_for_host(env_type: EnvType, spawn_path: &str) -> Option<PathBuf> {
+    let db_path = devin_db_path_for_env(env_type, spawn_path)?;
+    Some(PathBuf::from(super::to_host_path(
+        &db_path.to_string_lossy(),
+    )))
+}
+
+#[cfg(test)]
+#[path = "environment_tests.rs"]
+mod environment_tests;
