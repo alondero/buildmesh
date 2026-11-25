@@ -37,6 +37,18 @@ describe('mobile usage', () => {
     expect(screen.getByText(/Resets:/)).toBeTruthy();
     expect(screen.getByText(/Last known value/)).toBeTruthy();
   });
+  it('marks the monthly period on an explicit metered amount', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-10-16T12:00:00Z'));
+      render(<UsageCard row={{ ...row, meter: { ...row.meter, usage: { ...row.meter.usage!, windows: [], meters: [{ state: 'metered', amount: { used: 25, limit: 100, remaining: 75, unit: 'USD', usedPercent: 25, resetsAt: '2026-11-01T00:00:00Z' } }] } } }} />);
+      const pace = document.querySelector('.usage-pace') as HTMLElement | null;
+      expect(pace).not.toBeNull();
+      expect(parseFloat(pace!.style.left)).toBeCloseTo(50, 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
   it('keeps readings on failed forced refresh and retries successfully', async () => {
     vi.mocked(getUsage).mockResolvedValueOnce([row]).mockRejectedValueOnce(new Error('Desktop unavailable')).mockResolvedValueOnce([]);
     const back = vi.fn();

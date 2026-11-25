@@ -32,7 +32,24 @@ import { ProviderIcon } from '../Providers/ProviderIcon';
 import { SafeLink } from '../shared/SafeLink';
 import { OpenExternalIcon } from '../shared/OpenExternalIcon';
 import { formatRelativeAge } from '../../lib/time';
-import { getUsageWindowPacePercent } from '../../lib/usagePace';
+import { getUsageAmountPacePercent, getUsageWindowPacePercent } from '../../lib/usagePace';
+
+/** Period-elapsed marker shared by the quota and spend bars. Null (unknown
+ *  label, missing/stale reset) renders nothing rather than an invented
+ *  marker. */
+function PaceTick({ percent }: { percent: number | null }) {
+  if (percent == null) return null;
+  return (
+    <div
+      data-testid="usage-pace-tick"
+      role="img"
+      aria-label={`Period ${percent.toFixed(0)}% elapsed`}
+      title={`Period ${percent.toFixed(0)}% elapsed`}
+      className="absolute -top-0.5 -bottom-0.5 w-0.5 -ml-px rounded-full bg-text-primary/80 pointer-events-none"
+      style={{ left: `${percent}%` }}
+    />
+  );
+}
 
 /** A single subscription-quota window as a labeled fill bar. The "0%
  *  renders as a real figure" rule is the issue #537 regression — a `> 0`
@@ -62,16 +79,7 @@ export function UsageBar({ window }: { window: UsageWindow }) {
             style={{ width: `${Math.min(percent, 100)}%` }}
           />
         </div>
-        {periodElapsedPct != null && (
-          <div
-            data-testid="usage-pace-tick"
-            role="img"
-            aria-label={`Period ${periodElapsedPct.toFixed(0)}% elapsed`}
-            title={`Period ${periodElapsedPct.toFixed(0)}% elapsed`}
-            className="absolute -top-0.5 -bottom-0.5 w-0.5 -ml-px rounded-full bg-text-primary/80 pointer-events-none"
-            style={{ left: `${periodElapsedPct}%` }}
-          />
-        )}
+        <PaceTick percent={periodElapsedPct} />
       </div>
       {window.resetsAt && (
         <p className="text-2xs text-text-muted mt-1 tabular-nums">Resets: {new Date(window.resetsAt).toLocaleString()}</p>
@@ -97,6 +105,9 @@ function AmountRow({ label, value, unit }: { label: string; value: number; unit:
 }
 
 function AmountMeter({ amount, uncapped }: { amount: UsageAmount; uncapped: boolean }) {
+  // Explicit amount meters are monthly budgets/billing cycles, so the
+  // marker uses the calendar month ending at the provider's reset instant.
+  const periodElapsedPct = getUsageAmountPacePercent(amount);
   return (
     <div
       className="space-y-1"
@@ -119,11 +130,14 @@ function AmountMeter({ amount, uncapped }: { amount: UsageAmount; uncapped: bool
               {amount.usedPercent.toFixed(1)}%
             </span>
           </div>
-          <div className="h-1.5 bg-bg-card rounded-full overflow-hidden">
-            <div
-              className="h-full bg-accent-cyan rounded-full transition-[width] duration-300"
-              style={{ width: `${Math.min(Math.max(amount.usedPercent, 0), 100)}%` }}
-            />
+          <div className="relative">
+            <div className="h-1.5 bg-bg-card rounded-full overflow-hidden">
+              <div
+                className="h-full bg-accent-cyan rounded-full transition-[width] duration-300"
+                style={{ width: `${Math.min(Math.max(amount.usedPercent, 0), 100)}%` }}
+              />
+            </div>
+            <PaceTick percent={periodElapsedPct} />
           </div>
         </div>
       )}
