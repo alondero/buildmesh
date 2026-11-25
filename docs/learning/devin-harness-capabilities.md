@@ -49,15 +49,29 @@ Verified against:
 - **Session identity & resume**: `self_assigns_session_id() -> true`,
   `captures_session_id_from_pty() -> false`, `supports_resume: true`
   (`--resume <SESSION_ID>`). `Hooks Overview #command-hooks` shows a truncated
-  UUID-shaped `session_id` example (`3f8d1c2a-...`), though the full format is
-  not stated in the docs and has not yet been confirmed from a live session.
+  UUID-shaped `session_id` example (`3f8d1c2a-...`), but the live payloads
+  captured on 3000.14.30821 carried word slugs (`curved-gravity`,
+  `good-appliance`) — `resume` accepts a session id *or name*, and the slug
+  appears to be the session's name; the UUID form remains unconfirmed.
 - **Attention hooks & Circuit completion**: `attention_capability` is currently
   `None` (`requires_attention_hook: false`) and `circuit_observation` is
   `ObservationStrategy::UNWIRED`. Inside Autopilot Circuits, Devin completes
-  turns via result-file handoff until live hook delivery, the Windows hook
-  shell, the live `session_id` format, and `.claude/settings.local.json`
-  deduplication (`Hooks Overview #where-hooks-live` notes Devin reads `.claude/`
-  hooks when `read_config_from.claude` is enabled) are verified.
+  turns via result-file handoff until live hook delivery is wired.
+- **`.claude/` hook import (verified, issue #2864)**: a `devin -p` probe on
+  3000.14.30821 fired `SessionStart`, `UserPromptSubmit` and `Stop` hooks
+  defined in `.claude/settings.local.json` — `read_config_from.claude` is on
+  by default and the hook shell is POSIX (`$VAR` expands, `%VAR%` does not).
+  Payloads are Claude-shaped (`hook_event_name`, `prompt_id` UUID), but the
+  `session_id` is a word slug (`curved-gravity`, `good-appliance`), not a
+  UUID. Two guards prevent these imported hooks producing cross-harness
+  callbacks: the provisioned `.claude` command posts only when
+  `BUILDMESH_HARNESS` is unset or `anthropic`, and the attention route drops
+  callbacks resolved to a known harness with `attention_capability: None`
+  instead of degrading to `signal_unavailable`. Disabling
+  `read_config_from.claude` was rejected as the fix: it gates all Claude
+  imports (rules, skills, MCP servers), not just hooks.
+  `.devin/config.local.json` provisioning and the live hook event contract
+  remain unverified.
 - **Background inference**: `None` (`background_recipe` stays unwired until
   `-p/--print` is live-verified with an authenticated session).
 

@@ -117,6 +117,78 @@ fn attention_hook_forwards_stdin_payload() {
     }
 }
 
+#[test]
+fn attention_hook_posts_only_for_the_owning_harness() {
+    let temp = TempDir::new().unwrap();
+    inject_attention_hook(temp.path()).unwrap();
+    let settings = read_injected_settings(temp.path());
+    let sh_available = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("true")
+        .status()
+        .is_ok_and(|status| status.success());
+    let stub_dir = temp.path().join("stub-bin");
+    if sh_available {
+        std::fs::create_dir(&stub_dir).unwrap();
+        for name in ["curl", "curl.exe"] {
+            let stub = stub_dir.join(name);
+            std::fs::write(&stub, "#!/bin/sh\n: > \"$MARKER\"\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+    }
+    for event in ["Notification", "Stop"] {
+        let command = settings["hooks"][event][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert!(
+            command.contains("BUILDMESH_HARNESS"),
+            "{event}: the callback must identify the session harness, got: {command}"
+        );
+        assert!(
+            command.contains("anthropic"),
+            "{event}: the gate must name the owning harness family, got: {command}"
+        );
+        if sh_available {
+            let path = std::env::join_paths(std::iter::once(stub_dir.clone()).chain(
+                std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+            ))
+            .unwrap();
+            for (harness, expected) in [
+                ("", true),
+                ("anthropic", true),
+                ("devin", false),
+                ("kimi", false),
+                ("muse", false),
+            ] {
+                let marker = temp.path().join(format!("{event}-{harness}.posted"));
+                let marker_sh = marker.to_string_lossy().replace('\\', "/");
+                let posted = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(command)
+                    .env("PATH", &path)
+                    .env("BUILDMESH_HARNESS", harness)
+                    .env("BUILDMESH_PORT", "1")
+                    .env("BUILDMESH_SESSION_ID", "1")
+                    .env("MARKER", &marker_sh)
+                    .status()
+                    .unwrap()
+                    .success();
+                assert!(posted, "{event}: hook command must not fail the turn");
+                assert_eq!(
+                    marker.exists(),
+                    expected,
+                    "{event}: harness {harness:?} must {} post",
+                    if expected { "" } else { "not" }
+                );
+            }
+        }
+    }
+}
+
 /// Injection is idempotent: a second call over an already-correct file must
 /// not rewrite it (the early-return guard) and must leave it parseable.
 #[test]

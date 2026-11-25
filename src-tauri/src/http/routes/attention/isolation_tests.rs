@@ -113,15 +113,7 @@ fn malformed_codex_callback_cannot_stall_claude_completion() {
 fn unknown_harness_never_borrows_a_mapping_or_reads_a_transcript() {
     let payload = json!({"hook_event_name":"Stop", "fullyIdle":true,
         "session_id":"550e8400-e29b-41d4-a716-446655440000", "transcript_path":"untrusted.jsonl"});
-    for provider in [
-        "",
-        "future-harness",
-        "terminal",
-        "freebuff",
-        "dsh",
-        "muse",
-        "commandcode",
-    ] {
+    for provider in ["", "future-harness"] {
         let result = normalizers::normalize(Some(&payload), provider, |_| {
             panic!("unknown strategy cannot reconcile")
         });
@@ -134,6 +126,23 @@ fn unknown_harness_never_borrows_a_mapping_or_reads_a_transcript() {
             result.classified.detail.signal_health,
             SignalHealth::Degraded
         );
+        assert!(result.payload.is_none());
+        assert!(result.session_id.is_none());
+        assert!(result.native_hook.is_none());
+    }
+    for provider in [
+        "terminal",
+        "freebuff",
+        "dsh",
+        "muse",
+        "commandcode",
+        "perch",
+        "devin",
+    ] {
+        let result = normalizers::normalize(Some(&payload), provider, |_| {
+            panic!("hookless strategy cannot reconcile")
+        });
+        assert_eq!(result.classified.decision, Decision::Ignore, "{provider}");
         assert!(result.payload.is_none());
         assert!(result.session_id.is_none());
         assert!(result.native_hook.is_none());

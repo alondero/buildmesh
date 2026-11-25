@@ -92,12 +92,31 @@ impl Default for Normalized {
     }
 }
 
+fn known_hookless(provider: &str) -> bool {
+    crate::models::Provider::try_from_db_str(provider).is_some_and(|provider| {
+        matches!(
+            provider.adapter().descriptor().attention_capability,
+            crate::agent::capabilities::AttentionCapability::None
+        )
+    })
+}
+
 pub(super) fn normalize(
     raw: Option<&Value>,
     provider: &str,
     count_pending: impl FnOnce(&Path) -> Option<usize>,
 ) -> Normalized {
     let Some(normalizer) = dispatch(provider) else {
+        if known_hookless(provider) {
+            tracing::info!(
+                provider,
+                "attention webhook dropped: harness has no attention hook contract"
+            );
+            return Normalized {
+                classified: ignore(Default::default()),
+                ..Default::default()
+            };
+        }
         return Normalized::default();
     };
     let mut payload = raw.and_then(normalizer.parse);
