@@ -152,11 +152,20 @@ fn attention_hook_posts_only_for_the_owning_harness() {
             command.contains("anthropic"),
             "{event}: the gate must name the owning harness family, got: {command}"
         );
+        assert!(
+            command.starts_with("if [") && command.ends_with("; fi"),
+            "{event}: the gate must contain the whole callback, got: {command}"
+        );
         if sh_available {
             let path = std::env::join_paths(std::iter::once(stub_dir.clone()).chain(
                 std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
             ))
             .unwrap();
+            let unix_form = command.replace(
+                "$(command -v curl.exe || command -v curl)",
+                "probe() { : > \"$MARKER\"; }; probe",
+            );
+            assert!(unix_form.contains(';'), "{event}: probe must carry a ';'");
             for (harness, expected) in [
                 ("", true),
                 ("anthropic", true),
@@ -166,24 +175,35 @@ fn attention_hook_posts_only_for_the_owning_harness() {
             ] {
                 let marker = temp.path().join(format!("{event}-{harness}.posted"));
                 let marker_sh = marker.to_string_lossy().replace('\\', "/");
-                let posted = std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(command)
-                    .env("PATH", &path)
-                    .env("BUILDMESH_HARNESS", harness)
-                    .env("BUILDMESH_PORT", "1")
-                    .env("BUILDMESH_SESSION_ID", "1")
-                    .env("MARKER", &marker_sh)
-                    .status()
-                    .unwrap()
-                    .success();
-                assert!(posted, "{event}: hook command must not fail the turn");
-                assert_eq!(
-                    marker.exists(),
-                    expected,
-                    "{event}: harness {harness:?} must {} post",
-                    if expected { "" } else { "not" }
-                );
+                for candidate in [command, unix_form.as_str()] {
+                    let output = std::process::Command::new("sh")
+                        .arg("-c")
+                        .arg(candidate)
+                        .env("PATH", &path)
+                        .env("BUILDMESH_HARNESS", harness)
+                        .env("BUILDMESH_PORT", "1")
+                        .env("BUILDMESH_SESSION_ID", "1")
+                        .env("MARKER", &marker_sh)
+                        .output()
+                        .unwrap();
+                    assert!(
+                        output.status.success(),
+                        "{event}: hook command must not fail the turn: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    assert!(
+                        output.stderr.is_empty(),
+                        "{event}: harness {harness:?} leaked stderr: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    assert_eq!(
+                        marker.exists(),
+                        expected,
+                        "{event}: harness {harness:?} must {} post",
+                        if expected { "" } else { "not" }
+                    );
+                    let _ = std::fs::remove_file(&marker);
+                }
             }
         }
     }

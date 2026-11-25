@@ -130,7 +130,7 @@ pub fn inject_attention_hook(project_path: &Path) -> Result<(), String> {
     // to tell "turn ended, user needed" from "turn ended, waiting on
     // background tasks"; an empty body degrades to always-mark.
     let curl = crate::env::unix_attention_curl();
-    let command = format!("[ -z \"$BUILDMESH_HARNESS\" ] || [ \"$BUILDMESH_HARNESS\" = \"anthropic\" ] && {curl} -sf --connect-timeout 1 --max-time 2 -o /dev/null -X POST -H \"Content-Type: application/json\" --data-binary @- http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID || true");
+    let command = format!("if [ -z \"$BUILDMESH_HARNESS\" ] || [ \"$BUILDMESH_HARNESS\" = \"anthropic\" ]; then {curl} -sf --connect-timeout 1 --max-time 2 -o /dev/null -X POST -H \"Content-Type: application/json\" --data-binary @- http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID || true; fi");
     ensure_hooks_json(&settings_path, &command)
 }
 
