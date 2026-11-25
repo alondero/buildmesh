@@ -115,6 +115,9 @@ class MockTerminal {
   hasSelection = vi.fn().mockReturnValue(false);
   getSelection = vi.fn().mockReturnValue('');
   paste = vi.fn();
+  parser = {
+    registerCsiHandler: vi.fn(() => ({ dispose: vi.fn() })),
+  };
   buffer = { active: { getWindow: vi.fn(), viewportY: 0, baseY: 0 } };
   unicode = {
     register: vi.fn(),

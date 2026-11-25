@@ -29,6 +29,7 @@ import { decodeBase64Bytes } from '../../lib/base64';
 import { bumpRendererActivity } from '../../lib/diagnostics/rendererHealthCounters';
 import { setTheme, type ThemeName } from '../../lib/theme';
 import { TerminalResizeScheduler } from './TerminalResizeScheduler';
+import { createWin32InputModeTracker, encodeWin32InputModeKey, type Win32InputModeTracker } from '../../lib/win32InputMode';
 
 export interface TerminalInstance {
   term: Terminal;
@@ -42,6 +43,7 @@ export interface TerminalInstance {
   attachedContainer: HTMLElement | null;
   onFindRequest: (() => void) | null;
   useNativeClipboardPaste: boolean;
+  win32InputMode: Win32InputModeTracker;
   outputSubscribe?: Promise<void>;
 }
 
@@ -447,7 +449,7 @@ export class TerminalRegistry {
       instance.unlisten();
       api.unsubscribeAgentOutput(nodeId, instance.outputSubscribe).catch(() => {});
       terminalWebglPool.release(`agent:${nodeId}`);
-      instance.term.dispose(); // allow-dispose — keyed by deleted-node IPC, the registry's only legit dispose path
+      instance.win32InputMode.dispose(); instance.term.dispose(); // allow-dispose — keyed by deleted-node IPC, the registry's only legit dispose path
       this.instances.delete(nodeId);
       this.writer.unregister(nodeId);
       this.fontSizeManager.unregister(nodeId);
@@ -536,8 +538,11 @@ export class TerminalRegistry {
       // failure or a deletion anywhere in the rest of creation still tears
       // the xterm down (issue #2016). `release()` unwinds newest first, so
       // the terminal goes last — after the bookkeeping that points at it.
+      const win32InputMode = createWin32InputModeTracker((id, callback) =>
+        term.parser.registerCsiHandler(id, callback),
+      );
       pending.own(() => {
-        term.dispose(); // allow-dispose — the node was deleted (or creation failed) before this terminal was ever published
+        win32InputMode.dispose(); term.dispose(); // allow-dispose — the node was deleted (or creation failed) before this terminal was ever published
       });
 
       const fitAddon = new FitAddon();
@@ -578,6 +583,7 @@ export class TerminalRegistry {
         attachedContainer: null,
         onFindRequest: null,
         useNativeClipboardPaste: false,
+        win32InputMode,
       };
 
       // The scheduler is owned as soon as the instance exists, so a deletion
@@ -651,6 +657,13 @@ export class TerminalRegistry {
 
       term.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
         if (ev.type !== 'keydown') return true;
+
+        const win32Input = encodeWin32InputModeKey(ev, instance.win32InputMode.enabled);
+        if (win32Input !== null) {
+          ev.preventDefault();
+          api.writeToAgent(nodeId, win32Input).catch(console.error);
+          return false;
+        }
 
         const nativeShiftInsert = instance.useNativeClipboardPaste
           && ev.key === 'Insert' && ev.shiftKey && !ev.ctrlKey && !ev.altKey && !ev.metaKey;

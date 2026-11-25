@@ -71,6 +71,9 @@ vi.mock('@xterm/xterm', () => {
     attachCustomKeyEventHandler = vi.fn();
     scrollToBottom = vi.fn();
     refresh = vi.fn();
+    parser = {
+      registerCsiHandler: vi.fn(() => ({ dispose: vi.fn() })),
+    };
     buffer = { active: { getWindow: vi.fn() } };
     // User-facing proxy: NO `_providers`, has `register` (a passthrough to
     // the internal service) and `activeVersion` getter/setter.
