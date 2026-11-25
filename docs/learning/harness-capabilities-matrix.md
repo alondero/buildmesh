@@ -49,7 +49,7 @@ Run `cargo test -p buildmesh agent::capabilities` after an adapter edit, then
 
 ## Harness catalog
 
-The catalog lists fourteen detectable harness ids plus the built-in Terminal (fifteen rows total, pinned by `inventory_matches_research_matrix`).
+The catalog lists fifteen detectable harness ids plus the built-in Terminal (sixteen rows total, pinned by `inventory_matches_research_matrix`).
 OpenCode detection shares the `opencode` binary; a deferred version probe selects
 that harness only for major 2.
 "Adapter id" is the stable id matching the database `provider` column.
