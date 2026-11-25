@@ -96,9 +96,8 @@ provider's account console, quota documentation, or subscription settings instea
 Custom providers and externally managed billing omit the link. The browser uses
 its own login; choose the same account or workspace as the meter.
 
-OpenCode Go usage follows your OpenCode login automatically. In OpenCode 2,
-connect **OpenCode Console** and select the workspace with your Go subscription.
-OpenCode 1 uses the **OpenCode Go** API key saved by its own connection flow.
+OpenCode Go usage follows your OpenCode login automatically. Connect
+**OpenCode Console** and select the workspace with your Go subscription.
 The Usage tab shows the 5-hour, weekly, and monthly quotas with local reset
 dates and times. A separate Buildmesh Console sign-in is not required. If a
 native session expires, open OpenCode to renew it, then refresh usage. An expired
@@ -812,8 +811,7 @@ The current built-in catalog is:
 | Claude Code | Yes | Hook | Model, effort, extra-argument, and prefill controls may be available |
 | Codex | Yes | Hook | Uses its own project trust and permission flow |
 | Antigravity | Yes | Hook | Requires a supported CLI version for attention hooks |
-| OpenCode | Yes | Hook | OpenCode 1 only; existing conversations keep their V1 harness |
-| OpenCode 2 | Yes | Hook | OpenCode 2.2.x, native runtime; private server per node, model overrides and regenerate through the session API |
+| OpenCode | Yes | Hook | OpenCode 2.2.x, native runtime; private server per node, model overrides and regenerate through the session API |
 | Grok Code | Yes | Hook | Cross-runtime hooks need working Windows/WSL networking |
 | Cursor | Yes | Hook | Effort control is not available through Buildmesh |
 | Kimi Code | Yes | Hook | Needs Kimi Code 0.27.0 or newer; has no transcript reader |
@@ -839,20 +837,18 @@ write the file named in its prompt. A review you start on one of these agents
 cannot tell when its current turn ends, so its first step waits until you move
 it on from the Overview tab.
 
-OpenCode and OpenCode 2 share the `opencode` command. Detection checks its
-major version after the initial startup scan, so the matching menu entry may
-appear a few seconds later. An unknown result is still offered through the V1
-harness for compatibility; OpenCode 2 is withheld until a 2.x version is read.
-V2 discovery prefers the `opencode2` alias shipped by the npm CLI, then falls
-back to `opencode`, so a V1 executable earlier on PATH does not hide that alias.
-For installations without the alias, pin each Harness Profile's executable to
-the corresponding major. Existing V1 nodes stay V1; Buildmesh refuses a known
-mismatched native executable instead of silently upgrading a node.
-OpenCode 2 currently requires a native runtime, with no WSL/Windows Interop
+OpenCode's `opencode` command is offered once detection reads a 2.x version,
+which happens after the initial startup scan, so the menu entry may appear a few
+seconds later. Discovery prefers the `opencode2` alias shipped by the npm CLI,
+then falls back to `opencode`. Buildmesh refuses an executable whose major is
+known to be anything other than 2, and withholds it while the version is
+unknown; pin the harness executable if your PATH exposes another build.
+Nodes saved under the old OpenCode 1 harness id now open with this harness.
+OpenCode currently requires a native runtime, with no WSL/Windows Interop
 launch preparation. Extra arguments are disabled to preserve its private server
 and session identity. An active developer OS sandbox is refused before API
 preparation; a saved sandbox setting is ignored when that developer feature is
-off. See [OpenCode 2 troubleshooting](troubleshooting.md#opencode-2-does-not-start-or-report-attention).
+off. See [OpenCode 2 troubleshooting](troubleshooting.md#opencode-does-not-start-or-report-attention).
 
 Capabilities can change with the installed CLI and runtime. Buildmesh hides
 controls that a harness cannot safely honor. After installing or removing a
@@ -873,13 +869,13 @@ the updated terminal runtime.
 
 ## Attention hooks Buildmesh installs on disk
 
-Nine harnesses report their attention signal as **Hook** in the table above.
+Eight harnesses report their attention signal as **Hook** in the table above.
 Buildmesh implements that signal by writing a hook into the harness's own
 configuration before the agent starts. The hook is what lets a node show that it
 is waiting for you, instead of going quiet until you read its terminal.
 
 Claude Code's hook is written when you add the project and refreshed each time
-one of its nodes starts; the other eight appear the first time you start a node
+one of its nodes starts; the other seven appear the first time you start a node
 with that harness. Nothing is written for a harness whose signal is **Passive
 watcher** or **None**, and no hook file exists before you add the project or
 start a node from Buildmesh.
@@ -890,8 +886,7 @@ start a node from Buildmesh.
 | Codex | No hook file — the hooks ride the agent's own launch arguments | — |
 | Cursor | `.cursor/hooks.json` | Project directory |
 | Antigravity | `.agents/hooks.json` | Project directory |
-| OpenCode | `.opencode/plugins/buildmesh-attention.js` | Project directory (V1) |
-| OpenCode 2 | `.opencode/buildmesh-attention2/index.ts` and `.opencode/buildmesh2/<node-id>/opencode.json` | Project directory; only that node selects its managed config |
+| OpenCode | `.opencode/buildmesh-attention2/index.ts` and `.opencode/buildmesh2/<node-id>/opencode.json` | Project directory; only that node selects its managed config |
 | Grok Code | `.grok/hooks/buildmesh-attention.json` | Your user profile |
 | Kimi Code | `config.toml` in its configuration home | Configuration home |
 | MiniMax Code | `.claude-plugin/plugin.json` in its plugin directory | Configuration home |
@@ -1471,8 +1466,7 @@ auto mode because there is nobody to answer a prompt.
 | Antigravity | `--dangerously-skip-permissions` | Asks |
 | Codex | `--ask-for-approval never` | CLI default (asks); sandbox and hook trust unchanged |
 | Cursor | `--force` | Asks |
-| OpenCode | `--auto` | Asks (V1) |
-| OpenCode 2 | `--auto` | Asks; an external-directory deny is configured; see the [runtime caveats](troubleshooting.md#opencode-2-does-not-start-or-report-attention) |
+| OpenCode | `--auto` | Asks; an external-directory deny is configured; see the [runtime caveats](troubleshooting.md#opencode-does-not-start-or-report-attention) |
 | Command Code | `--yolo` | Asks |
 | Meta Muse | `--disable-approval --disable-sandbox` | Asks (its own OS sandbox stays on) |
 | Perch | `--permission take_the_wheel` | Asks |

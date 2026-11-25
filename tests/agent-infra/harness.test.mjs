@@ -2708,7 +2708,6 @@ test('new Vitest references to src-tauri are audited against the frontend-tests 
     "tests/unit/ipc-contract.test.ts: const commands = normalize(readFileSync(join(REPO_ROOT, 'src-tauri', 'src', 'commands', 'mod.rs'), 'utf8'));",
     "tests/unit/ipc-contract.test.ts: const services = normalize(readFileSync(join(REPO_ROOT, 'src-tauri', 'src', 'services', 'mod.rs'), 'utf8'));",
     "tests/unit/ipc-contract.test.ts: const startup = normalize(readFileSync(join(REPO_ROOT, 'src-tauri', 'src', 'startup', 'mod.rs'), 'utf8'));",
-    'tests/unit/opencode-attention-plugin.test.ts: const source = readFileSync(resolve("src-tauri/src/agent/provider/adapters/opencode_attention_plugin.js"), "utf8");',
     'tests/unit/opencode2-attention-plugin.test.ts: const source = readFileSync("src-tauri/src/agent/provider/adapters/opencode2_attention_plugin.ts", "utf8");',
     "tests/unit/tauri-capabilities.test.ts: describe('src-tauri/capabilities/default.json', () => {",
     "tests/unit/tauri-capabilities.test.ts: readFileSync(resolve(process.cwd(), 'src-tauri/capabilities/default.json'), 'utf8'),",

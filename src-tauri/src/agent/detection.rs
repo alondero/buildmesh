@@ -102,16 +102,8 @@ const DETECTABLE: &[Detectable] = &[
         config_dirs: &[".gemini/antigravity-cli", ".antigravity", ".antigravitycli"],
     },
     Detectable {
-        id: "opencode",
-        name: "OpenCode 1",
-        harness: "opencode",
-        binaries: &["opencode"],
-        major_version: Some(1),
-        config_dirs: &[],
-    },
-    Detectable {
         id: "opencode2",
-        name: "OpenCode 2",
+        name: "OpenCode",
         harness: "opencode2",
         // The npm V2 CLI ships this alias alongside the shared command. Prefer
         // it so an earlier V1 installation does not hide V2 during discovery.
@@ -632,6 +624,7 @@ fn merge_confirmed_versions(
 }
 
 fn version_requirement(harness: &str) -> Option<u64> {
+    let harness = crate::agent::harness_catalog::harness_adapter_id(harness);
     DETECTABLE
         .iter()
         .find(|d| d.harness == harness)?
@@ -833,6 +826,7 @@ pub(crate) fn validate_saved_native_profile(profile: &HarnessProfile) -> Result<
 }
 
 pub(crate) fn canonical_harness(id: &str) -> Option<&'static str> {
+    let id = crate::agent::harness_catalog::harness_adapter_id(id);
     DETECTABLE
         .iter()
         .find(|tool| tool.id == id || tool.harness == id)
@@ -1569,6 +1563,21 @@ mod tests {
     }
 
     #[test]
+    fn version_requirement_resolves_legacy_opencode_harness() {
+        assert_eq!(version_requirement("opencode"), Some(2));
+        assert_eq!(version_requirement("opencode2"), Some(2));
+    }
+
+    #[test]
+    fn canonical_harness_resolves_legacy_opencode_id() {
+        assert_eq!(canonical_harness("opencode"), Some("opencode2"));
+        assert_eq!(
+            canonical_wsl_harness("opencode-wsl-Ubuntu"),
+            Some("opencode2")
+        );
+    }
+
+    #[test]
     fn flags_absent_binary_as_not_detected() {
         let path_dirs = dirs(&["/usr/bin"]);
         // Nothing on disk → no profiles at all.
@@ -1586,7 +1595,7 @@ mod tests {
             .map(|p| p.id)
             .collect();
         ids.sort();
-        assert_eq!(ids, vec!["codex", "opencode", "opencode2"]);
+        assert_eq!(ids, vec!["codex", "opencode2"]);
     }
 
     #[test]
@@ -1959,7 +1968,6 @@ mod tests {
                 "codex" => assert_eq!(provider, Provider::Codex),
                 "cursor" => assert_eq!(provider, Provider::Cursor),
                 "agy" => assert_eq!(provider, Provider::Agy),
-                "opencode" => assert_eq!(provider, Provider::OpenCode),
                 "opencode2" => assert_eq!(provider, Provider::OpenCode2),
                 "cline" => assert_eq!(provider, Provider::Cline),
                 "grok" => assert_eq!(provider, Provider::Grok),

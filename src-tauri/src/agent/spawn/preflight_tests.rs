@@ -139,7 +139,7 @@ fn the_probed_stem_is_the_adapter_recipe_binary() {
     for provider in [
         Provider::Anthropic,
         Provider::Codex,
-        Provider::OpenCode,
+        Provider::OpenCode2,
         Provider::Cline,
         Provider::Kimi,
     ] {

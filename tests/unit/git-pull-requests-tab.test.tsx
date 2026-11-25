@@ -113,7 +113,7 @@ const CLOSED_PRS: GitHubPullRequest[] = [
 const PROVIDERS = [
   { id: 'anthropic', label: 'Anthropic', color: '#000', icon: '' },
   { id: 'minimax', label: 'Minimax', color: '#000', icon: '' },
-  { id: 'opencode', label: 'OpenCode', color: '#000', icon: '' },
+  { id: 'opencode2', label: 'OpenCode', color: '#000', icon: '' },
 ];
 
 // Stage-1 return value — the same shape `create_issue_node` returns, so

@@ -15,7 +15,7 @@ fn saved_opencode_binaries_are_validated_before_deferred_discovery_publishes() {
     }
     let _restore = Restore(detection::detection_snapshot());
     detection::observe_installations(Default::default());
-    for (harness, expected) in [("opencode", 1), ("opencode2", 2)] {
+    for (harness, expected) in [("opencode2", 2)] {
         for actual in [1, 2] {
             let dir = tempfile::tempdir().unwrap();
             let executable = dir.path().join(if cfg!(windows) {
@@ -719,4 +719,50 @@ fn a_stale_verification_is_carried_rather_than_refused() {
         plan.verification.is_some(),
         "the record travels with the plan so the spawn can name the reason"
     );
+}
+
+#[test]
+fn legacy_opencode_saved_profile_validates_with_the_opencode2_gate() {
+    use crate::agent::detection;
+    let dir = tempfile::tempdir().unwrap();
+    let executable = dir.path().join(if cfg!(windows) {
+        "opencode.cmd"
+    } else {
+        "opencode"
+    });
+    let script = if cfg!(windows) {
+        "@echo off\r\necho opencode v2.2.3\r\n"
+    } else {
+        "#!/bin/sh\nprintf 'opencode v2.2.3\\n'\n"
+    };
+    std::fs::write(&executable, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let profile = HarnessProfile {
+        id: "opencode".into(),
+        name: "OpenCode".into(),
+        harness: "opencode".into(),
+        runtime: None,
+        wsl_distro: None,
+        executable: Some(executable),
+    };
+    assert!(detection::validate_saved_native_profile(&profile).unwrap());
+}
+
+#[test]
+fn legacy_opencode_selection_resolves_to_the_opencode2_adapter() {
+    let prefs = AppPreferences::default();
+    let plan = resolve_plan(
+        &prefs,
+        "opencode",
+        &LaunchOverrides::default(),
+        AvailabilityCheck::Skip,
+    )
+    .expect("a stored opencode selection must resolve without a saved profile");
+    assert_eq!(plan.harness.id, "opencode");
+    assert_eq!(plan.harness.harness, "opencode2");
+    assert_eq!(plan.spawn_option_id, "opencode");
 }

@@ -27,5 +27,4 @@ pub(crate) use cursor::CursorAdapter;
 pub(crate) use grok::GrokAdapter;
 pub(crate) use mcode::McodeAdapter;
 pub(crate) use muse::MuseAdapter;
-pub(crate) use opencode::OpenCodeAdapter;
 pub(crate) use opencode2::OpenCode2Adapter;

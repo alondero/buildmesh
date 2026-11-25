@@ -132,7 +132,7 @@ fn spawn_configurations_reject_unsupported_fields_and_effort_vocabulary() {
     let mut value = configuration("codex");
     value.effort = Some("not-an-effort".into());
     assert!(validate(value).unwrap_err().contains("not allowed"));
-    let mut value = configuration("opencode");
+    let mut value = configuration("cursor");
     value.effort = Some("high".into());
     assert!(validate(value).unwrap_err().contains("does not support"));
     let mut value = configuration("terminal");
@@ -229,14 +229,16 @@ fn named_config(id: &str, name: &str, spawn_option_id: &str) -> SpawnConfigurati
 
 #[test]
 fn reorder_in_preferences_reorders_within_harness_and_preserves_other_slots() {
-    let mut prefs = AppPreferences::default();
-    prefs.spawn_configurations = vec![
-        named_config("launch/agy-1", "AGY Fast", "agy"),
-        named_config("launch/oc-1", "OC Alpha", "opencode"),
-        named_config("launch/agy-2", "AGY Deep", "agy"),
-        named_config("launch/agy-3", "AGY Review", "agy"),
-        named_config("launch/oc-2", "OC Beta", "opencode"),
-    ];
+    let mut prefs = AppPreferences {
+        spawn_configurations: vec![
+            named_config("launch/agy-1", "AGY Fast", "agy"),
+            named_config("launch/oc-1", "OC Alpha", "opencode2"),
+            named_config("launch/agy-2", "AGY Deep", "agy"),
+            named_config("launch/agy-3", "AGY Review", "agy"),
+            named_config("launch/oc-2", "OC Beta", "opencode2"),
+        ],
+        ..Default::default()
+    };
 
     let changed = reorder_in_preferences(
         &mut prefs,
@@ -279,13 +281,15 @@ fn reorder_in_preferences_reorders_within_harness_and_preserves_other_slots() {
 
 #[test]
 fn reorder_in_preferences_preserves_unmentioned_configs_and_ignores_invalid_ids() {
-    let mut prefs = AppPreferences::default();
-    prefs.spawn_configurations = vec![
-        named_config("launch/codex-a", "A", "codex"),
-        named_config("launch/codex-hidden", "Hidden", "codex"),
-        named_config("launch/codex-b", "B", "codex"),
-        named_config("launch/claude-1", "Claude", "claude"),
-    ];
+    let mut prefs = AppPreferences {
+        spawn_configurations: vec![
+            named_config("launch/codex-a", "A", "codex"),
+            named_config("launch/codex-hidden", "Hidden", "codex"),
+            named_config("launch/codex-b", "B", "codex"),
+            named_config("launch/claude-1", "Claude", "claude"),
+        ],
+        ..Default::default()
+    };
 
     // Subset reorder (e.g. login-filtered Codex menu) plus duplicate, unknown,
     // and cross-harness ids.
@@ -325,9 +329,9 @@ fn reorder_for_harness_from_persists_to_store_and_rejects_empty_harness() {
     store
         .update(|prefs| {
             prefs.spawn_configurations = vec![
-                named_config("launch/oc-1", "One", "opencode"),
-                named_config("launch/oc-2", "Two", "opencode"),
-                named_config("launch/oc-3", "Three", "opencode"),
+                named_config("launch/oc-1", "One", "opencode2"),
+                named_config("launch/oc-2", "Two", "opencode2"),
+                named_config("launch/oc-3", "Three", "opencode2"),
             ];
         })
         .unwrap();
@@ -336,7 +340,7 @@ fn reorder_for_harness_from_persists_to_store_and_rejects_empty_harness() {
 
     let changed = reorder_for_harness_from(
         &store,
-        "opencode",
+        "opencode2",
         vec![
             "launch/oc-3".into(),
             "launch/oc-1".into(),

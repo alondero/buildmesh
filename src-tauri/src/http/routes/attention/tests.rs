@@ -512,32 +512,6 @@ fn opencode_stop_of_a_child_never_started_neither_ends_the_turn_nor_invents_a_ch
 }
 
 #[test]
-fn opencode_child_events_reach_the_circuit_as_owned_work_receipts() {
-    for (wire, native) in [
-        ("subagent_start", "SubagentStart"),
-        ("subagent_stop", "SubagentStop"),
-    ] {
-        let hook = normalizers::normalize(Some(&opencode_child(wire)), "opencode", |_| Some(0))
-            .native_hook
-            .unwrap_or_else(|| panic!("{wire} yields a native receipt"));
-        assert_eq!(hook.event, native);
-        assert_eq!(hook.child_id.as_deref(), Some(OPENCODE_CHILD));
-        assert_eq!(hook.session_id.as_deref(), Some(OPENCODE_PARENT));
-    }
-    // The same payload is not a receipt for another harness.
-    for provider in ["anthropic", "codex", "agy", "grok", "cline"] {
-        assert!(
-            normalizers::normalize(Some(&opencode_child("subagent_start")), provider, |_| Some(
-                0
-            ))
-            .native_hook
-            .is_none(),
-            "{provider} must not read an OpenCode child event"
-        );
-    }
-}
-
-#[test]
 fn codex_answer_resumes_after_question_tool_result() {
     let mut state = crate::agent::hook_state::HookState::default();
     for (event, expected) in [

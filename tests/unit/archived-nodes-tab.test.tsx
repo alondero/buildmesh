@@ -130,7 +130,7 @@ const PROVIDERS: ProviderFixture[] = [
   // OpenCode / Antigravity write transcripts the coordinator read API
   // doesn't parse, so resume would corrupt the session — backend sets
   // `resumable: false` and the picker hides them.
-  { id: 'opencode', label: 'OpenCode', color: '#000', icon: '', resumable: false, harness_id: 'opencode', provider_id: null, is_proxied: false, group_key: 'opencode' },
+  { id: 'opencode2', label: 'OpenCode', color: '#000', icon: '', resumable: false, harness_id: 'opencode2', provider_id: null, is_proxied: false, group_key: 'opencode2' },
   { id: 'antigravity', label: 'Antigravity', color: '#000', icon: '', resumable: false, harness_id: 'agy', provider_id: null, is_proxied: false, group_key: 'agy' },
 ];
 

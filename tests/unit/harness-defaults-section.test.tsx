@@ -125,9 +125,9 @@ const OPENCODE_MODES = [
   { id: 'prompt', label: 'Prompts on (no flag)', description: 'OpenCode asks for approval.' },
 ];
 const OPENCODE_ROW = providerFixture(
-  'opencode',
-  'opencode',
-  capsFixture('opencode', { supports_model: false, effortKind: 'none', supportsAgent: true, permissionModes: OPENCODE_MODES }),
+  'opencode2',
+  'opencode2',
+  capsFixture('opencode2', { supports_model: true, effortKind: 'none', supportsAgent: true, permissionModes: OPENCODE_MODES }),
 );
 // Kimi Code genuinely has no permission flag and supports model override —
 // the truthful fixture for the no-such-flag line (review round 1: AGY and
@@ -229,7 +229,7 @@ describe('Settings — Agent Harness defaults', () => {
     expect(calls['set_harness_default']).toBeUndefined();
   });
 
-  it('renders capability-gated controls — Claude has both, Agy has model + permission, OpenCode has permission only', async () => {
+  it('renders capability-gated controls — Claude has both, Agy and OpenCode have model + permission but no effort', async () => {
     mockBackend({ providers: [CLAUDE_ROW, AGY_ROW, OPENCODE_ROW, CODEX_ROW, TERMINAL_ROW] });
     render(<AppSettingsModal initialTab="harnesses" onClose={() => {}} />);
 
@@ -242,13 +242,10 @@ describe('Settings — Agent Harness defaults', () => {
     expect(screen.queryByTestId('harness-default-effort-select-agy')).toBeNull();
     await screen.findByTestId('harness-permission-select-agy');
 
-    // OpenCode: no model/effort controls and no "no configurable
-    // defaults" state — it has a real permission flag, so it renders the
-    // permission select instead.
-    expect(screen.queryByTestId('harness-default-empty-opencode')).toBeNull();
-    expect(screen.queryByTestId('harness-default-model-input-opencode')).toBeNull();
-    expect(screen.queryByTestId('harness-default-effort-select-opencode')).toBeNull();
-    await screen.findByTestId('harness-permission-select-opencode');
+    expect(screen.queryByTestId('harness-default-empty-opencode2')).toBeNull();
+    await screen.findByTestId('harness-default-model-input-opencode2');
+    expect(screen.queryByTestId('harness-default-effort-select-opencode2')).toBeNull();
+    await screen.findByTestId('harness-permission-select-opencode2');
   });
 
   it('styles the model, effort and permission fields with the input surface tokens', async () => {
@@ -490,7 +487,7 @@ describe('Settings — Agent Harness defaults', () => {
   it('agent input is gated to agent-capable harnesses and commits on blur', async () => {
     const calls = mockBackend({ providers: [OPENCODE_ROW, CLAUDE_ROW] });
     render(<AppSettingsModal initialTab="harnesses" onClose={() => {}} />);
-    const input = await screen.findByTestId<HTMLInputElement>('harness-default-agent-input-opencode');
+    const input = await screen.findByTestId<HTMLInputElement>('harness-default-agent-input-opencode2');
     expect(screen.queryByTestId('harness-default-agent-input-claude')).toBeNull();
     const user = userEvent.setup();
     await user.click(input);
@@ -498,7 +495,7 @@ describe('Settings — Agent Harness defaults', () => {
     await user.tab();
     await waitFor(() => expect(calls['set_harness_default']).toBeTruthy());
     expect(calls['set_harness_default']!.at(-1)).toEqual({
-      profileId: 'opencode',
+      profileId: 'opencode2',
       value: { model: null, effort: null, permission_mode: null, agent: 'build' },
     });
   });

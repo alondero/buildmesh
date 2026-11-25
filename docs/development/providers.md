@@ -58,7 +58,7 @@ matches the CLI: active first, then newest creation time and ID. Legacy key
 and follows `XDG_DATA_HOME` (default `~/.local/share`) and `OPENCODE_DB` (absolute
 or relative to the `opencode` data directory). Custom channel databases need an
 explicit `OPENCODE_DB`; custom Console hosts are not supported. If there is no
-native Console credential, V1's `auth.json` `opencode-go.key` supplies the bearer.
+native Console credential, the legacy `auth.json` `opencode-go.key` supplies the bearer.
 A malformed or rejected selected credential does not fall back to another key.
 The salted cache identity includes the token and workspace.
 
@@ -729,12 +729,11 @@ deliberately-set names above ever drift in.
 
 ## Harness hook config documents
 
-OpenCode 2 selects its managed project override through `OPENCODE_CONFIG` in
-the adapter's `launch_environment`; V1 does not read that per-node file.
-OpenCode 2.0.25 and later also use that override to block auto-discovery from
-importing Buildmesh's V1 script at `.opencode/plugins/buildmesh-attention.js`.
-The adapter uses the cached CLI version to select the policy action accepted by
-that release. V1 continues to load the same file through its own discovery.
+OpenCode selects its managed project override through `OPENCODE_CONFIG` in
+the adapter's `launch_environment`. OpenCode 2.0.25 and later also use that
+override to block auto-discovery from importing the retired OpenCode 1 hook at
+`.opencode/plugins/buildmesh-attention.js`. The adapter uses the cached CLI
+version to select the policy action accepted by that release.
 `new_session_id` supplies its `ses_` vocabulary. The blocking `prepare_session`
 seam runs before command construction and uses a private session API to apply
 the model (including an optional `#variant`) or fork a regenerate. A returned
@@ -743,12 +742,14 @@ fork id is persisted before argv is built. `model_override_via_session_api` keep
 paths call adapter-owned executable validation. The API adapter escapes JSON
 for Windows PowerShell's native argument marshaller and encodes cmd
 metacharacters as JSON Unicode escapes before crossing an npm shim.
-V2 refuses an effective Mesh
+OpenCode refuses an effective Mesh
 sandbox request before API preparation, respecting the developer feature gate.
 Version results are cached by executable path, modification time and size.
-Discovery and launch share one compatibility rule: V2 requires a known major;
-V1 rejects only a known mismatch, remaining discoverable on unknown results.
-V2 discovery prefers the npm CLI's `opencode2` alias before the shared
+Discovery and launch share one compatibility rule: the harness requires a
+known major of 2, so a known 1.x executable and an unknown probe result are
+both withheld. The legacy `opencode` harness id resolves to this adapter when
+reading existing rows; there is no V1 adapter.
+OpenCode discovery prefers the npm CLI's `opencode2` alias before the shared
 `opencode` stem. The alias still passes the deferred major-version gate;
 installations exposing only `opencode` keep the shared-stem fallback.
 Frozen launches can validate their saved native OpenCode executable through
@@ -756,14 +757,14 @@ the same cached major gate before deferred detection publishes it. This probe
 runs in the spawn pipeline's blocking snapshot-resolution step; menu and edit
 resolution do not start a CLI. Missing binaries,
 unsupported runtimes and known major mismatches still fail.
-Ordinary V2 resume looks up its saved identity and creates it only on
+Ordinary resume looks up its saved identity and creates it only on
 `SessionNotFoundError`, so a failed first create does not strand that node.
 See [ADR-0050](../adr/0050-opencode-major-version-isolation.md).
 
 Deferred major-version detection publishes preferences and the detection epoch
 before emitting `provider-list-changed`. The frontend stream evicts the cached
 IPC provider-list promise before notifying menu consumers, so an initial list
-fetched while the CLI probe is pending cannot keep V2 hidden.
+fetched while the CLI probe is pending cannot keep OpenCode hidden.
 
 Every adapter that injects a Buildmesh entry into a harness config does the same
 three things: read the user's document, merge Buildmesh's own entry into it, and
@@ -1178,10 +1179,10 @@ profiles and pairings it ranks against too.
 
 ### One alias table
 
-The `claude` → `anthropic` mapping is declared once, in
-`agent::harness_catalog::HARNESS_PROFILE_ALIASES`. `harness_profile_alias` and
-`harness_profile_id_for_adapter` resolve it in both directions, so no module
-re-derives it. `agent::harness_catalog::HARNESS_MENU_LAST` sits next to it: a
+The `claude` → `anthropic` and retired `opencode` → `opencode2` mappings are
+declared once, in `agent::harness_catalog::HARNESS_PROFILE_ALIASES`.
+`harness_profile_alias` and `harness_profile_id_for_adapter` resolve them in
+both directions, so no module re-derives them. `agent::harness_catalog::HARNESS_MENU_LAST` sits next to it: a
 harness declares its own Spawn Menu position rather than the comparator
 special-casing one id, which is why Terminal sorts last.
 

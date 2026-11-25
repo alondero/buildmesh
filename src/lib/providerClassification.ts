@@ -10,7 +10,7 @@
 // Kept in sync with `preferences::default_provider_accounts` /
 // `BUILTIN_PROVIDER_ACCOUNTS` (self_auth: true rows).
 // Also includes opencode2, the V2 harness sharing the opencode account.
-export const SELF_AUTH_PROVIDER_IDS = ['anthropic', 'codex', 'agy', 'grok', 'opencode', 'opencode2', 'commandcode', 'muse-code', 'perch', 'devin'];
+export const SELF_AUTH_PROVIDER_IDS = ['anthropic', 'codex', 'agy', 'grok', 'opencode2', 'commandcode', 'muse-code', 'perch', 'devin'];
 
 // Keyed first-class catalog ids — removable once added. Sync with
 // `preferences::keyed_first_class_catalog` / `BUILTIN_PROVIDER_ACCOUNTS`

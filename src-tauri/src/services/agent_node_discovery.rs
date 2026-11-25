@@ -366,7 +366,7 @@ pub fn discover(
                 &path,
                 &normalized_mesh,
                 &normalized_effective,
-                &opencode2_excluded_sessions(&mesh_nodes, &tracked_ids),
+                &tracked_ids,
             )
             .map_err(crate::read_outcome::Unavailable::Read)?,
         );
@@ -390,24 +390,6 @@ pub fn discover(
     });
 
     Ok(sessions)
-}
-
-/// A V2 migration can retain a copy of a V1 conversation with the same id.
-/// Existing node provenance wins until an explicit major-version migration.
-fn opencode2_excluded_sessions(
-    nodes: &[crate::models::AgentNode],
-    tracked: &std::collections::HashSet<String>,
-) -> std::collections::HashSet<String> {
-    let mut excluded = tracked.clone();
-    excluded.extend(
-        nodes
-            .iter()
-            .filter(|node| {
-                crate::agent::provider::resolve_node_provider(node) == Provider::OpenCode
-            })
-            .filter_map(|node| node.cli_session_id.clone()),
-    );
-    excluded
 }
 
 /// Archived rows the Archive list must keep showing even though no transcript

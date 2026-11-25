@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use super::readers::{
     AgyAdapter, ClaudeCodeAdapter, ClineAdapter, CodexAdapter, CommandCodeAdapter, CursorAdapter,
-    GrokAdapter, McodeAdapter, MuseAdapter, OpenCode2Adapter, OpenCodeAdapter,
+    GrokAdapter, McodeAdapter, MuseAdapter, OpenCode2Adapter,
 };
 use super::types::{AssistantReport, Parsed, UnavailableReason};
 
@@ -185,10 +185,9 @@ static COMMANDCODE_ADAPTER: CommandCodeAdapter = CommandCodeAdapter;
 static GROK_ADAPTER: GrokAdapter = GrokAdapter;
 static MCODE_ADAPTER: McodeAdapter = McodeAdapter;
 static MUSE_ADAPTER: MuseAdapter = MuseAdapter;
-static OPENCODE_ADAPTER: OpenCodeAdapter = OpenCodeAdapter;
 static OPENCODE2_ADAPTER: OpenCode2Adapter = OpenCode2Adapter;
 
-static ADAPTERS: [&'static dyn TranscriptAdapter; 11] = [
+static ADAPTERS: [&'static dyn TranscriptAdapter; 10] = [
     // The default adapter supplies token verification for compatible hooks.
     // This is NOT the
     // transcript-format resolver: `TranscriptFormat::for_harness` returns
@@ -204,7 +203,6 @@ static ADAPTERS: [&'static dyn TranscriptAdapter; 11] = [
     &COMMANDCODE_ADAPTER,
     &GROK_ADAPTER,
     &MUSE_ADAPTER,
-    &OPENCODE_ADAPTER,
     &OPENCODE2_ADAPTER,
 ];
 
@@ -212,6 +210,7 @@ static ADAPTERS: [&'static dyn TranscriptAdapter; 11] = [
 /// module — is the dispatch and test surface. Returns `None` for unknown
 /// harness ids. Transcript reads never fall back to another harness.
 pub(crate) fn dispatch(harness_id: &str) -> Option<&'static dyn TranscriptAdapter> {
+    let harness_id = crate::agent::harness_catalog::harness_adapter_id(harness_id);
     ADAPTERS.iter().copied().find(|a| a.id() == harness_id)
 }
 

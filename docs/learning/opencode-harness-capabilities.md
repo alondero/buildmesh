@@ -9,6 +9,13 @@ metadata:
 
 # OpenCode harness vs Buildmesh capability contract (2026-08-26)
 
+> **Historical — OpenCode 1 support was removed on 2026-11-23.** This document
+> records the investigation and runtime evidence gathered while OpenCode 1 had
+> a Buildmesh adapter. OpenCode 2 is now the only OpenCode harness; see
+> [the capabilities matrix](harness-capabilities-matrix.md) and
+> [the V2 readiness research](../research/opencode-v2-readiness.md) for its
+> current contract.
+
 This document describes **OpenCode 1** (`opencode`). OpenCode 2 has its own
 `opencode2` adapter; see [the V2 integration evidence](../research/opencode-v2-readiness.md).
 

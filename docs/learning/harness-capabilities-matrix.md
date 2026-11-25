@@ -49,8 +49,9 @@ Run `cargo test -p buildmesh agent::capabilities` after an adapter edit, then
 
 ## Harness catalog
 
-The catalog lists sixteen detectable harness ids plus the built-in Terminal (seventeen rows total, pinned by `inventory_matches_research_matrix`).
-The OpenCode majors share a binary; a deferred version probe selects the matching id.
+The catalog lists fifteen detectable harness ids plus the built-in Terminal (sixteen rows total, pinned by `inventory_matches_research_matrix`).
+OpenCode detection shares the `opencode` binary; a deferred version probe selects
+that harness only for major 2.
 "Adapter id" is the stable id matching the database `provider` column.
 
 | Harness | Adapter id | Detection binary | Config dir(s) |
@@ -59,8 +60,7 @@ The OpenCode majors share a binary; a deferred version probe selects the matchin
 | Codex | `codex` | `codex` | `.codex` |
 | Cursor | `cursor` | `cursor-agent` | `.cursor` |
 | Antigravity | `agy` | `agy` | `.gemini/antigravity-cli`, `.antigravity`, `.antigravitycli` |
-| OpenCode | `opencode` | `opencode` (major 1) | — |
-| OpenCode 2 | `opencode2` | `opencode` (major 2) | Native runtime; per-node managed override |
+| OpenCode | `opencode2` | `opencode` (major 2) | Native runtime; per-node managed override |
 | Kimi Code | `kimi` | `kimi` | `.kimi` |
 | Grok Code | `grok` | `grok` | `.grok` |
 | MiniMax Code | `mcode` | `mcode` | `.mcode`, `.minimax-code` |
@@ -90,7 +90,7 @@ Legend: ✅ advertised, ❌ not advertised. Column shorthand:
 - **Transcript** — `produces_readable_transcript`; the transcript reader can parse this harness (Coordinator Node Digest, [Node Glance](../development/node-glance.md), archive picker).
 - **Archive** — the derived `resumable` flag (`resume` **and** `transcript`); surfaces the harness in the archived-node resume picker.
 - **Model** — `supports_model_override` (`--model` or equivalent).
-- **Agent** — `supports_agent` (`--agent` on OpenCode 1, session-API `agent` on OpenCode 2, `run --agent` for background; issue #1552 / #2716).
+- **Agent** — `supports_agent` (session-API `agent` on OpenCode, `run --agent` for background; issue #1552 / #2716).
 - **Effort** — `supports_effort_override` (see [Effort control vocabulary](#effort-control-vocabulary)).
 - **Extra args** — `supports_extra_args`; verbatim CLI flags from configuration are forwarded.
 - **Prefill** — `supports_prefill`; a seed prompt is delivered on the launch command line. Every other harness except Terminal still takes issue, PR and prompt spawns (`accepts_initial_prompt`): it launches plain and the prompt is typed into its terminal once the TUI has booted.
@@ -102,8 +102,7 @@ Legend: ✅ advertised, ❌ not advertised. Column shorthand:
 | Codex | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | Hook needs Codex 0.154.0+ and project trust |
 | Cursor | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | Completion and background signals only |
 | Antigravity | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | Hook needs CLI 1.0.0+; workspace trust |
-| OpenCode | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | Attention arrives through the project plugin |
-| OpenCode 2 | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | Session API model/variant/agent/fork; native child sessions tracked as background work; private server; native runtime only |
+| OpenCode | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | Session API model/variant/agent/fork; native child sessions tracked as background work; private server; native runtime only |
 | Kimi Code | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | Hook needs 0.27.0+; no transcript reader |
 | Grok Code | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | Hook validated against 1.0.5 |
 | MiniMax Code | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | Session-only `--model` verified in native Windows help; `UserPromptSubmit` resumes work using the 0.6.13 hook contract; see the [capability review](mcode-harness-capabilities.md) for delivery evidence and platform limits |
@@ -143,8 +142,7 @@ the node being named still needs a turn signal to trigger naming.
 |---|---|---|---|
 | Claude Code | stdin (`--print`) | text stdout | Native or configured route |
 | Codex | stdin (`exec -`) | `--output-last-message` file | Native only |
-| OpenCode | stdin (`run --format json`) | final text event | Native only |
-| OpenCode 2 | stdin (`run --standalone --format json`) | final text event | Native only; project deny rules |
+| OpenCode | stdin (`run --standalone --format json`) | final text event | Native only; project deny rules |
 | Kimi Code | `--prompt` argument | final assistant JSON message | Native only |
 | Grok Code | `--prompt-file` | plain stdout | Native only |
 | Antigravity | `--print` argument | text stdout | Native only |
@@ -166,7 +164,7 @@ limit to stay below Windows command-line limits; larger reports fail explicitly.
 Stdin and prompt-file transports do not have this argument-size restriction.
 
 Sources for the recipes: installed CLI help (Claude Code 2.1.286, Codex 0.159.3,
-OpenCode 1.18.3, Kimi Code 0.27.0, Grok Code 1.0.44, Command Code 1.72.4),
+OpenCode 2.2.3, Kimi Code 0.27.0, Grok Code 1.0.44, Command Code 1.72.4),
 [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference),
 [OpenCode run implementation](https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/cli/cmd/run.ts),
 and [Kimi Code command reference](https://www.kimi.com/code/docs/en/kimi-code-cli/reference/kimi-command.html).
@@ -182,8 +180,7 @@ Non-boolean detail for the nine harnesses with a native attention hook
 | Codex | Permission ask | Turn completed, input required, question, permission, background | 0.154.0 | Codex project trust |
 | Cursor | Skip permissions | Turn completed, background | 1.0.0 | — |
 | Antigravity | Skip permissions | Turn completed, background | 1.0.0 | Workspace trust |
-| OpenCode | Permission ask | Turn completed, question, permission | — | — |
-| OpenCode 2 | Permission ask | Turn completed, question, permission; busy clears attention | 2.2.3 | Native runtime; native child sessions tracked as owned work |
+| OpenCode | Permission ask | Turn completed, question, permission; busy clears attention | 2.2.3 | Native runtime; native child sessions tracked as owned work |
 | Kimi Code | Permission ask | Turn completed, input required, question, permission | 0.27.0 | — |
 | Grok Code | Permission ask | Turn completed, input required, question, permission | 1.0.5 | Global hook directory |
 | MiniMax Code | Skip permissions (pinned: `permissionMode: bypassPermissions`) | Turn completed | 0.4.12 | — |
@@ -252,7 +249,6 @@ before.
 | Cursor | Attn hook | ✅ |
 | Antigravity | Attn hook | ✅ |
 | OpenCode | Attn hook | ✅ |
-| OpenCode 2 | Attn hook | ✅ |
 | Kimi Code | Attn hook | ✅ |
 | Grok Code | Attn hook | ✅ |
 | MiniMax Code | Attn hook | ✅ |
@@ -320,8 +316,7 @@ chooses its own and Buildmesh recovers it.
 | Codex | Self-assigns | Yes |
 | Cursor | Self-assigns | Yes |
 | Antigravity | Self-assigns | No (brain-directory poll) |
-| OpenCode | Self-assigns | No (SQLite poll) |
-| OpenCode 2 | Assigns `ses_` id before spawn | No capture required |
+| OpenCode | Assigns `ses_` id before spawn | No capture required |
 | Kimi Code | Self-assigns | Yes |
 | Grok Code | Buildmesh mints | No |
 | MiniMax Code | Self-assigns | Yes |
@@ -358,7 +353,7 @@ differences are runtime-level, not capability-level:
 
 - Native Windows and WSL installations are detected separately and appear as
   distinct entries.
-- OpenCode majors are excluded from WSL cross-runtime probing until a guest-side version gate is validated. OpenCode 2 launch preparation requires a native runtime.
+- OpenCode is excluded from WSL cross-runtime probing until a guest-side version gate is validated. Its launch preparation requires a native runtime.
 - Cline is excluded from WSL cross-runtime probing: it is a native
   Windows/macOS/Linux target and its WSL behaviour is undocumented.
 

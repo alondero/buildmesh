@@ -171,10 +171,9 @@ fn drain(
     })
 }
 
-/// V1 discovery and launch preserve the pre-probe contract on unknown output;
 /// V2 requires a positively identified matching major.
 pub(crate) fn accepts_major(actual: Option<u64>, expected: u64) -> bool {
-    actual == Some(expected) || (expected == 1 && actual.is_none())
+    actual == Some(expected)
 }
 
 pub(crate) fn require_major(executable: &Path, expected: u64) -> Result<(), String> {

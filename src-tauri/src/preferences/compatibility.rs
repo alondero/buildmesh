@@ -175,7 +175,12 @@ pub fn harness_default_for(
     prefs: &AppPreferences,
     option: &crate::agent::provider::SpawnOptionId,
 ) -> Option<HarnessConfigValue> {
-    let stored = prefs.harness_defaults.get(option.harness_id())?;
+    let harness_id = option.harness_id();
+    let stored = prefs.harness_defaults.get(harness_id).or_else(|| {
+        (harness_id == "opencode2")
+            .then(|| prefs.harness_defaults.get("opencode"))
+            .flatten()
+    })?;
     if !option.is_proxied() {
         return Some(stored.clone());
     }

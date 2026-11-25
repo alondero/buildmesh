@@ -162,4 +162,4 @@ unverified. These are OpenCode permission rules, not OS
 confinement; the Mesh sandbox remains an independent control. User or
 organization policies and the CLI implementation remain part of that trust
 boundary. See [the decision](docs/adr/0050-opencode-major-version-isolation.md)
-and [recovery steps](docs/troubleshooting.md#opencode-2-does-not-start-or-report-attention).
+and [recovery steps](docs/troubleshooting.md#opencode-does-not-start-or-report-attention).

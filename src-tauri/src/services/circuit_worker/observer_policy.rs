@@ -113,46 +113,7 @@ mod tests {
                 policy.coverage.owned_work == OwnedWorkKind::Unavailable,
                 "{id}"
             );
-            if id == "opencode" {
-                // Issue #1899: the foreground is an explicit unsupported
-                // contract (Circuit execution stays Unverified), and the
-                // provenance records the inspected version, platform and hook
-                // source instead of the generic fallback. Issue #2636: native
-                // subagent sessions are the one thing the plugin does report,
-                // so owned work is declared, with the unvalidated modes named.
-                assert!(!strategy.has_foreground_source());
-                assert!(
-                    policy.foreground.starts_with("Unavailable:"),
-                    "child-session hooks must not make the foreground read as available"
-                );
-                assert!(
-                    policy.foreground.contains("OpenCode"),
-                    "must record the inspected harness version"
-                );
-                assert!(
-                    policy.foreground.contains("session.idle"),
-                    "must name the hook source that was inspected"
-                );
-                assert_eq!(policy.coverage.owned_work, OwnedWorkKind::HookRegistry);
-                assert!(
-                    !policy.owned_work.starts_with("Unavailable:"),
-                    "child sessions are reported"
-                );
-                for stated in [
-                    "child session",
-                    "task",
-                    "no registry",
-                    "background",
-                    "resumed",
-                ] {
-                    assert!(
-                        policy.owned_work.contains(stated),
-                        "owned-work provenance must state {stated:?}: {}",
-                        policy.owned_work
-                    );
-                }
-                assert_eq!(policy.yielded_budget_ms, 30_000);
-            } else if id == "cline" {
+            if id == "cline" {
                 // Issue #1902: same explicit-unsupported shape for Cline.
                 // A validated *turn* signal (`agent_end` -> `TurnCompleted`)
                 // must not leak into a claim about foreground termination or

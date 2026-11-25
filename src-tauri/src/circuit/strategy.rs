@@ -550,7 +550,6 @@ mod tests {
             vec![
                 ("anthropic", PushKind::Hooks, PullKind::None),
                 ("agy", PushKind::Hooks, PullKind::None),
-                ("opencode", PushKind::Hooks, PullKind::None),
                 ("codex", PushKind::Hooks, PullKind::NativeTurnCompletion),
             ]
         );
@@ -565,7 +564,7 @@ mod tests {
             .map(|p| p.adapter().id())
             .collect();
         assert_eq!(foreground, vec!["anthropic", "agy", "codex"]);
-        for id in ["opencode", "grok", "mcode", "cline"] {
+        for id in ["opencode2", "grok", "mcode", "cline"] {
             assert!(!for_stored(id).has_foreground_source(), "{id}");
         }
         for id in ["grok", "mcode", "cline"] {
@@ -576,9 +575,9 @@ mod tests {
             );
         }
         assert_eq!(
-            for_stored("opencode").coverage().owned_work,
-            OwnedWorkKind::HookRegistry,
-            "OpenCode reports child sessions as owned work"
+            for_stored("opencode2").coverage().owned_work,
+            OwnedWorkKind::Unavailable,
+            "OpenCode 2 does not yet own child sessions"
         );
     }
 
@@ -632,7 +631,7 @@ mod tests {
         let profiles = |id: &str| match id {
             "deepseek-via-claude" => Some("claude".to_owned()),
             "my-codex" => Some("codex".to_owned()),
-            "custom-opencode" => Some("opencode".to_owned()),
+            "custom-opencode" => Some("opencode2".to_owned()),
             "ghost" => Some("future-harness".to_owned()),
             _ => None,
         };
@@ -643,7 +642,7 @@ mod tests {
         assert_eq!(resolve("deepseek-via-claude:account"), Some("anthropic"));
         assert_eq!(resolve("my-codex"), Some("codex"));
         assert_eq!(resolve("codex:openrouter"), Some("codex"));
-        assert_eq!(resolve("custom-opencode"), Some("opencode"));
+        assert_eq!(resolve("custom-opencode"), Some("opencode2"));
         assert_eq!(resolve("claude_code"), Some("anthropic"));
         // Unknown stays unknown: a strategy grants evidence authority, so the
         // legacy "unknown means Anthropic" fallback must not reach it.

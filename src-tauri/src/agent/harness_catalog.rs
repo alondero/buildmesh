@@ -39,7 +39,8 @@ pub struct HarnessCatalogEntry {
 /// `claude` is a Harness Profile id (detection / Spawn Menu). Its executor is
 /// the legacy `anthropic` adapter. [`crate::agent::provider::BUILTIN_HARNESS_IDS`]
 /// lists both so the SQL whitelist covers stored profile rows.
-pub const HARNESS_PROFILE_ALIASES: &[(&str, &str)] = &[("claude", "anthropic")];
+pub const HARNESS_PROFILE_ALIASES: &[(&str, &str)] =
+    &[("claude", "anthropic"), ("opencode", "opencode2")];
 
 /// The adapter id a Harness Profile id executes through, when the alias table
 /// names one. `None` for a profile id that already *is* an adapter id.
@@ -99,8 +100,7 @@ fn inspector_label(provider: Provider) -> &'static str {
     match provider {
         Provider::Anthropic => "Claude Code",
         Provider::Agy => "Antigravity",
-        Provider::OpenCode => "OpenCode",
-        Provider::OpenCode2 => "OpenCode 2",
+        Provider::OpenCode2 => "OpenCode",
         Provider::Codex => "Codex",
         Provider::Cursor => "Cursor",
         Provider::Grok => "Grok Code",

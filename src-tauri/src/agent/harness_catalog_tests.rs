@@ -189,7 +189,10 @@ fn builtin_harness_ids_are_catalog_keys_or_aliases() {
 
 #[test]
 fn claude_alias_targets_anthropic() {
-    assert_eq!(HARNESS_PROFILE_ALIASES, &[("claude", "anthropic")]);
+    assert_eq!(
+        HARNESS_PROFILE_ALIASES,
+        &[("claude", "anthropic"), ("opencode", "opencode2")]
+    );
     assert!(
         builtin_harness_catalog()
             .iter()

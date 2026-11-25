@@ -177,6 +177,7 @@ pub fn resolve_harness_adapter_id(harness_id: &str) -> Option<&'static str> {
         "minimax-code" => "mcode",
         "deepseek-harness" | "deepseek" => "dsh",
         "command-code" | "cmdc" | "cmd" => "commandcode",
+        "opencode" => "opencode2",
         other => other,
     };
     Provider::all()

@@ -274,7 +274,7 @@ fn provider_adapter_recipe_windows() {
         "agy"
     );
     assert_eq!(
-        Provider::OpenCode
+        Provider::OpenCode2
             .adapter()
             .spawn_recipe(Platform::Windows, EnvType::Windows)
             .binary,
@@ -314,22 +314,22 @@ fn provider_adapter_recipe_macos_anthropic_uses_claude() {
 fn provider_capabilities_split_correctly() {
     assert!(Provider::Anthropic.adapter().descriptor().supports_resume);
     assert!(Provider::Agy.adapter().descriptor().supports_resume);
-    assert!(Provider::OpenCode.adapter().descriptor().supports_resume);
+    assert!(Provider::OpenCode2.adapter().descriptor().supports_resume);
     assert!(
-        Provider::OpenCode
+        Provider::OpenCode2
             .adapter()
             .descriptor()
             .supports_model_override
     );
-    assert!(Provider::OpenCode.adapter().descriptor().supports_prefill);
+    assert!(Provider::OpenCode2.adapter().descriptor().supports_prefill);
     assert!(
-        Provider::OpenCode
+        Provider::OpenCode2
             .adapter()
             .descriptor()
             .auto_resume_on_startup
     );
     // Issue #1295: plugin hook unblocks the Autopilot gate.
-    assert!(Provider::OpenCode
+    assert!(Provider::OpenCode2
         .adapter()
         .descriptor()
         .requires_attention_hook());
@@ -464,16 +464,13 @@ fn only_transcript_writing_providers_produce_a_readable_transcript() {
         "AGY must advertise produces_readable_transcript=true so the \
              archived-node resume picker surfaces it (#1283)",
     );
-    // Issue #1296: OpenCode's local `opencode.db` is read by
-    // TranscriptFormat::OpenCode, so the archive resume picker and the
-    // Coordinator rich layer include OpenCode nodes.
     assert!(
-        Provider::OpenCode
+        Provider::OpenCode2
             .adapter()
             .descriptor()
             .produces_readable_transcript,
-        "OpenCode must advertise produces_readable_transcript=true so the \
-             archived-node resume picker surfaces it (#1296)",
+        "OpenCode 2 must advertise produces_readable_transcript=true so the \
+             archived-node resume picker surfaces it",
     );
     assert!(
         !Provider::Terminal
@@ -521,7 +518,7 @@ fn provider_from_db_str_is_case_insensitive() {
     assert_eq!(Provider::from_db_str("TeRmInAl"), Provider::Terminal);
     assert_eq!(Provider::from_db_str("ANTHROPIC"), Provider::Anthropic);
     assert_eq!(Provider::from_db_str("AGY"), Provider::Agy);
-    assert_eq!(Provider::from_db_str("OpenCode"), Provider::OpenCode);
+    assert_eq!(Provider::from_db_str("OpenCode"), Provider::OpenCode2);
     assert_eq!(Provider::from_db_str("Codex"), Provider::Codex);
     assert_eq!(Provider::from_db_str("Mcode"), Provider::Mcode);
     assert_eq!(Provider::from_db_str("Dsh"), Provider::Dsh);
@@ -731,7 +728,7 @@ fn capture_warnings_isolates_buffers_per_thread() {
 fn provider_display_lowercase() {
     assert_eq!(format!("{}", Provider::Anthropic), "anthropic");
     assert_eq!(format!("{}", Provider::Agy), "agy");
-    assert_eq!(format!("{}", Provider::OpenCode), "opencode");
+    assert_eq!(format!("{}", Provider::OpenCode2), "opencode2");
     assert_eq!(format!("{}", Provider::Codex), "codex");
     assert_eq!(format!("{}", Provider::Cursor), "cursor");
     assert_eq!(format!("{}", Provider::Grok), "grok");
@@ -768,8 +765,8 @@ fn codex_self_assigns_session_ids() {
 #[test]
 fn anthropic_and_terminal_do_not_self_assign() {
     assert!(!Provider::Anthropic.adapter().self_assigns_session_id());
-    assert!(Provider::OpenCode.adapter().self_assigns_session_id());
-    assert!(!Provider::OpenCode.adapter().captures_session_id_from_pty());
+    assert!(!Provider::OpenCode2.adapter().self_assigns_session_id());
+    assert!(!Provider::OpenCode2.adapter().captures_session_id_from_pty());
     assert!(!Provider::Terminal.adapter().self_assigns_session_id());
     assert!(!Provider::Freebuff.adapter().self_assigns_session_id());
 }
@@ -786,7 +783,7 @@ fn is_plain_terminal_only_for_terminal() {
     assert!(Provider::Terminal.adapter().descriptor().is_plain_terminal);
     assert!(!Provider::Anthropic.adapter().descriptor().is_plain_terminal);
     assert!(!Provider::Agy.adapter().descriptor().is_plain_terminal);
-    assert!(!Provider::OpenCode.adapter().descriptor().is_plain_terminal);
+    assert!(!Provider::OpenCode2.adapter().descriptor().is_plain_terminal);
     assert!(!Provider::Codex.adapter().descriptor().is_plain_terminal);
 }
 

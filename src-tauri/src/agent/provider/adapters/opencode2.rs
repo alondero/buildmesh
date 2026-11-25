@@ -73,7 +73,7 @@ impl AgentProvider for OpenCode2Adapter {
     }
     fn ui(&self) -> UiMeta {
         UiMeta {
-            label: "OpenCode 2".into(),
+            label: "OpenCode".into(),
             color: "#f59e0b".into(),
             icon: "O".into(),
         }
@@ -88,6 +88,10 @@ impl AgentProvider for OpenCode2Adapter {
     }
 
     fn confirms_prompt_submission(&self) -> bool {
+        true
+    }
+
+    fn replays_unconfirmed_submit(&self) -> bool {
         true
     }
 
@@ -120,7 +124,7 @@ impl AgentProvider for OpenCode2Adapter {
         model_ref(model).map(|_| ())
     }
     fn validate_agent_override(&self, agent: &str) -> Result<(), String> {
-        super::opencode::validate_agent_name(agent)
+        validate_agent_name(agent)
     }
     fn agent_args(&self, _agent: &str) -> Vec<String> {
         // The full V2 TUI has no `--agent` flag; the selector is applied
@@ -143,10 +147,7 @@ impl AgentProvider for OpenCode2Adapter {
         }
     }
     fn prefill_args(&self, text: &str) -> Vec<String> {
-        vec![
-            "--prompt".into(),
-            super::opencode::flatten_cmd_prefill(text),
-        ]
+        vec!["--prompt".into(), flatten_cmd_prefill(text)]
     }
     fn provision_attention_hooks(
         &self,
@@ -273,7 +274,7 @@ fn prepare_identity(
         return Err("Invalid OpenCode 2 session identity".into());
     }
     if let Some(agent) = agent {
-        super::opencode::validate_agent_name(agent)?;
+        validate_agent_name(agent)?;
     }
     let target = if fork {
         let response = request(
@@ -334,6 +335,25 @@ fn prepare_identity(
         }
     }
     Ok(target)
+}
+
+pub(super) fn validate_agent_name(agent: &str) -> Result<(), String> {
+    let invalid = || "OpenCode agent must be a non-empty name without spaces".to_string();
+    if agent.trim().is_empty() || agent.chars().any(char::is_whitespace) {
+        return Err(invalid());
+    }
+    if agent.chars().any(char::is_control) {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+pub(super) fn flatten_cmd_prefill(text: &str) -> String {
+    text.split(['\n', '\r'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn model_ref(model: &str) -> Result<serde_json::Value, String> {

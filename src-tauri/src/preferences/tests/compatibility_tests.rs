@@ -258,6 +258,24 @@ fn normalize_harness_default_trims_blanks_and_whitespace() {
 }
 
 #[test]
+fn harness_default_for_reads_legacy_opencode_key() {
+    let mut prefs = AppPreferences::default();
+    prefs.harness_defaults.insert(
+        "opencode".to_string(),
+        HarnessConfigValue {
+            model: Some("opencode-model".to_string()),
+            effort: None,
+            permission_mode: None,
+            agent: None,
+        },
+    );
+    for harness in ["opencode", "opencode2"] {
+        let read = harness_default_for(&prefs, &SpawnOptionId::from(harness)).unwrap();
+        assert_eq!(read.model.as_deref(), Some("opencode-model"));
+    }
+}
+
+#[test]
 fn harness_default_for_reads_back_stored_value() {
     let mut prefs = AppPreferences::default();
     prefs.harness_defaults.insert(
@@ -479,31 +497,30 @@ fn upsert_harness_default_validates_permission_mode() {
 #[test]
 fn upsert_harness_default_validates_agent() {
     let mut prefs = AppPreferences::default();
-    for harness in ["opencode", "opencode2"] {
-        upsert_harness_default(
-            &mut prefs,
-            harness,
-            HarnessConfigValue {
-                model: None,
-                effort: None,
-                permission_mode: None,
-                agent: Some("build".to_string()),
-            },
-        )
-        .unwrap_or_else(|e| panic!("{harness} must accept an agent: {e}"));
-        assert_eq!(
-            prefs
-                .harness_defaults
-                .get(harness)
-                .and_then(|v| v.agent.clone()),
-            Some("build".to_string())
-        );
-    }
+    let harness = "opencode2";
+    upsert_harness_default(
+        &mut prefs,
+        harness,
+        HarnessConfigValue {
+            model: None,
+            effort: None,
+            permission_mode: None,
+            agent: Some("build".to_string()),
+        },
+    )
+    .unwrap_or_else(|e| panic!("{harness} must accept an agent: {e}"));
+    assert_eq!(
+        prefs
+            .harness_defaults
+            .get(harness)
+            .and_then(|v| v.agent.clone()),
+        Some("build".to_string())
+    );
     // Whitespace-only collapses to absent (removes the sparse entry).
     let mut prefs = AppPreferences::default();
     upsert_harness_default(
         &mut prefs,
-        "opencode",
+        "opencode2",
         HarnessConfigValue {
             model: None,
             effort: None,
@@ -512,7 +529,7 @@ fn upsert_harness_default_validates_agent() {
         },
     )
     .unwrap();
-    assert!(!prefs.harness_defaults.contains_key("opencode"));
+    assert!(!prefs.harness_defaults.contains_key("opencode2"));
     // Harnesses without the control reject any value.
     for harness in ["claude", "codex", "terminal"] {
         let err = upsert_harness_default(
@@ -534,7 +551,7 @@ fn upsert_harness_default_validates_agent() {
     // Malformed names fail at the adapter grammar (before spawn).
     let err = upsert_harness_default(
         &mut prefs,
-        "opencode",
+        "opencode2",
         HarnessConfigValue {
             model: None,
             effort: None,
