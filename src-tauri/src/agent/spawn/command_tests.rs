@@ -343,6 +343,59 @@ fn production_commands_preserve_identity_and_environment_across_runtimes() {
 }
 
 #[test]
+fn every_spawn_exports_the_session_harness_for_hook_gating() {
+    let _env = crate::env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    use super::command::{build_spawn_command_prepared, SpawnCommandInput};
+    use super::reader::SessionIdMode;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().to_string_lossy().into_owned();
+    for provider in Provider::all() {
+        for runtime in [EnvType::Windows, EnvType::Wsl] {
+            let resolved = crate::env::ResolvedPath {
+                host_path: path.clone(),
+                spawn_path: path.clone(),
+                raw_path: path.clone(),
+                env_type: runtime,
+            };
+            let command = build_spawn_command_prepared(SpawnCommandInput {
+                resolved: &resolved,
+                provider: *provider,
+                routing: &crate::agent::launch_routing::PreparedLaunchRouting::environment(&[]),
+                session_id_mode: &SessionIdMode::None,
+                session_id: 7,
+                config: &ResolvedAgentConfig::default(),
+                prefill: None,
+                sandbox: false,
+                resume_cause: super::ResumeCause::Explicit,
+            })
+            .unwrap();
+            assert_eq!(
+                command.get_env("BUILDMESH_HARNESS").unwrap(),
+                std::ffi::OsStr::new(provider.adapter().id()),
+                "{} on {runtime:?}",
+                provider.adapter().id()
+            );
+            if runtime == EnvType::Wsl && cfg!(windows) {
+                let wslenv = command
+                    .get_env("WSLENV")
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                assert!(
+                    wslenv
+                        .split(':')
+                        .any(|entry| entry.split('/').next() == Some("BUILDMESH_HARNESS")),
+                    "WSLENV must forward BUILDMESH_HARNESS for {}: {wslenv}",
+                    provider.adapter().id()
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn opencode2_commands_select_independent_node_config_files() {
     use super::command::{build_spawn_command_prepared, SpawnCommandInput};
     use super::reader::SessionIdMode;

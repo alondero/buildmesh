@@ -136,6 +136,9 @@ pub(super) fn build_spawn_command_with_adapter(
         command_wsl_env.push(k);
     }
 
+    cmd.env("BUILDMESH_HARNESS", adapter.id());
+    command_wsl_env.push("BUILDMESH_HARNESS");
+
     command_wsl_env.extend(["TERM", "COLORTERM", "FORCE_COLOR"]);
     spawn_environment::apply_wsl_env(
         &mut cmd,

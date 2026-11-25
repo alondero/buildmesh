@@ -67,6 +67,8 @@ Agents signal they need user input via Claude Code hooks configured in `.claude/
 curl -sf -X POST -H "Content-Type: application/json" --data-binary @- http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID || true
 ```
 
+The command is wrapped in a session-harness gate — `if [ -z "$BUILDMESH_HARNESS" ] || [ "$BUILDMESH_HARNESS" = "anthropic" ]; then … || true; fi` — because `.claude/` is shared territory (issue #2864): Devin imports `.claude/` hooks when `read_config_from.claude` is enabled (the default) and any Claude-compatible harness can do the same, so a node the file was never provisioned for would otherwise POST cross-harness callbacks. The `if …; fi` form (not a `&&`-chained guard) is required because `unix_attention_curl()` expands to a `;`-separated shell-function definition off Windows, and a `;` would split the callback out of a list-level gate. `build_spawn_command` exports `BUILDMESH_HARNESS=<adapter id>` on every launch (forwarded through WSLENV for WSL guests) so the gate can tell the owning family; an unset variable preserves the contract for sessions spawned before it existed. The test `attention_hook_posts_only_for_the_owning_harness` executes the provisioned command — and a `;`-bearing function-definition variant of it — under `sh` with a stubbed `curl`, asserting empty stderr for a blocked harness.
+
 The hook reads `$BUILDMESH_PORT` (set per-agent in `spawn_environment`) at run time rather than baking a literal port, so it routes correctly across the 1992→1994 fallback and to the dev profile's 2992 when an agent is spawned by `buildmesh-dev`.
 
 **Codex is a different contract.** Codex's hook runner launches the command in PowerShell (Windows, verified on 0.162, so cmd.exe-only syntax such as `& echo {}` is a parse error that surfaces as "Hook failed … exited with code 1") or `$SHELL -lc` (Unix), then `env_clear()`s down to a Core inherit snapshot. `BUILDMESH_PORT` / `BUILDMESH_SESSION_ID` are not in that snapshot, so the callback URL `http://localhost:<port>/api/attention/<node-id>` is baked in. The hooks are **launch arguments, not project files**: from a git worktree Codex loads the *main checkout's* `.codex/hooks.json` and ignores the worktree's own, so a file written beside the node is never read and a shared main-checkout file would be last-writer-wins across every worktree node. `AgentProvider::launch_hook_args` (called from `build_spawn_command_prepared`, which knows the node id) therefore emits `-c features.hooks=true` and one `-c hooks.<Event>=[…]` override per event: `SessionStart`, `Stop`, `PermissionRequest`, `UserPromptSubmit`, `PreToolUse` for `request_user_input`, catch-all `PostToolUse`, and `Interrupt`. Codex combines these with the user's own `hooks.json` hooks. The values are TOML literal strings, so the callback they wrap carries no quote characters of its own: a double quote is dropped by Windows PowerShell 5.1 on the way to a native program, and a single quote would force `toml_launch_string` to escape the value into a double-quoted string.
@@ -170,9 +172,14 @@ Harness wire validation and mapping live in
 `http::routes::attention::normalizers`, with one module per wired hook harness.
 Dispatch uses the resolved node's harness, never a claimed payload provider or
 another harness's classifier. Each module selects the fields it validates;
-unrelated harness metadata cannot invalidate its callback. Unknown harnesses,
-unsupported events and malformed payloads report `signal_unavailable` with
-degraded health and cannot mutate turn/question/child correlation state.
+unrelated harness metadata cannot invalidate its callback. A **known** harness
+whose adapter declares `attention_capability: None` has no dispatch arm on
+purpose: a callback it still manages to deliver — Devin firing the
+`.claude/settings.local.json` hooks it imports, for example — is dropped as
+noise rather than marked, because the harness has no hook contract to degrade
+(issue #2864). Unknown harness ids, unsupported events and malformed payloads
+report `signal_unavailable` with degraded health and cannot mutate
+turn/question/child correlation state.
 Compatible hooks share envelope and tool mechanics, while event vocabulary and
 observation strategy remain harness-owned. Explicit hooks are interpreted first;
 only that harness's completion path may request transcript reconciliation.

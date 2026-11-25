@@ -222,6 +222,7 @@ impl BackgroundLaunch {
             "BUILDMESH_SESSION_ID",
             "BUILDMESH_PORT",
             "BUILDMESH_HOOK_TOKEN",
+            "BUILDMESH_HARNESS",
         ] {
             cmd.env_remove(key);
         }
