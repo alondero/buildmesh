@@ -112,7 +112,7 @@ Legend: ✅ advertised, ❌ not advertised. Column shorthand:
 | Meta Muse | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | Native on Windows since Muse 1.3.0; workspace trust pre-provisioned (#1706); `--reasoning-effort` closed vocabulary (#1704) |
 | Cline | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | Native Provider; hook delivers turn completion only (no clean-exit dispatch); reader over `<id>.messages.json` (#1776) |
 | Perch | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | Resume via `--thread`; closed `--effort`; [deep dive](perch-harness-capabilities.md) |
-| Devin | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | `-- <prompt>` prefill; result-file completion in Circuits; [deep dive](devin-harness-capabilities.md) |
+| Devin | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | `-- <prompt>` prefill; result-file completion in Circuits; [deep dive](devin-harness-capabilities.md) |
 | Terminal | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | Plain shell; the only `PlainShell` launch mode |
 
 Ten harnesses are archive-resumable (Resume **and** Transcript): Claude Code,
@@ -148,6 +148,7 @@ the node being named still needs a turn signal to trigger naming.
 | Antigravity | `--print` argument | text stdout | Native only |
 | Command Code | stdin (`--print`) | JSON result event | Native only |
 | MiniMax Code | stdin (`exec --input -`) | `--output-last-message` file | Native only |
+| Devin | `--prompt-file` | text stdout | Native only |
 
 Cursor, Cline, Freebuff, Meta Muse, DeepSeek Harness, Perch, and Terminal currently
 advertise no background recipe. This does not imply their CLI lacks a headless
@@ -164,14 +165,15 @@ limit to stay below Windows command-line limits; larger reports fail explicitly.
 Stdin and prompt-file transports do not have this argument-size restriction.
 
 Sources for the recipes: installed CLI help (Claude Code 2.1.286, Codex 0.159.3,
-OpenCode 2.2.3, Kimi Code 0.27.0, Grok Code 1.0.44, Command Code 1.72.4),
+OpenCode 2.2.3, Kimi Code 0.27.0, Grok Code 1.0.44, Command Code 1.72.4,
+Devin 3000.14.30821),
 [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference),
 [OpenCode run implementation](https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/cli/cmd/run.ts),
 and [Kimi Code command reference](https://www.kimi.com/code/docs/en/kimi-code-cli/reference/kimi-command.html).
 
 ## Attention hooks
 
-Non-boolean detail for the nine harnesses with a native attention hook
+Non-boolean detail for the ten harnesses with a native attention hook
 (`attention_capability`). The other six have no hook wired yet.
 
 | Harness | Launch mode | Lifecycle events | Min. CLI version | Trust requirement |
@@ -185,6 +187,7 @@ Non-boolean detail for the nine harnesses with a native attention hook
 | Grok Code | Permission ask | Turn completed, input required, question, permission | 1.0.5 | Global hook directory |
 | MiniMax Code | Skip permissions (pinned: `permissionMode: bypassPermissions`) | Turn completed | 0.4.12 | — |
 | Cline | Skip permissions | Turn completed | 3.0.62 | — |
+| Devin | Skip permissions | Turn completed, work resumed, question, permission | 3000.14.30821 | Workspace trust |
 
 Launch mode is a real boundary, not a label. Under **Skip permissions** the
 harness auto-approves tool calls, so a permission request is impossible by
@@ -258,7 +261,7 @@ before.
 | DeepSeek Harness | Result file | ✅ |
 | Freebuff | Result file | ✅ |
 | Perch | Result file | ✅ |
-| Devin | Result file | ✅ |
+| Devin | Attn hook | ✅ |
 | Terminal | None (plain shell) | ❌ |
 
 Eligibility is necessary, not sufficient, and several ✅ rows are weaker than

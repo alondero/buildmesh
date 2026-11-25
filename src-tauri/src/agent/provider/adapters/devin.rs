@@ -195,6 +195,41 @@ impl AgentProvider for DevinAdapter {
         true
     }
 
+    fn ready_for_initial_prompt(&self, tail: &str) -> bool {
+        tail.contains("Ask Devin to build features")
+    }
+
+    fn background_recipe(
+        &self,
+        platform: Platform,
+    ) -> Option<crate::agent::background::BackgroundRecipe> {
+        use crate::agent::{
+            background::BackgroundRecipe,
+            capabilities::{BackgroundPromptInput, BackgroundResultOutput},
+        };
+        let mut spawn = self.spawn_recipe(platform, EnvType::Windows);
+        spawn.base_args = [
+            "--print",
+            "--respect-workspace-trust",
+            "false",
+            "--process-model",
+            "in-process",
+            "--permission-mode",
+            "auto",
+            "--verbosity",
+            "0",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        Some(BackgroundRecipe::new(
+            spawn,
+            BackgroundPromptInput::File {
+                flag: "--prompt-file".into(),
+            },
+            BackgroundResultOutput::Stdout,
+        ))
+    }
+
     fn self_assigns_session_id(&self) -> bool {
         true
     }

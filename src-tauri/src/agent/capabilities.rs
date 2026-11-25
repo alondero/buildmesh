@@ -1321,7 +1321,7 @@ mod tests {
         assert!(devin.supports_extra_args);
         assert!(devin.supports_prefill);
         assert!(!devin.is_plain_terminal);
-        assert!(devin.background_inference.is_none());
+        assert!(devin.background_inference.is_some());
         assert_eq!(devin.effort_control, EffortControlKind::None);
     }
 
