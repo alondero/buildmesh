@@ -418,6 +418,16 @@ deliberate: your file is left exactly as it was rather than replaced.
 - Restart the node. The write is retried and the status mark clears when a
   callback is delivered.
 
+## Devin hooks do not fire on Windows
+
+Devin runs its command hooks through a `bash.exe` it resolves on the machine
+(observed with an MSYS2/Git-Bash-family shell on PATH), not through `cmd.exe`
+or PowerShell. On a Windows machine with no bash on PATH the hook commands are
+expected to fail or never run — install Git for Windows (or another bash) and
+restart the node. This shell choice is also why the hook file
+(`.devin/hooks.v1.json`) carries POSIX syntax; do not rewrite the callback
+into cmd.exe or PowerShell syntax by hand.
+
 ## Codex reports “Hook failed”
 
 Buildmesh's Codex attention hook sends lifecycle updates to the local app. The

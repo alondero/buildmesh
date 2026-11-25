@@ -5,6 +5,7 @@ mod claude;
 mod cline;
 mod codex;
 mod cursor;
+mod devin;
 mod grok;
 mod kimi;
 mod mcode;
@@ -62,6 +63,10 @@ fn dispatch(provider: &str) -> Option<Normalizer> {
         "opencode" | "opencode2" => Normalizer {
             parse: opencode::parse,
             classify: opencode::classify,
+        },
+        "devin" => Normalizer {
+            parse: devin::parse,
+            classify: devin::classify,
         },
         _ => return None,
     })

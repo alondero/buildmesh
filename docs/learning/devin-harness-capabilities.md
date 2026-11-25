@@ -10,7 +10,7 @@ metadata:
 # Devin harness and usage meter
 
 Audience: maintainers changing the Devin adapter or its usage meter.
-Status: current against `devin 3000.14.30821 (a09cd7f323ee)` on 2026-11-24.
+Status: current against `devin 3000.14.30821 (a09cd7f323ee)` on 2026-11-25.
 
 Devin CLI is Cognition's native interactive terminal coding agent (`devin` /
 `devin.exe`). Buildmesh launches the native binary directly, passes interactive
@@ -59,25 +59,47 @@ Verified against:
   on Windows — filtering the `sessions` table by `working_directory`; the
   `services::devin_session` poller wires the row's `id` column into
   `cli_session_id`.
-- **Attention hooks & Circuit completion**: `attention_capability` is currently
-  `None` (`requires_attention_hook: false`) and `circuit_observation` is
-  `ObservationStrategy::UNWIRED`. Inside Autopilot Circuits, Devin completes
-  turns via result-file handoff until live hook delivery is wired.
+- **Attention hooks**: wired since issue #2862. Live capture against a print
+  session with `.devin/hooks.v1.json` provisioned confirmed:
+  - `hook_event_name` is present on `SessionStart`, `UserPromptSubmit`,
+    `PreToolUse`, `PostToolUse`, `PermissionRequest`, `Stop` (and `SessionEnd`).
+  - `session_id` is on every event; `prompt_id` (a UUID) is on every event
+    once a turn has started and absent on `SessionStart`, matching the docs.
+  - `UserPromptSubmit` adds `prompt` and `source`; `Stop` adds
+    `stop_hook_active` and `last_assistant_message`; tool events add
+    `tool_name`, `tool_input` and `tool_use_id` (`call_<hex>#<hex>` or
+    `<tool>:<n>#<hex>`); `PostToolUse` adds `tool_response` (`success`,
+    `output`, `error`). `ask_user_question`'s `tool_input` is Claude's
+    `questions[].options[].label` shape.
+  - `SessionEnd` fires for print-mode sessions (`reason: "other"`), sometimes
+    after the session output completes. `PostToolUse` does not fire for
+    `ask_user_question` in print mode because the interactive tool never
+    completes there. `exit_plan_mode` is a documented core tool but does not
+    exist in print mode, so its payload shape is unverified (uniform envelope
+    assumed).
+  - On Windows `devin.exe` runs command hooks through `bash.exe -c` — on the
+    verification machine an MSYS2 bash resolved from PATH — as a descendant
+    of the agent process (`devin.exe -p` -> `devin.exe acp` -> `bash.exe` ->
+    hook), so POSIX syntax (`$VAR`, `>/dev/null`, `|| true`) is required and
+    cmd.exe syntax would break, and per-agent environment variables propagate
+    to the hook shell (verified with `BUILDMESH_PORT`/`BUILDMESH_SESSION_ID`).
+    What devin does on a Windows machine with no `bash.exe` on PATH is
+    untested.
+- **Circuit completion**: `circuit_observation` stays
+  `ObservationStrategy::UNWIRED` until a live Circuit run proves the hook
+  surface end-to-end; Circuits complete turns via result-file handoff.
 - **`.claude/` hook import (verified, issue #2864)**: a `devin -p` probe on
   3000.14.30821 fired `SessionStart`, `UserPromptSubmit` and `Stop` hooks
   defined in `.claude/settings.local.json` — `read_config_from.claude` is on
   by default and the hook shell is POSIX (`$VAR` expands, `%VAR%` does not).
   Payloads are Claude-shaped (`hook_event_name`, `prompt_id` UUID), but the
   `session_id` is a word slug (`curved-gravity`, `good-appliance`), not a
-  UUID. Two guards prevent these imported hooks producing cross-harness
-  callbacks: the provisioned `.claude` command posts only when
-  `BUILDMESH_HARNESS` is unset or `anthropic`, and the attention route drops
-  callbacks resolved to a known harness with `attention_capability: None`
-  instead of degrading to `signal_unavailable`. Disabling
+  UUID. The provisioned `.claude` command posts only when `BUILDMESH_HARNESS`
+  is unset or `anthropic`, so imported Claude hooks cannot produce
+  cross-harness callbacks for a devin turn. Disabling
   `read_config_from.claude` was rejected as the fix: it gates all Claude
   imports (rules, skills, MCP servers), not just hooks.
-  `.devin/config.local.json` provisioning and the live hook event contract
-  remain unverified.
+
 - **Background inference**: `None` (`background_recipe` stays unwired until
   `-p/--print` is live-verified with an authenticated session).
 

@@ -1313,7 +1313,7 @@ mod tests {
         assert_eq!(devin.harness_id, "devin");
         assert!(devin.supports_resume);
         assert!(devin.auto_resume_on_startup);
-        assert!(!devin.requires_attention_hook);
+        assert!(devin.requires_attention_hook);
         assert!(!devin.supports_passive_turn_watcher);
         assert!(!devin.produces_readable_transcript);
         assert!(devin.supports_model_override);
