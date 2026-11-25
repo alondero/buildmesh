@@ -1,0 +1,275 @@
+[
+  {
+    "name": "live-session-start",
+    "payload": {
+      "hook_event_name": "SessionStart",
+      "source": "startup",
+      "session_id": "orchid-ragamuffin"
+    },
+    "pending": 0,
+    "decision": "Ignore",
+    "kind": null,
+    "health": "ok"
+  },
+  {
+    "name": "live-user-prompt-submit",
+    "payload": {
+      "hook_event_name": "UserPromptSubmit",
+      "prompt": "Use the exec tool to run exactly this command: echo hello-from-hook-probe \u00e2\u20ac\u201d then stop immediately.",
+      "source": "user",
+      "session_id": "orchid-ragamuffin",
+      "prompt_id": "c1ab6634-d0e8-408f-8348-97bf65c78e8b"
+    },
+    "pending": 0,
+    "decision": "Running",
+    "kind": "work_resumed",
+    "health": "ok"
+  },
+  {
+    "name": "live-stop",
+    "payload": {
+      "hook_event_name": "Stop",
+      "stop_hook_active": false,
+      "last_assistant_message": "hello-from-hook-probe",
+      "session_id": "orchid-ragamuffin",
+      "prompt_id": "c1ab6634-d0e8-408f-8348-97bf65c78e8b"
+    },
+    "pending": 0,
+    "decision": "Ready",
+    "kind": "turn_completed",
+    "health": "ok"
+  },
+  {
+    "name": "live-stop-hook-active",
+    "payload": {
+      "hook_event_name": "Stop",
+      "stop_hook_active": true,
+      "last_assistant_message": "Incomplete handoff: verification is incomplete. Diagnostic: `ask_user_question` was rejected because the question was canceled, so no preference was collected and there is no successful outcome to report.",
+      "session_id": "sneaky-biology",
+      "prompt_id": "05658f67-01ea-431a-928e-caa508b3a5c6"
+    },
+    "pending": 0,
+    "decision": "Ready",
+    "kind": "turn_completed",
+    "health": "ok"
+  },
+  {
+    "name": "live-permission-request",
+    "payload": {
+      "hook_event_name": "PermissionRequest",
+      "tool_name": "exec",
+      "tool_input": {
+        "command": "npm run verify",
+        "timeout": 0
+      },
+      "tool_use_id": "call_84a43ff3bb9d0dee#96a885a311e14ce2b17082baf5586845",
+      "session_id": "orchid-ragamuffin",
+      "prompt_id": "c1ab6634-d0e8-408f-8348-97bf65c78e8b"
+    },
+    "pending": 0,
+    "decision": "MarkInput",
+    "kind": "permission_requested",
+    "health": "ok"
+  },
+  {
+    "name": "live-pretooluse-ask-user-question",
+    "payload": {
+      "hook_event_name": "PreToolUse",
+      "tool_name": "ask_user_question",
+      "tool_input": {
+        "questions": [
+          {
+            "question": "Do you prefer red or blue?",
+            "header": "Color",
+            "options": [
+              {
+                "label": "Red",
+                "description": "Choose red"
+              },
+              {
+                "label": "Blue",
+                "description": "Choose blue"
+              }
+            ]
+          }
+        ]
+      },
+      "tool_use_id": "call_8635dec3028d4455#4f5c772eb9984224b0337d3e27063a89",
+      "session_id": "sneaky-biology",
+      "prompt_id": "05658f67-01ea-431a-928e-caa508b3a5c6"
+    },
+    "pending": 0,
+    "decision": "MarkInput",
+    "kind": "question_requested",
+    "health": "ok"
+  },
+  {
+    "name": "live-pretooluse-exec",
+    "payload": {
+      "hook_event_name": "PreToolUse",
+      "tool_name": "exec",
+      "tool_input": {
+        "command": "echo hello-from-hook-probe"
+      },
+      "tool_use_id": "call_83e0f1ec9407248b#3f3c2be3476a4c0bb4c0bd6fcf641207",
+      "session_id": "orchid-ragamuffin",
+      "prompt_id": "c1ab6634-d0e8-408f-8348-97bf65c78e8b"
+    },
+    "pending": 0,
+    "decision": "Ignore",
+    "kind": null,
+    "health": "ok"
+  },
+  {
+    "name": "live-posttooluse-exec",
+    "payload": {
+      "hook_event_name": "PostToolUse",
+      "tool_name": "exec",
+      "tool_input": {
+        "command": "echo hello-from-hook-probe"
+      },
+      "tool_use_id": "call_83e0f1ec9407248b#3f3c2be3476a4c0bb4c0bd6fcf641207",
+      "tool_response": {
+        "success": true,
+        "output": "Output from command in shell 35b28e:\nhello-from-hook-probe\n\n\nExit code: 0",
+        "error": null
+      },
+      "session_id": "orchid-ragamuffin",
+      "prompt_id": "c1ab6634-d0e8-408f-8348-97bf65c78e8b"
+    },
+    "pending": 0,
+    "decision": "Ignore",
+    "kind": null,
+    "health": "ok"
+  },
+  {
+    "name": "live-session-end",
+    "payload": {
+      "hook_event_name": "SessionEnd",
+      "reason": "other",
+      "session_id": "sneaky-biology",
+      "prompt_id": "05658f67-01ea-431a-928e-caa508b3a5c6"
+    },
+    "pending": 0,
+    "decision": "Ignore",
+    "kind": null,
+    "health": "ok"
+  },
+  {
+    "name": "synthetic-posttooluse-ask-user-question",
+    "payload": {
+      "hook_event_name": "PostToolUse",
+      "tool_name": "ask_user_question",
+      "tool_input": {
+        "questions": [
+          {
+            "question": "Do you prefer red or blue?",
+            "header": "Color",
+            "options": [
+              {
+                "label": "Red",
+                "description": "Choose red"
+              },
+              {
+                "label": "Blue",
+                "description": "Choose blue"
+              }
+            ]
+          }
+        ]
+      },
+      "tool_use_id": "call_8635dec3028d4455#4f5c772eb9984224b0337d3e27063a89",
+      "session_id": "sneaky-biology",
+      "prompt_id": "05658f67-01ea-431a-928e-caa508b3a5c6",
+      "tool_response": {
+        "success": true,
+        "output": "Red",
+        "error": null
+      }
+    },
+    "pending": 0,
+    "decision": "Running",
+    "kind": "work_resumed",
+    "health": "ok"
+  },
+  {
+    "name": "synthetic-pretooluse-exit-plan-mode",
+    "payload": {
+      "hook_event_name": "PreToolUse",
+      "tool_name": "exit_plan_mode",
+      "tool_input": {},
+      "tool_use_id": "call_83e0f1ec9407248b#3f3c2be3476a4c0bb4c0bd6fcf641207",
+      "session_id": "orchid-ragamuffin",
+      "prompt_id": "c1ab6634-d0e8-408f-8348-97bf65c78e8b"
+    },
+    "pending": 0,
+    "decision": "MarkInput",
+    "kind": "permission_requested",
+    "health": "ok"
+  },
+  {
+    "name": "synthetic-posttooluse-exit-plan-mode",
+    "payload": {
+      "hook_event_name": "PostToolUse",
+      "tool_name": "exit_plan_mode",
+      "tool_input": {},
+      "tool_use_id": "call_83e0f1ec9407248b#3f3c2be3476a4c0bb4c0bd6fcf641207",
+      "session_id": "orchid-ragamuffin",
+      "prompt_id": "c1ab6634-d0e8-408f-8348-97bf65c78e8b",
+      "tool_response": {
+        "success": true,
+        "output": "",
+        "error": null
+      }
+    },
+    "pending": 0,
+    "decision": "Running",
+    "kind": "work_resumed",
+    "health": "ok"
+  },
+  {
+    "name": "synthetic-postcompaction",
+    "payload": {
+      "hook_event_name": "PostCompaction",
+      "summary": "compacted context",
+      "session_id": "orchid-ragamuffin",
+      "prompt_id": "c1ab6634-d0e8-408f-8348-97bf65c78e8b"
+    },
+    "pending": 0,
+    "decision": "Ignore",
+    "kind": null,
+    "health": "ok"
+  },
+  {
+    "name": "malformed-envelope",
+    "body": "not json",
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  },
+  {
+    "name": "malformed-event",
+    "payload": {
+      "hook_event_name": 17
+    },
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  },
+  {
+    "name": "non-object",
+    "payload": [],
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  },
+  {
+    "name": "unknown-event",
+    "payload": {
+      "hook_event_name": "future-unvalidated-event"
+    },
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  }
+]

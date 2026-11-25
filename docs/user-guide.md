@@ -822,7 +822,7 @@ The current built-in catalog is:
 | Cline | Yes | Hook | Needs Cline 3.0.62 or newer. Manage providers with `cline auth`; Buildmesh injects account credentials at spawn |
 | Meta Muse | Yes | Passive watcher | Native on Windows since v1.3.0; WSL guest otherwise. Reasoning effort is available as `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra` |
 | Perch | Yes | None | Interactive CLI. Model and effort overrides are available; there is no transcript reader. Circuits use its result file (below) |
-| Devin | Yes | None | Native CLI (`devin`). Supports model override and interactive prefill; Circuits use its result file (below) |
+| Devin | Yes | Hook | Native CLI (`devin`). Supports model override and interactive prefill; validated against devin 3000.14.30821 |
 | Terminal | No | None | A plain shell; closing the app loses its live process |
 
 A harness with no attention signal can still run Autopilot Circuits, as the
@@ -869,13 +869,13 @@ the updated terminal runtime.
 
 ## Attention hooks Buildmesh installs on disk
 
-Eight harnesses report their attention signal as **Hook** in the table above.
+Nine harnesses report their attention signal as **Hook** in the table above.
 Buildmesh implements that signal by writing a hook into the harness's own
 configuration before the agent starts. The hook is what lets a node show that it
 is waiting for you, instead of going quiet until you read its terminal.
 
 Claude Code's hook is written when you add the project and refreshed each time
-one of its nodes starts; the other seven appear the first time you start a node
+one of its nodes starts; the other eight appear the first time you start a node
 with that harness. Nothing is written for a harness whose signal is **Passive
 watcher** or **None**, and no hook file exists before you add the project or
 start a node from Buildmesh.
@@ -891,6 +891,7 @@ start a node from Buildmesh.
 | Kimi Code | `config.toml` in its configuration home | Configuration home |
 | MiniMax Code | `.claude-plugin/plugin.json` in its plugin directory | Configuration home |
 | Cline | `TaskComplete.ps1` or `TaskComplete.sh` under `hooks/` | Configuration home |
+| Devin | `.devin/hooks.v1.json` | Project directory |
 
 Codex loads its project hooks from the *main checkout's* `.codex/hooks.json`,
 never a worktree's own, so from a git worktree a file beside the node would

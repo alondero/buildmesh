@@ -22,3 +22,39 @@ fn parse_session_id_for_provider_dispatches_devin_to_slug_validator() {
         assert_eq!(parse_session_id_for_provider("devin", bad), None, "{bad}");
     }
 }
+
+#[test]
+fn devin_session_ids_accept_live_petname_shapes() {
+    for id in ["orchid-ragamuffin", "sneaky-biology", "rumbling-path"] {
+        assert_eq!(
+            parse_session_id_for_provider("devin", id),
+            Some(id.into()),
+            "live petname id must round-trip"
+        );
+        assert_eq!(
+            parse_session_id_for_provider("anthropic", id),
+            None,
+            "other providers must not adopt the petname shape"
+        );
+    }
+    for invalid in [
+        "",
+        "ab",
+        "-orchid-ragamuffin",
+        "--resume",
+        "orchid ragamuffin",
+        "orchid_ragamuffin",
+        "Orchid-Ragamuffin",
+        "orchid-$(whoami)",
+        "orchid/ragamuffin",
+        "orchid.ragamuffin",
+    ] {
+        assert_eq!(
+            parse_session_id_for_provider("devin", invalid),
+            None,
+            "{invalid:?} must be rejected"
+        );
+    }
+    let too_long = format!("o{}", "-r".repeat(64));
+    assert_eq!(parse_session_id_for_provider("devin", &too_long), None);
+}

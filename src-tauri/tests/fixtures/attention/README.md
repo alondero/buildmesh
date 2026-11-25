@@ -24,6 +24,7 @@ They establish parsing/mapping parity, not installed CLI delivery reliability.
 | Antigravity | Settled/background Stop, neutral PreToolUse | No permission/question observer is provisioned |
 | Cursor | Stop with and without pending transcript work | No permission/question observer is provisioned |
 | OpenCode | Creation, idle/busy, permission, question/reply, subagent (child session) start/stop | Plugin fields are already projected from native events. `subagent_*` are Buildmesh-synthesized from a child session's lifecycle (recorded run: `tests/fixtures/opencode`), not native OpenCode event names |
+| Devin | SessionStart, UserPromptSubmit, Stop (both `stop_hook_active` values), PermissionRequest, PreToolUse/PostToolUse, SessionEnd | `live-*` cases are verbatim stdin captured from devin 3000.14.30821 print sessions on Windows (issue #2862). `synthetic-*` cases clone that envelope for combinations print mode cannot produce: interactive tools never complete there (no PostToolUse capture) and `exit_plan_mode` does not exist outside plan mode. No permission/background distinction exists on Stop |
 
 Unwired harnesses (including passive watcher integrations) do not acquire a
 pushed hook strategy through another harness's payload shape. Isolation tests

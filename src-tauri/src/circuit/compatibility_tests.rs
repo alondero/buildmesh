@@ -437,10 +437,9 @@ fn evaluate_commandcode_with_passive_watcher_is_allowed() {
 /// passive turn watcher. Issue #1816 refused them; they now complete a turn
 /// through the result file every Circuit prompt asks them for, so both the
 /// Autopilot gate and the reviewer gate accept them as file-only harnesses.
-/// Cursor and Cline keep their native hooks.
 #[test]
 fn evaluate_allows_hookless_harnesses_through_result_file_handoff() {
-    for harness in ["freebuff", "perch", "dsh", "devin"] {
+    for harness in ["freebuff", "perch", "dsh"] {
         let caps = lookup_capabilities(harness).unwrap_or_else(|| panic!("{harness} known"));
         assert!(!caps.requires_attention_hook, "{harness} must lack a hook");
         assert!(
@@ -460,7 +459,7 @@ fn evaluate_allows_hookless_harnesses_through_result_file_handoff() {
         assert!(result.allowed, "{harness}: {:?}", result.reasons);
         assert_eq!(reviewer_harness_reason(harness), None, "{harness}");
     }
-    for allowed_harness in ["cursor", "cline"] {
+    for allowed_harness in ["cursor", "cline", "devin"] {
         let caps = lookup_capabilities(allowed_harness)
             .unwrap_or_else(|| panic!("{allowed_harness} known"));
         assert!(

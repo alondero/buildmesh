@@ -137,7 +137,6 @@ fn unknown_harness_never_borrows_a_mapping_or_reads_a_transcript() {
         "muse",
         "commandcode",
         "perch",
-        "devin",
     ] {
         let result = normalizers::normalize(Some(&payload), provider, |_| {
             panic!("hookless strategy cannot reconcile")

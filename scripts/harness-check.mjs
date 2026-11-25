@@ -80,6 +80,7 @@ export const RUST_PATH_INCLUDES = {
   // The HTTP auth layer's suite moved to a sibling file (issue #589): the
   // module keeps the name `tests`, so every test path is unchanged.
   'src-tauri/src/http/auth_tests.rs': 'http::auth::tests',
+  'src-tauri/src/http/routes/attention/normalizers/devin_tests.rs': 'http::routes::attention::normalizers::devin::tests',
   'src-tauri/src/http/routes/session_tests.rs': 'http::routes::session::tests',
   'src-tauri/src/services/device_session_expiry_tests.rs': 'services::device_session_expiry::tests',
   'src-tauri/src/commands/build_run_tests.rs': 'commands::build_run::tests',

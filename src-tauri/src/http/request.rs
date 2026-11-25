@@ -32,7 +32,6 @@ pub enum ReadBodyError {
 
 /// Read a request body of exactly `content_length` bytes under a wall-clock
 /// deadline ([`BODY_READ_TIMEOUT`]), refusing anything larger than `max_bytes`.
-///
 /// The cap and the timeout are independent guards: the cap bounds *how much*
 /// the client can force the server to buffer, the timeout bounds *how long* a
 /// stalled client can pin the connection. Without the timeout a slowloris that
@@ -40,7 +39,6 @@ pub enum ReadBodyError {
 /// for the full upload window — the same DoS class `handle_connection`'s head
 /// read closes for the request line + headers. Both halves live behind this
 /// helper so every body-reading route carries the same guard.
-///
 /// Generic over the reader (production passes [`MaybeTls`]) so the fuzz
 /// harness in `crate::http::fuzz` can drive the real read from an in-memory
 /// duplex — issue #2156. `AsyncWrite` is in the bound only because

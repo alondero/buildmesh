@@ -174,9 +174,8 @@ Dispatch uses the resolved node's harness, never a claimed payload provider or
 another harness's classifier. Each module selects the fields it validates;
 unrelated harness metadata cannot invalidate its callback. A **known** harness
 whose adapter declares `attention_capability: None` has no dispatch arm on
-purpose: a callback it still manages to deliver — Devin firing the
-`.claude/settings.local.json` hooks it imports, for example — is dropped as
-noise rather than marked, because the harness has no hook contract to degrade
+purpose: a callback it still manages to deliver is dropped as noise rather
+than marked, because the harness has no hook contract to degrade
 (issue #2864). Unknown harness ids, unsupported events and malformed payloads
 report `signal_unavailable` with degraded health and cannot mutate
 turn/question/child correlation state.
