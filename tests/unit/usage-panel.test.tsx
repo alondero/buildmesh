@@ -454,6 +454,24 @@ describe('ExplicitUsageMeter (issue #1671 states)', () => {
     expect(screen.queryByText('Limit')).toBeNull();
   });
 
+  it('marks the monthly period on a metered amount with a reset', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-10-16T12:00:00Z'));
+      render(<ExplicitUsageMeter meter={{ state: 'metered', amount: { ...amount, resetsAt: '2026-11-01T00:00:00Z' } }} />);
+      const tick = screen.getByTestId('usage-pace-tick');
+      expect(parseFloat(tick.style.left)).toBeCloseTo(50, 1);
+      expect(tick.getAttribute('title')).toBe('Period 50% elapsed');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('hides the period marker when the amount has no reset', () => {
+    render(<ExplicitUsageMeter meter={{ state: 'metered', amount: { ...amount, resetsAt: null } }} />);
+    expect(screen.queryByTestId('usage-pace-tick')).toBeNull();
+  });
+
   it.each([
     [{ state: 'unlimited' } as const, 'Unlimited'],
     [{ state: 'managed_externally', platform: 'AWS Bedrock' } as const, 'Managed by AWS Bedrock'],

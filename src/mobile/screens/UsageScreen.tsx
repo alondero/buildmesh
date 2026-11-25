@@ -5,7 +5,7 @@ import { useVisibilityPolling } from '../useVisibilityPolling';
 import type { MobileProviderUsage } from '../../types/generated/MobileProviderUsage';
 import type { UsageMeter } from '../../types/generated/UsageMeter';
 import type { UsageAmount } from '../../types/generated/UsageAmount';
-import { getUsageWindowPacePercent } from '../../lib/usagePace';
+import { getUsageAmountPacePercent, getUsageWindowPacePercent } from '../../lib/usagePace';
 import { OpenExternalIcon } from '../../components/shared/OpenExternalIcon';
 
 function Percent({ label, value, pace }: { label: string; value: number | null; pace?: number | null }) {
@@ -29,7 +29,7 @@ function Amount({ amount, uncapped }: { amount: UsageAmount; uncapped: boolean }
     {!uncapped && amount.limit != null && <div className="usage-value"><span>Limit</span><span>{fmt(amount.limit)}</span></div>}
     {!uncapped && amount.remaining != null && <div className="usage-value"><span>Remaining</span><span>{fmt(amount.remaining)}</span></div>}
     {uncapped && <p>No individual limit</p>}
-    {amount.usedPercent != null && <Percent label="Usage" value={amount.usedPercent} />}
+    {amount.usedPercent != null && <Percent label="Usage" value={amount.usedPercent} pace={getUsageAmountPacePercent(amount)} />}
     <Reset at={amount.resetsAt} />
   </div>;
 }

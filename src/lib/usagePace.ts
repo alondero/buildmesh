@@ -18,41 +18,43 @@
  * Pure — `nowMs` is an arg so renderers and tests pin the clock.
  */
 
-import type { UsageWindow } from './tauri';
+import type { UsageAmount, UsageWindow } from './tauri';
 
 const HOUR_MS = 3600_000;
 const DAY_MS = 24 * HOUR_MS;
 
 type WindowPeriod = Pick<UsageWindow, 'label' | 'resetsAt'>;
+type AmountPeriod = Pick<UsageAmount, 'resetsAt'>;
+
+type Period = { durationMs: number; calendarMonth: boolean };
 
 /** Nominal period length for a bare period label, or null when unknown. */
-function inferBareDurationMs(text: string): number | null {
+function inferBarePeriod(text: string): Period | null {
   switch (text) {
-    case '5-hour': return 5 * HOUR_MS;
-    case '1-hour': return HOUR_MS;
+    case '5-hour': return { durationMs: 5 * HOUR_MS, calendarMonth: false };
+    case '1-hour': return { durationMs: HOUR_MS, calendarMonth: false };
     case 'weekly':
-    case 'weekly pool': return 7 * DAY_MS;
+    case 'weekly pool': return { durationMs: 7 * DAY_MS, calendarMonth: false };
     case 'monthly':
-    case 'monthly limit': return 30 * DAY_MS;
+    case 'monthly limit': return { durationMs: 30 * DAY_MS, calendarMonth: true };
     default: break;
   }
   const compact = /^(?<value>\d+)\s*(?<unit>h|d|s)$/.exec(text);
   if (compact?.groups) {
     const value = Number(compact.groups.value);
     switch (compact.groups.unit) {
-      case 'h': return value * HOUR_MS;
-      case 'd': return value * DAY_MS;
-      case 's': return value * 1000;
+      case 'h': return { durationMs: value * HOUR_MS, calendarMonth: false };
+      case 'd': return { durationMs: value * DAY_MS, calendarMonth: false };
+      case 's': return { durationMs: value * 1000, calendarMonth: false };
       default: return null;
     }
   }
   const days = /^(?<value>\d+)\s*-\s*day\b/.exec(text);
-  if (days?.groups) return Number(days.groups.value) * DAY_MS;
+  if (days?.groups) return { durationMs: Number(days.groups.value) * DAY_MS, calendarMonth: false };
   return null;
 }
 
-/** Nominal period length for a window label, or null when unknown. */
-export function inferUsageWindowDurationMs(label: string): number | null {
+function inferWindowPeriod(label: string): Period | null {
   const text = label.trim().toLowerCase();
   // "Display — Weekly" (Antigravity quota summary) and "name · 5-hour"
   // (Codex additional buckets) carry the period as the trailing segment —
@@ -62,7 +64,40 @@ export function inferUsageWindowDurationMs(label: string): number | null {
     return i === -1 ? -1 : i + sep.length;
   });
   const cut = Math.max(...cuts);
-  return inferBareDurationMs(cut >= 0 ? text.slice(cut) : text);
+  return inferBarePeriod(cut >= 0 ? text.slice(cut) : text);
+}
+
+/** Nominal period length for a window label, or null when unknown. */
+export function inferUsageWindowDurationMs(label: string): number | null {
+  return inferWindowPeriod(label)?.durationMs ?? null;
+}
+
+function parseResetMs(resetsAt: string | null): number | null {
+  if (resetsAt == null) return null;
+  const resetsAtMs = Date.parse(resetsAt);
+  return Number.isFinite(resetsAtMs) ? resetsAtMs : null;
+}
+
+function previousMonthInstant(resetsAtMs: number): number {
+  const reset = new Date(resetsAtMs);
+  const year = reset.getUTCFullYear();
+  const month = reset.getUTCMonth();
+  const lastDayOfPreviousMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return Date.UTC(
+    year,
+    month - 1,
+    Math.min(reset.getUTCDate(), lastDayOfPreviousMonth),
+    reset.getUTCHours(),
+    reset.getUTCMinutes(),
+    reset.getUTCSeconds(),
+    reset.getUTCMilliseconds(),
+  );
+}
+
+function getMonthlyPacePercent(resetsAtMs: number, nowMs: number): number | null {
+  const startMs = previousMonthInstant(resetsAtMs);
+  if (nowMs < startMs || nowMs > resetsAtMs) return null;
+  return ((nowMs - startMs) / (resetsAtMs - startMs)) * 100;
 }
 
 /**
@@ -75,11 +110,19 @@ export function getUsageWindowPacePercent(
   window: WindowPeriod,
   nowMs: number = Date.now(),
 ): number | null {
-  const duration = inferUsageWindowDurationMs(window.label);
-  if (duration == null || window.resetsAt == null) return null;
-  const resetsAt = Date.parse(window.resetsAt);
-  if (!Number.isFinite(resetsAt)) return null;
-  const remaining = resetsAt - nowMs;
-  if (remaining < 0 || remaining > duration) return null;
-  return ((duration - remaining) / duration) * 100;
+  const period = inferWindowPeriod(window.label);
+  const resetsAtMs = parseResetMs(window.resetsAt);
+  if (period == null || resetsAtMs == null) return null;
+  if (period.calendarMonth) return getMonthlyPacePercent(resetsAtMs, nowMs);
+  const remaining = resetsAtMs - nowMs;
+  if (remaining < 0 || remaining > period.durationMs) return null;
+  return ((period.durationMs - remaining) / period.durationMs) * 100;
+}
+
+export function getUsageAmountPacePercent(
+  amount: AmountPeriod,
+  nowMs: number = Date.now(),
+): number | null {
+  const resetsAtMs = parseResetMs(amount.resetsAt);
+  return resetsAtMs == null ? null : getMonthlyPacePercent(resetsAtMs, nowMs);
 }

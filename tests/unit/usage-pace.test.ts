@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { inferUsageWindowDurationMs, getUsageWindowPacePercent } from '../../src/lib/usagePace';
+import { inferUsageWindowDurationMs, getUsageWindowPacePercent, getUsageAmountPacePercent } from '../../src/lib/usagePace';
 
 const HOUR = 3600_000;
 const DAY = 24 * HOUR;
@@ -73,6 +73,11 @@ describe('getUsageWindowPacePercent', () => {
     expect(getUsageWindowPacePercent({ label: '5-hour', usedPercent: 0, resetsAt: isoAfter(0) }, NOW)).toBe(100);
   });
 
+  it('uses the calendar month rather than a 30-day nominal', () => {
+    expect(getUsageWindowPacePercent({ label: 'Monthly', usedPercent: 0, resetsAt: '2026-11-01T00:00:00Z' }, Date.parse('2026-10-01T00:00:00Z'))).toBe(0);
+    expect(getUsageWindowPacePercent({ label: 'Monthly', usedPercent: 0, resetsAt: '2026-11-01T00:00:00Z' }, Date.parse('2026-10-16T12:00:00Z'))).toBeCloseTo(50, 1);
+  });
+
   it.each([
     ['missing reset', { label: '5-hour', usedPercent: 0, resetsAt: null }],
     ['unparsable reset', { label: '5-hour', usedPercent: 0, resetsAt: 'not-a-date' }],
@@ -81,5 +86,24 @@ describe('getUsageWindowPacePercent', () => {
     ['reset beyond the duration (stale)', { label: '5-hour', usedPercent: 0, resetsAt: isoAfter(6 * HOUR) }],
   ])('returns null for %s', (_case, window) => {
     expect(getUsageWindowPacePercent(window, NOW)).toBeNull();
+  });
+});
+
+describe('getUsageAmountPacePercent', () => {
+  it('marks the elapsed share of a monthly spend budget', () => {
+    expect(getUsageAmountPacePercent({ resetsAt: '2026-11-01T00:00:00Z' }, Date.parse('2026-10-16T12:00:00Z'))).toBeCloseTo(50, 1);
+  });
+
+  it('returns 0 on the first day of a 31-day month instead of hiding', () => {
+    expect(getUsageAmountPacePercent({ resetsAt: '2026-11-01T00:00:00Z' }, Date.parse('2026-10-01T00:00:00Z'))).toBe(0);
+  });
+
+  it.each([
+    ['missing reset', null],
+    ['unparsable reset', 'not-a-date'],
+    ['reset in the past', new Date(NOW - HOUR).toISOString()],
+    ['reset beyond the current month', new Date(NOW + 62 * DAY).toISOString()],
+  ])('returns null for %s', (_case, resetsAt) => {
+    expect(getUsageAmountPacePercent({ resetsAt }, NOW)).toBeNull();
   });
 });
