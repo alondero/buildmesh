@@ -51,6 +51,12 @@ lives in `tests/e2e/mobile-terminal-links.spec.ts` and the Android
 ## Command Code keyboard (Ink 7)
 Command Code's Ink TUI can swallow keys when xterm.js leaves an unmatched bracketed-paste wrapper, or when the CLI's kitty-keyboard probe races ConPTY. Agent terminals for the `commandcode` harness set xterm.js `ignoreBracketedPasteMode`; other harnesses keep bracketed paste so a multi-line paste stays one prompt. Spawn sets `TERM_PROGRAM=vscode` so Command Code skips the probe. Every agent PTY is a real terminal: `wrap()` drops inherited `NO_COLOR` / `TERM=dumb` / `FORCE_COLOR=0` and sets `TERM=xterm-256color`, `COLORTERM=truecolor`, and `FORCE_COLOR=3` (and puts those keys on `WSLENV`).
 
+## Windows terminal identity and win32 input mode
+
+Windows Devin launches identify the rendering host as Buildmesh by setting `TERM_PROGRAM=Buildmesh` in the Devin adapter. That label is scoped to Devin on Windows; the harness launch contract fixture pins the other platform and harness rows without it.
+
+`TerminalRegistry` also tracks the child application's explicit win32-input-mode request (`CSI ? 9001 h` / `CSI ? 9001 l`) through xterm.js parser handlers. While mode 9001 is enabled, Shift+Enter is written as the Windows Enter+Shift key record (`Vk=13`, `Sc=28`, `Uc=13`, `Kd=1`, `Cs=16`, `Rc=1`); while it is disabled or was never requested, input remains the normal xterm.js encoding. `tests/unit/win32-input-mode.test.ts` and `tests/unit/terminal-registry.test.ts` pin the mode transitions, exact bytes and fallback path. This is deliberately a narrow opt-in input path rather than a global Windows keyboard rewrite or a complete console key-record implementation.
+
 ## PTY input
 
 Terminal handovers to Codex use `agent::handover::prepare` before prompt

@@ -116,6 +116,25 @@ vi.mock('@xterm/xterm', () => {
         mockActive = v;
       },
     };
+    csiHandlers: Array<{
+      id: { prefix?: string; final: string };
+      callback: (params: (number | number[])[]) => boolean;
+    }> = [];
+    parser = {
+      registerCsiHandler: vi.fn((
+        id: { prefix?: string; final: string },
+        callback: (params: (number | number[])[]) => boolean,
+      ) => {
+        const registration = { id, callback };
+        this.csiHandlers.push(registration);
+        return {
+          dispose: vi.fn(() => {
+            const index = this.csiHandlers.indexOf(registration);
+            if (index >= 0) this.csiHandlers.splice(index, 1);
+          }),
+        };
+      }),
+    };
     // The internal service lives behind `_core.unicodeService` in real xterm.
     _core = { unicodeService: internalService };
     rows = 24;
@@ -263,6 +282,48 @@ describe('TerminalRegistry', () => {
       expect(event.defaultPrevented).toBe(true);
       expect(invoke).toHaveBeenCalledExactlyOnceWith('write_to_agent', { sessionId: 1, data: '\x16' });
       expect(inst.term.paste).not.toHaveBeenCalled();
+    });
+
+    it('uses win32 Shift+Enter encoding only after the child enables mode 9001', async () => {
+      const inst = (await registry.getOrCreate(1))!;
+      const keyHandler = vi.mocked(inst.term.attachCustomKeyEventHandler).mock.calls[0][0];
+      const csiHandlers = (inst.term as unknown as {
+        csiHandlers: Array<{
+          id: { prefix?: string; final: string };
+          callback: (params: (number | number[])[]) => boolean;
+        }>;
+      }).csiHandlers;
+      const setMode = csiHandlers.find(({ id }) => id.prefix === '?' && id.final === 'h');
+      const resetMode = csiHandlers.find(({ id }) => id.prefix === '?' && id.final === 'l');
+      expect(setMode).toBeDefined();
+      expect(resetMode).toBeDefined();
+
+      vi.mocked(invoke).mockClear();
+      const shiftEnter = () => new KeyboardEvent('keydown', {
+        key: 'Enter', shiftKey: true, cancelable: true,
+      });
+
+      expect(keyHandler(shiftEnter())).toBe(true);
+      await Promise.resolve();
+      expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'write_to_agent')).toEqual([]);
+
+      expect(setMode!.callback([9001])).toBe(false);
+      const enabledShiftEnter = shiftEnter();
+      expect(keyHandler(enabledShiftEnter)).toBe(false);
+      expect(enabledShiftEnter.defaultPrevented).toBe(true);
+      await Promise.resolve();
+      expect(invoke).toHaveBeenCalledExactlyOnceWith('write_to_agent', {
+        sessionId: 1,
+        data: '\x1b[13;28;13;1;16;1_',
+      });
+
+      expect(keyHandler(new KeyboardEvent('keydown', { key: 'Enter' }))).toBe(true);
+
+      expect(resetMode!.callback([9001])).toBe(false);
+      vi.mocked(invoke).mockClear();
+      expect(keyHandler(shiftEnter())).toBe(true);
+      await Promise.resolve();
+      expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'write_to_agent')).toEqual([]);
     });
 
     it('creates a new instance', async () => {

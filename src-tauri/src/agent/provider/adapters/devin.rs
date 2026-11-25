@@ -100,6 +100,21 @@ fn ensure_hooks_v1_json(path: &Path, command: &str) -> Result<(), String> {
 }
 
 impl AgentProvider for DevinAdapter {
+    fn prepare_launch(
+        &self,
+        input: crate::agent::launch::HarnessLaunchInput<'_>,
+    ) -> crate::agent::launch::PreparedHarnessLaunch {
+        let platform = input.platform;
+        let mut prepared = crate::agent::launch::default_prepare(self, input);
+        if platform == Platform::Windows {
+            prepared
+                .environment
+                .env_set
+                .insert(0, ("TERM_PROGRAM".into(), "Buildmesh".into()));
+        }
+        prepared
+    }
+
     fn descriptor(&self) -> &'static crate::agent::capabilities::HarnessDescriptor {
         static DESCRIPTOR: std::sync::LazyLock<crate::agent::capabilities::HarnessDescriptor> =
             std::sync::LazyLock::new(|| {

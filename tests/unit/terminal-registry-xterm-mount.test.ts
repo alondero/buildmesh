@@ -61,6 +61,9 @@ vi.mock('@xterm/xterm', () => {
     hasSelection = vi.fn().mockReturnValue(false);
     getSelection = vi.fn().mockReturnValue('');
     paste = vi.fn();
+    parser = {
+      registerCsiHandler: vi.fn(() => ({ dispose: vi.fn() })),
+    };
     buffer = { active: { getWindow: vi.fn() } };
     unicode = {
       register: vi.fn(),

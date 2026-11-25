@@ -327,6 +327,9 @@ vi.mock('@xterm/xterm', () => {
     scrollToBottom = vi.fn();
     refresh = vi.fn();
     onScroll = vi.fn(() => ({ dispose: vi.fn() }));
+    parser = {
+      registerCsiHandler: vi.fn(() => ({ dispose: vi.fn() })),
+    };
     buffer = { active: { getWindow: vi.fn(), viewportY: 0, baseY: 0 } };
     // User-facing proxy: NO `_providers`, has `register` (a passthrough to
     // the internal service) and `activeVersion` getter/setter.

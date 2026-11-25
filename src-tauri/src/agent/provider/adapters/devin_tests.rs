@@ -77,6 +77,34 @@ fn prepare_launch_passes_resume_flag_and_omits_session_id_on_assign() {
 }
 
 #[test]
+fn windows_prepare_launch_identifies_buildmesh_as_the_terminal() {
+    let config = ResolvedAgentConfig::default();
+    for (platform, expected) in [
+        (Platform::Windows, Some("Buildmesh")),
+        (Platform::Macos, None),
+        (Platform::Linux, None),
+    ] {
+        let prepared = DEVIN.prepare_launch(HarnessLaunchInput {
+            routing: None,
+            node_id: None,
+            platform,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::None,
+            config: &config,
+            prefill: None,
+            sandbox: false,
+        });
+        let terminal_program = prepared
+            .environment
+            .env_set
+            .iter()
+            .find(|(key, _)| key == "TERM_PROGRAM")
+            .map(|(_, value)| value.as_str());
+        assert_eq!(terminal_program, expected, "{platform:?}");
+    }
+}
+
+#[test]
 fn prefill_ends_option_parsing_so_a_dashed_prompt_stays_text() {
     assert_eq!(DEVIN.prefill_args("-fix it"), vec!["--", "-fix it"]);
 }
