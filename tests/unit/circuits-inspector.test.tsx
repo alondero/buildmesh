@@ -269,7 +269,6 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
       'inspector-effort-select',
     ) as HTMLSelectElement;
     const options = Array.from(effortSelect.options).map((o) => o.value);
-    // Codex vocabulary (inline_config): none | low | medium | high | xhigh
     expect(options).toEqual(
       expect.arrayContaining(['none', 'low', 'medium', 'high', 'xhigh']),
     );

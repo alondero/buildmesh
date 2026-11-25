@@ -1,0 +1,37 @@
+{
+  "effort_storage": "encoded_in_model",
+  "harness_id": "agy",
+  "models": [
+    {
+      "description": "Exact Antigravity catalog group",
+      "efforts": [
+        {
+          "description": "Effort is encoded in the model id",
+          "id": "low",
+          "model": "gemini-4-neon-low",
+          "name": "low"
+        },
+        {
+          "description": "Effort is encoded in the model id",
+          "id": "medium",
+          "model": "gemini-4-neon-medium",
+          "name": "medium"
+        },
+        {
+          "description": "Effort is encoded in the model id",
+          "id": "high",
+          "model": "gemini-4-neon-high",
+          "name": "high"
+        },
+        {
+          "description": "Effort is encoded in the model id",
+          "id": "xhigh",
+          "model": "gemini-4-neon-xhigh",
+          "name": "xhigh"
+        }
+      ],
+      "id": "gemini-4-neon-high",
+      "name": "Gemini 4 Neon"
+    }
+  ]
+}

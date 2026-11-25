@@ -296,8 +296,8 @@ See [node review circuits](../development/agent-node-circuits.md).
 | Harness | Control kind | Accepted values |
 |---|---|---|
 | Claude Code | Closed flag | `low`, `medium`, `high`, `xhigh`, `max` |
-| Codex | Inline config key `model_reasoning_effort` | `none`, `low`, `medium`, `high`, `xhigh` |
-| Antigravity | Closed flag | `low`, `medium`, `high` |
+| Codex | Inline config key `model_reasoning_effort` | Open, model-defined non-empty values; static fallback menu `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra` |
+| Antigravity | Closed flag | `low`, `medium`, `high`, `xhigh`, `max` |
 | Grok Code | Closed flag | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` |
 | Command Code | Closed flag | `low`, `medium`, `high` |
 | Cline | Closed flag (`--thinking`) | `none`, `low`, `medium`, `high`, `xhigh` |
@@ -305,7 +305,12 @@ See [node review circuits](../development/agent-node-circuits.md).
 | All other harnesses | None | — (the resolver drops the effort layer) |
 
 Claude Code and Grok expose the union of their model-specific effort levels;
-availability depends on the selected model.
+availability depends on the selected model. Codex, OpenCode and
+Antigravity additionally support installation-specific catalogue discovery in
+Launch Configurations; those exact per-model choices replace the static union
+when discovery succeeds and fall back to the ordinary controls when it does not.
+When a Codex configuration pins a Harness Login, discovery runs against that
+login's home; an unpinned configuration uses the runtime default home.
 
 ## Session identity and resume
 

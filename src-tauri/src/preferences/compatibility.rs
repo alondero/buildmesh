@@ -57,10 +57,6 @@ fn trim_to_none(s: Option<&str>) -> Option<String> {
 ///   for a harness that advertises `None` is refused at the write boundary
 ///   (issue #1148 AC #5 "Accept effort only when the harness declares
 ///   effort support").
-/// * **Effort value outside the harness's vocabulary** → `Err`. The
-///   harness's `EffortControlKind::allowed` list is the single contract; a
-///   value not in it is refused at the write boundary (issue #1148 AC #5
-///   "Accept only values allowed by that harness's effort-control kind").
 /// * **Permission mode outside the harness's vocabulary** → `Err` (issue
 ///   #2151). The harness's `permission_modes` list is the single contract;
 ///   a value not in it — including any value for a harness with no modes —
@@ -90,16 +86,16 @@ pub fn validate_harness_default(
                 ));
             }
         }
-        EffortControlKind::Closed { allowed } | EffortControlKind::InlineConfig { allowed, .. } => {
+        control @ EffortControlKind::Closed { allowed } => {
             if let Some(value) = normalized.effort.as_deref() {
-                if !allowed.iter().any(|a| a == value) {
+                if !crate::agent::capabilities::effort_control_accepts(control, value) {
                     return Err(format!(
-                        "effort '{value}' is not allowed for harness '{profile_id}' \
-                         (allowed: {allowed:?})"
+                        "effort '{value}' is not allowed for harness '{profile_id}' (allowed: {allowed:?})"
                     ));
                 }
             }
         }
+        EffortControlKind::InlineConfig { .. } => {}
     }
     if let Some(mode) = normalized.permission_mode.as_deref() {
         if !caps.permission_modes.iter().any(|m| m.id == mode) {

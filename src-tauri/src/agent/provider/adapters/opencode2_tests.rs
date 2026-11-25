@@ -815,3 +815,158 @@ fn background_has_project_deny_rules_model_and_agent_and_unchanged_json_decoder(
         "Done"
     );
 }
+
+#[test]
+fn model_catalog_probe_uses_the_launch_equivalent_shared_command() {
+    let probe = OPENCODE2.model_catalog_probe().unwrap();
+    assert_eq!(probe.binary, None);
+    assert_eq!(probe.args, ["api", "--standalone", "model.list"]);
+}
+
+#[test]
+fn model_catalog_carries_direct_thinking_level_variants() {
+    let stdout = r#"{"data":[{"providerID":"google","id":"gemini-3-pro","name":"Gemini 3 Pro","status":"active","enabled":true,"variants":[
+        {"id":"low","settings":{"thinkingLevel":"low","thinkingSummaries":"auto"}},
+        {"id":"high","settings":{"thinkingLevel":"high","thinkingSummaries":"auto"}},
+        {"id":"budget","settings":{"thinkingBudget":4096}},
+        {"id":"plain","settings":{"temperature":0.2}}
+    ]}]}"#;
+    let models = parse_opencode_model_catalog(stdout).unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(
+        models[0]
+            .efforts
+            .iter()
+            .map(|effort| effort.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["low", "high", "budget", "plain"]
+    );
+}
+
+#[test]
+fn model_catalog_includes_enabled_beta_models() {
+    let models = parse_opencode_model_catalog(
+        r#"{"data":[{"providerID":"groq","id":"qwen/qwen3.8-27b","modelID":"qwen/qwen3.8-27b","name":"Qwen 3.8 27B","status":"beta","enabled":true,"variants":[{"id":"high","settings":{"reasoningEffort":"high"}}]}]}"#,
+    )
+    .unwrap();
+
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].id, "groq/qwen/qwen3.8-27b");
+    assert_eq!(models[0].efforts[0].id, "high");
+}
+
+#[test]
+fn model_catalog_carries_body_backed_variants() {
+    let models = parse_opencode_model_catalog(
+        r#"{"data":[{"providerID":"opencode","id":"deepseek-v4.1-flash","modelID":"deepseek-v4.1-flash","name":"DeepSeek Flash","status":"active","enabled":true,"variants":[{"id":"review","body":{"thinking":{"type":"disabled"},"temperature":0.2}}]}]}"#,
+    )
+    .unwrap();
+
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].efforts.len(), 1);
+    assert_eq!(models[0].efforts[0].id, "review");
+    assert_eq!(
+        models[0].efforts[0].model.as_deref(),
+        Some("opencode/deepseek-v4.1-flash#review")
+    );
+}
+
+#[test]
+fn model_catalog_excludes_rows_without_the_catalog_selector_id() {
+    let models = parse_opencode_model_catalog(
+        r#"{"data":[{"providerID":"custom","modelID":"sber/gigachat-2-pro","name":"GigaChat 2 Pro","status":"active","enabled":true,"variants":[]}]}"#,
+    )
+    .unwrap();
+
+    assert!(models.is_empty());
+}
+
+#[test]
+fn model_catalog_carries_exact_cognitive_variants() {
+    let models = parse_opencode_model_catalog(
+        r#"{"data":[{"providerID":"opencode","id":"tidepool","modelID":"tidepool","name":"Tidepool","status":"active","enabled":true,"variants":[{"id":"high","settings":{"reasoning":{"effort":"high"}}},{"id":"thinking","settings":{"reasoning":{"enabled":true}}},{"id":"fast","settings":{"speed":"fast"}}]},{"providerID":"opencode","modelID":"off","status":"active","enabled":false,"variants":[]},{"providerID":"opencode","modelID":"unannounced","enabled":true,"variants":[]}]}"#,
+    )
+    .unwrap();
+
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].id, "opencode/tidepool");
+    assert_eq!(
+        models[0]
+            .efforts
+            .iter()
+            .map(|effort| effort.id.as_str())
+            .collect::<Vec<_>>(),
+        ["high", "thinking", "fast"]
+    );
+    assert_eq!(
+        models[0].efforts[0].model.as_deref(),
+        Some("opencode/tidepool#high")
+    );
+}
+
+#[test]
+fn model_catalog_carries_live_thinking_and_reasoning_variant_shapes() {
+    let models = parse_opencode_model_catalog(
+        r#"{"data":[
+          {"providerID":"opencode","id":"gemini-4-neon","modelID":"gemini-4-neon","name":"Gemini 4 Neon","status":"active","enabled":true,"variants":[
+            {"id":"low","settings":{"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"low"}}},
+            {"id":"xhigh","settings":{"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"xhigh"}}}
+          ]},
+          {"providerID":"opencode-go","id":"qwen4-max","modelID":"qwen4-max","name":"Qwen4 Max","status":"active","enabled":true,"variants":[
+            {"id":"none","settings":{"thinking":{"type":"disabled"}}},
+            {"id":"high","settings":{"thinking":{"type":"adaptive","display":"summarized"},"effort":"high"}}
+          ]},
+          {"providerID":"openrouter","id":"xiaomi/mimo","modelID":"xiaomi/mimo","name":"MiMo","status":"active","enabled":true,"variants":[
+            {"id":"none","settings":{"reasoning":{"enabled":false}}},
+            {"id":"thinking","settings":{"reasoning":{"enabled":true}}}
+          ]}
+        ]}"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        models
+            .iter()
+            .map(|model| (
+                model.id.as_str(),
+                model
+                    .efforts
+                    .iter()
+                    .map(|effort| effort.id.as_str())
+                    .collect::<Vec<_>>(),
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("opencode/gemini-4-neon", vec!["low", "xhigh"]),
+            ("opencode-go/qwen4-max", vec!["none", "high"]),
+            ("openrouter/xiaomi/mimo", vec!["none", "thinking"]),
+        ]
+    );
+    assert_eq!(
+        models[0].efforts[1].model.as_deref(),
+        Some("opencode/gemini-4-neon#xhigh")
+    );
+}
+
+#[test]
+fn model_catalog_uses_the_exact_row_id_and_reasoning_effort_setting() {
+    let models = parse_opencode_model_catalog(
+        r#"{"data":[
+          {"providerID":"openai","modelID":"gpt","id":"gpt","name":"GPT","status":"active","enabled":true,"variants":[{"id":"high","settings":{"reasoningEffort":"high"}}]},
+          {"providerID":"openai","modelID":"gpt","id":"gpt-fast","name":"GPT Fast","status":"active","enabled":true,"variants":[{"id":"low","settings":{"reasoningEffort":"low"}}]}
+        ]}"#,
+    )
+    .unwrap();
+
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0].id, "openai/gpt");
+    assert_eq!(models[1].id, "openai/gpt-fast");
+    assert_eq!(
+        models[0].efforts[0].model.as_deref(),
+        Some("openai/gpt#high")
+    );
+    assert_eq!(
+        models[1].efforts[0].model.as_deref(),
+        Some("openai/gpt-fast#low")
+    );
+}

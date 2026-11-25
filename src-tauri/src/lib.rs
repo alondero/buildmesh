@@ -357,6 +357,7 @@ pub fn run() {
             preferences::spawn_configurations::list_spawn_configurations,
             preferences::launch_catalog::get_provider_catalogue,
             preferences::launch_catalog::get_launch_targets,
+            preferences::launch_catalog::get_harness_model_catalog,
             preferences::spawn_configurations::save_spawn_configuration,
             preferences::spawn_configurations::verify_launch_configuration,
             preferences::spawn_configurations::delete_spawn_configuration,

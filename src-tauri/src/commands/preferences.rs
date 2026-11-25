@@ -849,10 +849,6 @@ pub fn remove_provider_pairing(
 /// descriptor (issue #1148 AC #5):
 ///
 /// * Unknown harness id → `Err("unknown harness id …")`.
-/// * Effort value outside the harness's `EffortControlKind::allowed` vocabulary
-///   → `Err("effort … is not allowed for harness …")`.
-/// * Harness without effort control → the effort field is dropped before
-///   storage (the capability mask applies here, not just at the resolver).
 ///
 /// If `value` carries no fields after normalisation (every field blank), the
 /// sparse map entry is **removed** rather than stored as `{model: None,

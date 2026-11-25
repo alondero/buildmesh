@@ -19,6 +19,16 @@ use std::path::Path;
 pub struct AgyAdapter;
 pub static AGY: AgyAdapter = AgyAdapter;
 
+const AGY_EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+fn split_effort_qualified_model(model: &str) -> Option<(&str, &'static str)> {
+    AGY_EFFORT_LEVELS.iter().rev().find_map(|level| {
+        model
+            .strip_suffix(&format!("-{level}"))
+            .map(|base| (base, *level))
+    })
+}
+
 /// The callback command Antigravity (agy) lifecycle hooks run. AGY pipes
 /// the hook's stdin JSON — `{conversationId, transcriptPath, fullyIdle,
 /// terminationReason, …}` on `Stop` (issue #1285) — into the command;
@@ -293,30 +303,30 @@ impl AgentProvider for AgyAdapter {
                 },
                 circuit_observation: {
                     ObservationStrategy {
-            push: PushSource::Hooks(HookPush {
-                parse: parse_circuit_hook,
-                source: "agy_native_hook",
-                request_source: "agy_request_hook",
-                ownership_gap: Some(AGY_OWNERSHIP_GAP),
-                foreground: true,
-            }),
-            pull: PullSource::None,
-            turn_identity: TurnIdentity::None,
-            owned_work: OwnedWorkCoverage::Unavailable {
-                reason: "Antigravity exposes no child/background registry; settled turns cannot verify owned work",
-            },
-            final_report: FinalReportSource::TranscriptOrTerminal,
-            reconciliation: ReconciliationPolicy {
-                yielded_budget_ms: 30_000,
-            },
-            passive_watcher: None,
-            notes: StrategyNotes {
-                foreground: "Stop-hook turn receipts (fullyIdle settled vs background-busy); session-fenced with no per-turn token, never authoritative",
-                owned_work: "Antigravity exposes no child/background registry; settled turns cannot verify owned work",
-                final_report: "Transcript or PTY text may inform interpretation; complete native report unavailable",
-                reconciliation: "Durable Stop receipt replay with session and incarnation fences; input fencing is unavailable (no UserPromptSubmit binding), freshness recheck parks Unverified",
-            },
-        }
+                        push: PushSource::Hooks(HookPush {
+                            parse: parse_circuit_hook,
+                            source: "agy_native_hook",
+                            request_source: "agy_request_hook",
+                            ownership_gap: Some(AGY_OWNERSHIP_GAP),
+                            foreground: true,
+                        }),
+                        pull: PullSource::None,
+                        turn_identity: TurnIdentity::None,
+                        owned_work: OwnedWorkCoverage::Unavailable {
+                            reason: "Antigravity exposes no child/background registry; settled turns cannot verify owned work",
+                        },
+                        final_report: FinalReportSource::TranscriptOrTerminal,
+                        reconciliation: ReconciliationPolicy {
+                            yielded_budget_ms: 30_000,
+                        },
+                        passive_watcher: None,
+                        notes: StrategyNotes {
+                            foreground: "Stop-hook turn receipts (fullyIdle settled vs background-busy); session-fenced with no per-turn token, never authoritative",
+                            owned_work: "Antigravity exposes no child/background registry; settled turns cannot verify owned work",
+                            final_report: "Transcript or PTY text may inform interpretation; complete native report unavailable",
+                            reconciliation: "Durable Stop receipt replay with session and incarnation fences; input fencing is unavailable (no UserPromptSubmit binding), freshness recheck parks Unverified",
+                        },
+                    }
                 },
                 produces_readable_transcript: {
                     // Issue #1283: AGY writes per-conversation JSONL under
@@ -333,20 +343,26 @@ impl AgentProvider for AgyAdapter {
                 available_on: { &[Platform::Windows, Platform::Linux, Platform::Macos] },
                 effort_control: {
                     EffortControlKind::Closed {
-                        allowed: vec!["low".into(), "medium".into(), "high".into()],
+                        allowed: vec![
+                            "low".into(),
+                            "medium".into(),
+                            "high".into(),
+                            "xhigh".into(),
+                            "max".into(),
+                        ],
                     }
                 },
                 permission_modes: {
                     vec![
-            PermissionModeOption::unattended(
-                "--dangerously-skip-permissions",
-                "Prompts off — tools run without asking (today's behavior; required for unattended runs).",
-            ),
-            PermissionModeOption::prompt(
-                "Prompts on (no flag)",
-                "Antigravity asks for approval like a human-launched session.",
-            ),
-        ]
+                        PermissionModeOption::unattended(
+                            "--dangerously-skip-permissions",
+                            "Prompts off — tools run without asking (today's behavior; required for unattended runs).",
+                        ),
+                        PermissionModeOption::prompt(
+                            "Prompts on (no flag)",
+                            "Antigravity asks for approval like a human-launched session.",
+                        ),
+                    ]
                 },
                 ..Default::default()
             });
@@ -375,6 +391,23 @@ impl AgentProvider for AgyAdapter {
             trailing_args: Vec::new(),
             windows_shell: WindowsShell::Direct,
         }
+    }
+
+    fn model_catalog_probe(&self) -> Option<crate::agent::model_catalog::ModelCatalogProbe> {
+        Some(crate::agent::model_catalog::ModelCatalogProbe {
+            binary: None,
+            args: vec!["models".into()],
+            effort_storage: crate::agent::model_catalog::ModelEffortStorage::EncodedInModel,
+            login_home_env: None,
+            env_remove: &[],
+        })
+    }
+
+    fn parse_model_catalog(
+        &self,
+        stdout: &str,
+    ) -> Result<Vec<crate::agent::model_catalog::HarnessCatalogModel>, String> {
+        parse_agy_model_catalog(stdout)
     }
 
     fn permission_args(&self, mode_id: &str) -> Vec<String> {
@@ -504,6 +537,10 @@ impl AgentProvider for AgyAdapter {
         vec!["--model".into(), model.into()]
     }
 
+    fn model_encodes_effort(&self, model: &str) -> bool {
+        split_effort_qualified_model(model).is_some()
+    }
+
     fn prefill_args(&self, text: &str) -> Vec<String> {
         vec!["--prompt-interactive".into(), text.into()]
     }
@@ -522,6 +559,99 @@ impl AgentProvider for AgyAdapter {
     fn sandbox_args(&self) -> Vec<String> {
         vec!["--sandbox".into()]
     }
+}
+
+fn parse_agy_model_catalog(
+    stdout: &str,
+) -> Result<Vec<crate::agent::model_catalog::HarnessCatalogModel>, String> {
+    #[derive(Default)]
+    struct Group {
+        label: String,
+        bare: Option<String>,
+        efforts: std::collections::BTreeMap<String, String>,
+    }
+    let mut groups: std::collections::BTreeMap<String, Group> = Default::default();
+    for line in stdout.lines() {
+        let Some((id, label)) = line.split_once('\t') else {
+            continue;
+        };
+        let id = id.trim();
+        if id.is_empty() {
+            continue;
+        }
+        let label = label.trim();
+        let (base, effort) = split_effort_qualified_model(id).unwrap_or((id, ""));
+        let group = groups.entry(base.to_string()).or_default();
+        if group.label.is_empty() {
+            group.label = if effort.is_empty() {
+                label.to_string()
+            } else {
+                label
+                    .strip_suffix(')')
+                    .and_then(|body| body.rsplit_once(" ("))
+                    .filter(|(_, suffix)| suffix.eq_ignore_ascii_case(effort))
+                    .map(|(prefix, _)| prefix.to_string())
+                    .unwrap_or_else(|| label.to_string())
+            };
+        }
+        if effort.is_empty() {
+            group.bare = Some(id.into());
+        } else {
+            group.efforts.insert(effort.into(), id.into());
+        }
+    }
+    let mut models = Vec::new();
+    for (_, group) in groups {
+        if group.bare.is_none() && group.efforts.len() == 1 {
+            let (_, exact_model) = group.efforts.into_iter().next().unwrap();
+            models.push(crate::agent::model_catalog::HarnessCatalogModel {
+                id: exact_model,
+                name: group.label,
+                description: None,
+                efforts: Vec::new(),
+            });
+            continue;
+        }
+        let Some(default_model) = group
+            .bare
+            .clone()
+            .or_else(|| group.efforts.get("high").cloned())
+            .or_else(|| {
+                AGY_EFFORT_LEVELS
+                    .iter()
+                    .rev()
+                    .find_map(|level| group.efforts.get(*level).cloned())
+            })
+        else {
+            continue;
+        };
+        let mut efforts: Vec<_> = group
+            .efforts
+            .into_iter()
+            .map(
+                |(effort, model)| crate::agent::model_catalog::HarnessCatalogEffort {
+                    name: effort.clone(),
+                    description: None,
+                    model: Some(model),
+                    id: effort,
+                },
+            )
+            .collect();
+        efforts.sort_by_key(|effort| {
+            AGY_EFFORT_LEVELS
+                .iter()
+                .position(|level| *level == effort.id)
+                .unwrap_or(AGY_EFFORT_LEVELS.len())
+        });
+        models.push(crate::agent::model_catalog::HarnessCatalogModel {
+            id: default_model,
+            name: group.label,
+            description: None,
+            efforts,
+        });
+    }
+    models.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(models)
 }
 
 #[cfg(test)]
@@ -564,7 +694,6 @@ mod tests {
         assert_eq!(caps.harness_id, "agy");
         assert!(caps.supports_resume);
         assert!(caps.supports_model_override);
-        // Issue #1286: `--effort <low|medium|high>` is now advertised.
         assert!(caps.supports_effort_override);
         assert!(caps.supports_prefill);
         assert!(caps.requires_attention_hook);
@@ -575,7 +704,13 @@ mod tests {
         assert_eq!(
             caps.effort_control,
             EffortControlKind::Closed {
-                allowed: vec!["low".into(), "medium".into(), "high".into()],
+                allowed: vec![
+                    "low".into(),
+                    "medium".into(),
+                    "high".into(),
+                    "xhigh".into(),
+                    "max".into()
+                ],
             }
         );
     }
@@ -606,6 +741,37 @@ mod tests {
         };
         let prepared = AGY.prepare_launch(input);
         assert_flag_followed_by_value(&prepared.recipe.base_args, "--effort", "high");
+    }
+
+    #[test]
+    fn agy_recipe_does_not_pair_independent_effort_with_a_qualified_model() {
+        let config = ResolvedAgentConfig {
+            model: Some("gemini-4-neon-low".to_string()),
+            effort: Some("high".to_string()),
+            extra_args: None,
+            permission_mode: None,
+            agent: None,
+        };
+        let input = HarnessLaunchInput {
+            routing: None,
+            node_id: None,
+            platform: Platform::Linux,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::None,
+            config: &config,
+            prefill: None,
+            sandbox: false,
+        };
+        let prepared = AGY.prepare_launch(input);
+        assert_flag_followed_by_value(&prepared.recipe.base_args, "--model", "gemini-4-neon-low");
+        assert!(
+            !prepared
+                .recipe
+                .base_args
+                .iter()
+                .any(|arg| arg == "--effort"),
+            "an effort-qualified model must not receive a second independent effort argument"
+        );
     }
 
     /// Issue #1287 — when the mesh has its `sandbox` toggle ON, the
@@ -1172,5 +1338,66 @@ mod tests {
             !AGY.captures_session_id_from_pty(),
             "AGY UUIDs are not PTY banners; capture is after_fresh_spawn (issue #1499)"
         );
+    }
+
+    #[test]
+    fn model_catalog_live_shape_defaults_to_high_and_keeps_singleton_fixed() {
+        let models = parse_agy_model_catalog(
+            "gemini-4-neon-low	Gemini 4 Neon (Low)
+gemini-4-neon-medium	Gemini 4 Neon (Medium)
+gemini-4-neon-high	Gemini 4 Neon (High)
+gemini-4-neon-xhigh	Gemini 4 Neon (XHigh)
+gpt-oss-120b-medium	GPT OSS 120B (Medium)
+",
+        )
+        .unwrap();
+
+        let neon = models
+            .iter()
+            .find(|model| model.name == "Gemini 4 Neon")
+            .unwrap();
+        assert_eq!(neon.id, "gemini-4-neon-high");
+        assert_eq!(
+            neon.efforts
+                .iter()
+                .map(|effort| effort.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["low", "medium", "high", "xhigh"]
+        );
+
+        let singleton = models
+            .iter()
+            .find(|model| model.name == "GPT OSS 120B")
+            .unwrap();
+        assert_eq!(singleton.id, "gpt-oss-120b-medium");
+        assert!(singleton.efforts.is_empty());
+    }
+
+    #[test]
+    fn model_catalog_groups_exact_effort_qualified_model_ids() {
+        let models = parse_agy_model_catalog(
+            "Fetching available models...\ngemini-4-neon-low\tGemini 4 Neon (Low)\ngemini-4-neon-high\tGemini 4 Neon (High)\ngemini-4-neon-xhigh\tGemini 4 Neon (XHigh)\ngemini-pro-orchestrator\tOrchestrator\n",
+        )
+        .unwrap();
+
+        let neon = models
+            .iter()
+            .find(|model| model.name == "Gemini 4 Neon")
+            .unwrap();
+        assert_eq!(
+            neon.efforts
+                .iter()
+                .map(|effort| effort.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["low", "high", "xhigh"]
+        );
+        assert_eq!(neon.efforts[0].model.as_deref(), Some("gemini-4-neon-low"));
+        assert_eq!(
+            neon.efforts[2].model.as_deref(),
+            Some("gemini-4-neon-xhigh")
+        );
+        assert!(models
+            .iter()
+            .any(|model| model.id == "gemini-pro-orchestrator"));
     }
 }

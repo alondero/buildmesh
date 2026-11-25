@@ -62,7 +62,6 @@ pub enum EffortControlKind {
     InlineConfig {
         /// Config key the CLI reads (e.g. `"model_reasoning_effort"`).
         key: String,
-        /// Allowed values the CLI accepts for this key.
         allowed: Vec<String>,
     },
 }
@@ -333,6 +332,7 @@ pub struct HarnessCapabilities {
     pub produces_readable_transcript: bool,
     /// Whether `--model <name>` (or equivalent) from configuration applies.
     pub supports_model_override: bool,
+    pub supports_model_effort_discovery: bool,
     /// Whether an agent / persona selector (`--agent <name>` or the
     /// session-API equivalent) from configuration applies. The mask drops
     /// the value for every harness that does not opt in, so a stale
@@ -510,6 +510,19 @@ pub fn resolve_agent_config(
     }
 }
 
+pub fn mask_independent_effort_for_encoded_model(
+    adapter: &dyn AgentProvider,
+    resolved: &mut ResolvedAgentConfig,
+) {
+    if resolved
+        .model
+        .as_deref()
+        .is_some_and(|model| adapter.model_encodes_effort(model))
+    {
+        resolved.effort = None;
+    }
+}
+
 /// Capability-masked extra-args resolver (issue #1358).
 ///
 /// Kept separate from `resolve_agent_config` so the cascade
@@ -544,20 +557,20 @@ fn resolve_field(field: FieldInputs<'_>) -> Option<String> {
     crate::preferences::resolver::resolve_field(field)
 }
 
-/// Apply the capability mask for the effort field. Two-stage mask:
-/// 1. `EffortControlKind::None` → drop unconditionally (the harness has no
-///    effort control; Buildmesh must not invent one).
-/// 2. `Closed { allowed }` / `InlineConfig { allowed, .. }` → drop if the
-///    value isn't in `allowed`. The `InlineConfig.key` is UI metadata only
-///    (knob labelling on the frontend); the resolver matches the value
-///    shape, not the key, so the two arms collapse into one.
 fn resolve_effort(field: FieldInputs<'_>, control: &EffortControlKind) -> Option<String> {
-    let allowed: &[String] = match control {
-        EffortControlKind::None => return None,
-        EffortControlKind::Closed { allowed } => allowed,
-        EffortControlKind::InlineConfig { allowed, .. } => allowed,
-    };
-    resolve_field(field).filter(|v| allowed.iter().any(|a| a == v))
+    resolve_field(field).filter(|v| effort_control_accepts(control, v))
+}
+
+pub(crate) fn effort_control_accepts(control: &EffortControlKind, value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty() {
+        return false;
+    }
+    match control {
+        EffortControlKind::None => false,
+        EffortControlKind::Closed { allowed } => allowed.iter().any(|a| a == value),
+        EffortControlKind::InlineConfig { .. } => true,
+    }
 }
 
 /// Apply the capability mask for the permission-mode field (issue #2151).
@@ -631,6 +644,7 @@ pub fn capabilities_for<A: AgentProvider + ?Sized>(adapter: &A) -> HarnessCapabi
         supports_result_file_handoff,
         produces_readable_transcript: descriptor.produces_readable_transcript,
         supports_model_override: descriptor.supports_model_override,
+        supports_model_effort_discovery: adapter.model_catalog_probe().is_some(),
         supports_agent: descriptor.supports_agent,
         supports_extra_args: descriptor.supports_extra_args,
         supports_prefill: descriptor.supports_prefill,
@@ -659,9 +673,9 @@ pub const CLAUDE_EFFORT_ALLOWED: &[&str] = &["low", "medium", "high", "xhigh", "
 /// harnesses).
 pub const CODEX_EFFORT_KEY: &str = "model_reasoning_effort";
 
-/// The allowed values Codex accepts for `model_reasoning_effort` (issue
-/// #1143 research).
-pub const CODEX_EFFORT_ALLOWED: &[&str] = &["none", "low", "medium", "high", "xhigh"];
+pub const CODEX_EFFORT_ALLOWED: &[&str] = &[
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+];
 
 /// Grok Code (1.0.5) accepts `--reasoning-effort <level>` (alias `--effort`)
 /// with the seven canonical levels documented at
@@ -951,17 +965,19 @@ mod tests {
         // transcript reader can hydrate the Node Digest / archive picker.
         assert!(agy.produces_readable_transcript);
         assert!(agy.supports_model_override);
-        // Issue #1286: agy's CLI accepts `--effort <low|medium|high>`
-        // (verified against `agy --help`). The closed vocabulary
-        // mirrors Anthropic's; only the vocabulary differs from a
-        // vocabulary-superset perspective (both use `low|medium|high`).
         assert!(agy.supports_effort_override);
         assert!(agy.supports_extra_args);
         assert!(agy.supports_prefill);
         assert_eq!(
             agy.effort_control,
             EffortControlKind::Closed {
-                allowed: vec!["low".into(), "medium".into(), "high".into()],
+                allowed: vec![
+                    "low".into(),
+                    "medium".into(),
+                    "high".into(),
+                    "xhigh".into(),
+                    "max".into()
+                ],
             }
         );
         assert_eq!(
@@ -1604,6 +1620,22 @@ mod tests {
             );
             assert_eq!(claude.effort.as_deref(), Some(effort));
         }
+    }
+
+    #[test]
+    fn resolver_keeps_a_codex_model_defined_effort() {
+        let inputs = AgentConfigInputs {
+            model: FieldInputs::default(),
+            effort: FieldInputs {
+                explicit: Some("experimental"),
+                mesh: None,
+                application: None,
+            },
+            permission_mode: FieldInputs::default(),
+            agent: FieldInputs::default(),
+        };
+        let resolved = resolve_agent_config(&codex_caps(), inputs, None);
+        assert_eq!(resolved.effort.as_deref(), Some("experimental"));
     }
 
     /// Mesh legacy contract (issue #1149 acceptance criteria 5): a non-empty

@@ -34,6 +34,7 @@ pub(crate) mod hook_state;
 pub mod launch;
 pub mod launch_routing;
 pub(crate) mod managed_config;
+pub mod model_catalog;
 pub(crate) mod node_teardown;
 pub mod output;
 pub mod process;

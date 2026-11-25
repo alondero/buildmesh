@@ -18,6 +18,7 @@ import type { SpawnConfiguration } from '../../types/generated/SpawnConfiguratio
 import type { LaunchTarget } from '../../types/generated/LaunchTarget';
 import type { ProviderPairing } from '../../types/generated/ProviderPairing';
 import type { PairingVerification } from '../../types/generated/PairingVerification';
+import type { HarnessModelCatalog } from '../../types/generated/HarnessModelCatalog';
 import {
   applyHarnessConfigurationOrder,
   configurationHarnessId,
@@ -37,6 +38,7 @@ export interface LaunchConfigurationApi {
   verify?: (value: SpawnConfiguration, route?: ProviderPairing) => Promise<PairingVerification>;
   remove: (id: string) => Promise<void>;
   reorder?: (harnessId: string, configurationIds: string[]) => Promise<void>;
+  modelCatalog?: (harnessId: string, loginId?: string) => Promise<HarnessModelCatalog>;
 }
 
 function SortableLaunchConfigurationRow({
@@ -290,6 +292,7 @@ export function LaunchConfigurations({
   if (draft) return <LaunchConfigurationEditor key={draft.id} value={draft} targets={targets} onCancel={() => setDraft(null)}
     onDirtyChange={onDirtyChange}
     onVerify={api.verify}
+    getModelCatalog={api.modelCatalog}
     onSave={async (value, route) => { if (route) await api.save(value, route); else await api.save(value); refresh(); }}
     onDelete={draft.id ? async () => { await api.remove(draft.id); refresh(); } : undefined} />;
   return <div className="launch-config-form">

@@ -123,7 +123,7 @@ function backendProvider(id: string, label: string, extra: Partial<ProviderInfo>
     provider_id: id.includes(':') ? provider_id : null,
     is_proxied: id.includes(':'),
     group_key: harness_id,
-    capabilities: { supports_model_override: false, supports_effort_override: false, effort_control: 'none' },
+    capabilities: { supports_model_override: false, supports_model_effort_discovery: false, supports_effort_override: false, effort_control: 'none' },
     ...extra,
   } as ProviderInfo;
 }

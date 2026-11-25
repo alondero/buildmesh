@@ -159,7 +159,9 @@ are source-validated and unit-tested, not yet accepted by a live 2.2.6 app run.
 - **Model variants are supported.** `Model.Ref` accepts an optional `variant`
   in `POST /api/session` and `POST /api/session/:id/model`; Buildmesh now
   passes `provider/model#variant` through both the session API and the
-  background `run --model` path.
+  background `run --model` path. The V2 CLI's `api --standalone model.list`
+  exposes enabled models and their exact advertised variants for Launch
+  Configuration discovery.
 - **Agent selection via the session API (issue #2716 P1).** The V2 full TUI
   has no `--agent` flag; `POST /api/session` accepts `agent` at creation and
   `POST /api/session/:id/agent` switches an existing session

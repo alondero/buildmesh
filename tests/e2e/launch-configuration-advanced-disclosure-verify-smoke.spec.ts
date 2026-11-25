@@ -87,7 +87,7 @@ const nativeTarget = {
   route_attached: false,
   manual_model: false,
   default_model: 'MiniMax-M3',
-  supports_model: true,
+  supports_model: true, supports_model_effort_discovery: false,
   supports_extra_args: true, supports_agent: false,
 };
 
@@ -103,7 +103,7 @@ const proxiedTarget = {
   route_attached: false,
   manual_model: false,
   default_model: 'MiniMax-M3',
-  supports_model: true,
+  supports_model: true, supports_model_effort_discovery: false,
   supports_extra_args: true, supports_agent: false,
   verification_required: true,
 };

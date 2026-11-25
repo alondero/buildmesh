@@ -41,8 +41,13 @@ Verified against:
   `~/.config/devin` can exist without the CLI binary.
 - **Prefill & model override**: `supports_prefill: true`,
   `prefill_auto_submits: true` (`-- <prompt>`), `supports_model_override: true`
-  (`--model <MODEL>`). Effort override is `EffortControlKind::None` (thinking
-  level is interactive-only).
+  (`--model <MODEL>`). Effort override is `EffortControlKind::None` because
+  there is no independent `--effort` argument. The CLI enumerates
+  effort-qualified model variants through `devin models list --format json`,
+  but that output is the global catalogue rather than the entitlement-filtered
+  account selection. Buildmesh therefore does not advertise Devin model/effort
+  discovery; users can still enter an exact effort-qualified variant manually
+  as `--model` when their account offers it.
 - **Permission modes**:
   - `unattended` (default): `--permission-mode dangerous --respect-workspace-trust false`
   - `prompt`: no permission flag (Devin asks for approval)

@@ -19,7 +19,7 @@ vi.mock('../../src/lib/tauri/provider', () => ({
   listProviders: vi.fn(),
   listSpawnConfigurations: vi.fn(),
   verifyLaunchConfiguration: vi.fn(),
-  getLaunchTargets: vi.fn(),
+  getLaunchTargets: vi.fn(), getHarnessModelCatalog: vi.fn(),
   saveSpawnConfiguration: vi.fn(),
   deleteSpawnConfiguration: vi.fn(),
   reorderSpawnConfigurations: vi.fn(),
@@ -34,8 +34,8 @@ const agyTarget: LaunchTarget = {
   efforts: ['low', 'high'],
   route_attached: false,
   manual_model: true,
-  supports_model: true,
-  supports_extra_args: true,
+  supports_model: true, supports_model_effort_discovery: false,
+  supports_extra_args: true, supports_agent: false,
 };
 
 const opencodeTarget: LaunchTarget = {
@@ -47,8 +47,8 @@ const opencodeTarget: LaunchTarget = {
   efforts: [],
   route_attached: false,
   manual_model: true,
-  supports_model: true,
-  supports_extra_args: true,
+  supports_model: true, supports_model_effort_discovery: false,
+  supports_extra_args: true, supports_agent: false,
 };
 
 const makeConfig = (id: string, name: string, harnessId: string): SpawnConfiguration => ({

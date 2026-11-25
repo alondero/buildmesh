@@ -1454,6 +1454,48 @@ fn spawn_request_whitespace_explicit_falls_through_at_resolver() {
     assert_eq!(resolved.effort.as_deref(), Some("high"));
 }
 
+#[test]
+fn encoded_agy_model_suppresses_the_independent_application_effort() {
+    let app_default = HarnessConfigValue {
+        model: None,
+        effort: Some("high".into()),
+        permission_mode: None,
+        agent: None,
+    };
+    let resolved = resolve_spawn_config(
+        Provider::Agy,
+        Some("gemini-4-neon-low"),
+        None,
+        None,
+        Some(&app_default),
+        None,
+    );
+    assert_eq!(resolved.model.as_deref(), Some("gemini-4-neon-low"));
+    assert_eq!(
+        resolved.effort, None,
+        "an effort-qualified Antigravity model already carries the exact effort; the independent application default must not override it"
+    );
+}
+
+#[test]
+fn unqualified_agy_model_still_uses_the_independent_application_effort() {
+    let app_default = HarnessConfigValue {
+        model: None,
+        effort: Some("high".into()),
+        permission_mode: None,
+        agent: None,
+    };
+    let resolved = resolve_spawn_config(
+        Provider::Agy,
+        Some("gemini-4-neon"),
+        None,
+        None,
+        Some(&app_default),
+        None,
+    );
+    assert_eq!(resolved.effort.as_deref(), Some("high"));
+}
+
 /// Issue #1358 end-to-end pin: the `SpawnRequest → SpawnOptions →
 /// resolve_spawn_config` path **must** deliver `explicit_extra_args`
 /// end-to-end AND capability-mask it against the harness's

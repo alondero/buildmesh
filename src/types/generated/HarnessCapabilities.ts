@@ -79,7 +79,7 @@ produces_readable_transcript: boolean,
 /**
  * Whether `--model <name>` (or equivalent) from configuration applies.
  */
-supports_model_override: boolean, 
+supports_model_override: boolean, supports_model_effort_discovery: boolean, 
 /**
  * Whether an agent / persona selector (`--agent <name>` or the
  * session-API equivalent) from configuration applies. The mask drops

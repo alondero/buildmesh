@@ -1,4 +1,5 @@
 {
   "db::tests::reader_pool_reads_while_writer_transaction_is_active": 2868,
-  "db::tests::reader_pool_serves_a_second_reader_while_the_first_is_checked_out": 2868
+  "db::tests::reader_pool_serves_a_second_reader_while_the_first_is_checked_out": 2868,
+  "tests/integration/tauri-mock-settings.test.ts > renders Settings and prompt defaults in Chromium with the default mock IPC": 2876
 }

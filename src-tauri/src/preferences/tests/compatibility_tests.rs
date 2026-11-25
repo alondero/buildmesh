@@ -627,6 +627,22 @@ fn upsert_harness_default_accepts_codex_xhigh() {
 }
 
 #[test]
+fn upsert_harness_default_accepts_a_codex_model_defined_effort() {
+    let mut prefs = AppPreferences::default();
+    upsert_harness_default(
+        &mut prefs,
+        "codex",
+        HarnessConfigValue {
+            model: None,
+            effort: Some("experimental".to_string()),
+            permission_mode: None,
+            agent: None,
+        },
+    )
+    .unwrap();
+}
+
+#[test]
 fn upsert_harness_default_accepts_canonical_lowercase_via_capitalisation() {
     let mut prefs = AppPreferences::default();
     upsert_harness_default(

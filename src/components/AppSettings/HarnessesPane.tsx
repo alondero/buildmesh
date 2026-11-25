@@ -31,11 +31,11 @@ import { ResourceLoadStatus } from './ResourceLoadStatus';
 import { getHostPairingVerifications } from './settingsUtils';
 import { useSettingsData, type PairingsPayload } from './SettingsDataContext';
 import { isWindows } from '../../lib/platform';
-import { listSpawnConfigurations, getLaunchTargets, saveSpawnConfiguration, deleteSpawnConfiguration, verifyLaunchConfiguration, reorderSpawnConfigurations } from '../../lib/tauri/provider';
+import { listSpawnConfigurations, getLaunchTargets, getHarnessModelCatalog, saveSpawnConfiguration, deleteSpawnConfiguration, verifyLaunchConfiguration, reorderSpawnConfigurations } from '../../lib/tauri/provider';
 import type { HarnessConfigValue } from '../../types/generated/HarnessConfigValue';
 import type { ProviderAccount, ProviderPairing, PairingVerification } from '../../lib/tauri';
 
-const launchConfigurationApi = { list: listSpawnConfigurations, targets: getLaunchTargets, save: saveSpawnConfiguration, remove: deleteSpawnConfiguration, verify: verifyLaunchConfiguration, reorder: reorderSpawnConfigurations };
+const launchConfigurationApi = { list: listSpawnConfigurations, targets: getLaunchTargets, modelCatalog: getHarnessModelCatalog, save: saveSpawnConfiguration, remove: deleteSpawnConfiguration, verify: verifyLaunchConfiguration, reorder: reorderSpawnConfigurations };
 
 /** Stable empty map for "preferences not loaded yet". A module constant, not
  *  a fresh `{}` per render, so deriving from it does not invalidate

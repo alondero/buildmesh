@@ -24,7 +24,7 @@ Review of Antigravity CLI (`agy`) integration with Buildmesh, covering lifecycle
 | **Question Dialog** | **Active (validated on 1.3.5)** | `PreToolUse`/`PostToolUse` matcher groups scoped to `ask_question`; the pre-tool hook answers `{"decision":"allow"}` and both name their event in the callback URL |
 | **Workspace Trust** | **Pre-provisioned** | `ensure_trusted` populates `~/.gemini/antigravity-cli/settings.json` before spawn |
 | **Session Resume** | **Active (#1499)** | `--conversation <uuid>`; self-assigned UUIDv4 captured by the brain-directory poller (`services::agy_session`, primary — PTY capture is disabled, the TUI prints no UUID), `Stop`-hook `conversationId` as secondary |
-| **Reasoning Effort** | **Active (#1286)** | Closed vocabulary `low`, `medium`, `high` via `--effort` |
+| **Reasoning Effort** | **Active (#1286)** | Closed vocabulary `low`, `medium`, `high`, `xhigh`, `max` via `--effort`; Launch Configurations discover exact effort-qualified model slugs from `agy models` when available. A qualified slug such as `gemini-4-neon-low` carries the effort, so launch resolution does not add an independent `--effort` layer to it. Live ACP evidence uses High as the default thought level when offered, so a grouped catalog entry without an explicit effort uses the High slug; a singleton effort-qualified id such as `gpt-oss-120b-medium` remains one fixed exact model rather than a one-choice adjustable group |
 | **Native Sandbox** | **Active (#1287)** | Forwarded via `--sandbox` when mesh sandbox toggle is on |
 | **Transcript Reader** | **Active (#1283)** | `TranscriptFormat::Agy` reads `~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/transcript.jsonl` |
 

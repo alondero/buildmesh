@@ -72,7 +72,7 @@ fn launch_targets_offer_unattached_keyed_providers_without_mutating_routes() {
     // M3.1 Flash always reasons: `none` is a 400 there, so it must not be offered.
     assert_eq!(
         effort_of("MiniMax-M3.1-Flash"),
-        ["low", "medium", "high", "xhigh"]
+        ["low", "medium", "high", "xhigh", "max"]
     );
     assert!(targets
         .iter()
@@ -102,4 +102,48 @@ fn stored_cline_openai_route_remains_editable_without_codex_verification() {
     assert!(target.route_attached);
     assert_eq!(target.route.as_ref().unwrap().surface, ApiSurface::OpenAI);
     assert_eq!(target.verification_required, None);
+}
+
+#[test]
+fn catalog_login_resolves_the_pinned_home_only_for_native_windows() {
+    let prefs: super::super::AppPreferences = serde_json::from_value(serde_json::json!({
+        "harness_logins": [{
+            "id": "work",
+            "harness_id": "codex",
+            "label": "Work",
+            "home": "C:/Users/test/.codex-accounts/work"
+        }]
+    }))
+    .unwrap();
+
+    let login = catalog_login_for(
+        &prefs,
+        "codex",
+        Some("work"),
+        crate::models::EnvType::Windows,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(login.home, "C:/Users/test/.codex-accounts/work");
+    assert!(catalog_login_for(
+        &prefs,
+        "codex",
+        Some("default"),
+        crate::models::EnvType::Windows
+    )
+    .unwrap()
+    .is_none());
+    assert!(catalog_login_for(
+        &prefs,
+        "codex",
+        Some("missing"),
+        crate::models::EnvType::Windows
+    )
+    .is_err());
+    let refusal =
+        catalog_login_for(&prefs, "codex", Some("work"), crate::models::EnvType::Wsl).unwrap_err();
+    assert!(
+        refusal.contains("only available for native Windows"),
+        "{refusal}"
+    );
 }

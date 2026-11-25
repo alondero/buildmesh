@@ -66,7 +66,7 @@ function provider(overrides: Partial<ProviderInfo>): ProviderInfo {
       attention_capability: null,
       supports_passive_turn_watcher: false,
       produces_readable_transcript: true,
-      supports_model_override: true,
+      supports_model_override: true, supports_model_effort_discovery: false,
       supports_effort_override: true,
       supports_extra_args: true, supports_agent: false,
       supports_prefill: true,

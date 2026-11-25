@@ -3,14 +3,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GroupedProviderMenu } from '../../src/components/Providers/GroupedProviderMenu';
 import type { SpawnOption } from '../../src/lib/groups';
 import type { SpawnConfiguration } from '../../src/types/generated/SpawnConfiguration';
+import type { HarnessModelCatalog } from '../../src/types/generated/HarnessModelCatalog';
 import * as api from '../../src/lib/tauri/provider';
 
 vi.mock('../../src/lib/tauri/provider', () => ({
-  listProviders: vi.fn(), listSpawnConfigurations: vi.fn(), verifyLaunchConfiguration: vi.fn(), getLaunchTargets: vi.fn(), saveSpawnConfiguration: vi.fn(), deleteSpawnConfiguration: vi.fn(), reorderSpawnConfigurations: vi.fn(),
+  listProviders: vi.fn(), listSpawnConfigurations: vi.fn(), verifyLaunchConfiguration: vi.fn(), getLaunchTargets: vi.fn(), getHarnessModelCatalog: vi.fn(), saveSpawnConfiguration: vi.fn(), deleteSpawnConfiguration: vi.fn(), reorderSpawnConfigurations: vi.fn(),
 }));
 
 const target = { id: 'codex', harness_id: 'codex', harness_name: 'Codex', provider_name: 'OpenAI',
-  models: [], efforts: ['low', 'high', 'max'], route_attached: false, manual_model: true, supports_model: true, supports_extra_args: true };
+  models: [], efforts: ['low', 'high', 'max'], route_attached: false, manual_model: true, supports_model: true, supports_model_effort_discovery: false, supports_extra_args: true, supports_agent: false };
 
 const option: SpawnOption = {
   id: 'codex', label: 'Codex', harness_id: 'codex', provider_id: null,
@@ -302,7 +303,7 @@ describe('Spawn configurations', () => {
   });
 
   it('does not expose effort or extra arguments when unsupported', async () => {
-    vi.mocked(api.getLaunchTargets).mockResolvedValue([{ ...target, efforts: [], supports_extra_args: false }]);
+    vi.mocked(api.getLaunchTargets).mockResolvedValue([{ ...target, efforts: [], supports_extra_args: false, supports_agent: false }]);
     const limited = { ...option, capabilities: { ...option.capabilities!, supports_effort_override: false, supports_extra_args: false, supports_agent: false, effort_control: { kind: 'none' as const } } };
     render(<GroupedProviderMenu providers={[limited]} onSelect={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
@@ -513,4 +514,291 @@ describe('Spawn configuration submenu placement', () => {
     expect(panel.style.left).toBe('220px');
     expect(panel.style.top).toBe('400px');
   });
+
+  it('uses discovered exact models and independent efforts when the harness supports discovery', async () => {
+    vi.mocked(api.getLaunchTargets).mockResolvedValue([{ ...target, supports_model_effort_discovery: true }]);
+    vi.mocked(api.getHarnessModelCatalog).mockResolvedValue({
+      harness_id: 'codex', effort_storage: 'separate',
+      models: [{ id: 'gpt-a', name: 'GPT A', efforts: [
+        { id: 'low', name: 'low' }, { id: 'experimental', name: 'experimental' },
+      ] }],
+    });
+    vi.mocked(api.listSpawnConfigurations).mockResolvedValue([]);
+    vi.mocked(api.saveSpawnConfiguration).mockResolvedValue({ ...saved, name: 'Discovered' });
+
+    render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: /New configuration/ }));
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Discovered' } });
+    await screen.findByRole('option', { name: /GPT A/ });
+    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'gpt-a' } });
+    expect(within(screen.getByLabelText('Effort')).getAllByRole('option').map((o) => o.textContent)).toEqual(['Default', 'low', 'experimental']);
+    fireEvent.change(screen.getByLabelText('Effort'), { target: { value: 'experimental' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(api.saveSpawnConfiguration).toHaveBeenCalledWith(expect.objectContaining({
+      model: 'gpt-a', effort: 'experimental',
+    })));
+  });
+
+  it('does not offer a new custom model after discovery succeeds', async () => {
+    vi.mocked(api.getLaunchTargets).mockResolvedValue([{ ...target, supports_model_effort_discovery: true }]);
+    vi.mocked(api.getHarnessModelCatalog).mockResolvedValue({
+      harness_id: 'codex', effort_storage: 'separate',
+      models: [{ id: 'gpt-a', name: 'GPT A', efforts: [] }],
+    });
+    vi.mocked(api.listSpawnConfigurations).mockResolvedValue([]);
+
+    render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: /New configuration/ }));
+    await screen.findByRole('option', { name: /GPT A/ });
+
+    expect(screen.queryByRole('option', { name: 'Custom model...' })).toBeNull();
+  });
+
+  it('keeps an existing unlisted model as a transitional choice after discovery succeeds', async () => {
+    const unmatched: SpawnConfiguration = { ...saved, model: 'custom-unmatched' };
+    vi.mocked(api.getLaunchTargets).mockResolvedValue([{ ...target, supports_model_effort_discovery: true }]);
+    vi.mocked(api.getHarnessModelCatalog).mockResolvedValue({
+      harness_id: 'codex', effort_storage: 'separate',
+      models: [{ id: 'gpt-a', name: 'GPT A', efforts: [] }],
+    });
+    vi.mocked(api.listSpawnConfigurations).mockResolvedValue([unmatched]);
+    vi.mocked(api.listProviders).mockResolvedValue([option, { ...option, id: unmatched.id, label: unmatched.name, configuration: unmatched }]);
+
+    render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit Sol Max' }));
+    await screen.findByRole('option', { name: /GPT A/ });
+
+    expect(screen.getByRole('option', { name: 'custom-unmatched (advanced route)' })).toBeTruthy();
+    expect(screen.queryByRole('option', { name: 'Custom model...' })).toBeNull();
+  });
+
+  it('waits for a discovered model before offering effort choices', async () => {
+    vi.mocked(api.getLaunchTargets).mockResolvedValue([{ ...target, supports_model_effort_discovery: true }]);
+    vi.mocked(api.getHarnessModelCatalog).mockResolvedValue({
+      harness_id: 'codex', effort_storage: 'separate',
+      models: [{ id: 'gpt-a', name: 'GPT A', efforts: [{ id: 'ultra', name: 'ultra' }] }],
+    });
+    vi.mocked(api.listSpawnConfigurations).mockResolvedValue([]);
+
+    render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: /New configuration/ }));
+    await screen.findByRole('option', { name: /GPT A/ });
+
+    expect(screen.queryByLabelText('Effort')).toBeNull();
+    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'gpt-a' } });
+    expect(within(screen.getByLabelText('Effort')).getAllByRole('option').map((o) => o.textContent)).toEqual(['Default', 'ultra']);
+  });
+
+  it('stores the exact qualified model for encoded effort catalogs', async () => {
+    vi.mocked(api.getLaunchTargets).mockResolvedValue([{ ...target, supports_model_effort_discovery: true }]);
+    vi.mocked(api.getHarnessModelCatalog).mockResolvedValue({
+      harness_id: 'codex', effort_storage: 'encoded_in_model',
+      models: [{ id: 'swe-2-1', name: 'SWE 2.1', efforts: [
+        { id: 'low', name: 'low', model: 'swe-2-1-low' },
+        { id: 'high', name: 'high', model: 'swe-2-1-high' },
+      ] }],
+    });
+    vi.mocked(api.listSpawnConfigurations).mockResolvedValue([]);
+    vi.mocked(api.saveSpawnConfiguration).mockResolvedValue({ ...saved, name: 'Encoded' });
+
+    render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: /New configuration/ }));
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Encoded' } });
+    await screen.findByRole('option', { name: /SWE 2.1/ });
+    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'swe-2-1' } });
+    fireEvent.change(screen.getByLabelText('Effort'), { target: { value: 'high' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(api.saveSpawnConfiguration).toHaveBeenCalledWith(expect.objectContaining({
+      model: 'swe-2-1-high', effort: null,
+    })));
+  });
+
+
+  it('keeps the ordinary controls usable while discovery is still loading', async () => {
+    let finishCatalog!: (value: HarnessModelCatalog) => void;
+    vi.mocked(api.getLaunchTargets).mockResolvedValue([{ ...target, supports_model_effort_discovery: true }]);
+    vi.mocked(api.getHarnessModelCatalog).mockImplementation(() => new Promise((resolve) => { finishCatalog = resolve; }));
+    vi.mocked(api.listSpawnConfigurations).mockResolvedValue([]);
+
+    render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: /New configuration/ }));
+    await waitFor(() => expect(api.getHarnessModelCatalog).toHaveBeenCalledWith('codex'));
+
+    const model = await screen.findByLabelText('Model') as HTMLInputElement;
+    expect(model.tagName).toBe('INPUT');
+    expect(model.disabled).toBe(false);
+    expect(within(screen.getByLabelText('Effort')).getAllByRole('option').map((o) => o.textContent)).toEqual(['Default', 'low', 'high', 'max']);
+    await act(async () => finishCatalog({ harness_id: 'codex', effort_storage: 'separate', models: [] }));
+  });
+
+  it('clears a pending static effort that the discovered model does not support', async () => {
+    let finishCatalog!: (value: HarnessModelCatalog) => void;
+    vi.mocked(api.getLaunchTargets).mockResolvedValue([{ ...target, supports_model_effort_discovery: true }]);
+    vi.mocked(api.getHarnessModelCatalog).mockImplementation(() => new Promise((resolve) => { finishCatalog = resolve; }));
+    vi.mocked(api.listSpawnConfigurations).mockResolvedValue([]);
+    vi.mocked(api.saveSpawnConfiguration).mockResolvedValue(saved);
+
+    render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: /New configuration/ }));
+    await waitFor(() => expect(api.getHarnessModelCatalog).toHaveBeenCalledWith('codex'));
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Exact' } });
+    fireEvent.change(await screen.findByLabelText('Model'), { target: { value: 'gpt-a' } });
+    fireEvent.change(screen.getByLabelText('Effort'), { target: { value: 'max' } });
+
+    await act(async () => finishCatalog({
+      harness_id: 'codex', effort_storage: 'separate',
+      models: [{ id: 'gpt-a', name: 'GPT A', efforts: [{ id: 'low', name: 'low' }] }],
+    }));
+
+    await waitFor(() => expect((screen.getByLabelText('Effort') as HTMLSelectElement).value).toBe(''));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(api.saveSpawnConfiguration).toHaveBeenCalledWith(expect.objectContaining({
+      model: 'gpt-a', effort: null,
+    })));
+  });
+
+  it('clears a hidden independent effort when saving an encoded-effort catalog configuration', async () => {
+    const encodedSaved: SpawnConfiguration = { ...saved, model: 'swe-2-1-high', effort: 'high' };
+    vi.mocked(api.getLaunchTargets).mockResolvedValue([{ ...target, supports_model_effort_discovery: true }]);
+    vi.mocked(api.getHarnessModelCatalog).mockResolvedValue({
+      harness_id: 'codex', effort_storage: 'encoded_in_model',
+      models: [{ id: 'swe-2-1', name: 'SWE 2.1', efforts: [
+        { id: 'low', name: 'low', model: 'swe-2-1-low' },
+        { id: 'high', name: 'high', model: 'swe-2-1-high' },
+      ] }],
+    });
+    vi.mocked(api.listSpawnConfigurations).mockResolvedValue([encodedSaved]);
+    vi.mocked(api.listProviders).mockResolvedValue([option, { ...option, id: encodedSaved.id, label: encodedSaved.name, configuration: encodedSaved }]);
+    vi.mocked(api.saveSpawnConfiguration).mockResolvedValue(encodedSaved);
+
+    render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit Sol Max' }));
+    await screen.findByRole('option', { name: /SWE 2.1/ });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(api.saveSpawnConfiguration).toHaveBeenCalledWith(expect.objectContaining({
+      model: 'swe-2-1-high', effort: null,
+    })));
+  });
+
+
+  it('saves the ordinary fallback values immediately while encoded-effort discovery is pending', async () => {
+    let finishCatalog!: (value: HarnessModelCatalog) => void;
+    const encodedSaved: SpawnConfiguration = { ...saved, model: 'swe-2-1-high', effort: 'high' };
+    vi.mocked(api.getLaunchTargets).mockResolvedValue([{ ...target, supports_model_effort_discovery: true }]);
+    vi.mocked(api.getHarnessModelCatalog).mockImplementation(() => new Promise((resolve) => { finishCatalog = resolve; }));
+    vi.mocked(api.listSpawnConfigurations).mockResolvedValue([encodedSaved]);
+    vi.mocked(api.listProviders).mockResolvedValue([option, { ...option, id: encodedSaved.id, label: encodedSaved.name, configuration: encodedSaved }]);
+    vi.mocked(api.saveSpawnConfiguration).mockResolvedValue(encodedSaved);
+
+    render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit Sol Max' }));
+    await waitFor(() => expect(api.getHarnessModelCatalog).toHaveBeenCalledWith('codex'));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(api.saveSpawnConfiguration).toHaveBeenCalledWith(expect.objectContaining({
+      model: 'swe-2-1-high', effort: 'high',
+    })));
+
+    await act(async () => finishCatalog({
+      harness_id: 'codex', effort_storage: 'encoded_in_model',
+      models: [{ id: 'swe-2-1', name: 'SWE 2.1', efforts: [
+        { id: 'high', name: 'high', model: 'swe-2-1-high' },
+      ] }],
+    }));
+
+    expect(api.saveSpawnConfiguration).toHaveBeenCalledTimes(1);
+  });
+
+
+  it('clears a pending static effort when discovery leaves the model unmatched', async () => {
+    let finishCatalog!: (value: HarnessModelCatalog) => void;
+    const unmatched: SpawnConfiguration = { ...saved, model: 'custom-unmatched', effort: 'max' };
+    vi.mocked(api.getLaunchTargets).mockResolvedValue([{ ...target, supports_model_effort_discovery: true }]);
+    vi.mocked(api.getHarnessModelCatalog).mockImplementation(() => new Promise((resolve) => { finishCatalog = resolve; }));
+    vi.mocked(api.listSpawnConfigurations).mockResolvedValue([unmatched]);
+    vi.mocked(api.listProviders).mockResolvedValue([option, { ...option, id: unmatched.id, label: unmatched.name, configuration: unmatched }]);
+    vi.mocked(api.saveSpawnConfiguration).mockResolvedValue(unmatched);
+
+    render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit Sol Max' }));
+    await waitFor(() => expect(api.getHarnessModelCatalog).toHaveBeenCalledWith('codex'));
+
+    await act(async () => finishCatalog({
+      harness_id: 'codex', effort_storage: 'separate',
+      models: [{ id: 'gpt-5.6-sol', name: 'GPT 5.6 Sol', efforts: [
+        { id: 'high', name: 'high' },
+      ] }],
+    }));
+
+    await waitFor(() => expect(screen.queryByLabelText('Effort')).toBeNull());
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(api.saveSpawnConfiguration).toHaveBeenCalledWith(expect.objectContaining({
+      model: 'custom-unmatched', effort: null,
+    })));
+  });
+
+  it('clears a pending static effort when discovery leaves the default model unmatched', async () => {
+    const blank: SpawnConfiguration = { ...saved, model: null, effort: 'max' };
+    vi.mocked(api.getLaunchTargets).mockResolvedValue([{ ...target, supports_model_effort_discovery: true }]);
+    vi.mocked(api.getHarnessModelCatalog).mockResolvedValue({
+      harness_id: 'codex', effort_storage: 'separate',
+      models: [{ id: 'gpt-5.6-sol', name: 'GPT 5.6 Sol', efforts: [
+        { id: 'high', name: 'high' },
+      ] }],
+    });
+    vi.mocked(api.listSpawnConfigurations).mockResolvedValue([blank]);
+    vi.mocked(api.listProviders).mockResolvedValue([option, { ...option, id: blank.id, label: blank.name, configuration: blank }]);
+    vi.mocked(api.saveSpawnConfiguration).mockResolvedValue(blank);
+
+    render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit Sol Max' }));
+    await waitFor(() => expect(api.getHarnessModelCatalog).toHaveBeenCalledWith('codex'));
+    await waitFor(() => expect(screen.queryByLabelText('Effort')).toBeNull());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(api.saveSpawnConfiguration).toHaveBeenCalledWith(expect.objectContaining({
+      model: null, effort: null,
+    })));
+  });
+
+  it('discovers the catalog for the configuration pinned Harness Login', async () => {
+    const pinned: SpawnConfiguration = { ...saved, login_id: 'work' };
+    vi.mocked(api.getLaunchTargets).mockResolvedValue([{ ...target, supports_model_effort_discovery: true }]);
+    vi.mocked(api.getHarnessModelCatalog).mockResolvedValue({ harness_id: 'codex', effort_storage: 'separate', models: [] });
+    vi.mocked(api.listSpawnConfigurations).mockResolvedValue([pinned]);
+    vi.mocked(api.listProviders).mockResolvedValue([option, { ...option, id: pinned.id, label: pinned.name, configuration: pinned }]);
+
+    render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit Sol Max' }));
+
+    await waitFor(() => expect(api.getHarnessModelCatalog).toHaveBeenCalledWith('codex', 'work'));
+  });
+
+  it('keeps the freeform model control when discovery fails', async () => {
+    vi.mocked(api.getLaunchTargets).mockResolvedValue([{ ...target, supports_model_effort_discovery: true }]);
+    vi.mocked(api.getHarnessModelCatalog).mockRejectedValue(new Error('catalog unavailable'));
+    vi.mocked(api.listSpawnConfigurations).mockResolvedValue([]);
+
+    render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: /New configuration/ }));
+    await waitFor(() => expect(api.getHarnessModelCatalog).toHaveBeenCalledWith('codex'));
+
+    await waitFor(() => expect((screen.getByLabelText('Model') as HTMLElement).tagName).toBe('INPUT'));
+  });
+
 });

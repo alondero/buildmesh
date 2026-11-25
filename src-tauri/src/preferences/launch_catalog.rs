@@ -36,6 +36,8 @@ pub struct LaunchTarget {
     pub efforts: Vec<String>,
     pub manual_model: bool,
     pub supports_model: bool,
+    #[serde(default)]
+    pub supports_model_effort_discovery: bool,
     pub supports_extra_args: bool,
     #[serde(default)]
     pub supports_agent: bool,
@@ -58,6 +60,64 @@ pub fn get_launch_targets() -> Result<Vec<LaunchTarget>, String> {
     Ok(targets_for(&prefs, super::harness_profiles()))
 }
 
+fn catalog_login_for(
+    prefs: &super::AppPreferences,
+    harness_adapter_id: &str,
+    login_id: Option<&str>,
+    env_type: crate::models::EnvType,
+) -> Result<Option<super::harness_logins::HarnessLoginRef>, String> {
+    let login = super::harness_logins::resolve_login(prefs, harness_adapter_id, login_id)?;
+    if let Some(login) = &login {
+        if let Some(refusal) = super::harness_logins::runtime_refusal(login, env_type) {
+            return Err(refusal);
+        }
+    }
+    Ok(login)
+}
+
+pub fn harness_model_catalog_blocking(
+    harness_id: &str,
+    login_id: Option<&str>,
+) -> Result<crate::agent::model_catalog::HarnessModelCatalog, String> {
+    let prefs = super::load()?;
+    let profiles = super::harness_profiles();
+    let profile = super::resolver::harness::resolved_harness_profile_from(&profiles, harness_id);
+    let spawn_option = crate::agent::provider::SpawnOptionId::from(harness_id);
+    let executor_id = profile
+        .as_ref()
+        .map(|profile| profile.harness.as_str())
+        .unwrap_or_else(|| spawn_option.harness_id());
+    let provider = crate::models::Provider::try_from_db_str(executor_id)
+        .ok_or_else(|| "Unknown harness".to_string())?;
+    let runtime = profile.as_ref().and_then(|profile| profile.runtime);
+    let env_type = runtime.unwrap_or_else(crate::agent::model_catalog::host_env_type);
+    let login = catalog_login_for(&prefs, executor_id, login_id, env_type)?;
+    crate::agent::model_catalog::discover(
+        provider.adapter(),
+        crate::agent::model_catalog::ModelCatalogTarget {
+            executable: profile
+                .as_ref()
+                .and_then(|profile| profile.executable.as_deref()),
+            runtime,
+            wsl_distro: profile
+                .as_ref()
+                .and_then(|profile| profile.wsl_distro.as_deref()),
+            login_home: login.as_ref().map(|login| login.home.as_str()),
+        },
+    )
+}
+
+#[tauri::command]
+pub async fn get_harness_model_catalog(
+    harness_id: String,
+    login_id: Option<String>,
+) -> Result<crate::agent::model_catalog::HarnessModelCatalog, String> {
+    crate::commands::run_blocking("get_harness_model_catalog", move || {
+        harness_model_catalog_blocking(&harness_id, login_id.as_deref())
+    })
+    .await
+}
+
 pub fn targets_for(
     prefs: &super::AppPreferences,
     profiles: Vec<super::HarnessProfile>,
@@ -78,6 +138,7 @@ pub fn targets_for(
                 efforts: allowed_efforts(&caps, None),
                 manual_model: true,
                 supports_model: caps.supports_model_override,
+                supports_model_effort_discovery: caps.supports_model_effort_discovery,
                 supports_extra_args: caps.supports_extra_args,
                 supports_agent: caps.supports_agent,
                 route: None,

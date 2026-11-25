@@ -303,8 +303,15 @@ pub(super) fn default_prepare<A: AgentProvider + ?Sized>(
         }
     }
     if !matches!(capabilities.effort_control, EffortControlKind::None) {
-        if let Some(effort) = input.config.effort.as_deref().filter(|s| !s.is_empty()) {
-            recipe.base_args.extend(adapter.effort_args(effort));
+        let model_encodes_effort = input
+            .config
+            .model
+            .as_deref()
+            .is_some_and(|model| adapter.model_encodes_effort(model));
+        if !model_encodes_effort {
+            if let Some(effort) = input.config.effort.as_deref().filter(|s| !s.is_empty()) {
+                recipe.base_args.extend(adapter.effort_args(effort));
+            }
         }
     }
     // Issue #1358: forward the per-step `extra_args` verbatim through

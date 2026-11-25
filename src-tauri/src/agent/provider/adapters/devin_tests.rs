@@ -372,3 +372,11 @@ fn initial_prompt_waits_for_the_composer_prompt() {
     assert!(DEVIN
         .ready_for_initial_prompt("> Ask Devin to build features, fix bugs, or work on your code"));
 }
+
+#[test]
+fn global_model_list_is_not_advertised_as_exact_discovery() {
+    assert!(
+        DEVIN.model_catalog_probe().is_none(),
+        "devin models list is the global catalog, not the account-visible ACP selection"
+    );
+}

@@ -19,6 +19,7 @@ import {
   createNode,
   listProviders,
   getUsage,
+  launchConfigurationApi,
   newOperationKey,
   importAndResume,
   spawnFromIssue,
@@ -168,6 +169,28 @@ describe("mobile api wire shape (issue #1262)", () => {
     it("reports an older desktop's unknown-route response", async () => {
       fetchMock.mockResolvedValue(okJson({ error: 'not found' }));
       await expect(getUsage()).rejects.toThrow('updated desktop');
+    });
+  });
+
+  describe("launchConfigurationApi.modelCatalog", () => {
+    it("forwards the harness and pinned login as escaped query parameters", async () => {
+      fetchMock.mockResolvedValue(okJson({ harness_id: "codex", effort_storage: "separate", models: [] }));
+
+      await launchConfigurationApi.modelCatalog("codex", "work login");
+
+      expect(fetchMock.mock.calls[0][0]).toBe(
+        "/api/launch-targets/model-catalog?harness=codex&login=work%20login",
+      );
+    });
+
+    it("omits the login query parameter for the spawn-menu login", async () => {
+      fetchMock.mockResolvedValue(okJson({ harness_id: "codex", effort_storage: "separate", models: [] }));
+
+      await launchConfigurationApi.modelCatalog("codex");
+
+      expect(fetchMock.mock.calls[0][0]).toBe(
+        "/api/launch-targets/model-catalog?harness=codex",
+      );
     });
   });
 
