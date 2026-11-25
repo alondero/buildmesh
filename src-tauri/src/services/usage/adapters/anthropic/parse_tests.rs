@@ -287,10 +287,6 @@ fn mixed_consumer_windows_and_spend_are_both_kept() {
 
 #[test]
 fn stale_plan_fields_are_ignored() {
-    // subscription_type / rate_limit_tier / their camelCase variants
-    // are no longer in the parsed shape after #1689. Serde defaults
-    // make them silently dropped, but a regression that re-introduces
-    // a strict parser would fail this test. Lock the lenient behavior.
     let json = r#"{
         "five_hour":{"utilization":1.0},
         "subscription_type":"enterprise",

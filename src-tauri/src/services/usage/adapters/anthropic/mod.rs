@@ -181,8 +181,6 @@ fn fetch_oauth_usage(
             }
         }
         Ok(response) => {
-            // Enterprise usage-based seats report the monthly cap's reset on
-            // the response headers; the body may carry only amounts.
             let fallback_reset = overage_reset_header(&response);
             match parse_anthropic_usage(&response.text().unwrap_or_default(), fallback_reset) {
                 Ok(parsed) => {
@@ -216,10 +214,6 @@ fn fetch_oauth_usage(
     }
 }
 
-/// The monthly cap's reset instant from the `anthropic-ratelimit-unified-*`
-/// response headers, in Unix seconds. `-overage-reset` is the cap's own
-/// reset; the plain `-reset` header can describe a 5h/7d window and must not
-/// drive a monthly spend meter.
 fn overage_reset_header(response: &reqwest::blocking::Response) -> Option<String> {
     let value = response
         .headers()

@@ -37,8 +37,6 @@ struct ExtraUsage {
     used_credits: Option<f64>,
     utilization: Option<f64>,
     currency: Option<String>,
-    /// The monthly cap's reset instant. Recent responses carry it here; the
-    /// spend object and the `limits` array are the other reported sources.
     #[serde(default)]
     resets_at: Option<Value>,
 }
@@ -51,9 +49,6 @@ struct Spend {
     resets_at: Option<Value>,
 }
 
-/// One row of the post-2026-06-25 `limits` array. Spend caps appear as
-/// `kind: "spend"` with `group: "monthly"`; session/weekly quota rows are
-/// ignored for the monthly spend meter's reset.
 #[derive(Deserialize, Debug)]
 struct LimitEntry {
     #[serde(default)]
@@ -82,9 +77,6 @@ struct Resp {
     limits: Option<Vec<LimitEntry>>,
 }
 
-/// Parse a usage body, using `fallback_reset` (the response's
-/// `anthropic-ratelimit-unified-overage-reset` header, when present) only if
-/// the body itself does not report a monthly cap reset.
 pub(crate) fn parse_anthropic_usage(
     body: &str,
     fallback_reset: Option<String>,
@@ -96,9 +88,6 @@ pub(crate) fn parse_anthropic_usage(
     push_window(&mut windows, "7-day", resp.seven_day);
     push_window(&mut windows, "7-day Sonnet", resp.seven_day_sonnet);
 
-    // The monthly cap's reset is reported in one of three places depending on
-    // the account shape: the spend object, the `limits` array, or the older
-    // `extra_usage` block. Prefer the most specific, then fall back.
     let resets_at = spend_reset(resp.spend.as_ref())
         .or_else(|| active_monthly_limit_reset(resp.limits.as_deref().unwrap_or_default()))
         .or_else(|| extra_usage_reset(resp.extra_usage.as_ref()))
@@ -180,9 +169,6 @@ fn active_monthly_limit_reset(limits: &[LimitEntry]) -> Option<String> {
     limits
         .iter()
         .filter(|entry| entry.is_active.unwrap_or(true))
-        // The spend meter is monthly, so only a monthly row may supply its
-        // reset. A daily/weekly spend row (a gateway may report those) would
-        // put the marker at the wrong point in the month.
         .find(|entry| {
             entry.group.as_deref() == Some("monthly")
                 || (entry.group.is_none() && entry.kind.as_deref() == Some("spend"))
@@ -190,9 +176,6 @@ fn active_monthly_limit_reset(limits: &[LimitEntry]) -> Option<String> {
         .and_then(|entry| reset_value(entry.resets_at.as_ref()))
 }
 
-/// Accepts either an ISO-8601 string (the `limits`/`extra_usage` shapes) or
-/// Unix epoch seconds (the older numeric shapes), normalising to RFC3339 so
-/// the wire type stays one representation.
 fn reset_value(value: Option<&Value>) -> Option<String> {
     match value? {
         Value::String(text) if !text.trim().is_empty() => Some(text.clone()),

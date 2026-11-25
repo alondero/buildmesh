@@ -34,13 +34,6 @@ fn loopback_url(port: u16) -> String {
     format!("http://127.0.0.1:{port}/oauth/usage")
 }
 
-// After #1689 the Anthropic adapter always issues a second HTTP
-// request to /oauth/profile for scope-failure detection. Most tests
-// don't care about the profile response; the test loopback answers
-// it with a 200 + empty body (which `oauth_profile_scope_failure`
-// interprets as "no scope failure, no detail to surface"). Tests
-// that need a 403-from-profile path override the closure.
-
 #[test]
 fn consumer_oauth_fetch_keeps_windows() {
     let hits = Arc::new(AtomicUsize::new(0));
@@ -72,12 +65,12 @@ fn consumer_oauth_fetch_keeps_windows() {
         } => {
             assert_eq!(windows.len(), 2);
             assert!(meters.is_empty());
-            // /profile returned 200, so detail stays unset.
+
             assert!(detail.is_none());
         }
         other => panic!("expected Reading outcome, got: {other:?}"),
     }
-    // /usage + /profile both succeed.
+
     assert_eq!(hits.load(Ordering::SeqCst), 2);
     assert!(!format!("{outcome:?}").contains("sk-ant-"));
 }
@@ -151,10 +144,6 @@ fn enterprise_oauth_fetch_uses_the_overage_reset_header() {
 
 #[test]
 fn env_oauth_token_does_not_use_stale_login_file_plan() {
-    // Stale local login file is "pro"; the env token is a separate
-    // credential. After #1689 the plan label is no longer surfaced,
-    // so this test now only asserts that the env token's own spend
-    // body drives the meter (no leakage from the stale login).
     let port = spawn_loopback(2, move |request| {
         let auth = request
             .headers()
@@ -189,9 +178,6 @@ fn env_oauth_token_does_not_use_stale_login_file_plan() {
 
 #[test]
 fn env_oauth_token_forbidden_profile_documents_setup_token_limit() {
-    // Realistic setup-token shape: usage/spend may succeed while profile
-    // returns 403 (missing user:profile). Plan stays blank with an explicit
-    // limitation — we do not invent Enterprise or borrow a stale local plan.
     let port = spawn_loopback(2, move |request| {
         let path = request.url().to_string();
         if path.contains("/profile") {
@@ -230,11 +216,6 @@ fn env_oauth_token_forbidden_profile_documents_setup_token_limit() {
 
 #[test]
 fn rejected_login_retries_active_user_oauth() {
-    // First /usage call uses the expired login token (401). The
-    // adapter then retries with the active user_oauth profile and
-    // succeeds, hitting /usage again. After the successful /usage,
-    // /profile is also called for scope-failure detection. Total
-    // hits: 3.
     let hits = Arc::new(AtomicUsize::new(0));
     let hits_thread = Arc::clone(&hits);
     let port = spawn_loopback(3, move |request| {
@@ -258,7 +239,6 @@ fn rejected_login_retries_active_user_oauth() {
                 );
             }
             _ => {
-                // /profile from the retry path
                 assert_eq!(auth, "Bearer sk-ant-oat01-profile");
                 let _ =
                     request.respond(tiny_http::Response::from_string("{}").with_status_code(200));
@@ -292,11 +272,6 @@ fn rejected_login_retries_active_user_oauth() {
     assert_eq!(hits.load(Ordering::SeqCst), 3);
 }
 
-// Spec test for #1689: /usage may return 200 with valid data while
-// /oauth/profile returns 403 missing user:profile. The adapter must
-// surface the OAuth scope-limitation message in `detail` even when
-// /usage itself returned success — that's the new behaviour this PR
-// introduces (the unconditional /profile probe).
 #[test]
 fn usage_ok_profile_scope_failure_surfaces_limitation_detail() {
     let port = spawn_loopback(2, move |request| {
@@ -323,15 +298,13 @@ fn usage_ok_profile_scope_failure_surfaces_limitation_detail() {
                 detail.contains("user:profile"),
                 "detail should name the missing scope; got detail={detail:?}"
             );
-            // The windows from the successful /usage call are still surfaced.
+
             assert_eq!(windows.len(), 2);
         }
         other => panic!("expected Reading outcome, got: {other:?}"),
     }
 }
 
-// Negative companion: /profile returns 200 with a body that does NOT
-// match the scope-failure predicate. detail stays unset.
 #[test]
 fn usage_ok_profile_200_leaves_detail_unset() {
     let port = spawn_loopback(2, move |request| {
@@ -501,8 +474,6 @@ fn named_profile_401_guides_ant_auth_login_with_profile_name() {
 
 #[test]
 fn usage_scope_forbidden_stays_logged_in_with_limitation() {
-    // Anthropic returns 403 from /usage when the token lacks user:profile
-    // (common for setup-token). That is not an expired login.
     let port = spawn_loopback(1, move |request| {
         assert!(!request.url().contains("/profile"));
         let _ = request.respond(
@@ -638,7 +609,6 @@ fn active_named_profile_scope_failure_includes_actual_profile_name() {
 
 #[test]
 fn usage_401_with_scope_text_is_expired_not_scope_limitation() {
-    // 401 is authentication failure even if the body mentions user:profile.
     let hits = Arc::new(AtomicUsize::new(0));
     let hits_thread = Arc::clone(&hits);
     let port = spawn_loopback(2, move |request| {
@@ -694,8 +664,6 @@ fn usage_401_with_scope_text_is_expired_not_scope_limitation() {
 
 #[test]
 fn generic_permission_error_is_not_a_scope_failure() {
-    // A bare permission_error without the user:profile scope message must
-    // stay logged_out so active-profile retry can still run.
     let hits = Arc::new(AtomicUsize::new(0));
     let hits_thread = Arc::clone(&hits);
     let port = spawn_loopback(2, move |request| {
@@ -788,9 +756,7 @@ fn missing_credential_does_not_hit_the_network() {
         hits_thread.fetch_add(1, Ordering::SeqCst);
         let _ = request.respond(tiny_http::Response::from_string("{}").with_status_code(200));
     });
-    // (`dispatch("anthropic").fetch` is not hermetic here: it reads
-    // the real production credential sources. `anthropic_usage_with`
-    // with a `FakeLookup` is the hermetic seam-level equivalent.)
+
     match anthropic_usage_with(&FakeLookup::default(), &loopback_url(port)) {
         UsageOutcome::NoCredential { .. } => {}
         other => panic!("expected NoCredential outcome, got: {other:?}"),

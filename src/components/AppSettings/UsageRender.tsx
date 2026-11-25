@@ -34,9 +34,6 @@ import { OpenExternalIcon } from '../shared/OpenExternalIcon';
 import { formatRelativeAge } from '../../lib/time';
 import { getUsageAmountPacePercent, getUsageWindowPacePercent } from '../../lib/usagePace';
 
-/** Period-elapsed marker shared by the quota and spend bars. Null (unknown
- *  label, missing/stale reset) renders nothing rather than an invented
- *  marker. */
 function PaceTick({ percent }: { percent: number | null }) {
   if (percent == null) return null;
   return (
@@ -105,8 +102,6 @@ function AmountRow({ label, value, unit }: { label: string; value: number; unit:
 }
 
 function AmountMeter({ amount, uncapped }: { amount: UsageAmount; uncapped: boolean }) {
-  // Explicit amount meters are monthly budgets/billing cycles, so the
-  // marker uses the calendar month ending at the provider's reset instant.
   const periodElapsedPct = getUsageAmountPacePercent(amount);
   return (
     <div

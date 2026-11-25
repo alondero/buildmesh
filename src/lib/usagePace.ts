@@ -1,12 +1,11 @@
 /**
- * Period-pace helper for the usage-meter tick. The wire types carry only a
- * reset instant — no period start — so "how far through the period am I" is
- * inferred from the window label's nominal duration, or from the calendar
- * month for explicit monthly spend/budget meters. Anything unknowable
- * returns null so the caller hides the tick instead of inventing one.
+ * Period-pace helper for the UsageBar tick. The wire type (`UsageWindow`)
+ * carries only `label` + `resetsAt` — no period start — so "how far
+ * through the period am I" is inferred from the label's nominal duration.
+ * Anything unknowable returns null so the caller hides the tick instead
+ * of inventing one.
  *
- * Supported window shapes (each evidenced under
- * `src-tauri/src/services/usage*`):
+ * Supported shapes (each evidenced under `src-tauri/src/services/usage*`):
  *   - bare quota labels: `5-hour`, `1-hour`, `Weekly`, `Monthly`, Codex
  *     dynamic `Nh`/`Nd`/`Ns`, Anthropic `N-day` (`7-day`, `7-day Sonnet`)
  *   - trailing segment after ` — ` (Antigravity `Display — Weekly`) or
@@ -15,11 +14,6 @@
  * Deliberately unmatched (stay hidden): model-name labels (`Claude Sonnet
  * 4.6 (Thinking)`, `Gemini (all models)`), `Grok Build Quota` (unknown
  * period), Cursor `Fast Requests` (monthly grid, not a fixed duration).
- *
- * Explicit `UsageAmount` meters (Claude Enterprise spend, Codex spend
- * control, Cursor/Devin billing cycles) are monthly budgets, so their pace
- * uses the calendar month ending at the reset instant. A 30-day nominal
- * would hide the tick for the first day of a 31-day month.
  *
  * Pure — `nowMs` is an arg so renderers and tests pin the clock.
  */
@@ -34,7 +28,7 @@ type AmountPeriod = Pick<UsageAmount, 'resetsAt'>;
 
 type Period = { durationMs: number; calendarMonth: boolean };
 
-/** Nominal period for a bare period label, or null when unknown. */
+/** Nominal period length for a bare period label, or null when unknown. */
 function inferBarePeriod(text: string): Period | null {
   switch (text) {
     case '5-hour': return { durationMs: 5 * HOUR_MS, calendarMonth: false };
@@ -60,7 +54,6 @@ function inferBarePeriod(text: string): Period | null {
   return null;
 }
 
-/** Nominal period for a window label, or null when unknown. */
 function inferWindowPeriod(label: string): Period | null {
   const text = label.trim().toLowerCase();
   // "Display — Weekly" (Antigravity quota summary) and "name · 5-hour"
@@ -85,12 +78,6 @@ function parseResetMs(resetsAt: string | null): number | null {
   return Number.isFinite(resetsAtMs) ? resetsAtMs : null;
 }
 
-/**
- * Start of the calendar month preceding `resetsAtMs`, keeping the reset's
- * day and time. A reset on the 1st maps to the 1st of the previous month;
- * a billing-cycle reset on the 15th maps to the 15th. Month-end days clamp
- * to the previous month's length (31 Mar → 28/29 Feb).
- */
 function previousMonthInstant(resetsAtMs: number): number {
   const reset = new Date(resetsAtMs);
   const year = reset.getUTCFullYear();
@@ -132,11 +119,6 @@ export function getUsageWindowPacePercent(
   return ((period.durationMs - remaining) / period.durationMs) * 100;
 }
 
-/**
- * Share (0–100) of a monthly budget's period elapsed at `nowMs`, or null
- * when the reset is missing, unparsable, in the past, or beyond the
- * calendar month that ends at it.
- */
 export function getUsageAmountPacePercent(
   amount: AmountPeriod,
   nowMs: number = Date.now(),

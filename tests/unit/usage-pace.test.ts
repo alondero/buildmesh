@@ -74,8 +74,6 @@ describe('getUsageWindowPacePercent', () => {
   });
 
   it('uses the calendar month rather than a 30-day nominal', () => {
-    // 1 Oct 2026 → 1 Nov 2026 is 31 days. The old 30-day nominal hid the
-    // tick for the whole first day of a 31-day month.
     expect(getUsageWindowPacePercent({ label: 'Monthly', usedPercent: 0, resetsAt: '2026-11-01T00:00:00Z' }, Date.parse('2026-10-01T00:00:00Z'))).toBe(0);
     expect(getUsageWindowPacePercent({ label: 'Monthly', usedPercent: 0, resetsAt: '2026-11-01T00:00:00Z' }, Date.parse('2026-10-16T12:00:00Z'))).toBeCloseTo(50, 1);
   });
