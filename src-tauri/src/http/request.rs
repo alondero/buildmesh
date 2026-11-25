@@ -372,6 +372,14 @@ pub fn parse_mcode_session_id(s: &str) -> Option<String> {
     Some(format!("mvs_{rest}"))
 }
 
+pub fn parse_devin_session_id(s: &str) -> Option<String> {
+    let s = s.trim();
+    if crate::services::devin_session::is_devin_session_slug(s) {
+        return Some(s.to_string());
+    }
+    parse_cli_session_id(s)
+}
+
 /// Pick the right per-provider validator for a hook payload's session id
 /// (issue #1294).
 ///
@@ -394,6 +402,7 @@ pub fn parse_session_id_for_provider(provider: &str, raw: &str) -> Option<String
         // mcode self-assigns `mvs_<hex>` ids (issue #1797) — the UUID gate
         // would silently drop every one of them.
         "mcode" => parse_mcode_session_id(raw),
+        "devin" => parse_devin_session_id(raw),
         // Codex/Claude/AGY/Grok/Cursor all use UUIDs (the alias stack on
         // `HookPayload::session_id` accepts every casing each harness
         // ships; canonicalisation to lowercase happens in
@@ -1031,3 +1040,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "request_tests.rs"]
+mod request_tests;

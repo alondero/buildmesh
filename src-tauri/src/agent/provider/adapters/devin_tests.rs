@@ -40,7 +40,7 @@ fn prepare_launch_passes_resume_flag_and_omits_session_id_on_assign() {
         node_id: None,
         platform: Platform::Linux,
         runtime: EnvType::Windows,
-        session: SessionIdModeRef::Assign("ses_abc"),
+        session: SessionIdModeRef::Assign("phantom-jellyfish"),
         config: &config,
         prefill: None,
         sandbox: false,
@@ -56,7 +56,7 @@ fn prepare_launch_passes_resume_flag_and_omits_session_id_on_assign() {
         platform: Platform::Linux,
         runtime: EnvType::Windows,
         session: SessionIdModeRef::Resume {
-            id: "ses_abc",
+            id: "phantom-jellyfish",
             cause: ResumeCause::Explicit,
         },
         config: &config,
@@ -71,7 +71,7 @@ fn prepare_launch_passes_resume_flag_and_omits_session_id_on_assign() {
             "--respect-workspace-trust",
             "false",
             "--resume",
-            "ses_abc"
+            "phantom-jellyfish"
         ]
     );
 }
@@ -82,9 +82,10 @@ fn prefill_ends_option_parsing_so_a_dashed_prompt_stays_text() {
 }
 
 #[test]
-fn descriptor_advertises_the_verified_capabilities() {
+fn descriptor_advertises_only_live_verified_capabilities() {
     let descriptor = DEVIN.descriptor();
     assert!(descriptor.supports_resume);
+    assert!(descriptor.auto_resume_on_startup);
     assert!(!descriptor.requires_attention_hook());
     assert!(descriptor.supports_model_override);
     assert!(descriptor.supports_prefill);

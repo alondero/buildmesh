@@ -48,11 +48,17 @@ Verified against:
   - `prompt`: no permission flag (Devin asks for approval)
 - **Session identity & resume**: `self_assigns_session_id() -> true`,
   `captures_session_id_from_pty() -> false`, `supports_resume: true`
-  (`--resume <SESSION_ID>`). `Hooks Overview #command-hooks` shows a truncated
-  UUID-shaped `session_id` example (`3f8d1c2a-...`), but the live payloads
-  captured on 3000.14.30821 carried word slugs (`curved-gravity`,
-  `good-appliance`) — `resume` accepts a session id *or name*, and the slug
-  appears to be the session's name; the UUID form remains unconfirmed.
+  (`--resume <SESSION_ID>`). Live-verified on `3000.14.30821`: `session_id`
+  is a lowercase `<word>-<word>` slug (`phantom-jellyfish`,
+  `tangy-peony`, `exciting-ghost`, `spangled-click`; issue #2864's
+  independent capture saw `curved-gravity`, `good-appliance`) — the docs'
+  `3f8d1c2a-...` example is the payload's `prompt_id`, not `session_id`,
+  and `resume` accepts a session id *or name*. `devin --resume <slug>`
+  fires `SessionStart` with `source: "resume"`. Capture reads the CLI's
+  own session store — `cli/sessions.db` under `%APPDATA%\devin` (Roaming)
+  on Windows — filtering the `sessions` table by `working_directory`; the
+  `services::devin_session` poller wires the row's `id` column into
+  `cli_session_id`.
 - **Attention hooks & Circuit completion**: `attention_capability` is currently
   `None` (`requires_attention_hook: false`) and `circuit_observation` is
   `ObservationStrategy::UNWIRED`. Inside Autopilot Circuits, Devin completes

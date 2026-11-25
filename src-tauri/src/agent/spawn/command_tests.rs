@@ -111,10 +111,14 @@ fn harness_launch_contract_preserves_all_adapter_recipes() {
         let adapter = provider.adapter();
         for platform in [Platform::Linux, Platform::Windows, Platform::Macos] {
             for mode in ["fresh", "assign", "resume", "regenerate"] {
+                let contract_id = match adapter.id() {
+                    "devin" => "phantom-jellyfish",
+                    _ => "ses_contract",
+                };
                 let session = match mode {
-                    "assign" => SessionIdModeRef::Assign("ses_contract"),
+                    "assign" => SessionIdModeRef::Assign(contract_id),
                     "resume" | "regenerate" => SessionIdModeRef::Resume {
-                        id: "ses_contract",
+                        id: contract_id,
                         cause: if mode == "regenerate" {
                             super::ResumeCause::Regenerate
                         } else {

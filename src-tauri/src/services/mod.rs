@@ -21,6 +21,7 @@ pub mod create_operation;
 /// that have not authenticated for `DEVICE_SESSION_IDLE_DAYS`, so an orphan
 /// cannot stay a live Admin credential for the life of the install.
 pub mod device_session_expiry;
+pub mod devin_session;
 pub mod freebuff_usage;
 pub mod gh_auth_cache;
 pub mod github;
