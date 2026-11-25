@@ -405,7 +405,15 @@ export const HARNESS_CATALOG = {
         "macos",
         "linux"
       ],
-      "background_inference": null,
+      "background_inference": {
+        "max_prompt_bytes": null,
+        "prompt_input": {
+          "flag": "--prompt-file",
+          "kind": "file"
+        },
+        "result_output": "stdout",
+        "supports_provider_routing": false
+      },
       "default_permission_mode": "unattended",
       "effort_control": {
         "kind": "none"

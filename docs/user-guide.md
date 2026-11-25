@@ -438,11 +438,13 @@ Agent steps use their explicit launch configuration, then the mesh default, then
 the application default. Review agents use their configured reviewer selection.
 Settings > Providers > **Circuit classifier provider** selects the background
 launch configuration used to classify reports. It defaults to Claude Code and
-is independent of agent and reviewer defaults. Select host-native Claude Code
-(including a compatible provider route) or native Codex. Saved model and effort
-settings apply; for example, save a Codex configuration with model `gpt-6-luna`
-and effort `low`, then select it here. Codex uses its existing login and supports
-model and effort settings without extra CLI arguments.
+is independent of agent and reviewer defaults. Select a host-native
+configuration whose harness supports background inference. Claude Code
+configurations may use compatible provider routes; the other harnesses use their
+native login. Saved model and effort settings apply; for example, save a Codex
+configuration with model `gpt-6-luna` and effort `low`, then select it here.
+Codex uses its existing login and supports model and effort settings without
+extra CLI arguments.
 
 After five unsuccessful classifications, the step remains **Unverified** with
 the last failure displayed. Automatic retries stop, including after an app
@@ -869,13 +871,13 @@ the updated terminal runtime.
 
 ## Attention hooks Buildmesh installs on disk
 
-Nine harnesses report their attention signal as **Hook** in the table above.
+Ten harnesses report their attention signal as **Hook** in the table above.
 Buildmesh implements that signal by writing a hook into the harness's own
 configuration before the agent starts. The hook is what lets a node show that it
 is waiting for you, instead of going quiet until you read its terminal.
 
 Claude Code's hook is written when you add the project and refreshed each time
-one of its nodes starts; the other eight appear the first time you start a node
+one of its nodes starts; the other nine appear the first time you start a node
 with that harness. Nothing is written for a harness whose signal is **Passive
 watcher** or **None**, and no hook file exists before you add the project or
 start a node from Buildmesh.
@@ -1183,9 +1185,9 @@ again. Regenerate with a different recipe deliberately replaces the snapshot.
 Mobile exposes the same choices and **Manage Launch Configurations** in the
 new-node picker. Background auto-naming and Circuit classification accept
 host-native configurations whose harness supports one-shot background inference:
-Claude Code, Codex, OpenCode, Kimi Code, Grok Code, Antigravity, Command Code, and
-MiniMax Code. Claude Code also accepts configured provider routes; the other
-background runners use the harness's native authentication. Saved model and
+Claude Code, Codex, OpenCode, Kimi Code, Grok Code, Antigravity, Command Code,
+MiniMax Code, and Devin. Claude Code also accepts configured provider routes; the
+other background runners use the harness's native authentication. Saved model and
 effort settings apply where the harness supports those controls. Configurations
 with extra CLI arguments cannot run background inference. Unsupported choices
 show the missing requirement in the settings picker and are rejected by the

@@ -90,7 +90,7 @@ fn descriptor_advertises_only_live_verified_capabilities() {
     assert!(descriptor.supports_prefill);
     assert!(descriptor.prefill_auto_submits);
     assert!(matches!(descriptor.effort_control, EffortControlKind::None));
-    assert!(DEVIN.background_recipe(Platform::Linux).is_none());
+    assert!(DEVIN.background_recipe(Platform::Linux).is_some());
     assert!(!descriptor.circuit_observation.has_foreground_source());
     match &descriptor.attention_capability {
         crate::agent::capabilities::AttentionCapability::Hook {
@@ -114,6 +114,44 @@ fn descriptor_advertises_only_live_verified_capabilities() {
             assert_eq!(min_version.as_deref(), Some(DEVIN_MIN_HOOK_VERSION));
         }
         other => panic!("devin attention hook is wired: {other:?}"),
+    }
+}
+
+#[test]
+fn background_recipe_uses_printed_prompt_file_in_an_in_process_auto_permission_session() {
+    use crate::agent::capabilities::{BackgroundPromptInput, BackgroundResultOutput};
+
+    for platform in [Platform::Windows, Platform::Macos, Platform::Linux] {
+        let recipe = DEVIN
+            .background_recipe(platform)
+            .expect("devin print mode is a live-verified background transport");
+        assert_eq!(recipe.spawn.binary, "devin");
+        assert!(matches!(recipe.spawn.windows_shell, WindowsShell::Direct));
+        assert_eq!(
+            recipe.spawn.base_args,
+            [
+                "--print",
+                "--respect-workspace-trust",
+                "false",
+                "--process-model",
+                "in-process",
+                "--permission-mode",
+                "auto",
+                "--verbosity",
+                "0",
+            ],
+            "unexpected print-mode arguments for {platform:?}"
+        );
+        assert!(matches!(
+            recipe.capability.prompt_input,
+            BackgroundPromptInput::File { ref flag } if flag == "--prompt-file"
+        ));
+        assert_eq!(
+            recipe.capability.result_output,
+            BackgroundResultOutput::Stdout
+        );
+        assert!(!recipe.capability.supports_provider_routing);
+        assert_eq!(recipe.capability.max_prompt_bytes, None);
     }
 }
 
@@ -288,4 +326,21 @@ fn provision_refuses_a_malformed_existing_file() {
 #[test]
 fn confirms_prompt_submission_userpromptsubmit_fires() {
     assert!(DEVIN.confirms_prompt_submission());
+}
+
+#[test]
+fn unconfirmed_submit_is_not_replayed_because_devin_needs_a_paced_enter() {
+    assert!(!DEVIN.replays_unconfirmed_submit());
+}
+
+#[test]
+fn initial_prompt_waits_for_the_composer_prompt() {
+    assert!(!DEVIN.ready_for_initial_prompt(""));
+    assert!(
+        !DEVIN.ready_for_initial_prompt("SWE-2.1 Medium Starting session… Unsupported terminal")
+    );
+    assert!(DEVIN
+        .ready_for_initial_prompt("❭ Ask Devin to build features, fix bugs, or work on your code"));
+    assert!(DEVIN
+        .ready_for_initial_prompt("> Ask Devin to build features, fix bugs, or work on your code"));
 }

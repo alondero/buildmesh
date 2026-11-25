@@ -85,9 +85,32 @@ Verified against:
     to the hook shell (verified with `BUILDMESH_PORT`/`BUILDMESH_SESSION_ID`).
     What devin does on a Windows machine with no `bash.exe` on PATH is
     untested.
-- **Circuit completion**: `circuit_observation` stays
-  `ObservationStrategy::UNWIRED` until a live Circuit run proves the hook
-  surface end-to-end; Circuits complete turns via result-file handoff.
+- **Interactive submit lifecycle**: live probes on 2026-11-25 showed that
+  input written about 50ms after spawn is silently discarded before the
+  composer attaches, while input written after half a second lands. The
+  successful writes also paced the Enter after the prompt rather than sending
+  `prompt+Enter` in one write; the same live probes showed the concatenated
+  shape only stages the text in Devin's composer. Buildmesh therefore waits
+  for the composer marker (`Ask Devin to build features`) before typing an
+  initial prompt and does not use the generic concatenated unconfirmed-submit
+  replay. If no `UserPromptSubmit` hook confirms a submit, the existing
+  bounded confirmation window reverts the node to Ready instead of treating
+  the unacknowledged input as running work.
+  The marker is pinned copy in `3000.14.30821`; if a CLI update changes it,
+  initial delivery degrades to the existing bounded blind fallback rather
+  than waiting forever. Landed interactive submits do fire
+  `UserPromptSubmit` with the verbatim `prompt`, a UUID `prompt_id`, and the
+  word-slug `session_id` (captured sessions included `lilac-chameleon`,
+  `upbeat-limburger`, `evanescent-fireplace`, `south-zenobia`,
+  `innate-card`, and `heather-yellowhorn`).
+- **Circuit completion**: live verification on 2026-11-25 ran a Devin
+  reviewer step through the dev app. The staged prompt reached Devin through
+  the interactive terminal, `UserPromptSubmit` and `Stop` hooks resumed and
+  completed the node's lifecycle, Devin wrote the contracted UTF-8 result file,
+  and the review circuit classified the report, routed `APPROVE`, and completed.
+  `circuit_observation` remains `ObservationStrategy::UNWIRED` because no
+  Devin-specific foreground/ownership strategy has been declared; the result
+  file supplies the final report beside the attention lifecycle.
 - **`.claude/` hook import (verified, issue #2864)**: a `devin -p` probe on
   3000.14.30821 fired `SessionStart`, `UserPromptSubmit` and `Stop` hooks
   defined in `.claude/settings.local.json` — `read_config_from.claude` is on
@@ -100,8 +123,25 @@ Verified against:
   `read_config_from.claude` was rejected as the fix: it gates all Claude
   imports (rules, skills, MCP servers), not just hooks.
 
-- **Background inference**: `None` (`background_recipe` stays unwired until
-  `-p/--print` is live-verified with an authenticated session).
+- **Background inference**: wired. Live verification on 2026-11-25 ran
+  `devin --print --respect-workspace-trust false --process-model in-process
+  --permission-mode auto --verbosity 0 --prompt-file prompt.txt` from an
+  authenticated empty temporary directory outside any repository, matching the
+  product's classifier and naming working directories. A simple exact-output
+  prompt exited 0 after 5.844 seconds with the requested answer on stdout; a
+  representative circuit-classification prompt exited 0 after 5.140 seconds
+  with `COMPLETED`; adding `--model gpt-6-luna-low` exited 0 after 2.984
+  seconds. Evidence: `.tmp/live-probes/background/simple-external-empty.json`,
+  `classifier-external-empty.json`, and `simple-external-with-model.json`.
+  `auto` permission mode auto-approves only read-only tools; print mode rejects
+  confirmation-required shell or side-effecting tools instead of asking. That
+  is intentional for self-contained classification and naming prompts. Probe
+  variants run inside this repository are not valid contract evidence because
+  Devin correctly loads repository agent instructions and can continue working
+  after the first answer; their exit-143 stderr artifacts are probe timeout
+  terminations, not CLI exit statuses. The adapter uses the prompt-file
+  transport and stdout result channel, with no provider routing or advertised
+  prompt-size limit.
 
 ## Usage meter contract
 
@@ -113,7 +153,13 @@ Verified against:
 - **Request**: `POST {api_server_url}/exa.seat_management_pb.SeatManagementService/GetUserStatus`
   over `https` (or `http` for loopback addresses only) with
   `Content-Type: application/json`, `Connect-Protocol-Version: 1`, and
-  `metadata.api_key`.
+  `metadata.api_key`. Live verification on 2026-11-25 against a signed-in Pro
+  account returned `BILLING_STRATEGY_QUOTA`, daily and weekly quota windows at
+  100% remaining with Unix reset timestamps, and a positive
+  `overageBalanceMicros` balance. The ACU/dollar billing-cycle and meaningful
+  legacy prompt-credit branches are covered by adapter tests because this
+  account's quota response carries no billing-cycle consumption fields and only
+  `-1` prompt-credit sentinels.
 - **Rendering**:
   - Daily and weekly quota windows (`100 - remainingPercent`, clamped to `0..=100`,
     with Unix reset timestamps) unless `hideDailyQuota` / `hideWeeklyQuota` is set.

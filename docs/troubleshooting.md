@@ -582,8 +582,9 @@ as they were. See
 
 The classifier has its own selection in Settings > Providers > **Circuit
 classifier provider**. Changing an implementer or reviewer does not change it.
-Select a working host-native Claude Code or native Codex configuration. A Codex
-configuration can use `gpt-6-luna` with `low` effort and the existing Codex login.
+Select a working host-native configuration whose harness supports background
+inference. A Codex configuration can use `gpt-6-luna` with `low` effort and the
+existing Codex login.
 
 The step displays the classifier's last error and stops automatic inference
 after five failures. Once authentication or configuration is restored, choose

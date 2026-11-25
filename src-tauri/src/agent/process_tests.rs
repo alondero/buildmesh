@@ -1620,6 +1620,10 @@ fn submit_replay_follows_the_harness() {
     ] {
         assert!(!harness_replays_unconfirmed_submit(id), "{id}");
     }
+    assert!(
+        !harness_replays_unconfirmed_submit("devin"),
+        "Devin discards early input, but one prompt+Enter write only stages the text"
+    );
 }
 
 /// Feed keystrokes through the real decoder, exactly as the enqueue path
