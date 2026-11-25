@@ -28,6 +28,7 @@ export type InspectorHarnessId =
   | "muse"
   | "cline"
   | "perch"
+  | "devin"
   | "terminal";
 
 /**
@@ -64,6 +65,7 @@ export const HARNESS_REVIEW_ELIGIBILITY_CATALOG = {
     "muse",
     "cline",
     "perch",
+    "devin",
     "terminal"
   ],
   "aliases": {
@@ -103,6 +105,12 @@ export const HARNESS_REVIEW_ELIGIBILITY_CATALOG = {
     "cursor": {
       "is_plain_terminal": false,
       "requires_attention_hook": true,
+      "supports_passive_turn_watcher": false,
+      "supports_result_file_handoff": true
+    },
+    "devin": {
+      "is_plain_terminal": false,
+      "requires_attention_hook": false,
       "supports_passive_turn_watcher": false,
       "supports_result_file_handoff": true
     },

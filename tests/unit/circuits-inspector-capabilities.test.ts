@@ -123,7 +123,7 @@ describe('blocksReviewCircuit', () => {
   });
 
   it('allows a harness with a native hook, a passive turn watcher or a result-file handoff', () => {
-    for (const id of ['anthropic', 'codex', 'commandcode', 'muse', 'cline', 'dsh', 'freebuff', 'perch']) {
+    for (const id of ['anthropic', 'codex', 'commandcode', 'muse', 'cline', 'dsh', 'freebuff', 'perch', 'devin']) {
       expect(blocksReviewCircuit(id), id).toBe(false);
     }
   });
@@ -187,7 +187,7 @@ describe('review-circuit eligibility across the shipped catalog', () => {
       const caps = HARNESS_CAPABILITIES[id];
       return !caps.requires_attention_hook && !caps.supports_passive_turn_watcher && !caps.is_plain_terminal;
     });
-    expect(fileOnly).toEqual(['dsh', 'freebuff', 'perch']);
+    expect(fileOnly).toEqual(['dsh', 'freebuff', 'perch', 'devin']);
     for (const id of fileOnly) {
       expect(HARNESS_CAPABILITIES[id].supports_result_file_handoff, id).toBe(true);
     }

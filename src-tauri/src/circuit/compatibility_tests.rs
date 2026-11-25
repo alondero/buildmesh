@@ -427,7 +427,7 @@ fn evaluate_commandcode_with_passive_watcher_is_allowed() {
 /// Cursor and Cline keep their native hooks.
 #[test]
 fn evaluate_allows_hookless_harnesses_through_result_file_handoff() {
-    for harness in ["freebuff", "perch", "dsh"] {
+    for harness in ["freebuff", "perch", "dsh", "devin"] {
         let caps = lookup_capabilities(harness).unwrap_or_else(|| panic!("{harness} known"));
         assert!(!caps.requires_attention_hook, "{harness} must lack a hook");
         assert!(
@@ -552,6 +552,7 @@ fn reviewer_gate_reuses_reason_enum_and_catalog_labels() {
         "claude_code",
         "cmd",
         "cline",
+        "devin",
     ] {
         assert_eq!(
             reviewer_harness_reason(harness),

@@ -132,6 +132,11 @@ pub(crate) const BUILTIN_PROVIDER_ACCOUNTS: &[BuiltInProviderAccount] = &[
         name: "Perch",
         self_auth: true,
     },
+    BuiltInProviderAccount {
+        id: "devin",
+        name: "Devin",
+        self_auth: true,
+    },
 ];
 
 // One row per credential/billing identity. Pairings live in the Spawn Menu

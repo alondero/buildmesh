@@ -161,6 +161,18 @@ plan. The usage link is the
 [documented separately](https://www.perchai.app/docs/plans/starter)), labelled
 **Usage guide**, not a settings deep link.
 
+**Devin usage.** Devin CLI owns its sign-in (`devin auth login`). Credentials
+live in `%APPDATA%\devin\credentials.toml` on Windows or
+`$XDG_DATA_HOME/devin/credentials.toml` (falling back to
+`~/.local/share/devin/credentials.toml`) on Unix, with `WINDSURF_API_KEY` and
+`WINDSURF_API_SERVER_URL` environment fallbacks. Buildmesh posts ConnectRPC JSON
+to `POST {api_server_url}/exa.seat_management_pb.SeatManagementService/GetUserStatus`
+(defaulting `api_server_url` to `https://server.codeium.com`), renders Daily and
+Weekly quota windows (`100 - remainingPercent`), surfaces positive
+`overageBalanceMicros` as a `USD` balance, and falls back to ACU/dollar
+billing-cycle meters or legacy prompt credits when quota windows are absent. The
+usage link is `https://app.devin.ai/settings/usage` (**View usage**).
+
 **Observed Session Telemetry is not a Usage Meter.** Muse MSP
 `session/tokenUsage` and `session/contextUsage` notifications are ingested by
 `agent/provider/muse/telemetry.rs`, stored per Agent Node, and surfaced on

@@ -197,6 +197,14 @@ const DETECTABLE: &[Detectable] = &[
         major_version: None,
         config_dirs: &[".perch"],
     },
+    Detectable {
+        id: "devin",
+        name: "Devin",
+        harness: "devin",
+        binaries: &["devin"],
+        major_version: None,
+        config_dirs: &[],
+    },
 ];
 
 /// Harnesses whose WSL cross-runtime probes are deliberately disabled. Cline
@@ -343,6 +351,22 @@ fn supplemental_user_bin_dirs(home: Option<&Path>) -> Vec<PathBuf> {
         dirs.push(home.join(".local").join("bin"));
         dirs.push(home.join(".cargo").join("bin"));
         dirs.push(home.join(".volta").join("bin"));
+    }
+    if cfg!(windows) {
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+        {
+            dirs.push(local_app_data.join("devin").join("cli").join("bin"));
+        } else if let Some(home) = home {
+            dirs.push(
+                home.join("AppData")
+                    .join("Local")
+                    .join("devin")
+                    .join("cli")
+                    .join("bin"),
+            );
+        }
     }
     if cfg!(not(windows)) {
         dirs.push(PathBuf::from("/opt/homebrew/bin"));
@@ -1600,6 +1624,33 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn supplemental_user_bin_dirs_prefer_localappdata_for_devin() {
+        let _env = crate::env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var_os("LOCALAPPDATA");
+        let home = PathBuf::from(r"C:\Users\me");
+
+        unsafe {
+            std::env::set_var("LOCALAPPDATA", r"D:\CustomLocal");
+        }
+        let custom = super::supplemental_user_bin_dirs(Some(&home));
+        assert!(custom.contains(&PathBuf::from(r"D:\CustomLocal\devin\cli\bin")));
+
+        unsafe {
+            std::env::remove_var("LOCALAPPDATA");
+        }
+        let fallback = super::supplemental_user_bin_dirs(Some(&home));
+        assert!(fallback.contains(&PathBuf::from(r"C:\Users\me\AppData\Local\devin\cli\bin")));
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("LOCALAPPDATA", value) },
+            None => unsafe { std::env::remove_var("LOCALAPPDATA") },
+        }
+    }
+
     #[test]
     fn config_dir_alone_counts_as_installed() {
         // No binary on PATH, but ~/.claude exists → Claude Code still offered.
@@ -1896,6 +1947,7 @@ mod tests {
             "/bin/cmd",
             "/bin/freebuff",
             "/bin/perch",
+            "/bin/devin",
         ]);
         let profiles = detect_profiles(&path_dirs, &[""], None, &exists);
         for p in &profiles {
@@ -1917,6 +1969,7 @@ mod tests {
                 "commandcode" => assert_eq!(provider, Provider::CommandCode),
                 "freebuff" => assert_eq!(provider, Provider::Freebuff),
                 "perch" => assert_eq!(provider, Provider::Perch),
+                "devin" => assert_eq!(provider, Provider::Devin),
                 other => panic!("unexpected detected id {other}"),
             }
         }

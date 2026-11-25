@@ -88,6 +88,7 @@ pub const BUILTIN_HARNESS_IDS: &[&str] = &[
     "muse",
     "cline",
     "perch",
+    "devin",
     "terminal",
     "anthropic",
 ];
