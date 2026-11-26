@@ -113,9 +113,14 @@ Verified against:
   the interactive terminal, `UserPromptSubmit` and `Stop` hooks resumed and
   completed the node's lifecycle, Devin wrote the contracted UTF-8 result file,
   and the review circuit classified the report, routed `APPROVE`, and completed.
-  `circuit_observation` remains `ObservationStrategy::UNWIRED` because no
-  Devin-specific foreground/ownership strategy has been declared; the result
-  file supplies the final report beside the attention lifecycle.
+  A borrowed Devin implementation agent can have a finished turn from before
+  the Circuit attached, with no result file owed. The Circuit reads the current
+  main-chain message from Devin's local `sessions.db` for that report and
+  rechecks the message before acting on it. New input or tool activity on the
+  main chain invalidates the earlier report. Attention supplies the lifecycle
+  signal. For a contracted turn, the result-file fallback uses the current
+  input and lifecycle timestamps even when Devin acknowledges the file in a
+  later assistant message.
 - **`.claude/` hook import (verified, issue #2864)**: a `devin -p` probe on
   3000.14.30821 fired `SessionStart`, `UserPromptSubmit` and `Stop` hooks
   defined in `.claude/settings.local.json` — `read_config_from.claude` is on

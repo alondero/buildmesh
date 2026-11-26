@@ -116,6 +116,7 @@ pub(crate) enum TranscriptActivity {
     Unavailable,
     /// The newest assistant report was published at this time.
     ReportedAt(i64),
+    DevinFinalReply,
     /// The transcript shows newer input or tool activity, or is mid-write.
     Busy,
 }
@@ -123,6 +124,7 @@ pub(crate) enum TranscriptActivity {
 impl TranscriptActivity {
     pub(crate) fn of(report: &Result<ReportSnapshot, ReportReadError>) -> Self {
         match report {
+            Ok(report) if report.is_devin_final_reply() => Self::DevinFinalReply,
             Ok(report) => Self::ReportedAt(report.published_at_ms),
             Err(
                 ReportReadError::WorkInProgress
@@ -165,7 +167,7 @@ pub(crate) fn finishes_turn(turn: &ResultTurn<'_>) -> bool {
                 .quiet_ms
                 .is_some_and(|quiet| quiet >= super::turn_classify::LOST_TURN_QUIET_MS)
                 && match turn.transcript {
-                    TranscriptActivity::Unavailable => true,
+                    TranscriptActivity::Unavailable | TranscriptActivity::DevinFinalReply => true,
                     TranscriptActivity::ReportedAt(at) => at <= turn.written_at_ms,
                     TranscriptActivity::Busy => false,
                 }))

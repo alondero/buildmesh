@@ -1290,13 +1290,11 @@ fn recover_result_turn(
         return false;
     };
     let file_only = result_handoff::completes_by_result_file_only(node);
-    let transcript = if file_only {
-        TranscriptActivity::Unavailable
-    } else {
-        TranscriptActivity::of(&crate::coordinator::enrichment::circuit_report_snapshot(
-            node,
-        ))
-    };
+    let snapshot =
+        (!file_only).then(|| crate::coordinator::enrichment::circuit_report_snapshot(node));
+    let transcript = snapshot
+        .as_ref()
+        .map_or(TranscriptActivity::Unavailable, TranscriptActivity::of);
     if !result_handoff::finishes_turn(&ResultTurn {
         file_only,
         written_at_ms,
@@ -1318,6 +1316,10 @@ fn recover_result_turn(
             && current.cli_session_id == node.cli_session_id
             && crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id)
             && result_handoff::written_at_ms(&path) == Some(written_at_ms)
+            && snapshot
+                .as_ref()
+                .and_then(|report| report.as_ref().ok())
+                .is_none_or(|report| report.is_current())
     };
     if !still_current() {
         return false;

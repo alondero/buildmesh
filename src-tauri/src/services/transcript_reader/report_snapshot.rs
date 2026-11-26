@@ -7,6 +7,9 @@ use std::{
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
 };
 
+mod devin;
+pub(crate) use devin::read as read_devin;
+
 #[cfg(test)]
 pub(crate) mod result_read_test_support {
     use std::{cell::RefCell, path::Path};
@@ -66,6 +69,7 @@ enum ReportSource {
         session_id: String,
         rows: Vec<(String, serde_json::Value)>,
     },
+    Devin(devin::HeadGuard),
     ResultFile {
         transcript: Option<Box<ReportSnapshot>>,
         path: PathBuf,
@@ -86,6 +90,10 @@ pub(crate) struct ReportSnapshot {
 }
 
 impl ReportSnapshot {
+    pub(crate) fn is_devin_final_reply(&self) -> bool {
+        matches!(self.source, ReportSource::Devin(_))
+    }
+
     /// Anchor a result to the already admitted turn. File-backed turns also
     /// retain their transcript guard; receipt-backed turns keep their input fence.
     pub(crate) fn read_result_file(
@@ -162,6 +170,7 @@ impl ReportSnapshot {
                 .as_ref()
                     == Some(rows)
             }
+            ReportSource::Devin(head) => head.is_current(),
             ReportSource::ResultFile {
                 transcript,
                 path,
