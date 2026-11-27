@@ -12,7 +12,9 @@ const REVIEW_PROMPT: &str = "Circuit result contract: finish your final review r
     Choose REQUEST_CHANGES when the implementer has a concrete next step, including a correction or missing verification the implementer can supply. \
     State the expected behavior and the fix or evidence needed. When successive rounds surface related findings, consolidate the fixes and expected cases into one request.\n\
     Choose BLOCKED only when a person must choose between materially different product behaviors before the implementer can proceed and the available spec and evidence cannot resolve the choice, \
-    or when there is no reviewable change at the assigned target after ordinary checks. State the specific decision or missing review target.\n\
+    or when there is no reviewable change at the assigned target after ordinary checks, including when its required revision cannot be safely established. \
+    Inspect the assigned worktree directly and, for a pull request, check the current PR on GitHub before deciding the target is unavailable. \
+    State the specific decision or what prevents review of the assigned target.\n\
     Choose APPROVE when you have reviewed the assigned change and no actionable findings remain. \
     Choose the verdict from the current round. Treat earlier reports, verdicts, and fix reports as review history.\n\
     Put findings, reviewed revision, and verification before the result line. Do not quote or repeat the result line in examples, code blocks, or progress updates. \
@@ -95,9 +97,9 @@ pub(super) fn prompt(view: &RunView, node_id: &str, prompt: &str) -> String {
                  Start with a clean worktree (`git status --porcelain`), fetch the PR head from its base repository \
                  (`git fetch origin refs/pull/<number>/head`). Keep the dedicated reviewer branch checked out and move it to the exact SHA (`git reset --keep <SHA>`) \
                  only if it is unshared and contains no reviewer-authored commits. Leave it local. \
+                 If the assigned worktree is dirty or you cannot safely establish the exact pushed head there, report BLOCKED and describe what prevents review. \
                  Verify HEAD matches the GitHub SHA and the worktree is clean, then review that commit's full diff from its merge base with the fetched target branch. \
                  Recheck those facts before posting the verdict. If the head moved, start the review again at the new head. \
-                 If you cannot safely establish the exact pushed head in the assigned worktree, explain what makes the review target unavailable. \
                  For a completed review, begin your final report and PR verdict with `{REVIEWED_COMMIT}<full SHA>`."
             ));
         }

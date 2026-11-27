@@ -474,7 +474,9 @@ issue-driven review flow run the same loop:
    Reviewers request changes for concrete fixes or verification the implementation
    agent can supply. When related findings recur, the reviewer groups the fixes
    and expected outcomes into one request. A **Blocked** verdict asks for a
-   decision on product behavior or identifies a missing review target.
+   decision on product behavior or identifies an unavailable review target. For
+   issue-driven reviews this includes a pushed PR head that cannot be established
+   safely in the assigned reviewer worktree.
 3. On approval the reviewer is closed and the implementation agent is asked to
    squash and merge the pull request. It marks a draft ready, rebases its
    branch onto the base branch the pull request targets, resolves the merge

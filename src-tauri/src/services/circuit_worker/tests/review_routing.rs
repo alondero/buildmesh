@@ -94,6 +94,12 @@ fn pr_review_requires_report_remote_and_clean_checkout_to_agree() {
 
 #[test]
 fn built_in_review_handoffs_check_metadata_and_use_current_findings_for_verdict() {
+    let assert_unavailable_pr_guidance = |prompt: &str| {
+        assert!(prompt.contains(
+            "If the assigned worktree is dirty or you cannot safely establish the exact pushed head there, report BLOCKED"
+        ));
+        assert!(prompt.contains("only if it is unshared and contains no reviewer-authored commits"));
+    };
     let assert_verdict_guidance = |prompt: &str| {
         assert!(!prompt.contains("End with the BLOCKED result below"));
         assert!(prompt.contains("REQUEST_CHANGES when the implementer has a concrete next step"));
@@ -101,6 +107,8 @@ fn built_in_review_handoffs_check_metadata_and_use_current_findings_for_verdict(
         assert!(prompt.contains("consolidate the fixes and expected cases into one request"));
         assert!(prompt.contains("BLOCKED only when a person must choose"));
         assert!(prompt.contains("no reviewable change at the assigned target"));
+        assert!(prompt.contains("including when its required revision cannot be safely established"));
+        assert!(prompt.contains("Inspect the assigned worktree directly"));
         assert!(prompt.contains("APPROVE when you have reviewed the assigned change"));
         assert!(prompt.contains("Choose the verdict from the current round"));
     };
@@ -119,6 +127,7 @@ fn built_in_review_handoffs_check_metadata_and_use_current_findings_for_verdict(
         assert!(prompt.contains("assigned worktree"));
         assert!(prompt.contains("Keep the dedicated reviewer branch checked out"));
         assert!(prompt.contains("Reviewed commit: <full SHA>"));
+        assert_unavailable_pr_guidance(prompt);
         assert_verdict_guidance(prompt);
     }
     assert!(next.contains("Fixed the empty input case"));
@@ -146,6 +155,7 @@ fn built_in_review_handoffs_check_metadata_and_use_current_findings_for_verdict(
     view.context.set("source.output", "Fixed the preceding finding");
     let restarted = report_contract::prompt(&view, "reviewer", "Review the continued PR");
     assert!(restarted.contains("headRefOid"));
+    assert_unavailable_pr_guidance(&restarted);
     assert!(restarted.contains(previous_report));
     assert!(restarted.contains("Fixed the preceding finding"));
     assert_verdict_guidance(&restarted);
