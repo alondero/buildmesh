@@ -745,9 +745,10 @@ pub(crate) fn background_command_for_runtime(
         return Ok(cmd);
     }
     if env_type == EnvType::WindowsInterop && !cfg!(windows) {
+        let native_args: Vec<_> = args.iter().map(|arg| arg.replace('"', "\\\"")).collect();
         let script = format!(
             "{}; exit $LASTEXITCODE",
-            format_powershell_command(&executable_override, &args)
+            format_powershell_command(&executable_override, &native_args)
         );
         ensure_powershell_command_line_fits(&script)?;
         let mut cmd = crate::process_util::command_no_window("powershell.exe");

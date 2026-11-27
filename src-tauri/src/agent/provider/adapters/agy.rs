@@ -397,7 +397,9 @@ impl AgentProvider for AgyAdapter {
         Some(crate::agent::model_catalog::ModelCatalogProbe {
             binary: None,
             args: vec!["models".into()],
+            stdin: None,
             effort_storage: crate::agent::model_catalog::ModelEffortStorage::EncodedInModel,
+            allow_unlisted_models: false,
             login_home_env: None,
             env_remove: &[],
         })

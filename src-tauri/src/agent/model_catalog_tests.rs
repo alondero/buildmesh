@@ -37,7 +37,9 @@ impl AgentProvider for CatalogTestAdapter {
         Some(ModelCatalogProbe {
             binary: None,
             args: vec!["probe".into()],
+            stdin: None,
             effort_storage: ModelEffortStorage::Separate,
+            allow_unlisted_models: false,
             login_home_env: Some("BM_CATALOG_HOME"),
             env_remove: &[],
         })
@@ -106,6 +108,21 @@ fn catalog_results_are_cached_by_executable_until_their_ttl_expires() {
 }
 
 #[test]
+fn a_failed_catalog_probe_can_recover_on_the_next_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let executable = write_probe(dir.path(), "");
+    let target = ModelCatalogTarget {
+        executable: Some(&executable),
+        ..Default::default()
+    };
+    assert!(discover(&CATALOG_TEST_ADAPTER, target).is_err());
+
+    std::fs::write(dir.path().join("catalog-output.txt"), "recovered\n").unwrap();
+    let recovered = discover(&CATALOG_TEST_ADAPTER, target).unwrap();
+    assert_eq!(recovered.models[0].id, "recovered");
+}
+
+#[test]
 fn unsupported_and_failed_catalog_probes_fail_closed() {
     let terminal = crate::models::Provider::Terminal.adapter();
     assert!(discover(terminal, ModelCatalogTarget::default()).is_err());
@@ -138,6 +155,74 @@ fn unsupported_and_failed_catalog_probes_fail_closed() {
     )
     .unwrap_err();
     assert!(error.contains("Harness model catalog failed"), "{error}");
+}
+
+#[test]
+fn model_only_probes_keep_interactive_ids_without_inventing_effort() {
+    let cases = [
+        (
+            crate::models::Provider::Grok,
+            "Default model: grok-4.7\n\nAvailable models:\n  * grok-4.7 (default)\n  * custom/model\n",
+            ["grok-4.7", "custom/model"],
+        ),
+        (
+            crate::models::Provider::CommandCode,
+            "Available models  ·  2 models\n\nAnthropic\nclaude-sonnet-5  fast\n\nOpen Source\nexample/model  reasoning\n\nPass the full id:\n\nDecision models (headless only)\ntypesafe/jev  headless only\n",
+            ["claude-sonnet-5", "example/model"],
+        ),
+    ];
+    for (provider, stdout, expected_ids) in cases {
+        let adapter = provider.adapter();
+        let dir = tempfile::tempdir().unwrap();
+        let executable = write_probe(dir.path(), stdout);
+        let target = ModelCatalogTarget {
+            executable: Some(&executable),
+            ..Default::default()
+        };
+        let catalog = discover(adapter, target).unwrap();
+        assert_eq!(catalog.effort_storage, ModelEffortStorage::Undiscovered);
+        assert_eq!(
+            catalog
+                .models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            expected_ids
+        );
+        assert!(catalog.models.iter().all(|model| model.efforts.is_empty()));
+    }
+}
+
+#[test]
+fn claude_catalog_reads_the_matching_control_response() {
+    let adapter = crate::models::Provider::Anthropic.adapter();
+    let probe = adapter.model_catalog_probe().unwrap();
+    let request: serde_json::Value = serde_json::from_str(probe.stdin.unwrap()).unwrap();
+    assert_eq!(request["type"], "control_request");
+    assert_eq!(request["request"]["subtype"], "initialize");
+    assert_eq!(probe.effort_storage, ModelEffortStorage::Separate);
+    assert!(probe.allow_unlisted_models);
+
+    let models = adapter.parse_model_catalog(concat!(
+        "{\"type\":\"system\",\"subtype\":\"init\"}\n",
+        "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"other\"}}\n",
+        r#"{"type":"control_response","response":{"subtype":"success","request_id":"model-catalog","response":{"models":["#,
+        r#"{"value":"default","displayName":"Default"},"#,
+        r#"{"value":"sonnet","resolvedModel":"claude-sonnet-5","displayName":"Sonnet","supportedEffortLevels":["low","high","future"]},"#,
+        r#"{"value":"claude-haiku-4-5-20251001"}]}}}"#,
+    )).unwrap();
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0].id, "sonnet");
+    assert_eq!(models[0].name, "Sonnet");
+    assert_eq!(
+        models[0]
+            .efforts
+            .iter()
+            .map(|effort| effort.id.as_str())
+            .collect::<Vec<_>>(),
+        ["low", "high"]
+    );
+    assert!(models[1].efforts.is_empty());
 }
 
 #[test]

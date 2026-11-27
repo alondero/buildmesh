@@ -107,6 +107,14 @@ pub enum Platform {
 }
 
 impl Platform {
+    pub(crate) fn for_runtime(runtime: EnvType) -> Self {
+        match runtime {
+            EnvType::Wsl => Self::Linux,
+            EnvType::WindowsInterop => Self::Windows,
+            EnvType::Windows => Self::current(),
+        }
+    }
+
     pub fn current() -> Self {
         if cfg!(target_os = "macos") {
             Platform::Macos

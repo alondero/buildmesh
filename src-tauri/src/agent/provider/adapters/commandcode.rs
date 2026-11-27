@@ -143,6 +143,37 @@ impl AgentProvider for CommandCodeAdapter {
         }
     }
 
+    fn model_catalog_probe(&self) -> Option<crate::agent::model_catalog::ModelCatalogProbe> {
+        use crate::agent::model_catalog::{ModelCatalogProbe, ModelEffortStorage};
+        Some(ModelCatalogProbe {
+            binary: None,
+            args: vec!["--no-auto-update".into(), "--list-models".into()],
+            stdin: None,
+            effort_storage: ModelEffortStorage::Undiscovered,
+            allow_unlisted_models: true,
+            login_home_env: None,
+            env_remove: &[],
+        })
+    }
+
+    fn parse_model_catalog(
+        &self,
+        stdout: &str,
+    ) -> Result<Vec<crate::agent::model_catalog::HarnessCatalogModel>, String> {
+        let rows = stdout
+            .lines()
+            .map(str::trim)
+            .skip_while(|line| !line.starts_with("Available models"))
+            .skip(1)
+            .take_while(|line| {
+                !line.starts_with("Pass the full id")
+                    && !line.starts_with("Decision models (headless only)")
+            })
+            .filter_map(|line| line.split_once("  "))
+            .map(|(id, description)| (id, Some(description.trim())));
+        Ok(crate::agent::model_catalog::models_without_effort(rows))
+    }
+
     fn permission_args(&self, mode_id: &str) -> Vec<String> {
         if mode_id == PERMISSION_MODE_UNATTENDED {
             vec!["--yolo".into()]

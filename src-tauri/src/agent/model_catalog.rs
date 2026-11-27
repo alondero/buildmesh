@@ -16,6 +16,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 pub enum ModelEffortStorage {
     Separate,
     EncodedInModel,
+    Undiscovered,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
@@ -47,13 +48,18 @@ pub struct HarnessCatalogModel {
 pub struct HarnessModelCatalog {
     pub harness_id: String,
     pub effort_storage: ModelEffortStorage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub allow_unlisted_models: Option<bool>,
     pub models: Vec<HarnessCatalogModel>,
 }
 
 pub struct ModelCatalogProbe {
     pub binary: Option<&'static str>,
     pub args: Vec<String>,
+    pub stdin: Option<&'static str>,
     pub effort_storage: ModelEffortStorage,
+    pub allow_unlisted_models: bool,
     pub login_home_env: Option<&'static str>,
     pub env_remove: &'static [&'static str],
 }
@@ -68,7 +74,27 @@ pub struct ModelCatalogTarget<'a> {
 
 struct CacheEntry {
     checked: Instant,
-    result: Result<HarnessModelCatalog, String>,
+    catalog: HarnessModelCatalog,
+}
+
+pub(super) fn models_without_effort<'a>(
+    rows: impl Iterator<Item = (&'a str, Option<&'a str>)>,
+) -> Vec<HarnessCatalogModel> {
+    let mut seen = std::collections::HashSet::new();
+    rows.filter(|(id, _)| {
+        id.starts_with(|c: char| c.is_ascii_alphanumeric())
+            && id
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"-._:/".contains(&c))
+            && seen.insert(*id)
+    })
+    .map(|(id, description)| HarnessCatalogModel {
+        id: id.into(),
+        name: id.into(),
+        description: description.map(str::to_owned),
+        efforts: Vec::new(),
+    })
+    .collect()
 }
 
 static CACHE: LazyLock<Mutex<HashMap<String, CacheEntry>>> =
@@ -103,18 +129,18 @@ fn discover_with_cache_ttl(
     );
     if let Some(entry) = CACHE.lock().unwrap().get(&key) {
         if entry.checked.elapsed() < cache_ttl {
-            return entry.result.clone();
+            return Ok(entry.catalog.clone());
         }
     }
-    let result = probe_uncached(adapter, target, env_type, probe);
+    let catalog = probe_uncached(adapter, target, env_type, probe)?;
     CACHE.lock().unwrap().insert(
         key,
         CacheEntry {
             checked: Instant::now(),
-            result: result.clone(),
+            catalog: catalog.clone(),
         },
     );
-    result
+    Ok(catalog)
 }
 
 pub(crate) fn host_env_type() -> crate::models::EnvType {
@@ -131,7 +157,12 @@ fn probe_uncached(
     env_type: EnvType,
     probe: ModelCatalogProbe,
 ) -> Result<HarnessModelCatalog, String> {
-    let mut recipe: SpawnRecipe = adapter.spawn_recipe(Platform::current(), env_type);
+    let mut recipe: SpawnRecipe = adapter.spawn_recipe(
+        target
+            .runtime
+            .map_or_else(Platform::current, Platform::for_runtime),
+        env_type,
+    );
     if let Some(binary) = probe.binary {
         recipe.binary = binary;
     }
@@ -164,6 +195,7 @@ fn probe_uncached(
         command,
         "harness model catalog",
         PROBE_TIMEOUT,
+        probe.stdin,
     )?;
     if !output.status.success() {
         return Err(format!(
@@ -179,6 +211,7 @@ fn probe_uncached(
     Ok(HarnessModelCatalog {
         harness_id: adapter.id().into(),
         effort_storage: probe.effort_storage,
+        allow_unlisted_models: probe.allow_unlisted_models.then_some(true),
         models,
     })
 }

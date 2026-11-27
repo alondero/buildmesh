@@ -20,6 +20,21 @@ export function cloneConfiguration(value: SpawnConfiguration): SpawnConfiguratio
   return { ...value, id: '', name: `${value.name} copy`, generated: undefined, resolved: undefined };
 }
 
+function findCatalogModel(catalog: HarnessModelCatalog | null | undefined, model: string | null) {
+  return catalog?.models.find((entry) => entry.id === model || entry.efforts.some((effort) => effort.model === model));
+}
+
+function catalogEfforts(catalog: HarnessModelCatalog | null | undefined, model: ReturnType<typeof findCatalogModel>) {
+  if (!catalog || catalog.effort_storage === 'undiscovered') return undefined;
+  return model?.efforts ?? (catalog.allow_unlisted_models ? undefined : []);
+}
+
+function catalogRejectsEffort(catalog: HarnessModelCatalog | null | undefined, { model, effort }: SpawnConfiguration) {
+  if (!effort) return false;
+  return catalog?.effort_storage === 'encoded_in_model'
+    || (catalogEfforts(catalog, findCatalogModel(catalog, model))?.every((option) => option.id !== effort) ?? false);
+}
+
 export function LaunchConfigurationEditor({ value, targets, onSave, onCancel, onDelete, onDirtyChange, onVerify, getModelCatalog }: {
   value: SpawnConfiguration;
   targets: LaunchTarget[];
@@ -77,36 +92,23 @@ export function LaunchConfigurationEditor({ value, targets, onSave, onCancel, on
     return () => { current = false; };
   }, [discoveryEnabled, targetHarnessId, catalogLoginId, getModelCatalog]);
   const catalog = discoveryEnabled ? modelCatalog : null;
-  const customModelActive = customModel && !catalog;
+  const allowCustomModel = !catalog || catalog.allow_unlisted_models;
+  const customModelActive = customModel && allowCustomModel;
   const advancedExpanded = advancedOpen || customModelActive;
   const encodedEffort = catalog?.effort_storage === 'encoded_in_model';
-  const selectedCatalogModel = catalog?.models.find((m) =>
-    m.id === draft.model || m.efforts.some((effort) => effort.model === draft.model));
+  const selectedCatalogModel = findCatalogModel(catalog, draft.model);
   const selectedEncodedEffort = encodedEffort
     ? selectedCatalogModel?.efforts.find((effort) => effort.model === draft.model)
     : undefined;
   const model = target?.models.find((m) => m.id === (draft.model ?? target.default_model));
   const selectableModels = catalog?.models ?? target?.models ?? [];
   const modelListed = catalog ? !!selectedCatalogModel : !!model;
-  const catalogEfforts = selectedCatalogModel?.efforts;
-  const efforts = catalog ? catalogEfforts?.map((effort) => effort.id) ?? []
-    : model?.efforts ?? target?.efforts ?? [];
+  const efforts = catalogEfforts(catalog, selectedCatalogModel)?.map((effort) => effort.id)
+    ?? model?.efforts ?? target?.efforts ?? [];
   useEffect(() => {
-    if (!catalog || draft.effort == null) return;
-    const catalogModel = catalog.models.find((entry) =>
-      entry.id === draft.model || entry.efforts.some((effort) => effort.model === draft.model));
-    const supported = catalog.effort_storage !== 'encoded_in_model'
-      && !!catalogModel && catalogModel.efforts.some((effort) => effort.id === draft.effort);
-    if (supported) return;
-    setDraft((current) => {
-      const currentModel = catalog.models.find((entry) =>
-        entry.id === current.model || entry.efforts.some((effort) => effort.model === current.model));
-      if (current.effort == null) return current;
-      const currentSupported = catalog.effort_storage !== 'encoded_in_model'
-        && !!currentModel && currentModel.efforts.some((effort) => effort.id === current.effort);
-      return currentSupported ? current : { ...current, effort: null };
-    });
-  }, [catalog, draft.model, draft.effort]);
+    if (!catalogRejectsEffort(catalog, draft)) return;
+    setDraft((current) => catalogRejectsEffort(catalog, current) ? { ...current, effort: null } : current);
+  }, [catalog, draft]);
   const route = target?.route && !target.route_attached ? { ...target.route,
     base_url: endpoint ?? target.route.base_url,
     model_tiers: { ...target.route.model_tiers, default: target.route.model_tiers.default ?? draft.model },
@@ -142,13 +144,7 @@ export function LaunchConfigurationEditor({ value, targets, onSave, onCancel, on
     if (canSubmit) {
       setSaveStage('saving');
       void runBusyAction(async () => {
-        const resolvedCatalog = catalog;
-        const encoded = resolvedCatalog?.effort_storage === 'encoded_in_model';
-        const catalogModel = resolvedCatalog?.models.find((entry) =>
-          entry.id === draft.model || entry.efforts.some((effort) => effort.model === draft.model));
-        const unsupportedSeparateEffort = !encoded && !!resolvedCatalog && !!draft.effort
-          && (!catalogModel || !catalogModel.efforts.some((effort) => effort.id === draft.effort));
-        const savedDraft = encoded || unsupportedSeparateEffort ? { ...draft, effort: null } : draft;
+        const savedDraft = encodedEffort || catalogRejectsEffort(catalog, draft) ? { ...draft, effort: null } : draft;
         await onSave(savedDraft, route, () => setSaveStage('refreshing'));
       }, 'save');
     }
@@ -189,8 +185,8 @@ export function LaunchConfigurationEditor({ value, targets, onSave, onCancel, on
         }}>
           <option value="">{target.default_model ? `Default (${target.default_model})` : 'Default'}</option>
           {draft.model && !modelListed && <option value={draft.model}>{draft.model} (advanced route)</option>}
-          {selectableModels.map((m) => <option key={m.id} value={m.id}>{m.name} ({m.id})</option>)}
-          {!catalog && <option value="__custom__">Custom model...</option>}
+          {selectableModels.map((m) => <option key={m.id} value={m.id}>{m.name === m.id ? m.id : m.name + ' (' + m.id + ')'}</option>)}
+          {allowCustomModel && <option value="__custom__">Custom model...</option>}
         </select>}
       </label>}
       {efforts.length > 0 && <>

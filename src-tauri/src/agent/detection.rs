@@ -686,6 +686,12 @@ impl DetectionSnapshot {
     pub(crate) fn observed(&self) -> bool {
         self.epoch > 0
     }
+
+    pub(crate) fn permits_versioned_profile(&self, profile: &HarnessProfile) -> bool {
+        version_requirement(&profile.harness).is_none()
+            || !self.observed()
+            || self.installed.contains(&profile.id)
+    }
 }
 
 /// The published detection state.
@@ -841,6 +847,9 @@ pub(crate) fn canonical_wsl_harness(id: &str) -> Option<&'static str> {
 }
 
 fn is_automatic_profile(p: &HarnessProfile) -> bool {
+    if p.harness == "opencode" && matches!(p.id.as_str(), "opencode" | "opencode-windows") {
+        return true;
+    }
     DETECTABLE.iter().any(|tool| {
         p.harness == tool.harness
             && (p.id == tool.id

@@ -81,8 +81,14 @@ pub fn harness_model_catalog_blocking(
 ) -> Result<crate::agent::model_catalog::HarnessModelCatalog, String> {
     let prefs = super::load()?;
     let profiles = super::harness_profiles();
-    let profile = super::resolver::harness::resolved_harness_profile_from(&profiles, harness_id);
     let spawn_option = crate::agent::provider::SpawnOptionId::from(harness_id);
+    let detection = crate::agent::detection::detection_snapshot();
+    if profiles.iter().any(|profile| {
+        profile.id == spawn_option.harness_id() && !detection.permits_versioned_profile(profile)
+    }) {
+        return Err("This harness installation has not passed its CLI version check".into());
+    }
+    let profile = super::resolver::harness::resolved_harness_profile_from(&profiles, harness_id);
     let executor_id = profile
         .as_ref()
         .map(|profile| profile.harness.as_str())
@@ -123,6 +129,7 @@ pub fn targets_for(
     profiles: Vec<super::HarnessProfile>,
 ) -> Vec<LaunchTarget> {
     let catalogue = provider_catalogue();
+    let detection = crate::agent::detection::detection_snapshot();
     profiles
         .into_iter()
         .flat_map(|harness| {
@@ -138,7 +145,8 @@ pub fn targets_for(
                 efforts: allowed_efforts(&caps, None),
                 manual_model: true,
                 supports_model: caps.supports_model_override,
-                supports_model_effort_discovery: caps.supports_model_effort_discovery,
+                supports_model_effort_discovery: caps.supports_model_effort_discovery
+                    && detection.permits_versioned_profile(&harness),
                 supports_extra_args: caps.supports_extra_args,
                 supports_agent: caps.supports_agent,
                 route: None,

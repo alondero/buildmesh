@@ -311,7 +311,9 @@ impl AgentProvider for CodexAdapter {
         Some(crate::agent::model_catalog::ModelCatalogProbe {
             binary: None,
             args: vec!["debug".into(), "models".into()],
+            stdin: None,
             effort_storage: crate::agent::model_catalog::ModelEffortStorage::Separate,
+            allow_unlisted_models: false,
             login_home_env: Some("CODEX_HOME"),
             env_remove: CODEX_INHERITED_CREDENTIAL_ENV_VARS,
         })

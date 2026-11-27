@@ -1128,13 +1128,13 @@ value a save depends on stays on screen. The endpoint, the model choices and
 Model choices belong to the selected provider and API surface; **Custom model**
 allows a model not yet in the catalogue when the editor is using the ordinary
 or fallback controls. Effort choices are restricted to documented
-provider/model and harness support. Native Codex, OpenCode and Antigravity
-installations can also enumerate their exact model/effort catalogues; when that
-discovery succeeds the editor lists only the combinations the selected model
-supports and does not offer a new custom model. A configuration that already
-carries an unlisted model keeps that value as a transitional advanced-route
-choice. When a Codex configuration pins a Harness Login, discovery uses that
-login's home; an unpinned configuration uses the runtime default. Discovery is
+provider/model and harness support. Native Claude Code, Codex, OpenCode 2 and
+Antigravity can list models and their effort choices. Grok and Command Code can
+list models and keep their usual effort controls. Claude Code, Grok and Command
+Code also offer **Custom model** for IDs outside the list.
+The editor preserves an unlisted model saved in an existing configuration.
+For a Codex configuration with a pinned Harness Login, discovery uses that
+login's home. Otherwise it uses the runtime default. Discovery is
 installation-specific, is cached briefly, and falls back to the ordinary
 harness controls if the command is unavailable or fails. The ordinary controls
 also remain usable while discovery is still running, so saving then records

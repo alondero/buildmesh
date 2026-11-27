@@ -91,7 +91,9 @@ impl AgentProvider for OpenCode2Adapter {
         Some(crate::agent::model_catalog::ModelCatalogProbe {
             binary: None,
             args: vec!["api".into(), "--standalone".into(), "model.list".into()],
+            stdin: None,
             effort_storage: crate::agent::model_catalog::ModelEffortStorage::EncodedInModel,
+            allow_unlisted_models: false,
             login_home_env: None,
             env_remove: &[
                 "OPENCODE_CONFIG",
@@ -467,6 +469,7 @@ fn api(
         command,
         "OpenCode 2 session API",
         Duration::from_secs(30),
+        None,
     )
     .map_err(SessionApiError::Failed)?;
     decode_api_output(output)
