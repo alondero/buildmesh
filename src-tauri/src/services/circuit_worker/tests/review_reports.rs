@@ -345,6 +345,211 @@ fn review_handoff_without_transcript_or_native_evidence_remains_unverified() {
 }
 
 #[test]
+fn review_handoff_reads_the_finished_devin_implementation_turn() {
+    use crate::agent::process::{testing::insert_standin, PROCESS_REGISTRY};
+    use crate::agent::session_lifecycle::{
+        HookSignalDetail, LifecycleChangedPayload, LifecycleKind,
+    };
+    use crate::circuit::evaluator::{self, Classification};
+    use crate::circuit::observation::CircuitObservationBlocker;
+    use crate::services::transcript_reader::report_snapshot::ReportReadError;
+
+    let _db = install_temp_db();
+    let directory = tempfile::tempdir().unwrap();
+    let store = crate::preferences::PreferencesStore::new(directory.path().to_path_buf());
+    let path = directory.path().to_str().unwrap();
+    let native_path = directory.path().join("sessions.db");
+    let native = rusqlite::Connection::open(native_path).unwrap();
+    native
+        .execute_batch(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, main_chain_id INTEGER);
+             CREATE TABLE message_nodes (
+                 session_id TEXT, node_id INTEGER, chat_message TEXT,
+                 UNIQUE(session_id, node_id)
+             );
+             INSERT INTO sessions VALUES ('finished-deer', 1);
+             INSERT INTO message_nodes VALUES ('finished-deer', 99, '{\"role\":\"tool\"}');",
+        )
+        .unwrap();
+    let report = "Implementation and verification are complete.";
+    native
+        .execute(
+            "INSERT INTO message_nodes VALUES ('finished-deer', 1, ?1)",
+            [serde_json::json!({
+                "message_id": "7d4926ff-b04a-4216-b4b0-5d28e69f8117",
+                "role": "assistant", "content": report, "tool_calls": [],
+                "metadata": {"finish_reason": "stop", "created_at": "2026-11-26T23:12:01.104581300Z"}
+            })
+            .to_string()],
+        )
+        .unwrap();
+
+    let mesh = db::create_mesh("devin-source", path).unwrap();
+    let agent = db::create_agent_node(db::NewAgentNode {
+        mesh_id: mesh.id,
+        name: "Finished Devin source",
+        path,
+        branch: "work",
+        env: crate::models::EnvType::Windows,
+        provider: "devin",
+        worktree_name: None,
+        source_issue: None,
+        source_pr: None,
+        source_pr_pinned_sha: None,
+        use_worktree: false,
+        head_repo_owner: None,
+        head_repo_clone_url: None,
+        worktree_path: None,
+        spawn_configuration: None,
+    })
+    .unwrap();
+    db::write_conn()
+        .execute(
+            "UPDATE agent_nodes SET cli_session_id='finished-deer', session_started_at=1,
+             status='ready' WHERE id=?1",
+            [agent.id],
+        )
+        .unwrap();
+    insert_standin(&PROCESS_REGISTRY, agent.id);
+
+    let mut view = RunView {
+        run_id: 85,
+        graph: CircuitGraph::agent_review(None, None, 3),
+        state: RunState::Pending,
+        context: CircuitContext::new(),
+        steps: vec![],
+    };
+    view.context.set("source.agent_id", agent.id.to_string());
+    view.context.set("source.review_preset", "1");
+    advance(&mut view, &CircuitEvent::Triggered);
+    advance(
+        &mut view,
+        &CircuitEvent::Tick(crate::circuit::stepper::Capacity {
+            agent_free_slots: 1,
+        }),
+    );
+    {
+        let _guard = crate::env::ENV_LOCK.lock().unwrap();
+        crate::env::with_env_vars(
+            &[("DEVIN_SESSIONS_DIR", Some(directory.path().as_os_str()))],
+            || {
+                let classify = |view: &RunView| {
+                    evaluator::unregister(agent.id);
+                    evaluator::register_circuit(agent.id);
+                    super::turn_classify::classify_step_turn_from(
+                        &store,
+                        &active_run(view.run_id),
+                        view,
+                        "await_source",
+                    )
+                    .unwrap()
+                };
+                let classified = classify(&view);
+                assert_eq!(
+                    classified.classification,
+                    Some(Classification::Completed),
+                    "finished Devin report should clear await_source, got {:?}",
+                    classified.observation_blocker
+                );
+                assert_eq!(classified.output, report);
+                let binding = classified.binding.unwrap();
+                let reloaded = db::get_agent_node_by_id(agent.id).unwrap();
+                assert_eq!(
+                    crate::coordinator::enrichment::assistant_report(&reloaded)
+                        .unwrap()
+                        .revision,
+                    binding.report_revision
+                );
+
+                let mut after_input = view.clone();
+                after_input.context.set(
+                    &format!("agent.{}.previous_report_revision", agent.id),
+                    binding.report_revision.clone(),
+                );
+                assert_eq!(
+                    classify(&after_input).observation_blocker,
+                    Some(CircuitObservationBlocker::ReportSuperseded)
+                );
+
+                let permission = LifecycleChangedPayload::new(
+                    agent.id,
+                    LifecycleKind::PermissionRequested,
+                    SessionStatus::AwaitingInput,
+                    &HookSignalDetail::default(),
+                    "Permission requested",
+                );
+                let save_lifecycle = |snapshot: Option<String>| {
+                    db::write_conn()
+                        .execute(
+                            "UPDATE agent_nodes SET lifecycle_snapshot=?1 WHERE id=?2",
+                            rusqlite::params![snapshot, agent.id],
+                        )
+                        .unwrap();
+                };
+                save_lifecycle(Some(serde_json::to_string(&permission).unwrap()));
+                assert_eq!(
+                    classify(&view).observation_blocker,
+                    Some(CircuitObservationBlocker::HumanResponseRequired)
+                );
+                save_lifecycle(None);
+
+                let guard = binding.input_guard.report_guard.clone().unwrap();
+                use super::result_handoff::{finishes_turn, ResultTurn, TranscriptActivity};
+                let written_at_ms = guard.published_at_ms - 10_000;
+                let lifecycle_stamp = |started_at_ms| {
+                    let started_at = chrono::DateTime::from_timestamp_millis(started_at_ms)
+                        .unwrap()
+                        .to_rfc3339();
+                    format!("1:{started_at}")
+                };
+                let original_turn = lifecycle_stamp(written_at_ms - 120_000);
+                let recovery = ResultTurn {
+                    file_only: false,
+                    written_at_ms,
+                    now_ms: written_at_ms + 120_000,
+                    quiet_ms: Some(super::turn_classify::LOST_TURN_QUIET_MS),
+                    transcript: TranscriptActivity::of(&Ok(guard.clone())),
+                    stamp: &original_turn,
+                };
+                assert!(
+                    finishes_turn(&recovery),
+                    "Devin acknowledged the current result file"
+                );
+                assert!(!finishes_turn(&ResultTurn {
+                    stamp: &lifecycle_stamp(written_at_ms + 1),
+                    ..recovery
+                }));
+                advance(
+                    &mut view,
+                    &CircuitEvent::TurnClassified {
+                        binding: Some(binding),
+                        node_id: "await_source".into(),
+                        classification: classified.classification,
+                        output: Some(classified.output),
+                    },
+                );
+                assert_eq!(
+                    view.step("await_source").unwrap().status,
+                    StepStatus::Completed
+                );
+
+                native.execute_batch(
+                    "INSERT INTO message_nodes VALUES ('finished-deer', 2, '{\"role\":\"user\"}');
+                     UPDATE sessions SET main_chain_id=2 WHERE id='finished-deer';"
+                ).unwrap();
+                assert!(!guard.is_current());
+                assert_eq!(
+                    crate::coordinator::enrichment::circuit_report_snapshot(&reloaded),
+                    Err(ReportReadError::WorkInProgress)
+                );
+            },
+        );
+    }
+    evaluator::unregister(agent.id);
+    PROCESS_REGISTRY.kill_session(agent.id);
+}
+
+#[test]
 fn review_handoff_clean_turn_does_not_require_task_completion_or_classifier() {
     use crate::circuit::evaluator::Classification;
     use crate::circuit::stepper::{Capacity, Effect};

@@ -227,7 +227,15 @@ fn scrub_glance(
 }
 
 pub(crate) fn assistant_report(node: &AgentNode) -> Option<transcript_reader::AssistantReport> {
-    let adapter = crate::preferences::resolve_harness_provider(&node.provider).adapter();
+    let provider = crate::circuit::strategy::provider_for_agent(node)?;
+    if provider == crate::models::Provider::Devin {
+        let report = devin_circuit_report(node).ok()?;
+        return Some(transcript_reader::AssistantReport {
+            text: report.text,
+            revision: report.revision,
+        });
+    }
+    let adapter = provider.adapter();
     if !adapter.descriptor().produces_readable_transcript {
         return None;
     }
@@ -250,7 +258,12 @@ pub(crate) fn circuit_report_snapshot(
     transcript_reader::report_snapshot::ReportReadError,
 > {
     use transcript_reader::report_snapshot::ReportReadError;
-    let adapter = crate::preferences::resolve_harness_provider(&node.provider).adapter();
+    let provider =
+        crate::circuit::strategy::provider_for_agent(node).ok_or(ReportReadError::Unsupported)?;
+    if provider == crate::models::Provider::Devin {
+        return devin_circuit_report(node);
+    }
+    let adapter = provider.adapter();
     let format = TranscriptFormat::for_harness(adapter.id()).ok_or(ReportReadError::Unsupported)?;
     transcript_reader::report_snapshot::read(
         format,
@@ -259,6 +272,24 @@ pub(crate) fn circuit_report_snapshot(
             .ok_or(ReportReadError::NoSession)?,
         &transcript_dir(node),
     )
+}
+
+fn devin_circuit_report(
+    node: &AgentNode,
+) -> Result<
+    transcript_reader::report_snapshot::ReportSnapshot,
+    transcript_reader::report_snapshot::ReportReadError,
+> {
+    use transcript_reader::report_snapshot::{read_devin, ReportReadError};
+    let session_id = node
+        .cli_session_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .ok_or(ReportReadError::NoSession)?;
+    let store = env::devin_db_path_for_host(node.env, &transcript_dir(node))
+        .filter(|path| path.is_file())
+        .ok_or(ReportReadError::NoTranscript)?;
+    read_devin(&store, session_id)
 }
 
 #[cfg(test)]
