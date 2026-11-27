@@ -1,18 +1,20 @@
 use super::repository::{DbSessionNamingRepository, SessionNamingRepository};
 use super::slug::slug_with_retry;
 use super::{is_default_name, NamingBackendFailedPayload, NodeRenamedPayload};
+use crate::services::transcript_reader::UnavailableReason;
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
 // Per-node naming state — one entry per node, one lock
 
-/// One reservation and retry budget per eligible node. Conversation text is
-/// read afresh on each attempt, outside the state lock.
 #[derive(Default)]
 pub(super) struct NodeNamingState {
     pub(super) renaming: bool,
     pub(super) attempts: u8,
+    activity_pending: bool,
     generation: Arc<()>,
 }
 
@@ -36,6 +38,21 @@ impl RenameReservation {
         {
             states.remove(&self.node_id);
         }
+    }
+
+    fn recheck_after_activity(&self) -> bool {
+        let mut states = naming();
+        let Some(state) = states
+            .get_mut(&self.node_id)
+            .filter(|state| Arc::ptr_eq(&state.generation, &self.generation))
+        else {
+            return false;
+        };
+        if std::mem::take(&mut state.activity_pending) {
+            return true;
+        }
+        states.remove(&self.node_id);
+        false
     }
 }
 
@@ -70,196 +87,210 @@ pub(crate) static ANSI_ESCAPE: once_cell::sync::Lazy<regex::Regex> =
         regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[()][A-B012]").unwrap()
     });
 
-pub(super) fn should_trigger_rename(
-    repo: &dyn SessionNamingRepository,
-    node_id: i64,
-) -> Option<RenameTrigger> {
-    let node = repo.get_agent_node_by_id(node_id).ok()?;
-    if !is_default_name(&node.name) {
-        clear_node_state(node_id);
+const DIALOGUE_CHECK_DELAYS: [Duration; 6] = [
+    Duration::ZERO,
+    Duration::from_secs(1),
+    Duration::from_secs(3),
+    Duration::from_secs(8),
+    Duration::from_secs(15),
+    Duration::from_secs(30),
+];
+const INFERENCE_RETRY_DELAYS: [Duration; MAX_RENAME_ATTEMPTS as usize - 1] =
+    [Duration::from_secs(3), Duration::from_secs(10)];
+static INFERENCE_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(3);
+
+pub(super) fn reserve_rename(node_id: i64) -> Option<RenameReservation> {
+    let mut states = naming();
+    let state = states.entry(node_id).or_default();
+    if state.attempts >= MAX_RENAME_ATTEMPTS {
         return None;
     }
-    let reservation = {
-        let mut map = naming();
-        let st = map.entry(node_id).or_default();
-        if st.attempts >= MAX_RENAME_ATTEMPTS || st.renaming {
-            return None;
-        }
-        // Reserve before disk I/O; concurrent turns must not schedule another read.
-        st.renaming = true;
-        RenameReservation {
-            node_id,
-            generation: st.generation.clone(),
-        }
-    };
-    let Some(dialogue) = repo.naming_context(&node) else {
-        tracing::debug!(
-            node_id,
-            "session_naming: waiting for readable task dialogue"
-        );
-        return None;
-    };
-    if !reservation.is_current() {
+    if state.renaming {
+        state.activity_pending = true;
         return None;
     }
-    Some(RenameTrigger {
-        dialogue,
-        reservation,
+    state.renaming = true;
+    state.activity_pending = false;
+    Some(RenameReservation {
+        node_id,
+        generation: state.generation.clone(),
     })
 }
 
-pub(super) struct RenameTrigger {
+pub(super) struct RenameInput {
+    pub(super) node_id: i64,
+    pub(super) name: String,
+    pub(super) session_id: Option<String>,
     pub(super) dialogue: String,
-    pub(super) reservation: RenameReservation,
 }
 
-pub(super) fn prepare_rename_with(
+pub(super) fn read_rename_input(
     repo: &dyn SessionNamingRepository,
-    node_id: i64,
-    resolve_launch: impl FnOnce() -> Result<NamingLaunch, String>,
-) -> Result<Option<(RenameTrigger, NamingLaunch)>, String> {
-    let Some(trigger) = should_trigger_rename(repo, node_id) else {
+    reservation: &RenameReservation,
+) -> Result<Option<RenameInput>, UnavailableReason> {
+    let node_id = reservation.node_id;
+    let Ok(node) = repo.get_agent_node_by_id(node_id) else {
+        reservation.clear();
         return Ok(None);
     };
-    let launch = match resolve_launch() {
-        Ok(launch) => launch,
-        Err(error) => {
-            // No inference attempt has started; release the reservation for a
-            // later turn after the user repairs the selected configuration.
-            return Err(error);
+    if !is_default_name(&node.name) || node.status == crate::models::SessionStatus::Archived {
+        reservation.clear();
+        return Ok(None);
+    }
+    let dialogue = repo.naming_context(&node)?;
+    Ok(reservation.is_current().then_some(RenameInput {
+        node_id,
+        dialogue,
+        name: node.name,
+        session_id: node.cli_session_id,
+    }))
+}
+
+pub(super) async fn wait_for_dialogue(
+    repo: &Arc<dyn SessionNamingRepository>,
+    reservation: &Arc<RenameReservation>,
+    delays: &[Duration],
+) -> Option<RenameInput> {
+    let node_id = reservation.node_id;
+    loop {
+        let mut last_reason = None;
+        for &delay in delays {
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            if !reservation.is_current() {
+                return None;
+            }
+            let reader = repo.clone();
+            let owner = reservation.clone();
+            match tauri::async_runtime::spawn_blocking(move || read_rename_input(&*reader, &owner))
+                .await
+            {
+                Ok(Ok(input)) => return input,
+                Ok(Err(UnavailableReason::Unsupported)) => {
+                    reservation.clear();
+                    return None;
+                }
+                Ok(Err(reason)) => last_reason = Some(reason),
+                Err(error) => {
+                    tracing::warn!(node_id, %error, "session_naming: transcript worker failed");
+                    return None;
+                }
+            }
         }
-    };
-    Ok(Some((trigger, launch)))
+        if !reservation.recheck_after_activity() {
+            tracing::debug!(
+                node_id,
+                ?last_reason,
+                "session_naming: task dialogue still unavailable"
+            );
+            return None;
+        }
+    }
 }
 
-/// Record a completed turn and attempt naming from readable task dialogue.
-pub fn on_turn(node_id: i64, app: AppHandle) {
-    on_turn_with(Arc::new(DbSessionNamingRepository), node_id, app);
+pub(super) async fn infer_with_retry<Inference: Future<Output = Option<Result<String, String>>>>(
+    reservation: &RenameReservation,
+    delays: &[Duration; MAX_RENAME_ATTEMPTS as usize - 1],
+    mut infer: impl FnMut() -> Inference,
+) -> Option<Result<String, String>> {
+    while reservation.is_current() {
+        let slot = INFERENCE_SLOTS.acquire().await.ok()?;
+        if !reservation.is_current() {
+            return None;
+        }
+        let result = infer().await?;
+        drop(slot);
+        if !reservation.is_current() {
+            return None;
+        }
+        let Err(error) = result else {
+            return Some(result);
+        };
+        let attempt = record_failed_attempt(reservation)?;
+        let node_id = reservation.node_id;
+        let Some(delay) = delays.get(usize::from(attempt - 1)) else {
+            tracing::warn!(node_id, attempt, %error, "session_naming: rename attempts exhausted");
+            return Some(Err(error));
+        };
+        tracing::warn!(node_id, attempt, %error, "session_naming: rename attempt failed; retry scheduled");
+        tokio::time::sleep(*delay).await;
+    }
+    None
 }
 
-pub(super) fn on_turn_with(repo: Arc<dyn SessionNamingRepository>, node_id: i64, app: AppHandle) {
-    // User-config gate (issue #824 v2): auto-naming is opt-in via
-    // Settings → Auto-naming. `None` (the default for users who never
-    // visited that page) skips the rename entirely — the node keeps its
-    // random `adjective-adjective-noun` slug. Distinct from the
-    // previously-shipped `node.provider` lookup, which would route through
-    // whatever model the spawned node is on (could be Opus with xhigh
-    // effort). The point of this gate is to *opt in*, never to inherit.
-    let Some(user_naming_provider) = crate::preferences::naming_provider() else {
+pub fn on_activity(node_id: i64, app: AppHandle) {
+    let Some(reservation) = reserve_rename(node_id).map(Arc::new) else {
         return;
     };
-
-    let app_for_task = app.clone();
-    let repo_for_task = repo.clone();
+    let repo: Arc<dyn SessionNamingRepository> = Arc::new(DbSessionNamingRepository);
     tauri::async_runtime::spawn(async move {
-        let read_repo = repo_for_task.clone();
-        let prepared = tauri::async_runtime::spawn_blocking(move || {
-            prepare_rename_with(&*read_repo, node_id, || {
-                naming_backend_env(&user_naming_provider)
-            })
-        })
-        .await;
-        let (trigger, backend_env) = match prepared {
-            Ok(Ok(Some(prepared))) => prepared,
-            Ok(Ok(None)) => return,
-            Ok(Err(error)) => {
-                tracing::warn!(node_id, "session_naming: {error}");
-                return;
-            }
-            Err(error) => {
-                tracing::warn!(node_id, "session_naming: preparation failed: {error}");
-                return;
-            }
+        let Ok(Some(_)) =
+            tauri::async_runtime::spawn_blocking(crate::preferences::naming_provider).await
+        else {
+            reservation.clear();
+            return;
         };
-        let RenameTrigger {
-            dialogue,
-            reservation,
-        } = trigger;
-        if !reservation.is_current() {
+        let Some(input) = wait_for_dialogue(&repo, &reservation, &DIALOGUE_CHECK_DELAYS).await
+        else {
             return;
-        }
-        let result = summarize_and_rename_with(node_id, &dialogue, backend_env).await;
-        if !reservation.is_current() {
-            return;
-        }
-        match result {
-            Ok(slug) => {
-                // User-rename race guard: the LLM call above can take 5-30s.
-                // During that window the user may have invoked `rename_session`
-                // and overwritten the node's name in the DB. Re-read and skip
-                // both the write and the event emit if the user has taken
-                // ownership — the user always wins.
-                if user_renamed_mid_flight(&*repo_for_task, node_id) {
-                    tracing::info!(
-                        "Node {} was manually renamed during LLM call; skipping slug '{}'",
-                        node_id,
-                        slug
-                    );
-                    // Removing the entry also drops the `renaming` flag.
-                    reservation.clear();
-                    return;
-                }
-                // Route the DB write through the injected `repo` so the
-                // mock-repo tests can exercise this commit path. The
-                // production caller (see `on_turn` above) passes the
-                // real `DbSessionNamingRepository`.
-                commit_rename(&*repo_for_task, &reservation, &slug, |name| {
-                    let _ = app_for_task.emit(
-                        "node-renamed",
-                        NodeRenamedPayload {
-                            node_id,
-                            name: name.to_string(),
-                        },
-                    );
-                });
+        };
+        match infer_with_retry(&reservation, &INFERENCE_RETRY_DELAYS, || {
+            infer_with_configured_backend(&reservation, &input.dialogue)
+        })
+        .await
+        {
+            Some(Ok(slug)) => {
+                let _ = tauri::async_runtime::spawn_blocking(move || {
+                    commit_rename(&*repo, &reservation, &input, &slug, |name| {
+                        let _ = app.emit(
+                            "node-renamed",
+                            NodeRenamedPayload {
+                                node_id,
+                                name: name.to_owned(),
+                            },
+                        );
+                    });
+                })
+                .await;
             }
-            Err(e) => {
-                // `record_failed_attempt` bumps the counter and, on reaching the
-                // cap, keeps the counter set so
-                // the next on_turn short-circuits (sticky lockout).
-                let Some(attempt) = record_failed_attempt(&reservation) else {
-                    return;
-                };
-                if attempt >= MAX_RENAME_ATTEMPTS {
-                    tracing::warn!(
-                        "Node {} giving up on rename after {} attempts (last error: {})",
-                        node_id,
-                        attempt,
-                        e
-                    );
-                    // Issue #824: surface the terminal rename failure to the
-                    // frontend so the user sees a toast / Settings hint
-                    // instead of a silent log. The frontend can map the
-                    // event to its existing toast primitive.
-                    let _ = app_for_task.emit(
-                        "naming-backend-failed",
-                        NamingBackendFailedPayload { node_id, reason: e },
-                    );
-                } else {
-                    tracing::warn!(
-                        "Node {} rename attempt {}/{} failed (eligible for retry): {}",
-                        node_id,
-                        attempt,
-                        MAX_RENAME_ATTEMPTS,
-                        e
-                    );
-                }
+            Some(Err(reason)) if reservation.is_current() => {
+                let _ = app.emit(
+                    "naming-backend-failed",
+                    NamingBackendFailedPayload { node_id, reason },
+                );
             }
+            _ => {}
         }
     });
 }
 
-/// Race-guard helper: returns true if the node's name in the DB is not a
-/// default slug (i.e. it was either LLM-renamed earlier or manually renamed
-/// by the user). Called from the LLM commit path to make sure a user
-/// rename that landed during the LLM call wins over the auto-rename. On a
-/// DB read error we err on the side of "user has not renamed" so the LLM
-/// rename is allowed to proceed (failing closed here would be a silent
-/// regression of the auto-rename for nodes whose DB read transiently fails).
-pub(crate) fn user_renamed_mid_flight(repo: &dyn SessionNamingRepository, node_id: i64) -> bool {
-    repo.get_agent_node_by_id(node_id)
-        .map(|n| !is_default_name(&n.name))
-        .unwrap_or(false)
+async fn infer_with_configured_backend(
+    reservation: &RenameReservation,
+    dialogue: &str,
+) -> Option<Result<String, String>> {
+    let node_id = reservation.node_id;
+    let launch = tauri::async_runtime::spawn_blocking(|| {
+        crate::preferences::naming_provider()
+            .map(|user_naming_provider| naming_backend_env(&user_naming_provider))
+            .transpose()
+    })
+    .await;
+    let launch = match launch {
+        Ok(Ok(launch)) => launch?,
+        Ok(Err(error)) => {
+            tracing::warn!(node_id, %error, "session_naming: naming backend unavailable");
+            return None;
+        }
+        Err(error) => {
+            tracing::warn!(node_id, %error, "session_naming: backend worker failed");
+            return None;
+        }
+    };
+    if !reservation.is_current() {
+        return None;
+    }
+    Some(summarize_and_rename_with(node_id, dialogue, &launch).await)
 }
 
 /// Reset naming eligibility on kill so a resumed node can try again.
@@ -267,31 +298,14 @@ pub fn reset_buffers(node_id: i64) {
     clear_node_state(node_id);
 }
 
-/// Commit an LLM-derived slug to the DB and notify the frontend.
-///
-/// Extracted from the `Ok(slug)` arm of `on_turn_with` so the
-/// write-or-skip behaviour is unit-testable through `MockRepo` without
-/// having to spawn `claude --print`. The emit callback is injected so
-/// the test can observe whether a `node-renamed` event would have
-/// been broadcast.
-///
-/// Failure path (issue #1223): when the DB write errors — e.g. transient
-/// write-lock contention with the pool worker — we log a warning and
-/// leave the node's naming state intact. The frontend MUST NOT see a
-/// `node-renamed` event for a name SQLite never persisted: the prior
-/// behaviour cleared state and emitted regardless, so the UI patched
-/// its in-memory list to a name the DB never accepted and eligibility was lost, so the next Node Turn couldn't naturally retry.
-/// This mirrors the LLM-error arm above, which preserves state across
-/// transient backend failures.
 pub(super) fn commit_rename(
     repo: &dyn SessionNamingRepository,
     reservation: &RenameReservation,
+    input: &RenameInput,
     slug: &str,
     emit_renamed: impl FnOnce(&str),
 ) {
     let node_id = reservation.node_id;
-    // Serialize the short persistence commit with reset/cleanup. A successful
-    // old inference must not rename a new session using the same node id.
     let mut states = naming();
     if !states
         .get(&node_id)
@@ -299,17 +313,18 @@ pub(super) fn commit_rename(
     {
         return;
     }
-    if let Err(e) = repo.update_agent_node_name(node_id, slug) {
-        tracing::warn!("Node {} rename write failed: {}", node_id, e);
-        // Skip clear_node_state and the emit — the rename was never
-        // persisted, so the UI must not see it, and the retry state
-        // must remain intact for the next Node Turn to re-attempt.
-        return;
-    }
+    let committed = match repo.commit_name(input, slug) {
+        Ok(committed) => committed,
+        Err(error) => {
+            tracing::warn!(node_id, %error, "session_naming: rename write failed");
+            return;
+        }
+    };
     states.remove(&node_id);
-    drop(states);
-    emit_renamed(slug);
-    tracing::info!("Node {} renamed to '{}'", node_id, slug);
+    if committed {
+        emit_renamed(slug);
+        tracing::info!("Node {} renamed to '{}'", node_id, slug);
+    }
 }
 
 /// Clear all state for a node. Called on delete/archive.
@@ -321,9 +336,6 @@ pub(super) fn clear_node_state(node_id: i64) {
     naming().remove(&node_id);
 }
 
-/// Record a failed rename attempt, returning the new count. On reaching the cap
-/// it keeps the counter (sticky lockout) so future
-/// turns short-circuit in `should_trigger_rename`.
 pub(super) fn record_failed_attempt(reservation: &RenameReservation) -> Option<u8> {
     let mut map = naming();
     let st = map.get_mut(&reservation.node_id)?;
@@ -479,28 +491,6 @@ pub(super) fn resolve_from_windows_install_paths(
 /// (`preferences::resolve_provider_env`) without touching real
 /// preferences. Production callers pass the real helper via
 /// [`naming_backend_env`].
-///
-/// Routing (issue #824 v2 — after the user-review pivot to a dedicated
-/// Settings config):
-/// 1. **User-configured `naming_provider`** (a spawn-option id from
-///    [`crate::preferences::naming_provider`]). Honours whatever the user
-///    picked — a Provider Account, a built-in like `"anthropic"`, etc.
-///    This is the *only* layer the user can opt into; the node's own
-///    provider is intentionally **not** consulted (auto-rename runs
-///    frequently on trivial content, see the `#824` review follow-up).
-/// 2. **Empty / unset** — caller should not invoke `summarize_and_rename_with`
-///    at all (auto-naming is off). Returning an empty Vec here is a safety
-///    net for the "user set a value that didn't resolve to an env" path;
-///    the higher-level `on_turn_with` short-circuits on `Option::None`
-///    before the helper is consulted.
-///
-/// Legacy `~/.claude/providers.conf` MiniMax is no longer the implicit
-/// fallback. A user who wants cheap MiniMax renames now picks
-/// `"minimax"` (or the configured `claude:minimax` account id) in
-/// Settings → Auto-naming explicitly, mirroring the same opt-in shape as
-/// every other rename backend. The historic `minimax_backend_env()` is
-/// kept for any future regression check or one-shot tooling, but is no
-/// longer called from the rename path.
 pub(crate) fn naming_backend_env_with<F>(
     provider: &str,
     resolve_provider_env: F,
@@ -568,7 +558,7 @@ pub(crate) fn naming_backend_env_from_plan(
 pub(super) async fn summarize_and_rename_with(
     node_id: i64,
     dialogue: &str,
-    backend_env: NamingLaunch,
+    backend_env: &NamingLaunch,
 ) -> Result<String, String> {
     let full_input = naming_prompt(dialogue);
     maybe_dump_rename_buffer(node_id, dialogue, &full_input);
@@ -584,10 +574,6 @@ pub(super) async fn summarize_and_rename_with(
     let mut cmd: tokio::process::Command = backend_env
         .command(directory.path(), &result, &full_input)?
         .into();
-    // Caller (on_turn_with, line 734) is `tauri::async_runtime::spawn` and this
-    // future is wrapped in a 30s `tokio::time::timeout` (line below) — both
-    // cancel the awaiter, not the child, so without this flag a claude leak
-    // accumulates up to MAX_RENAME_ATTEMPTS times per node (gh688).
     cmd.kill_on_drop(true);
     #[cfg(unix)]
     {

@@ -1453,6 +1453,20 @@ pub fn update_agent_node_name(id: i64, name: &str) -> SqlResult<()> {
     Ok(())
 }
 
+pub(crate) fn auto_name_agent_node(
+    id: i64,
+    expected_name: &str,
+    expected_session_id: Option<&str>,
+    name: &str,
+) -> SqlResult<bool> {
+    let changed = write_conn().execute(
+        "UPDATE agent_nodes SET name = ?1 WHERE id = ?2 AND name = ?3
+         AND cli_session_id IS ?4 AND status <> 'archived'",
+        params![name, id, expected_name, expected_session_id],
+    )?;
+    Ok(changed != 0)
+}
+
 /// Legacy two-half adoption (`name` + `worktree_name`, issue #1080) kept for
 /// the `db::tests` pins. Production spawns use
 /// [`adopt_manual_pool_slug_with_path`], which adds the third half

@@ -1,13 +1,48 @@
 //! Naming consumes dialogue, never the terminal rendering of that dialogue.
-use crate::models::AgentNode;
-use crate::services::transcript_reader::{self, TranscriptTail};
+use crate::models::{AgentNode, Provider};
+use crate::services::transcript_reader::{self, TranscriptTail, Turn, UnavailableReason};
 
-pub(super) fn read(node: &AgentNode) -> Option<String> {
-    let format = crate::coordinator::enrichment::native_completion_format(node)?;
+pub(super) fn read(node: &AgentNode) -> Result<String, UnavailableReason> {
+    let provider =
+        crate::circuit::strategy::provider_for_agent(node).ok_or(UnavailableReason::Unsupported)?;
     let path = crate::env::node_working_path(node).spawn_path;
-    let tail =
-        transcript_reader::read_naming_dialogue(format, node.cli_session_id.as_deref(), &path);
-    from_tail(tail)
+    let tail = if provider == Provider::Devin {
+        let session_id = node
+            .cli_session_id
+            .as_deref()
+            .ok_or(UnavailableReason::NoSession)?;
+        let store = crate::env::devin_db_path_for_host(node.env, &path)
+            .filter(|path| path.is_file())
+            .ok_or(UnavailableReason::NoTranscript)?;
+        devin_tail(&store, session_id)?
+    } else {
+        let format = crate::coordinator::enrichment::native_completion_format_for(provider)
+            .ok_or(UnavailableReason::Unsupported)?;
+        transcript_reader::read_naming_dialogue(format, node.cli_session_id.as_deref(), &path)
+    };
+    if let TranscriptTail::Unavailable { reason } = tail {
+        return Err(reason);
+    }
+    from_tail(tail).ok_or(UnavailableReason::Empty)
+}
+
+pub(super) fn devin_tail(
+    path: &std::path::Path,
+    session_id: &str,
+) -> Result<TranscriptTail, UnavailableReason> {
+    use transcript_reader::types::{truncate, MAX_TURN_TEXT};
+
+    let request = crate::services::devin_session::first_user_request(path, session_id)
+        .map_err(|_| UnavailableReason::Unreadable)?
+        .ok_or(UnavailableReason::Empty)?;
+    Ok(TranscriptTail::Available {
+        turns: vec![Turn {
+            role: "user".into(),
+            text: truncate(request.trim(), MAX_TURN_TEXT),
+            tool_calls: Vec::new(),
+        }],
+        last_assistant_message: None,
+    })
 }
 
 pub(super) fn from_tail(tail: TranscriptTail) -> Option<String> {
@@ -251,38 +286,6 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&text).unwrap(),
             json!([{"role":"user","text":"Fix login"}])
-        );
-    }
-
-    #[tokio::test]
-    #[ignore = "requires an explicitly selected local transcript and authenticated naming harness"]
-    async fn live_transcript_naming() {
-        let path = std::env::var("BUILDMESH_NAMING_TRANSCRIPT").unwrap();
-        let harness = std::env::var("BUILDMESH_NAMING_FORMAT").unwrap();
-        let expected = std::env::var("BUILDMESH_NAMING_EXPECTED").unwrap();
-        let format = TranscriptFormat::for_harness(&harness).unwrap();
-        let dialogue = from_tail(transcript_reader::read_naming_from_file(
-            std::path::Path::new(&path),
-            "session",
-            format,
-        ))
-        .unwrap();
-        let backend = std::env::var("BUILDMESH_BACKGROUND_HARNESS").unwrap();
-        let prefs = crate::preferences::AppPreferences::default();
-        let plan = crate::preferences::launch_configurations::capture(
-            &prefs,
-            &backend,
-            &crate::preferences::launch_configurations::LaunchOverrides::default(),
-        )
-        .unwrap();
-        let launch = super::super::engine::naming_backend_env_from_plan(plan, &prefs).unwrap();
-        let slug = super::super::engine::summarize_and_rename_with(0, &dialogue, launch)
-            .await
-            .unwrap();
-        println!("Live naming result: {slug}");
-        assert!(
-            slug.contains(&expected),
-            "expected task topic {expected}, got {slug}"
         );
     }
 

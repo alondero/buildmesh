@@ -330,12 +330,30 @@ fallbacks for both binary spellings, unless an executable override is supplied.
 Extra CLI arguments are rejected because they can change this protocol;
 provider routes require explicit support from the background recipe. Adding a
 runner belongs in its adapter, without an orchestration allow-list. Naming
-preflight failures release in-flight ownership without consuming an inference
-attempt, so repaired settings can retry on a later turn.
+preflight failures release the reservation without using an inference attempt.
+The next activity can retry after the user repairs the settings.
 
-`session_naming.rs` names default-named nodes from initial user/assistant dialogue, through the harness-owned transcript readers. It resolves the saved launch harness and actual node working directory, reads on a blocking worker outside DB/naming locks, and sends at most four text messages (4,000-byte previews plus an ellipsis when truncated) with explicit JSON role labels to the configured naming backend. JSONL readers inspect at most the first 1 MiB with their normal message coalescing and ignore tool-only turns; Cline reads its document and OpenCode queries its first 50 message rows. Later tool traffic cannot evict the initial request. Tool arguments/results, reasoning, terminal redraws and status chrome are not naming input. Codex AGENTS.md injections and MiniMax's leading reminder wrappers are removed by their readers before text truncation.
+`session_naming.rs` names default-named nodes from initial dialogue. It
+resolves the saved launch harness and actual node working directory, then reads
+on a blocking worker. JSONL readers inspect the first 1 MiB, Cline reads its
+document, and OpenCode queries its first 50 message rows. Devin reads the first
+message marked as user input in the captured session's local database. The
+configured naming backend receives up to four secret-scrubbed, role-labelled
+messages with 4,000-byte text previews. Codex AGENTS.md injections and
+MiniMax's leading reminder wrappers are filtered before truncation.
 
-The first accepted Node Turn can trigger naming, including short requests; there is no startup gate or terminal-byte threshold. A missing session, unreadable/unsupported transcript, or absent user request defers naming to a later turn without consuming an inference attempt. Unsupported harnesses retain the generated name. The configured naming backend remains independent of the node's harness. Existing non-default names are preserved. Rename reservations are generation-scoped so reset, restart and cleanup reject stale reads and inference completions. Set `BUILDMESH_DUMP_NAME_BUFFER=1` for an opt-in dump of the selected, secret-scrubbed dialogue and exact model prompt; normal logs contain only source and byte count.
+An accepted prompt submission, work-resumed hook, or Node Turn can schedule
+naming. Starting a run with a launch prompt or resuming a conversation can
+also schedule it. Each node has one job at a time. The job checks for dialogue
+with backoff for up to about a minute per activity, so a late session ID or
+transcript write can be picked up during the same turn. Activity received
+during a check can extend it. Unsupported harnesses keep the generated name.
+Inference failures retry twice with backoff, with at most three naming
+subprocesses running concurrently. Each attempt reads the current naming
+backend setting. A rename is published only
+after the database updates the expected name and conversation. Reset and
+cleanup invalidate stale work. Set `BUILDMESH_DUMP_NAME_BUFFER=1` for an opt-in
+dump of the selected dialogue and exact model prompt.
 
 **Slug length is clamped, not refused.** `slug_with_retry` prefers the first hyphenated line, then fits the candidate: empty tokens collapse, the tail is dropped past five words, and the remainder is cut at 50 characters on a whole-word boundary, so a hyphen-joined answer keeps its subject and loses only its tail. The clamp applies to responses that were already hyphen-joined, because that is what the prompt asks for. A response with no hyphen anywhere is ambiguous — `fix auth token flow` is a name, `please rename it to fix auth flow` is a sentence — and joining those words cannot tell them apart, so that path only normalises: a run of three to five words inside the character cap becomes a name, while a run past five words or past the cap stays retry-worthy rather than being trimmed into a name that describes nothing. Both limits matter there, because the character cut would drop a sentence's last word just as the word count would. A candidate is refused when it cannot name the task at all: fewer than three words, characters `SLUG_REGEX` forbids, or leading words that exceed the cap on their own. The regex enforces slug syntax — a lowercase alphanumeric start, then lowercase alphanumerics and hyphens inside the length bounds — and not meaning: it rejects punctuation, capitals and leading digits, but a short word run of ordinary words passes it, which is why the spaced path's own limits do the work of telling a name from a sentence.
 

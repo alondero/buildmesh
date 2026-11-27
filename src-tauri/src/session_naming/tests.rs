@@ -7,6 +7,9 @@ use super::{
     words::{ADJECTIVES, NOUNS},
 };
 use crate::models::AgentNode;
+use crate::services::transcript_reader::UnavailableReason;
+use std::sync::Arc;
+use std::time::Duration;
 
 #[test]
 fn naming_accepts_native_codex_launch_configuration() {
@@ -41,11 +44,45 @@ async fn live_background_inference() {
     let slug = summarize_and_rename_with(
         0,
         "The user asked to fix background naming. Reply only with fix-background-naming.",
-        launch,
+        &launch,
     )
     .await
     .unwrap();
     assert_eq!(slug, "fix-background-naming");
+}
+
+#[tokio::test]
+#[ignore = "requires an explicitly selected local transcript and authenticated naming harness"]
+async fn live_transcript_naming() {
+    use crate::services::transcript_reader::{self, TranscriptFormat};
+
+    let path = std::env::var("BUILDMESH_NAMING_TRANSCRIPT").unwrap();
+    let harness = std::env::var("BUILDMESH_NAMING_FORMAT").unwrap();
+    let expected = std::env::var("BUILDMESH_NAMING_EXPECTED").unwrap();
+    let format = TranscriptFormat::for_harness(&harness).unwrap();
+    let dialogue = super::context::from_tail(transcript_reader::read_naming_from_file(
+        std::path::Path::new(&path),
+        "session",
+        format,
+    ))
+    .unwrap();
+    let backend = std::env::var("BUILDMESH_BACKGROUND_HARNESS").unwrap();
+    let prefs = crate::preferences::AppPreferences::default();
+    let plan = crate::preferences::launch_configurations::capture(
+        &prefs,
+        &backend,
+        &crate::preferences::launch_configurations::LaunchOverrides::default(),
+    )
+    .unwrap();
+    let launch = naming_backend_env_from_plan(plan, &prefs).unwrap();
+    let slug = summarize_and_rename_with(0, &dialogue, &launch)
+        .await
+        .unwrap();
+    println!("Live naming result: {slug}");
+    assert!(
+        slug.contains(&expected),
+        "expected task topic {expected}, got {slug}"
+    );
 }
 
 #[tokio::test]
@@ -99,7 +136,7 @@ async fn codex_background_naming_reads_the_final_file_and_preserves_saved_settin
     plan.harness.executable = Some(script);
     let launch = naming_backend_env_from_plan(plan, &prefs).unwrap();
     assert_eq!(
-        summarize_and_rename_with(0, "fix background naming", launch)
+        summarize_and_rename_with(0, "fix background naming", &launch)
             .await
             .unwrap(),
         "fix-background-naming"
@@ -330,19 +367,6 @@ fn on_spawn_500_samples_have_no_collisions() {
     }
 }
 
-/// Deterministic guards on the seed-word lists. Two failure modes are
-/// checked, both of which silently degrade the collision rate without
-/// tripping the size-pin test above (which counts rows, not distinct
-/// entries or position-specific membership):
-///
-/// 1. Internal duplicates within a single list. A dup entry makes
-///    `ADJECTIVES.choose()` and `NOUNS.choose()` non-uniform, lowering
-///    the effective pool size.
-/// 2. Cross-list overlap. A word appearing in BOTH lists lets
-///    `is_default_name("X-Y-Z")` return true for non-default names where
-///    every part is in either list — defeating `user_renamed_mid_flight`'s
-///    guard, which then lets the LLM rename overwrite a user-typed slug.
-///    The fix is position-strict: `parts[2]` must not also be in ADJECTIVES.
 #[test]
 fn seed_pools_have_no_duplicates() {
     use std::collections::HashSet;
@@ -842,8 +866,8 @@ impl MockRepo {
 }
 
 impl SessionNamingRepository for MockRepo {
-    fn naming_context(&self, _node: &AgentNode) -> Option<String> {
-        self.context.clone()
+    fn naming_context(&self, _node: &AgentNode) -> Result<String, UnavailableReason> {
+        self.context.clone().ok_or(UnavailableReason::Empty)
     }
 
     fn get_agent_node_by_id(&self, id: i64) -> Result<AgentNode, String> {
@@ -858,13 +882,27 @@ impl SessionNamingRepository for MockRepo {
             ..Default::default()
         })
     }
-    fn update_agent_node_name(&self, id: i64, name: &str) -> Result<(), String> {
+    fn commit_name(&self, input: &RenameInput, name: &str) -> Result<bool, String> {
         if self.update_should_fail {
             return Err("mock update error".into());
         }
-        self.updates.lock().unwrap().push((id, name.to_string()));
-        Ok(())
+        self.updates
+            .lock()
+            .unwrap()
+            .push((input.node_id, name.to_string()));
+        Ok(true)
     }
+}
+
+struct PreparedRename {
+    reservation: RenameReservation,
+    input: RenameInput,
+}
+
+fn should_trigger_rename(repo: &dyn SessionNamingRepository, id: i64) -> Option<PreparedRename> {
+    let reservation = reserve_rename(id)?;
+    let input = read_rename_input(repo, &reservation).ok().flatten()?;
+    Some(PreparedRename { reservation, input })
 }
 
 #[test]
@@ -874,7 +912,7 @@ fn naming_uses_short_dialogue_on_first_turn() {
     let repo = MockRepo::with_name("bold-keen-brook");
     let trigger = should_trigger_rename(&repo, id).unwrap();
     assert_eq!(
-        trigger.dialogue,
+        trigger.input.dialogue,
         "[{\"role\":\"user\",\"text\":\"Fix login\"}]"
     );
     assert!(
@@ -897,7 +935,7 @@ fn unavailable_dialogue_retries_without_spending_attempts() {
     }
     repo.context = Some("actual task".into());
     assert_eq!(
-        should_trigger_rename(&repo, id).unwrap().dialogue,
+        should_trigger_rename(&repo, id).unwrap().input.dialogue,
         "actual task"
     );
     cleanup(id);
@@ -940,9 +978,13 @@ fn stale_reservation_cannot_release_or_charge_resumed_naming() {
     let current = should_trigger_rename(&repo, id).unwrap();
     assert!(!old.reservation.is_current());
     assert_eq!(record_failed_attempt(&old.reservation), None);
-    commit_rename(&repo, &old.reservation, "stale-task-name", |_| {
-        panic!("stale completion emitted")
-    });
+    commit_rename(
+        &repo,
+        &old.reservation,
+        &old.input,
+        "stale-task-name",
+        |_| panic!("stale completion emitted"),
+    );
     assert!(repo.updates.lock().unwrap().is_empty());
     drop(old);
     assert!(current.reservation.is_current());
@@ -962,10 +1004,14 @@ fn old_completion_after_new_success_cannot_restore_stale_name() {
     reset_buffers(id);
     let current = should_trigger_rename(&repo, id).unwrap();
     let mut names = Vec::new();
-    commit_rename(&repo, &current.reservation, "new-task-name", |name| {
-        names.push(name.to_owned())
-    });
-    commit_rename(&repo, &old.reservation, "old-task-name", |_| {
+    commit_rename(
+        &repo,
+        &current.reservation,
+        &current.input,
+        "new-task-name",
+        |name| names.push(name.to_owned()),
+    );
+    commit_rename(&repo, &old.reservation, &old.input, "old-task-name", |_| {
         panic!("old completion emitted")
     });
     assert_eq!(names, ["new-task-name"]);
@@ -984,10 +1030,10 @@ fn reset_during_transcript_read_discards_the_prepared_rename() {
         fn get_agent_node_by_id(&self, id: i64) -> Result<AgentNode, String> {
             self.0.get_agent_node_by_id(id)
         }
-        fn update_agent_node_name(&self, id: i64, name: &str) -> Result<(), String> {
-            self.0.update_agent_node_name(id, name)
+        fn commit_name(&self, input: &RenameInput, name: &str) -> Result<bool, String> {
+            self.0.commit_name(input, name)
         }
-        fn naming_context(&self, node: &AgentNode) -> Option<String> {
+        fn naming_context(&self, node: &AgentNode) -> Result<String, UnavailableReason> {
             reset_buffers(node.id);
             self.0.naming_context(node)
         }
@@ -995,34 +1041,189 @@ fn reset_during_transcript_read_discards_the_prepared_rename() {
     let id = 71005;
     cleanup(id);
     let repo = ResetDuringRead(MockRepo::with_name("bold-keen-brook"));
-    assert!(prepare_rename_with(&repo, id, || panic!(
-        "stale read must not resolve an inference backend"
-    ))
-    .unwrap()
-    .is_none());
+    let reservation = reserve_rename(id).unwrap();
+    assert!(read_rename_input(&repo, &reservation).unwrap().is_none());
     assert!(!has_state(id));
 }
 
-#[test]
-fn failed_backend_resolution_releases_rename_ownership() {
+#[tokio::test]
+async fn naming_retries_transcript_lag_and_backend_timeout_without_another_turn() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct LateTranscript {
+        base: MockRepo,
+        reads: AtomicUsize,
+    }
+
+    impl SessionNamingRepository for LateTranscript {
+        fn get_agent_node_by_id(&self, id: i64) -> Result<AgentNode, String> {
+            self.base.get_agent_node_by_id(id)
+        }
+
+        fn naming_context(&self, node: &AgentNode) -> Result<String, UnavailableReason> {
+            if self.reads.fetch_add(1, Ordering::Relaxed) == 0 {
+                return Err(UnavailableReason::NoTranscript);
+            }
+            self.base.naming_context(node)
+        }
+
+        fn commit_name(&self, input: &RenameInput, name: &str) -> Result<bool, String> {
+            self.base.commit_name(input, name)
+        }
+    }
+
     let id = 71003;
-    cleanup(id);
-    let repo = MockRepo::with_name("bold-keen-brook");
-    let err = prepare_rename_with(&repo, id, || Err("repair configuration".into()))
-        .err()
-        .unwrap();
-    assert_eq!(err, "repair configuration");
+    let repo = Arc::new(LateTranscript {
+        base: MockRepo::with_name("bold-keen-brook"),
+        reads: AtomicUsize::new(0),
+    });
+    let reservation = Arc::new(reserve_rename(id).unwrap());
+    let input = wait_for_dialogue(
+        &(repo.clone() as Arc<dyn SessionNamingRepository>),
+        &reservation,
+        &[Duration::ZERO; 2],
+    )
+    .await
+    .expect("a delayed transcript must be read on the same activity");
+    assert_eq!(repo.reads.load(Ordering::Relaxed), 2);
     assert_eq!(naming().get(&id).unwrap().attempts, 0);
-    assert!(should_trigger_rename(&repo, id).is_some());
+
+    let calls = std::cell::Cell::new(0);
+    let slug = infer_with_retry(&reservation, &[Duration::ZERO; 2], || async {
+        calls.set(calls.get() + 1);
+        assert!(input.dialogue.contains("Fix login"));
+        if calls.get() == 1 {
+            return Some(Err("CLI timed out after 30s".into()));
+        }
+        Some(Ok("fix-login-redirect".into()))
+    })
+    .await
+    .expect("the naming attempt must stay scheduled")
+    .expect("a failed inference must retry from the same activity");
+    assert_eq!(calls.get(), 2);
+
+    let mut emitted = Vec::new();
+    commit_rename(&*repo, &reservation, &input, &slug, |name| {
+        emitted.push(name.to_owned());
+    });
+    assert_eq!(emitted, ["fix-login-redirect"]);
+    assert_eq!(*repo.base.updates.lock().unwrap(), [(id, slug)]);
+
+    let id = 71007;
+    let repo = Arc::new(LateTranscript {
+        base: MockRepo::with_name("bold-keen-brook"),
+        reads: AtomicUsize::new(0),
+    });
+    let reservation = Arc::new(reserve_rename(id).unwrap());
+    assert!(reserve_rename(id).is_none(), "coalesce concurrent activity");
+    assert!(
+        wait_for_dialogue(
+            &(repo as Arc<dyn SessionNamingRepository>),
+            &reservation,
+            &[Duration::ZERO],
+        )
+        .await
+        .is_some(),
+        "activity during a pending read must extend the check"
+    );
     cleanup(id);
 }
 
 #[test]
-fn mock_repo_update_records_calls() {
-    let repo = MockRepo::with_name("bold-keen-brook");
-    repo.update_agent_node_name(42, "test-slug-name").unwrap();
-    let calls = repo.updates.lock().unwrap();
-    assert_eq!(calls[0], (42, "test-slug-name".to_string()));
+fn devin_naming_reads_the_first_user_input_for_the_selected_session() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.db");
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch(
+        "CREATE TABLE message_nodes (session_id TEXT, node_id INTEGER, chat_message TEXT,
+         UNIQUE (session_id, node_id))",
+    )
+    .unwrap();
+    for (session_id, node_id, message) in [
+        (
+            "other",
+            0,
+            r#"{"role":"user","metadata":{"is_user_input":true},"content":"Wrong session"}"#,
+        ),
+        ("current", 0, "malformed"),
+        (
+            "current",
+            1,
+            r#"{"role":"user","content":"A compaction summary"}"#,
+        ),
+        (
+            "current",
+            2,
+            r#"{"role":"assistant","content":"Internal progress"}"#,
+        ),
+        (
+            "current",
+            3,
+            r#"{"role":"user","metadata":{"is_user_input":true},"content":"Fix login redirects"}"#,
+        ),
+        (
+            "current",
+            4,
+            r#"{"role":"user","metadata":{"is_user_input":true},"content":"Later request"}"#,
+        ),
+    ] {
+        db.execute(
+            "INSERT INTO message_nodes VALUES (?1, ?2, ?3)",
+            rusqlite::params![session_id, node_id, message],
+        )
+        .unwrap();
+    }
+
+    let tail = super::context::devin_tail(&path, "current").unwrap();
+    let dialogue = super::context::from_tail(tail).unwrap();
+    assert_eq!(
+        dialogue,
+        r#"[{"role":"user","text":"Fix login redirects"}]"#
+    );
+    assert_eq!(
+        super::context::devin_tail(&path, "missing"),
+        Err(UnavailableReason::Empty)
+    );
+}
+
+#[test]
+fn auto_rename_cannot_overwrite_a_manual_name_or_a_replaced_conversation() {
+    let _db = crate::db::test_support::isolated();
+    let mesh = crate::db::create_mesh("naming", "/repo").unwrap();
+    let id = crate::db::write_conn()
+        .query_row(
+            "INSERT INTO agent_nodes (mesh_id, name, path, cli_session_id)
+             VALUES (?1, 'bold-keen-brook', '/repo', 'original-session') RETURNING id",
+            [mesh.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let repo = DbSessionNamingRepository;
+    let node = repo.get_agent_node_by_id(id).unwrap();
+    let mut input = RenameInput {
+        node_id: id,
+        name: node.name,
+        session_id: node.cli_session_id,
+        dialogue: "Fix login".into(),
+    };
+
+    crate::db::update_cli_session_id(id, "new-session").unwrap();
+    let reservation = reserve_rename(id).unwrap();
+    commit_rename(&repo, &reservation, &input, "fix-stale-login", |_| {
+        panic!("stale conversation emitted a rename")
+    });
+    assert_eq!(
+        repo.get_agent_node_by_id(id).unwrap().name,
+        "bold-keen-brook"
+    );
+
+    input.session_id = Some("new-session".into());
+    crate::db::update_agent_node_name(id, "Manual name").unwrap();
+    let reservation = reserve_rename(id).unwrap();
+    commit_rename(&repo, &reservation, &input, "fix-stale-login", |_| {
+        panic!("auto-rename replaced a manual name")
+    });
+    assert_eq!(repo.get_agent_node_by_id(id).unwrap().name, "Manual name");
 }
 
 // --- issue #1223: DB-write-failure path must not emit node-renamed ---
@@ -1035,12 +1236,6 @@ fn mock_repo_update_records_calls() {
 /// cleared state and emitted — the frontend patched its in-memory
 /// node list to a name SQLite never persisted, and the retry
 /// dialogue was wiped.
-///
-/// Asserts the contract on `commit_rename` directly, since the
-/// inline `Ok(slug)` arm of `on_turn_with` is otherwise hidden
-/// behind a real `summarize_and_rename_with` call (the unit-test
-/// cannot spawn `claude --print`). The helper is the same code
-/// path the async arm executes against the production repo.
 #[test]
 fn commit_rename_preserves_state_on_db_write_failure() {
     let node_id = 71100;
@@ -1054,9 +1249,13 @@ fn commit_rename_preserves_state_on_db_write_failure() {
     let trigger = should_trigger_rename(&repo, node_id).unwrap();
     let mut emitted: Option<String> = None;
 
-    commit_rename(&repo, &trigger.reservation, "fix-test-slug-bug", |name| {
-        emitted = Some(name.to_string())
-    });
+    commit_rename(
+        &repo,
+        &trigger.reservation,
+        &trigger.input,
+        "fix-test-slug-bug",
+        |name| emitted = Some(name.to_string()),
+    );
 
     assert!(
         emitted.is_none(),
@@ -1090,6 +1289,7 @@ fn commit_rename_emits_and_clears_on_db_write_success() {
     commit_rename(
         &repo,
         &trigger.reservation,
+        &trigger.input,
         "fix-auth-token-refresh",
         |name| emitted = Some(name.to_string()),
     );
@@ -1115,45 +1315,6 @@ fn commit_rename_emits_and_clears_on_db_write_success() {
     );
 
     cleanup(node_id);
-}
-
-#[test]
-fn user_renamed_mid_flight_returns_true_for_user_chosen_name() {
-    // "Fix OAuth callback" is not a default adj-adj-noun slug — the
-    // guard must return true so the LLM slug is dropped.
-    let repo = MockRepo::with_name("Fix OAuth callback");
-    assert!(user_renamed_mid_flight(&repo, 1));
-}
-
-#[test]
-fn user_renamed_mid_flight_returns_true_for_prior_llm_rename() {
-    // A node whose LLM rename already committed is also "renamed";
-    // the guard skips re-renaming in that case too.
-    let repo = MockRepo::with_name("fix-auth-token-refresh");
-    assert!(user_renamed_mid_flight(&repo, 1));
-}
-
-#[test]
-fn user_renamed_mid_flight_returns_false_for_default_name() {
-    // Default adj-adj-noun slugs (e.g. "bold-keen-brook") mean the node
-    // has NOT been renamed, so the LLM rename is allowed to proceed.
-    let repo = MockRepo::with_name("bold-keen-brook");
-    assert!(!user_renamed_mid_flight(&repo, 1));
-}
-
-#[test]
-fn user_renamed_mid_flight_returns_false_on_db_error() {
-    // A transient DB read failure must NOT silently disable the
-    // auto-rename path; err on the side of "user has not renamed" so
-    // the LLM slug still gets a chance to commit.
-    let repo = MockRepo {
-        node_name: String::new(),
-        context: None,
-        should_fail: true,
-        update_should_fail: false,
-        updates: std::sync::Mutex::new(vec![]),
-    };
-    assert!(!user_renamed_mid_flight(&repo, 1));
 }
 
 #[test]
@@ -1252,19 +1413,15 @@ fn naming_backend_env_with_configured_account_forwards_resolve() {
 /// can be an expensive tier like Opus with xhigh effort, and
 /// auto-rename runs frequently on trivial content, so the rename
 /// backend is decoupled from the node's model and lives in Settings.
-/// Brace-counts `on_turn_with`'s body so a regression that routes
-/// through `node.provider` surfaces immediately.
 #[test]
 fn rename_call_site_uses_user_naming_provider_not_node_provider() {
     let source = include_str!("engine.rs");
 
-    // Pull out the body of `fn on_turn_with(..)` by brace-counting so
-    // nested closures don't false-match the closer.
-    let sig = "fn on_turn_with(";
-    let sig_idx = source.find(sig).expect("on_turn_with must exist");
+    let sig = "fn infer_with_configured_backend(";
+    let sig_idx = source.find(sig).expect("the backend resolver must exist");
     let open_rel = source[sig_idx..]
         .find('{')
-        .expect("on_turn_with body must open with `{`");
+        .expect("the backend resolver body must open with `{`");
     let body_start = sig_idx + open_rel + 1;
     let bytes = source.as_bytes();
     let mut depth: usize = 1;
@@ -1277,7 +1434,7 @@ fn rename_call_site_uses_user_naming_provider_not_node_provider() {
         }
         i += 1;
     }
-    assert_eq!(depth, 0, "on_turn_with body must close");
+    assert_eq!(depth, 0, "the backend resolver body must close");
     let body_end = i - 1;
     let body = &source[body_start..body_end];
 
@@ -1302,15 +1459,15 @@ fn rename_call_site_uses_user_naming_provider_not_node_provider() {
     // expensive tier the spawned node is on — the v1 regression
     // that triggered the v2 design pivot.
     assert!(
-        code_only.contains("preferences::naming_provider()"),
-        "on_turn_with must call preferences::naming_provider() (issue \
+        code_only.contains("preferences::naming_provider"),
+        "the backend resolver must call preferences::naming_provider() (issue \
              #824 v2). Reading node.provider here would burn the node's \
              own model — auto-rename is opt-in via Settings, decoupled \
              from the node."
     );
     assert!(
         !code_only.contains("trigger.provider"),
-        "on_turn_with must NOT use the node's provider for routing \
+        "the backend resolver must NOT use the node's provider for routing \
              (issue #824 v2). Rename-backend lives in Settings → Auto-naming."
     );
     assert!(

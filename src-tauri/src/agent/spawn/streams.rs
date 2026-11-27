@@ -154,11 +154,12 @@ pub(super) async fn start_streams(
     // through SessionLifecycle (issue #132) so the `unless_in` predicate
     // lives in one place.
     let sink = session_lifecycle::AppSessionLifecycleSink { app };
-    if let Err(error) = session_lifecycle::on_spawn_started(&sink, session_id) {
-        adapter.on_process_terminated(session_id);
-        return Err(error.to_string());
-    }
+    let started = session_lifecycle::on_spawn_started(&sink, session_id)
+        .inspect_err(|_| adapter.on_process_terminated(session_id))?;
     adapter.on_spawn_activated(session_id);
+    if started && (launch_prompt || resume_attempt) {
+        crate::session_naming::on_activity(session_id, app.clone());
+    }
     let app_for_promotion = app.clone();
     std::thread::spawn(move || {
         // Promote iff the reader hasn't already written Error: to Running
