@@ -859,6 +859,14 @@ afterwards.
 
 ## Saved Spawn Configurations
 
+Native model discovery runs through the selected harness installation. Claude
+Code sends a streaming initialization request without submitting a prompt. The
+Windows Interop wrapper escapes embedded quotes in the probe's JSON arguments
+for Windows PowerShell 5. The editor uses Claude's effort metadata for listed
+models and the harness defaults for inherited or unlisted models. Grok and
+Command Code return model IDs and use the existing harness-wide effort choices.
+Catalog discovery caches successful results and retries after failures.
+
 Reusable initial prompts are independent of Launch Configurations. The desktop
 project Spawn Menu opens `PromptLibrary` inside `CanvasSpawnMenu`; built-ins
 live in `src/lib/promptLibrary.ts`, while user prompts live in the profile's

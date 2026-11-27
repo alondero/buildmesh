@@ -557,6 +557,54 @@ describe('Spawn configuration submenu placement', () => {
     expect(screen.queryByRole('option', { name: 'Custom model...' })).toBeNull();
   });
 
+  it('keeps the saved effort and manual model entry for a model-only catalog', async () => {
+    vi.mocked(api.getLaunchTargets).mockResolvedValue([{ ...target, supports_model_effort_discovery: true }]);
+    vi.mocked(api.getHarnessModelCatalog).mockResolvedValue({
+      harness_id: 'codex', effort_storage: 'undiscovered', allow_unlisted_models: true,
+      models: [{ id: 'gpt-a', name: 'GPT A', efforts: [] }],
+    });
+    vi.mocked(api.listSpawnConfigurations).mockResolvedValue([saved]);
+    vi.mocked(api.listProviders).mockResolvedValue([option, { ...option, id: saved.id, label: saved.name, configuration: saved }]);
+    vi.mocked(api.saveSpawnConfiguration).mockResolvedValue(saved);
+
+    render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit Sol Max' }));
+    await screen.findByRole('option', { name: /GPT A/ });
+
+    expect(screen.getByRole('option', { name: 'Custom model...' })).toBeTruthy();
+    expect((screen.getByLabelText('Effort') as HTMLSelectElement).value).toBe(saved.effort);
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(api.saveSpawnConfiguration).toHaveBeenCalledWith(expect.objectContaining({
+      model: saved.model, effort: saved.effort,
+    })));
+  });
+
+  it.each([null, 'custom-unmatched'])('preserves a saved effort with a Claude catalog and model %s', async (model) => {
+    const configuration: SpawnConfiguration = { ...saved, name: 'Claude recipe', spawn_option_id: 'claude', model, effort: 'high' };
+    const claudeOption: SpawnOption = { ...option, id: 'claude', label: 'Claude Code', harness_id: 'claude', group_key: 'claude' };
+    vi.mocked(api.getLaunchTargets).mockResolvedValue([{ ...claudeTarget, supports_model_effort_discovery: true }]);
+    vi.mocked(api.getHarnessModelCatalog).mockResolvedValue({
+      harness_id: 'anthropic', effort_storage: 'separate', allow_unlisted_models: true,
+      models: [{ id: 'sonnet', name: 'Sonnet', efforts: [{ id: 'low', name: 'low' }] }],
+    });
+    vi.mocked(api.listSpawnConfigurations).mockResolvedValue([configuration]);
+    vi.mocked(api.listProviders).mockResolvedValue([claudeOption, { ...claudeOption, id: saved.id, label: configuration.name, configuration }]);
+    vi.mocked(api.saveSpawnConfiguration).mockResolvedValue(configuration);
+
+    render(<GroupedProviderMenu providers={[claudeOption]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Claude Code configurations', exact: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit Claude recipe' }));
+    await screen.findByRole('option', { name: /Sonnet/ });
+
+    expect((screen.getByLabelText('Effort') as HTMLSelectElement).value).toBe('high');
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Renamed configuration' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(api.saveSpawnConfiguration).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'Renamed configuration', model, effort: 'high',
+    })));
+  });
+
   it('keeps an existing unlisted model as a transitional choice after discovery succeeds', async () => {
     const unmatched: SpawnConfiguration = { ...saved, model: 'custom-unmatched' };
     vi.mocked(api.getLaunchTargets).mockResolvedValue([{ ...target, supports_model_effort_discovery: true }]);

@@ -4,7 +4,7 @@ use crate::agent::launch::{HarnessLaunchInput, SessionIdModeRef};
 use crate::agent::provider::Platform;
 use crate::agent::spawn_environment;
 use crate::env;
-use crate::models::{EnvType, Provider};
+use crate::models::Provider;
 use portable_pty::CommandBuilder;
 
 /// Everything [`build_spawn_command_prepared`] composes the launch from.
@@ -69,13 +69,7 @@ pub(super) fn build_spawn_command_with_adapter(
         resume_cause,
         ..
     } = input;
-    let platform = if resolved.env_type == EnvType::Wsl {
-        Platform::Linux
-    } else if resolved.env_type == EnvType::WindowsInterop {
-        Platform::Windows
-    } else {
-        Platform::current()
-    };
+    let platform = Platform::for_runtime(resolved.env_type);
 
     if let Some(model) = config.model.as_deref() {
         adapter.validate_model_override(model)?;

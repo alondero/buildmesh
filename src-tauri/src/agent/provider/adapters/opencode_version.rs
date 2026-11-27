@@ -106,7 +106,7 @@ fn probe_uncached(executable: &Path, timeout: Duration) -> Option<Version> {
 
 fn run_version_probe(mut command: std::process::Command, timeout: Duration) -> Option<Version> {
     command.env_remove("FORCE_COLOR").env("NO_COLOR", "1");
-    let output = run_private_command(command, "OpenCode version", timeout).ok()?;
+    let output = run_private_command(command, "OpenCode version", timeout, None).ok()?;
     output
         .status
         .success()
@@ -121,15 +121,28 @@ pub(crate) fn run_private_command(
     mut command: std::process::Command,
     label: &str,
     timeout: Duration,
+    input: Option<&'static str>,
 ) -> Result<std::process::Output, String> {
+    use std::io::Write;
     use std::process::Stdio;
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = command
         .spawn()
         .map_err(|e| format!("failed to spawn {label}: {e}"))?;
     let guard = crate::agent::background::BackgroundProcessGuard::new(child.id());
     let stdout = drain(child.stdout.take().expect("piped stdout"));
     let stderr = drain(child.stderr.take().expect("piped stderr"));
+    let stdin = input.map(|input| {
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        std::thread::spawn(move || stdin.write_all(input.as_bytes()))
+    });
     let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
@@ -150,13 +163,20 @@ pub(crate) fn run_private_command(
     // Join both readers after terminating descendants, including on timeout.
     let stdout = stdout.join();
     let stderr = stderr.join();
+    let input_result = stdin.map(std::thread::JoinHandle::join);
+    let status = status?;
+    if let (true, Some(result)) = (status.success(), input_result) {
+        result
+            .map_err(|_| format!("{label} input writer panicked"))?
+            .map_err(|e| format!("{label} input failed: {e}"))?;
+    }
     let read = |result: std::thread::Result<std::io::Result<Vec<u8>>>| {
         result
             .map_err(|_| format!("{label} output reader panicked"))?
             .map_err(|e| format!("{label} output failed: {e}"))
     };
     Ok(std::process::Output {
-        status: status?,
+        status,
         stdout: read(stdout)?,
         stderr: read(stderr)?,
     })

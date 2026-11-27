@@ -304,11 +304,10 @@ See [node review circuits](../development/agent-node-circuits.md).
 | Perch | Closed flag (`--effort`) | `off`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra` |
 | All other harnesses | None | — (the resolver drops the effort layer) |
 
-Claude Code and Grok expose the union of their model-specific effort levels;
-availability depends on the selected model. Codex, OpenCode and
-Antigravity additionally support installation-specific catalogue discovery in
-Launch Configurations; those exact per-model choices replace the static union
-when discovery succeeds and fall back to the ordinary controls when it does not.
+Claude Code, Codex, OpenCode 2 and Antigravity discover per-model effort
+choices in native Launch Configurations. Grok and Command Code discover models
+and keep their harness-wide effort controls. The editor uses the ordinary model
+and effort controls while a probe is pending or if it fails.
 When a Codex configuration pins a Harness Login, discovery runs against that
 login's home; an unpinned configuration uses the runtime default home.
 

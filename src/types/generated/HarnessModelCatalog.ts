@@ -2,4 +2,4 @@
 import type { HarnessCatalogModel } from "./HarnessCatalogModel";
 import type { ModelEffortStorage } from "./ModelEffortStorage";
 
-export type HarnessModelCatalog = { harness_id: string, effort_storage: ModelEffortStorage, models: Array<HarnessCatalogModel>, };
+export type HarnessModelCatalog = { harness_id: string, effort_storage: ModelEffortStorage, allow_unlisted_models?: boolean, models: Array<HarnessCatalogModel>, };

@@ -2,6 +2,9 @@ use super::hook_contract;
 use crate::agent::capabilities::{
     EffortControlKind, PermissionModeOption, CLAUDE_EFFORT_ALLOWED, PERMISSION_MODE_UNATTENDED,
 };
+use crate::agent::model_catalog::{
+    HarnessCatalogEffort, HarnessCatalogModel, ModelCatalogProbe, ModelEffortStorage,
+};
 use crate::agent::provider::{
     claude_direct_recipe, AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta,
 };
@@ -14,6 +17,8 @@ use crate::models::EnvType;
 
 pub struct AnthropicAdapter;
 pub static ANTHROPIC: AnthropicAdapter = AnthropicAdapter;
+
+const CATALOG_REQUEST_ID: &str = "model-catalog";
 
 impl AgentProvider for AnthropicAdapter {
     fn prepare_launch(
@@ -120,6 +125,81 @@ impl AgentProvider for AnthropicAdapter {
 
     fn spawn_recipe(&self, platform: Platform, _env_type: EnvType) -> SpawnRecipe {
         claude_direct_recipe(platform)
+    }
+
+    fn model_catalog_probe(&self) -> Option<ModelCatalogProbe> {
+        Some(ModelCatalogProbe {
+            binary: None,
+            args: [
+                "--print",
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--no-session-persistence",
+                "--setting-sources",
+                "user",
+                "--tools=",
+                "--strict-mcp-config",
+                "--mcp-config",
+                r#"{"mcpServers":{}}"#,
+                "--settings",
+                r#"{"disableAllHooks":true}"#,
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            stdin: Some(concat!(
+                r#"{"type":"control_request","request_id":"model-catalog","request":{"subtype":"initialize"}}"#,
+                "\n"
+            )),
+            effort_storage: ModelEffortStorage::Separate,
+            allow_unlisted_models: true,
+            login_home_env: None,
+            env_remove: crate::agent::provider::CLAUDE_BACKEND_ENV_VARS,
+        })
+    }
+
+    fn parse_model_catalog(&self, stdout: &str) -> Result<Vec<HarnessCatalogModel>, String> {
+        let models = stdout
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|event| {
+                event["type"] == "control_response"
+                    && event["response"]["request_id"] == CATALOG_REQUEST_ID
+                    && event["response"]["subtype"] == "success"
+            })
+            .ok_or("Claude Code returned no model catalog response")?;
+        let models = models["response"]["response"]["models"]
+            .as_array()
+            .ok_or("Claude Code model catalog has no models array")?;
+        Ok(models
+            .iter()
+            .filter_map(|model| {
+                let id = model["value"]
+                    .as_str()
+                    .filter(|id| !id.is_empty() && *id != "default")?;
+                let efforts = model["supportedEffortLevels"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|level| level.as_str())
+                    .filter(|level| CLAUDE_EFFORT_ALLOWED.contains(level))
+                    .map(|level| HarnessCatalogEffort {
+                        id: level.into(),
+                        name: level.into(),
+                        description: None,
+                        model: None,
+                    })
+                    .collect();
+                Some(HarnessCatalogModel {
+                    id: id.into(),
+                    name: model["displayName"].as_str().unwrap_or(id).into(),
+                    description: model["description"].as_str().map(str::to_owned),
+                    efforts,
+                })
+            })
+            .collect())
     }
 
     fn background_recipe(

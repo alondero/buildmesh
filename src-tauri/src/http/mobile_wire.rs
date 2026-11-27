@@ -461,6 +461,7 @@ fn fixtures() -> Vec<Fixture> {
             &crate::agent::model_catalog::HarnessModelCatalog {
                 harness_id: "agy".to_string(),
                 effort_storage: crate::agent::model_catalog::ModelEffortStorage::EncodedInModel,
+                allow_unlisted_models: None,
                 models: vec![crate::agent::model_catalog::HarnessCatalogModel {
                     id: "gemini-4-neon-high".to_string(),
                     name: "Gemini 4 Neon".to_string(),

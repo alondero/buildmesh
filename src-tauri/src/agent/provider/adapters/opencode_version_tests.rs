@@ -42,11 +42,26 @@ fn private_commands_drain_large_stdout_and_stderr_before_exit() {
         fixture_command(&executable),
         "large reply",
         Duration::from_secs(5),
+        None,
     )
     .unwrap();
     assert!(output.status.success());
     assert_eq!(output.stdout, vec![b'x'; 1048576]);
     assert_eq!(output.stderr, vec![b'y'; 1048576]);
+}
+
+#[test]
+fn private_commands_deliver_input_and_close_stdin() {
+    let (_dir, executable) = fixture("process.stdin.pipe(process.stdout);");
+    let output = run_private_command(
+        fixture_command(&executable),
+        "stream initialization",
+        Duration::from_secs(5),
+        Some("initialize\n"),
+    )
+    .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"initialize\n");
 }
 
 #[test]

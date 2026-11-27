@@ -21,6 +21,35 @@ fn claude_launch_target_exposes_every_supported_effort_level() {
     let claude = targets.iter().find(|target| target.id == "claude").unwrap();
 
     assert_eq!(claude.efforts, ["low", "medium", "high", "xhigh", "max"]);
+    assert!(claude.supports_model_effort_discovery);
+}
+
+#[test]
+fn launch_targets_only_advertise_catalogs_for_admitted_opencode_installations() {
+    use crate::agent::detection;
+    let previous = detection::detection_snapshot();
+    detection::observe_installations(["opencode2".into()].into_iter().collect());
+    let profiles = ["opencode", "opencode2"].map(|id| super::super::HarnessProfile {
+        id: id.into(),
+        name: "OpenCode".into(),
+        harness: id.into(),
+        runtime: None,
+        wsl_distro: None,
+        executable: None,
+    });
+    let installed = detection::currently_installed_profiles(profiles.to_vec());
+    let targets = targets_for(&Default::default(), profiles.to_vec());
+    detection::restore_detection_state(&previous);
+
+    assert_eq!(
+        installed
+            .iter()
+            .map(|profile| profile.id.as_str())
+            .collect::<Vec<_>>(),
+        ["opencode2"]
+    );
+    assert!(!targets[0].supports_model_effort_discovery);
+    assert!(targets[1].supports_model_effort_discovery);
 }
 
 #[test]

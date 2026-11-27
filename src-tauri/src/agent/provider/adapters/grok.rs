@@ -59,6 +59,7 @@ use crate::agent::attention_hooks::{
     HookProvisioningSpec, JsonHookShape, Ownership,
 };
 use crate::agent::capabilities::{EffortControlKind, GROK_EFFORT_ALLOWED};
+use crate::agent::model_catalog::{HarnessCatalogModel, ModelCatalogProbe, ModelEffortStorage};
 use crate::agent::provider::{
     AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta, WindowsShell,
 };
@@ -332,6 +333,31 @@ impl AgentProvider for GrokAdapter {
 
     fn paste_requires_cr_newlines(&self) -> bool {
         true
+    }
+
+    fn model_catalog_probe(&self) -> Option<ModelCatalogProbe> {
+        Some(ModelCatalogProbe {
+            binary: None,
+            args: vec!["models".into()],
+            stdin: None,
+            effort_storage: ModelEffortStorage::Undiscovered,
+            allow_unlisted_models: true,
+            login_home_env: None,
+            env_remove: &[],
+        })
+    }
+
+    fn parse_model_catalog(&self, stdout: &str) -> Result<Vec<HarnessCatalogModel>, String> {
+        let rows = stdout
+            .lines()
+            .map(str::trim)
+            .skip_while(|line| *line != "Available models:")
+            .skip(1)
+            .map_while(|line| line.strip_prefix("* "))
+            .filter_map(|line| line.split_whitespace().next());
+        Ok(crate::agent::model_catalog::models_without_effort(
+            rows.map(|id| (id, None)),
+        ))
     }
 
     fn background_recipe(
