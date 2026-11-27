@@ -471,9 +471,10 @@ issue-driven review flow run the same loop:
    For issue-driven PRs, Buildmesh checks that the commit in the verdict matches
    the current pushed PR head and the reviewer's clean, assigned worktree. If that
    check fails, review the current head and use **Check again**.
-   When two consecutive rounds each find a different new actionable issue in the
-   same behavior or interface, the reviewer is asked to pause for a decision and
-   provide the latest findings, the fix history, and a proposed case table.
+   Reviewers request changes for concrete fixes or verification the implementation
+   agent can supply. When related findings recur, the reviewer groups the fixes
+   and expected outcomes into one request. A **Blocked** verdict asks for a
+   decision on product behavior or identifies a missing review target.
 3. On approval the reviewer is closed and the implementation agent is asked to
    squash and merge the pull request. It marks a draft ready, rebases its
    branch onto the base branch the pull request targets, resolves the merge

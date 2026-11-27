@@ -7,13 +7,21 @@ use crate::circuit::lineage::RunLineage;
 
 const REVIEW: &str = "BUILDMESH_REVIEW_V1: ";
 const HANDOFF: &str = "BUILDMESH_HANDOFF_V1: ";
-const REVIEW_PROMPT: &str = "Circuit result contract: finish your final review report with exactly one plain-text line: BUILDMESH_REVIEW_V1: APPROVE or BUILDMESH_REVIEW_V1: REQUEST_CHANGES or BUILDMESH_REVIEW_V1: BLOCKED (choose one). APPROVE means no actionable findings remain; REQUEST_CHANGES means actionable findings remain; BLOCKED means you cannot finish the review without help. Put findings, reviewed revision, and verification before that line. Do not quote or repeat the result line in examples, code blocks, or progress updates. Emit it only after your review and all delegated/background work have finished, or you are blocked on a person. Review completion is not approval.";
+const REVIEW_PROMPT: &str = "Circuit result contract: finish your final review report with exactly one plain-text line: \
+    BUILDMESH_REVIEW_V1: APPROVE or BUILDMESH_REVIEW_V1: REQUEST_CHANGES or BUILDMESH_REVIEW_V1: BLOCKED (choose one).\n\
+    Choose REQUEST_CHANGES when the implementer has a concrete next step, including a correction or missing verification the implementer can supply. \
+    State the expected behavior and the fix or evidence needed. When successive rounds surface related findings, consolidate the fixes and expected cases into one request.\n\
+    Choose BLOCKED only when a person must choose between materially different product behaviors before the implementer can proceed and the available spec and evidence cannot resolve the choice, \
+    or when there is no reviewable change at the assigned target after ordinary checks. State the specific decision or missing review target.\n\
+    Choose APPROVE when you have reviewed the assigned change and no actionable findings remain. \
+    Choose the verdict from the current round. Treat earlier reports, verdicts, and fix reports as review history.\n\
+    Put findings, reviewed revision, and verification before the result line. Do not quote or repeat the result line in examples, code blocks, or progress updates. \
+    Emit it once your review and all delegated/background work have finished or you have established a BLOCKED reason.";
 const HANDOFF_PROMPT: &str = "Circuit result contract: finish your final fixes report with exactly one plain-text line: BUILDMESH_HANDOFF_V1: READY or BUILDMESH_HANDOFF_V1: BLOCKED (choose one). READY means this fix round and all delegated/background work have finished and are ready for independent review; it does not mean approved. BLOCKED means you need a person to proceed. Explain changes, verification, disagreements or blockers before that line. Do not quote or repeat the result line in examples, code blocks, or progress updates.";
 const PUBLISH_PROMPT: &str = "Circuit result contract: finish your final publication report with exactly one plain-text line: BUILDMESH_HANDOFF_V1: READY or BUILDMESH_HANDOFF_V1: BLOCKED (choose one). READY means your work is committed and pushed and has an open pull request, ready for independent review; it does not mean approved. BLOCKED means you need a person to proceed. Give the pull request URL or the blocker before that line. Do not quote or repeat the result line in examples, code blocks, or progress updates.";
 const ISSUE_HANDOFF_PROMPT: &str = "Circuit result contract: finish your final report for this assigned phase (implementation, wrap-up/publication, or review fixes) with exactly one plain-text line: BUILDMESH_HANDOFF_V1: READY or BUILDMESH_HANDOFF_V1: BLOCKED (choose one). READY means all instructions for this phase and all delegated/background work have finished; the next circuit gate may proceed. It does not mean independently reviewed or approved. BLOCKED means you need a person to proceed. Explain changes, verification and any blockers before that line. Do not quote or repeat the result line in examples, code blocks, or progress updates. Emit it only in the final report.";
 
 const REVIEWED_COMMIT: &str = "Reviewed commit: ";
-const REVIEW_ESCALATION: &str = "Track new actionable findings by the affected behavior or interface contract across rounds. Use the previous report and fix history to identify new findings, consulting earlier review reports and PR comments when available. When two consecutive rounds each surface a distinct new actionable finding in the same contract, stop the automatic repair loop and ask for a human decision. An unresolved finding repeated across rounds does not count as new. Include the latest review findings, the fixes attempted and their outcomes by round, and a proposed case table with inputs or states and expected outcomes. End with the BLOCKED result below.";
 const PR_METADATA_CHECK: &str = "Before publishing or handing the PR back for review, compare its title and description with the full change against its target base and the verification you actually ran. Check the proposed text before opening a new PR. For an existing PR, read the current title and body and update any stale text, preserving applicable issue links. Verify the published title and description on GitHub before reporting READY.";
 
 fn is_review(view: &RunView, node_id: &str) -> bool {
@@ -85,11 +93,11 @@ pub(super) fn prompt(view: &RunView, node_id: &str, prompt: &str) -> String {
                 "\n\nReview the current pushed head of {pr_url} in this reviewer node's assigned worktree. \
                  Read the full head SHA and target base from GitHub (`gh pr view <PR> --json headRefOid,baseRefName`). \
                  Start with a clean worktree (`git status --porcelain`), fetch the PR head from its base repository \
-                 (`git fetch origin refs/pull/<number>/head`). Keep the dedicated reviewer branch checked out and move it to the exact SHA (`git reset --keep <SHA>`). \
-                 If the branch contains reviewer-authored commits or is shared, report BLOCKED before moving it. Leave it local. \
+                 (`git fetch origin refs/pull/<number>/head`). Keep the dedicated reviewer branch checked out and move it to the exact SHA (`git reset --keep <SHA>`) \
+                 only if it is unshared and contains no reviewer-authored commits. Leave it local. \
                  Verify HEAD matches the GitHub SHA and the worktree is clean, then review that commit's full diff from its merge base with the fetched target branch. \
                  Recheck those facts before posting the verdict. If the head moved, start the review again at the new head. \
-                 If the assigned worktree is dirty or you cannot establish the exact pushed head, report BLOCKED. \
+                 If you cannot safely establish the exact pushed head in the assigned worktree, explain what makes the review target unavailable. \
                  For a completed review, begin your final report and PR verdict with `{REVIEWED_COMMIT}<full SHA>`."
             ));
         }
@@ -122,8 +130,6 @@ pub(super) fn prompt(view: &RunView, node_id: &str, prompt: &str) -> String {
                     dispatched.push_str(report);
                 }
             }
-            dispatched.push_str("\n\n");
-            dispatched.push_str(REVIEW_ESCALATION);
         }
     } else if suffix == PUBLISH_PROMPT
         || suffix == HANDOFF_PROMPT
