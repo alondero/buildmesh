@@ -93,7 +93,25 @@ fn pr_review_requires_report_remote_and_clean_checkout_to_agree() {
 }
 
 #[test]
-fn built_in_pr_handoffs_check_metadata_and_rereview_requests_escalation_evidence() {
+fn built_in_review_handoffs_check_metadata_and_use_current_findings_for_verdict() {
+    let assert_unavailable_pr_guidance = |prompt: &str| {
+        assert!(prompt.contains(
+            "If the assigned worktree is dirty or you cannot safely establish the exact pushed head there, report BLOCKED"
+        ));
+        assert!(prompt.contains("only if it is unshared and contains no reviewer-authored commits"));
+    };
+    let assert_verdict_guidance = |prompt: &str| {
+        assert!(!prompt.contains("End with the BLOCKED result below"));
+        assert!(prompt.contains("REQUEST_CHANGES when the implementer has a concrete next step"));
+        assert!(prompt.contains("missing verification the implementer can supply"));
+        assert!(prompt.contains("consolidate the fixes and expected cases into one request"));
+        assert!(prompt.contains("BLOCKED only when a person must choose"));
+        assert!(prompt.contains("no reviewable change at the assigned target"));
+        assert!(prompt.contains("including when its required revision cannot be safely established"));
+        assert!(prompt.contains("Inspect the assigned worktree directly"));
+        assert!(prompt.contains("APPROVE when you have reviewed the assigned change"));
+        assert!(prompt.contains("Choose the verdict from the current round"));
+    };
     let mut view = report_gate_view();
     view.context.set("pr.url", "https://github.com/example/buildmesh/pull/1");
     view.context.set("node.implementer.output", "Fixed the empty input case");
@@ -109,9 +127,8 @@ fn built_in_pr_handoffs_check_metadata_and_rereview_requests_escalation_evidence
         assert!(prompt.contains("assigned worktree"));
         assert!(prompt.contains("Keep the dedicated reviewer branch checked out"));
         assert!(prompt.contains("Reviewed commit: <full SHA>"));
-        assert!(prompt.contains("two consecutive rounds"));
-        assert!(prompt.contains("fixes attempted and their outcomes by round"));
-        assert!(prompt.contains("case table"));
+        assert_unavailable_pr_guidance(prompt);
+        assert_verdict_guidance(prompt);
     }
     assert!(next.contains("Fixed the empty input case"));
 
@@ -124,19 +141,24 @@ fn built_in_pr_handoffs_check_metadata_and_rereview_requests_escalation_evidence
             "{role}"
         );
     }
-    let next = report_contract::prompt(&view, "re_review", "Review again");
-    assert!(next.contains("two consecutive rounds"));
-    assert!(!next.contains("headRefOid"));
+    for role in ["reviewer", "re_review"] {
+        let prompt = report_contract::prompt(&view, role, "Review the local change");
+        assert_verdict_guidance(&prompt);
+        assert!(!prompt.contains("headRefOid"));
+    }
 
     view.context.set("source.review_preset", "0");
     view.context.set("review.extended", "1");
     view.context.set("review.source_was_circuit_owned", "1");
-    view.context.set("review.previous_report", "A finding from the preceding round");
+    let previous_report = "A finding from the preceding round\n\nBUILDMESH_REVIEW_V1: BLOCKED";
+    view.context.set("review.previous_report", previous_report);
     view.context.set("source.output", "Fixed the preceding finding");
     let restarted = report_contract::prompt(&view, "reviewer", "Review the continued PR");
     assert!(restarted.contains("headRefOid"));
-    assert!(restarted.contains("A finding from the preceding round"));
+    assert_unavailable_pr_guidance(&restarted);
+    assert!(restarted.contains(previous_report));
     assert!(restarted.contains("Fixed the preceding finding"));
+    assert_verdict_guidance(&restarted);
     assert!(report_contract::prompt(&view, "feedback", "Fix findings")
         .contains("compare its title and description"));
     assert!(report_contract::verify_pr_review_report(
