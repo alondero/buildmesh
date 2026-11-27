@@ -31,7 +31,9 @@ fn with_file(json: &str) -> FakeLookup {
 }
 
 fn loopback_url(port: u16) -> String {
-    format!("http://127.0.0.1:{port}/oauth/usage")
+    static NEXT_PATH: AtomicUsize = AtomicUsize::new(0);
+    let path = NEXT_PATH.fetch_add(1, Ordering::SeqCst);
+    format!("http://127.0.0.1:{port}/test{path}/oauth/usage")
 }
 
 #[test]
@@ -73,6 +75,91 @@ fn consumer_oauth_fetch_keeps_windows() {
 
     assert_eq!(hits.load(Ordering::SeqCst), 2);
     assert!(!format!("{outcome:?}").contains("sk-ant-"));
+}
+
+#[test]
+fn repeat_refresh_reuses_the_profile_scope_result() {
+    let usage_hits = Arc::new(AtomicUsize::new(0));
+    let profile_hits = Arc::new(AtomicUsize::new(0));
+    let usage_hits_thread = Arc::clone(&usage_hits);
+    let profile_hits_thread = Arc::clone(&profile_hits);
+    let port = spawn_loopback(3, move |request| {
+        if request.url().to_string().contains("/profile") {
+            profile_hits_thread.fetch_add(1, Ordering::SeqCst);
+            let _ = request.respond(tiny_http::Response::from_string("{}").with_status_code(200));
+        } else {
+            usage_hits_thread.fetch_add(1, Ordering::SeqCst);
+            let _ = request
+                .respond(tiny_http::Response::from_string(CONSUMER_BODY).with_status_code(200));
+        }
+    });
+
+    let usage_url = loopback_url(port);
+    for _ in 0..2 {
+        let outcome = anthropic_usage_with(&with_file(OAUTH_JSON), &usage_url);
+        assert!(matches!(outcome, UsageOutcome::Reading { .. }));
+    }
+
+    assert_eq!(usage_hits.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        profile_hits.load(Ordering::SeqCst),
+        1,
+        "the token's profile-scope result must be reused rather than probed on every refresh"
+    );
+}
+
+#[test]
+fn rotated_tokens_do_not_reuse_the_profile_scope_result() {
+    let usage_hits = Arc::new(AtomicUsize::new(0));
+    let profile_hits = Arc::new(AtomicUsize::new(0));
+    let usage_hits_thread = Arc::clone(&usage_hits);
+    let profile_hits_thread = Arc::clone(&profile_hits);
+    let port = spawn_loopback(4, move |request| {
+        if request.url().to_string().contains("/profile") {
+            profile_hits_thread.fetch_add(1, Ordering::SeqCst);
+            let auth = request
+                .headers()
+                .iter()
+                .find(|header| header.field.equiv("Authorization"))
+                .map(|header| header.value.as_str().to_string())
+                .unwrap_or_default();
+            if auth == "Bearer sk-ant-oat01-rotated" {
+                let _ = request.respond(
+                    tiny_http::Response::from_string(
+                        r#"{"type":"error","error":{"type":"permission_error","message":"OAuth token does not meet scope requirement user:profile"}}"#,
+                    )
+                    .with_status_code(403),
+                );
+            } else {
+                let _ =
+                    request.respond(tiny_http::Response::from_string("{}").with_status_code(200));
+            }
+        } else {
+            usage_hits_thread.fetch_add(1, Ordering::SeqCst);
+            let _ = request
+                .respond(tiny_http::Response::from_string(CONSUMER_BODY).with_status_code(200));
+        }
+    });
+
+    let usage_url = loopback_url(port);
+    let first = anthropic_usage_with(&with_file(OAUTH_JSON), &usage_url);
+    assert!(matches!(first, UsageOutcome::Reading { detail: None, .. }));
+
+    let rotated_json = OAUTH_JSON.replace("sk-ant-oat01-secret", "sk-ant-oat01-rotated");
+    let second = anthropic_usage_with(&with_file(&rotated_json), &usage_url);
+    match second {
+        UsageOutcome::Reading {
+            detail: Some(detail),
+            ..
+        } => assert!(
+            detail.contains("user:profile"),
+            "rotated token must use its own profile-scope result; detail={detail:?}"
+        ),
+        other => panic!("expected scope-limited Reading outcome, got: {other:?}"),
+    }
+
+    assert_eq!(usage_hits.load(Ordering::SeqCst), 2);
+    assert_eq!(profile_hits.load(Ordering::SeqCst), 2);
 }
 
 #[test]

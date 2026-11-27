@@ -285,7 +285,11 @@ Keychain service `Claude Code-credentials`, suffixed from `CLAUDE_CONFIG_DIR`,
 with `.credentials.json` as fallback when Keychain is missing or unusable) and
 queries `GET /api/oauth/usage` directly — never by spawning the Claude CLI.
 Consumer plans keep five-hour and seven-day windows; Enterprise prefers the
-`spend` object and falls back to `extra_usage`.
+`spend` object and falls back to `extra_usage`. A successful `/usage` answer
+still evaluates the `/profile` scope signal, but a conclusive profile response
+(2xx or the explicit scope 403) is memoized for the process lifetime against a
+digest of endpoint plus token. Rotated tokens probe again; transient errors and
+non-scope auth failures are not memoized.
 
 **The Spawn Menu is where harness↔provider pairings live.** Its backend list
 contains one Spawn Option per **stored** `(harness, provider)` pairing as the
