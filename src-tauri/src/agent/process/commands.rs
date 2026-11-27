@@ -164,6 +164,9 @@ pub(crate) fn commit_submitted_input(
         Err(_) => (false, false),
     };
     let committed = lifecycle::on_user_submitted(sink, session_id)?;
+    if let (Some(_), Some(app)) = (&committed, crate::http::state::app_handle()) {
+        crate::session_naming::on_activity(session_id, app.clone());
+    }
     if let Some(submitted) = committed.clone().filter(|_| awaits_confirmation) {
         std::thread::spawn(move || {
             std::thread::sleep(lifecycle::SUBMIT_CONFIRM_WINDOW);

@@ -38,10 +38,9 @@ Claude command resolution preserves PATH lookup and Windows native/npm install
 fallbacks for both binary spellings, unless an executable override is supplied.
 Extra CLI arguments are rejected because they can change this protocol;
 provider routes require explicit support from the background recipe. Adding a
-runner belongs in its adapter, without an orchestration allow-list. Naming
-preflight failures release in-flight ownership without consuming an inference
-attempt or discarding the buffer, so repaired settings can retry on a later turn.
-`session_naming.rs` captures PTY output and auto-names agent nodes via LLM summarisation (slug-based, e.g. `fix-auth-flow`). Buffering is gated: `on_output` only starts collecting after the first `on_turn` (first idle-prompt webhook) fires, so the Claude Code startup chrome — banner, "Bypass Permissions" warning, plugin/skill listing — is discarded before it can reach the LLM. The rename runs async one turn later, against clean post-startup content.
+runner belongs in its adapter, without an orchestration allow-list. See
+[Node naming](attention.md#turn-counting-and-node-naming) for eligibility,
+native dialogue sources, and retries.
 
 ### Optimistic mutation authority (issue #2325)
 

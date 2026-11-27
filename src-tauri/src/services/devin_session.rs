@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 use crate::models::EnvType;
 
@@ -10,6 +10,29 @@ pub const CAPTURE_SKEW_MS: i64 = 2_000;
 pub const RETRY_DELAYS_MS: &[u64] = &[400, 800, 1_600, 2_500, 4_000];
 
 const MAX_SLUG_LEN: usize = 128;
+
+pub(crate) fn first_user_request(
+    path: &Path,
+    session_id: &str,
+) -> rusqlite::Result<Option<String>> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.busy_timeout(Duration::from_millis(100))?;
+    let preview_chars = super::transcript_reader::types::MAX_TURN_TEXT as i64 + 1;
+    conn.query_row(
+        "SELECT substr(json_extract(chat_message, '$.content'), 1, ?2)
+         FROM message_nodes
+         WHERE session_id = ?1 AND CASE WHEN json_valid(chat_message) THEN
+           json_extract(chat_message, '$.role') = 'user'
+           AND json_extract(chat_message, '$.metadata.is_user_input') = 1
+           AND json_type(chat_message, '$.content') = 'text'
+           AND trim(json_extract(chat_message, '$.content'), char(9, 10, 13, 32)) <> ''
+         ELSE 0 END
+         ORDER BY node_id LIMIT 1",
+        rusqlite::params![session_id, preview_chars],
+        |row| row.get(0),
+    )
+    .optional()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListedSession {

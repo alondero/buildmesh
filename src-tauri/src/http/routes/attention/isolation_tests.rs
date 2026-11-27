@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 struct NodeFixture {
     state: HookState,
     sink: RecordingSink,
-    turns: usize,
+    naming_activity: Vec<LifecycleKind>,
 }
 
 impl NodeFixture {
@@ -18,7 +18,7 @@ impl NodeFixture {
         Self {
             state: HookState::default(),
             sink: RecordingSink::with_status(SessionStatus::Running),
-            turns: 0,
+            naming_activity: Vec::new(),
         }
     }
 
@@ -27,7 +27,7 @@ impl NodeFixture {
         let permission_pending = normalized.classified.decision == Decision::CodexToolResult
             && self.state.has_permission_requests();
         let sink = &self.sink;
-        let turns = &mut self.turns;
+        let naming_activity = &mut self.naming_activity;
         apply_hook_after_turn_fence(
             node_id,
             &mut self.state,
@@ -49,7 +49,7 @@ impl NodeFixture {
                     node_id,
                     kind,
                     &normalized.classified.detail,
-                    || *turns += 1,
+                    || naming_activity.push(kind),
                 );
                 Ok(Applied::Applied)
             },
@@ -96,8 +96,13 @@ fn malformed_codex_callback_cannot_stall_claude_completion() {
         LifecycleKind::TurnCompleted
     );
     assert_eq!(
-        claude.turns, 2,
-        "permission and completion each fan out after a lifecycle commit"
+        claude.naming_activity,
+        [
+            LifecycleKind::WorkResumed,
+            LifecycleKind::PermissionRequested,
+            LifecycleKind::WorkResumed,
+            LifecycleKind::TurnCompleted,
+        ],
     );
     codex.apply(-187902, "codex", json!({"hook_event_name":"Stop"}));
     assert_eq!(
