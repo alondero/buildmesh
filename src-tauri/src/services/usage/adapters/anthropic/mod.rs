@@ -11,6 +11,7 @@ use crate::preferences::ProviderAccount;
 use crate::services::usage::adapter::{shared_client, UsageAdapter, UsageIdentityFingerprint};
 use crate::services::usage::outcome::UsageOutcome;
 use crate::services::usage::types::UsagePage;
+use std::collections::HashMap;
 
 use auth::{
     active_user_oauth, anthropic_config_dir_for, cache_identity_from, resolve_claude_auth,
@@ -26,6 +27,16 @@ const PLAN_SCOPE_DETAIL_ENV: &str = "Plan unavailable — token lacks user:profi
 /// Claude Code `/login` store tokens that predate the scope.
 const PLAN_SCOPE_DETAIL_RELOGIN: &str =
     "Plan unavailable — OAuth token lacks user:profile scope; run /login to refresh credentials";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProfileScopeProbe {
+    Limited,
+    Available,
+}
+
+static PROFILE_SCOPE_PROBES: once_cell::sync::Lazy<
+    std::sync::Mutex<HashMap<UsageIdentityFingerprint, ProfileScopeProbe>>,
+> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
 
 fn scope_limitation_detail(origin: &OauthOrigin) -> String {
     match origin {
@@ -184,13 +195,6 @@ fn fetch_oauth_usage(
             let fallback_reset = overage_reset_header(&response);
             match parse_anthropic_usage(&response.text().unwrap_or_default(), fallback_reset) {
                 Ok(parsed) => {
-                    // Always probe /oauth/profile, even when /usage succeeded:
-                    // a token may lack `user:profile` while still returning a
-                    // 200 from /usage with whatever default data Anthropic
-                    // chooses to surface. The profile endpoint catches the
-                    // missing scope precisely via 403 + scope body. Performance
-                    // is one extra HTTP round-trip per meter refresh — the
-                    // trade was made deliberately in #1689 / #1694.
                     let detail = if oauth_profile_scope_failure(&client, profile_url, token) {
                         Some(scope_limitation_detail(&origin))
                     } else {
@@ -239,6 +243,13 @@ fn oauth_profile_scope_failure(
     profile_url: &str,
     token: &str,
 ) -> bool {
+    let identity_material = format!("{profile_url}\0{token}");
+    let identity =
+        UsageIdentityFingerprint::new("anthropic_profile_scope", identity_material.as_bytes());
+    if let Some(probe) = PROFILE_SCOPE_PROBES.lock().unwrap().get(&identity) {
+        return *probe == ProfileScopeProbe::Limited;
+    }
+
     let response = match client
         .get(profile_url)
         .header("Authorization", format!("Bearer {token}"))
@@ -248,11 +259,25 @@ fn oauth_profile_scope_failure(
         Ok(response) => response,
         Err(_) => return false,
     };
+    if response.status().is_success() {
+        PROFILE_SCOPE_PROBES
+            .lock()
+            .unwrap()
+            .insert(identity, ProfileScopeProbe::Available);
+        return false;
+    }
     if response.status().as_u16() != 403 {
         return false;
     }
     let body = response.text().unwrap_or_default();
-    is_oauth_scope_failure(403, &body)
+    let limited = is_oauth_scope_failure(403, &body);
+    if limited {
+        PROFILE_SCOPE_PROBES
+            .lock()
+            .unwrap()
+            .insert(identity, ProfileScopeProbe::Limited);
+    }
+    limited
 }
 
 /// Distinguish expired/revoked credentials from missing `user:profile` scope.

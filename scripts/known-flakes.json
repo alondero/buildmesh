@@ -1,5 +1,9 @@
 {
   "db::tests::reader_pool_reads_while_writer_transaction_is_active": 2868,
   "db::tests::reader_pool_serves_a_second_reader_while_the_first_is_checked_out": 2868,
-  "tests/integration/tauri-mock-settings.test.ts > renders Settings and prompt defaults in Chromium with the default mock IPC": 2876
+  "tests/integration/tauri-mock-settings.test.ts > renders Settings and prompt defaults in Chromium with the default mock IPC": 2876,
+  "agent::provider::adapters::mcode::tests::attention_invocation_reaches_every_live_instance": 2628,
+  "git::fetch_failure::tests::the_detected_default_branch_comes_from_the_remote": 2628,
+  "git::fetch_failure::tests::the_permanent_failure_pauses_the_mesh_and_offers_the_default_branch": 2628,
+  "git::worktree::tests::run_bounded_git_surfaces_a_hung_command_as_a_named_err": 2628
 }
