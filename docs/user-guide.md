@@ -1108,7 +1108,8 @@ any unsaved prompt edits for this retry.
 Use **Settings → Launch Configurations** to name the recipes you launch (the
 list is collapsed; open it with **Show launch configurations**). Choose
 a harness, native authentication or a provider, then a model and supported
-effort. Known providers supply catalogue choices; generic
+effort. Open **Model** and type in **Search models** to filter catalogue choices by
+name or model ID. Use the arrow keys and Enter to pick a result. Generic
 providers retain manual model entry. The same editor opens from **New configuration**
 in a harness's spawn submenu. Add credentials in **Providers** first: enabled,
 keyed providers can be selected even before a pairing exists. New pairings collect

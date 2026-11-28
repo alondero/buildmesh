@@ -9,6 +9,11 @@ import type { SpawnConfiguration } from '../../src/types/generated/SpawnConfigur
 const targets: LaunchTarget[] = [{ id: 'claude:minimax', harness_id: 'claude', harness_name: 'Claude Code', provider_name: 'MiniMax', models: [{ id: 'MiniMax-M3', name: 'MiniMax M3', surface: 'anthropic', efforts: [] }], efforts: ['low', 'high'], route_attached: false, manual_model: false, supports_model: true, supports_model_effort_discovery: false, supports_extra_args: true, supports_agent: false }];
 const route: ProviderPairing = { harness_id: 'claude', provider_id: 'minimax', surface: 'anthropic', base_url: 'https://api.minimax.io/anthropic', model_tiers: { default: 'MiniMax-M3', opus: null, fable: null, sonnet: null, haiku: null, small_fast: null } };
 
+function selectModel(name: string) {
+  fireEvent.click(screen.getByRole('button', { name: 'Model', exact: true }));
+  fireEvent.click(screen.getByRole('option', { name }));
+}
+
 describe('Launch Configuration editor', () => {
   it('saves and reopens a MiniMax Code session model reference', async () => {
     const target: LaunchTarget = {
@@ -109,7 +114,7 @@ describe('Launch Configuration editor', () => {
     await act(async () => { finishSave(); });
     expect(screen.getAllByRole('status')).toHaveLength(1);
     expect(status.textContent).toContain('Verified MiniMax-M3');
-    fireEvent.change(screen.getByLabelText('Model'), { target: { value: '__custom__' } });
+    selectModel('Custom model...');
     fireEvent.change(screen.getByLabelText('Custom model'), { target: { value: 'new-model' } });
     expect(screen.getByRole('status').textContent).toContain('verify again');
   });
@@ -175,7 +180,7 @@ describe('Launch Configuration editor', () => {
     const save = vi.fn().mockResolvedValue(undefined);
     render(<LaunchConfigurationEditor value={{ id: '', name: '', spawn_option_id: 'claude:minimax', model: null, effort: null, extra_args: null }} targets={targets} onSave={save} onCancel={() => {}} />);
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Fast review' } });
-    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'MiniMax-M3' } });
+    selectModel('MiniMax M3 (MiniMax-M3)');
     expect(screen.queryByLabelText('Effort')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ name: 'Fast review', model: 'MiniMax-M3', effort: null }), undefined, expect.any(Function)));
@@ -214,7 +219,7 @@ describe('Launch Configuration editor', () => {
     render(<LaunchConfigurationEditor value={{ id: '', name: 'Custom', spawn_option_id: targets[0].id, model: null, effort: null, extra_args: null }}
       targets={targets} onSave={vi.fn()} onCancel={vi.fn()} />);
     const toggle = screen.getByRole('button', { name: 'Advanced options' });
-    fireEvent.change(screen.getByLabelText('Model'), { target: { value: '__custom__' } });
+    selectModel('Custom model...');
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
     const custom = screen.getByLabelText('Custom model') as HTMLInputElement;
     expect(custom.required).toBe(true);
@@ -228,7 +233,7 @@ describe('Launch Configuration editor', () => {
     expect(region.hasAttribute('hidden')).toBe(false);
 
     // Choosing a listed model releases the disclosure.
-    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'MiniMax-M3' } });
+    selectModel('MiniMax M3 (MiniMax-M3)');
     fireEvent.click(toggle);
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
   });
@@ -253,7 +258,7 @@ describe('Launch Configuration editor', () => {
     render(<LaunchConfigurationEditor value={{ id: '', name: 'Switch', spawn_option_id: targets[0].id, model: null, effort: null, extra_args: null }}
       targets={[targets[0], other]} onSave={vi.fn()} onCancel={vi.fn()} />);
     const toggle = screen.getByRole('button', { name: 'Advanced options' });
-    fireEvent.change(screen.getByLabelText('Model'), { target: { value: '__custom__' } });
+    selectModel('Custom model...');
     fireEvent.click(toggle);
     expect(screen.getByRole('alert').textContent).toContain('custom model is required');
 
@@ -293,6 +298,7 @@ describe('Launch Configuration editor', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Edit Native' }));
 
     await waitFor(() => expect(modelCatalog).toHaveBeenCalledWith('codex'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Model', exact: true }));
     await screen.findByRole('option', { name: /GPT Native/ });
   });
 
