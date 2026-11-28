@@ -117,8 +117,8 @@ const fixtures = {
 };
 
 /** Open the Settings modal and the Launch Configuration editor it owns. */
-async function openEditor(page: import('@playwright/test').Page) {
-  await page.addInitScript({ content: buildInitScript(fixtures) });
+async function openEditor(page: import('@playwright/test').Page, overrides = {}) {
+  await page.addInitScript({ content: buildInitScript({ ...fixtures, ...overrides }) });
   await page.goto('/');
   await openSettingsFromTitleBar(page);
   const dialog = page.getByRole('dialog', { name: 'Settings', exact: true });
@@ -171,7 +171,8 @@ test.describe('launch configuration advanced disclosure', () => {
     const editor = await openEditor(page);
     const toggle = editor.getByRole('button', { name: 'Advanced options' });
 
-    await editor.getByLabel('Model').selectOption('__custom__');
+    await editor.getByRole('button', { name: 'Model', exact: true }).click();
+    await editor.getByRole('option', { name: 'Custom model...' }).click();
 
     // The required raw model is on screen with the disclosure open.
     await expect(toggle).toHaveAttribute('aria-expanded', 'true');
@@ -205,5 +206,57 @@ test.describe('launch configuration advanced disclosure', () => {
       return text.includes('Provider endpoint') || text.includes('Verify provider and model');
     }, controls);
     expect(inside).toBe(false);
+  });
+});
+
+test.describe('launch configuration model search', () => {
+  test.use({ viewport: { width: 460, height: 900 } });
+
+  test('filters a large discovered catalog by model name and ID', async ({ page }) => {
+    const editor = await openEditor(page, {
+      get_launch_targets: [{ ...nativeTarget, supports_model_effort_discovery: true }, proxiedTarget],
+      get_harness_model_catalog: {
+        harness_id: HARNESS_ID,
+        effort_storage: 'undiscovered',
+        models: [
+          ...Array.from({ length: 180 }, (_, index) => ({ id: `openai/model-${index}`, name: `Catalog Model ${index}`, efforts: [] })),
+          { id: 'openai/gpt-5.4', name: 'Orion', efforts: [] },
+          { id: 'openai/gpt-5.4-mini', name: 'Orion Mini', efforts: [] },
+        ],
+      },
+    });
+    const picker = editor.getByRole('button', { name: 'Model', exact: true });
+    const search = editor.getByRole('combobox', { name: 'Search models' });
+    const list = editor.getByRole('listbox', { name: 'Models' });
+
+    await picker.focus();
+    await picker.press('ArrowDown');
+    await expect(search).toBeFocused();
+    await expect(list.getByRole('option')).toHaveCount(183);
+    expect(await list.evaluate(el => el.clientHeight < el.scrollHeight)).toBe(true);
+
+    await search.fill('  ORION   openai/gpt-5.4 ');
+    await expect(list.getByRole('option')).toHaveCount(2);
+    await expect(picker).toHaveText('Default (MiniMax-M3)');
+    await search.press('ArrowDown');
+    await search.press('Enter');
+    await expect(picker).toHaveText('Orion Mini (openai/gpt-5.4-mini)');
+    await expect(picker).toBeFocused();
+
+    await picker.click();
+    await search.fill('no such model');
+    await expect(editor.getByText('No matching models.')).toBeVisible();
+    await search.press('Enter');
+    await expect(search).toBeFocused();
+    await search.press('Escape');
+    await expect(search).toHaveValue('');
+    await search.press('Escape');
+    await expect(search).toBeHidden();
+    await expect(picker).toHaveText('Orion Mini (openai/gpt-5.4-mini)');
+
+    await picker.click();
+    await search.fill('default');
+    await list.getByRole('option', { name: 'Default (MiniMax-M3)' }).click();
+    await expect(picker).toHaveText('Default (MiniMax-M3)');
   });
 });

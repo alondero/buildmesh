@@ -32,6 +32,11 @@ const saved: SpawnConfiguration = {
 };
 const savedRow = { ...option, id: saved.id, label: saved.name, configuration: saved };
 const claudeTarget = { ...target, id: 'claude', harness_id: 'claude', harness_name: 'Claude Code' };
+
+async function openModelPicker() {
+  fireEvent.click(await screen.findByRole('button', { name: 'Model', exact: true }));
+}
+
 afterEach(cleanup);
 beforeEach(() => {
   vi.resetAllMocks();
@@ -530,8 +535,8 @@ describe('Spawn configuration submenu placement', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
     fireEvent.click(await screen.findByRole('menuitem', { name: /New configuration/ }));
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Discovered' } });
-    await screen.findByRole('option', { name: /GPT A/ });
-    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'gpt-a' } });
+    await openModelPicker();
+    fireEvent.click(await screen.findByRole('option', { name: /GPT A/ }));
     expect(within(screen.getByLabelText('Effort')).getAllByRole('option').map((o) => o.textContent)).toEqual(['Default', 'low', 'experimental']);
     fireEvent.change(screen.getByLabelText('Effort'), { target: { value: 'experimental' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
@@ -552,6 +557,7 @@ describe('Spawn configuration submenu placement', () => {
     render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
     fireEvent.click(await screen.findByRole('menuitem', { name: /New configuration/ }));
+    await openModelPicker();
     await screen.findByRole('option', { name: /GPT A/ });
 
     expect(screen.queryByRole('option', { name: 'Custom model...' })).toBeNull();
@@ -570,6 +576,7 @@ describe('Spawn configuration submenu placement', () => {
     render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit Sol Max' }));
+    await openModelPicker();
     await screen.findByRole('option', { name: /GPT A/ });
 
     expect(screen.getByRole('option', { name: 'Custom model...' })).toBeTruthy();
@@ -595,6 +602,7 @@ describe('Spawn configuration submenu placement', () => {
     render(<GroupedProviderMenu providers={[claudeOption]} onSelect={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: 'Claude Code configurations', exact: true }));
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit Claude recipe' }));
+    await openModelPicker();
     await screen.findByRole('option', { name: /Sonnet/ });
 
     expect((screen.getByLabelText('Effort') as HTMLSelectElement).value).toBe('high');
@@ -618,6 +626,7 @@ describe('Spawn configuration submenu placement', () => {
     render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit Sol Max' }));
+    await openModelPicker();
     await screen.findByRole('option', { name: /GPT A/ });
 
     expect(screen.getByRole('option', { name: 'custom-unmatched (advanced route)' })).toBeTruthy();
@@ -635,10 +644,11 @@ describe('Spawn configuration submenu placement', () => {
     render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
     fireEvent.click(await screen.findByRole('menuitem', { name: /New configuration/ }));
-    await screen.findByRole('option', { name: /GPT A/ });
+    await openModelPicker();
+    const model = await screen.findByRole('option', { name: /GPT A/ });
 
     expect(screen.queryByLabelText('Effort')).toBeNull();
-    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'gpt-a' } });
+    fireEvent.click(model);
     expect(within(screen.getByLabelText('Effort')).getAllByRole('option').map((o) => o.textContent)).toEqual(['Default', 'ultra']);
   });
 
@@ -658,8 +668,8 @@ describe('Spawn configuration submenu placement', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
     fireEvent.click(await screen.findByRole('menuitem', { name: /New configuration/ }));
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Encoded' } });
-    await screen.findByRole('option', { name: /SWE 2.1/ });
-    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'swe-2-1' } });
+    await openModelPicker();
+    fireEvent.click(await screen.findByRole('option', { name: /SWE 2.1/ }));
     fireEvent.change(screen.getByLabelText('Effort'), { target: { value: 'high' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
@@ -731,6 +741,7 @@ describe('Spawn configuration submenu placement', () => {
     render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit Sol Max' }));
+    await openModelPicker();
     await screen.findByRole('option', { name: /SWE 2.1/ });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 

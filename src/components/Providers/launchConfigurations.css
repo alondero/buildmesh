@@ -17,7 +17,17 @@
 .launch-config-form fieldset { border: 0; margin: 0; padding: 0; min-width: 0; display: grid; gap: 12px; }
 .launch-config-status { display: flex; align-items: center; gap: 6px; min-height: 28px; margin: 0 0 12px; font-size: calc(12px * var(--ui-text-scale, 1)); }
 .launch-config-form label { display: grid; gap: 4px; font-size: calc(13px * var(--ui-text-scale, 1)); }
-.launch-config-form input, .launch-config-form select { width: 100%; min-width: 0; padding: 8px; border: 1px solid var(--color-border-default, var(--border)); border-radius: var(--radius-lg, 6px); color: inherit; background: var(--color-bg-input, var(--surface)); }
+.launch-config-form input, .launch-config-form select, .launch-config-model-trigger { width: 100%; min-width: 0; padding: 8px; border: 1px solid var(--color-border-default, var(--border)); border-radius: var(--radius-lg, 6px); color: inherit; background: var(--color-bg-input, var(--surface)); }
+.launch-config-model { display: grid; min-width: 0; gap: 4px; font-size: calc(13px * var(--ui-text-scale, 1)); }
+.launch-config-model-trigger { display: flex; align-items: center; justify-content: space-between; gap: 8px; text-align: left; overflow-wrap: anywhere; }
+.launch-config-model-trigger::after { content: ''; flex: none; width: 6px; height: 6px; margin: 0 3px 3px; border-right: 1px solid; border-bottom: 1px solid; transform: rotate(45deg); }
+.launch-config-model-trigger[aria-expanded="true"]::after { transform: rotate(225deg); margin-bottom: 0; }
+.launch-config-model-search { min-width: 0; padding: 4px; border: 1px solid var(--color-border-default, var(--border)); border-radius: var(--radius-lg, 6px); background: var(--color-bg-overlay, var(--surface)); }
+.launch-config-model-search ul { list-style: none; margin: 4px 0 0; padding: 0; max-height: min(12rem, 35vh); overflow-y: auto; }
+.launch-config-model-search li { min-height: 24px; padding: 5px 8px; border-radius: 4px; overflow-wrap: anywhere; cursor: pointer; }
+.launch-config-model-search li:hover { background: var(--color-bg-card-hover, var(--surface-3)); }
+.launch-config-model-search li[aria-selected="true"] { background: var(--color-bg-selection, var(--accent-glow)); }
+.launch-config-form .launch-config-model-search p { margin: 4px 8px; color: var(--color-text-secondary, var(--text-dim)); }
 .launch-config-actions { display: flex; flex-wrap: wrap; gap: 12px; }
 .launch-config-actions button { padding: 8px; }
 .launch-config-advanced { display: grid; gap: 8px; }
@@ -34,7 +44,8 @@
 .launch-delete-dialog button { min-height: 44px; min-width: 44px; padding: 8px; }
 div:has(> .launch-delete-dialog) { position: fixed; inset: 0; z-index: 1100; display: flex; align-items: center; justify-content: center; background: var(--color-bg-overlay, var(--surface)); }
 @media (max-width: 600px) {
-  .launch-config-form input, .launch-config-form select { min-height: 44px; font-size: 16px; box-sizing: border-box; }
+  .launch-config-form input, .launch-config-form select, .launch-config-model-trigger { min-height: 44px; font-size: 16px; box-sizing: border-box; }
+  .launch-config-model-search li { display: flex; align-items: center; min-height: 44px; }
   .launch-config-form button { min-height: 44px; min-width: 44px; }
   .launch-config-drag-handle { min-height: 44px; min-width: 44px; }
 }

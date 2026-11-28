@@ -9,6 +9,7 @@ import { EffortGuidance } from '../shared/EffortGuidance';
 import { Spinner } from '../shared/Spinner';
 import { useHarnessLogins } from '../../hooks/useHarnessLogins';
 import type { HarnessModelCatalog } from '../../types/generated/HarnessModelCatalog';
+import { LaunchModelPicker } from './LaunchModelPicker';
 
 // Verify, save, and delete share the fieldset lock; status text is derived separately.
 type BusyAction = 'save' | 'verify' | 'delete';
@@ -172,23 +173,23 @@ export function LaunchConfigurationEditor({ value, targets, onSave, onCancel, on
         <p>This provider will be paired with {target?.harness_name} when you save. Credentials come from Providers.</p>
         <label>Provider endpoint<input required type="url" value={route.base_url ?? ''} onChange={(e) => setEndpoint(e.target.value)} placeholder="https://provider.example/v1" /></label>
       </>}
-      {target?.supports_model && <label>Model{target.manual_model && !catalog ?
-        <input required={!!target.route && !target.default_model} value={draft.model ?? ''} placeholder={target.default_model ?? 'Default'} onChange={(e) => setDraft({ ...draft, model: e.target.value || null, effort: null })} /> :
-        <select value={customModelActive ? '__custom__' : selectedCatalogModel?.id ?? draft.model ?? ''} onChange={(e) => {
-          setCustomModel(e.target.value === '__custom__');
-          // Picking a custom model opens the disclosure: its input is required
-          // and lives inside.
-          if (e.target.value === '__custom__') setAdvancedOpen(true);
-          setAdvancedNotice(false);
-          const chosen = catalog?.models.find((m) => m.id === e.target.value);
-          setDraft({ ...draft, model: e.target.value === '__custom__' ? null : chosen?.id ?? (e.target.value || null), effort: null });
-        }}>
-          <option value="">{target.default_model ? `Default (${target.default_model})` : 'Default'}</option>
-          {draft.model && !modelListed && <option value={draft.model}>{draft.model} (advanced route)</option>}
-          {selectableModels.map((m) => <option key={m.id} value={m.id}>{m.name === m.id ? m.id : m.name + ' (' + m.id + ')'}</option>)}
-          {allowCustomModel && <option value="__custom__">Custom model...</option>}
-        </select>}
-      </label>}
+      {target?.supports_model && (target.manual_model && !catalog ?
+        <label>Model<input required={!!target.route && !target.default_model} value={draft.model ?? ''} placeholder={target.default_model ?? 'Default'} onChange={(e) => setDraft({ ...draft, model: e.target.value || null, effort: null })} /></label> :
+        <LaunchModelPicker key={JSON.stringify([target.id, catalogLoginId])}
+          value={customModelActive ? '__custom__' : selectedCatalogModel?.id ?? draft.model ?? ''}
+          options={[
+            { value: '', label: target.default_model ? `Default (${target.default_model})` : 'Default' },
+            ...draft.model && !modelListed ? [{ value: draft.model, label: `${draft.model} (advanced route)` }] : [],
+            ...selectableModels.map(({ id, name }) => ({ value: id, label: name === id ? id : `${name} (${id})` })),
+            ...allowCustomModel ? [{ value: '__custom__', label: 'Custom model...' }] : [],
+          ]}
+          onSelect={(modelId) => {
+            const custom = modelId === '__custom__';
+            setCustomModel(custom);
+            if (custom) setAdvancedOpen(true);
+            setAdvancedNotice(false);
+            setDraft({ ...draft, model: custom ? null : modelId || null, effort: null });
+          }} />)}
       {efforts.length > 0 && <>
         <label>Effort<select aria-describedby={efforts.includes('max') ? 'launch-config-effort-help' : undefined} value={encodedEffort ? selectedEncodedEffort?.id ?? '' : draft.effort ?? ''} onChange={(e) => {
           if (encodedEffort && selectedCatalogModel) {
